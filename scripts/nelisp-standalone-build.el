@@ -7416,10 +7416,16 @@ extern arms in dynamic builds."
 ;; rc=1 propagates up through every body-walker (progn/if/let/...) exactly like
 ;; an error -- they all abort on rc!=0 -- naturally unwinding the whole native
 ;; call stack with NO frame/landing bookkeeping.  CATCH evals BODY via
-;; nelisp_eval_call; on rc=1 it inspects the stash:
-;;   flag==0          -> genuine (non-throw) error: re-propagate rc=1.
-;;   flag==1, tag eq  -> caught: copy stashed val to *out, clear flag, rc=0.
-;;   flag==1, tag ne  -> re-propagate rc=1 (stash kept for the outer catch).
+;; nelisp_eval_call; on rc=1 it inspects the stash.  The flag distinguishes
+;; the non-local-exit KIND: 1 = signal/error, 2 = throw.  (Both throw and
+;; signal share this stash; the distinct value is what lets `condition-case'
+;; trap only signals and `catch' only throws — a `throw' must NOT match an
+;; `error'/`t' condition-case handler.)
+;;   flag==0          -> nothing in flight (shouldn't happen on rc=1).
+;;   flag==1          -> signal/error: NOT a throw, re-propagate rc=1 (the
+;;                       enclosing condition-case traps it).
+;;   flag==2, tag eq  -> caught: copy stashed val to *out, clear flag, rc=0.
+;;   flag==2, tag ne  -> re-propagate rc=1 (stash kept for the outer catch).
 ;; Every defun has even arity and every extern-call is argument 0 at its call
 ;; site so rsp == 0 mod 16 at the call (SysV ABI alignment for the variadic
 ;; nelisp_eval_call path).  Stash region: TAG @268435480, VAL @268435512,
@@ -7439,7 +7445,12 @@ extern arms in dynamic builds."
           (seq
            (nl_ct_copy32 268435480 tag_slot 0 0)
            (nl_ct_copy32 268435512 val_slot 0 0)
-           (ptr-write-u64 268435472 0 1)
+           ;; Flag value 2 = `throw' (vs 1 = signal/error).  The shared M6
+           ;; stash is used by BOTH throw and signal; using a distinct value
+           ;; lets `condition-case' trap ONLY signals (flag==1) and `catch'
+           ;; trap ONLY throws (flag==2), so a `throw' no longer matches an
+           ;; `error'/`t' condition-case handler.
+           (ptr-write-u64 268435472 0 2)
            (atomic-fetch-add 268435544 1)
            1)
         1))
@@ -7482,7 +7493,10 @@ extern arms in dynamic builds."
             (ptr-read-u64 eqres_slot 0))
        tag_slot env out 0 0))
     (defun nl_ct_catch_caught (_rc tag_slot env out eqres_slot _p5)
-      (if (= (ptr-read-u64 268435472 0) 1)
+      ;; Flag value 2 = `throw' (1 = signal/error).  `catch' only intercepts
+      ;; throws; a signal (flag==1) re-propagates so the right condition-case
+      ;; traps it.
+      (if (= (ptr-read-u64 268435472 0) 2)
           (nl_ct_catch_check_tag tag_slot env out eqres_slot 0 0)
         1))
     (defun nl_ct_catch_body_step (rc body_rest tag_slot env out eqres_slot)
