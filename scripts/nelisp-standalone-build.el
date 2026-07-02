@@ -644,11 +644,18 @@ entries carry explicit hex-encoded byte sections."
 
 (defun nelisp-standalone--cached-unit (name source source-file)
   "Return the link-unit for NAME, compiling SOURCE only if SOURCE-FILE
-or the toolchain is newer than the cached object."
+or the toolchain is newer than the cached object.
+SOURCE-FILE may be a single file or a list of dependency files.
+CACHE-STALENESS (2026-07-03): units whose SOURCE comes from a `require'd
+lisp/nelisp-cc-*.el defconst must list that library file here too --
+depending only on this build script left the cached object stale when the
+library changed, so edits to e.g. the combiner-apply source were silently
+not linked."
   (let* ((name (nelisp-standalone--target-object-name name))
          (cache-dir (nelisp-standalone--target-cache-dir))
          (cache (expand-file-name (concat name ".unit") cache-dir))
-         (deps (cons source-file (nelisp-standalone--dep-files)))
+         (deps (append (if (listp source-file) source-file (list source-file))
+                       (nelisp-standalone--dep-files)))
          (fresh (and (file-exists-p cache)
                      (cl-every (lambda (f) (or (null f) (file-newer-than-file-p cache f))) deps))))
     (if fresh
@@ -13092,7 +13099,7 @@ genuine general interpreter for the 11 special forms + installed builtins."
                         "eval-inner-kw.o"
                         (nelisp-standalone--patch-eval-inner
                          (symbol-value 'nelisp-cc-eval-inner--source))
-                        nelisp-standalone--this-file)))
+                        (list nelisp-standalone--this-file (locate-library "nelisp-cc-eval-inner")))))
          ;; M6 catch/throw dispatch + void-function miss fix.  The old
          ;; macro-expansion cache is disabled inside the patch for Doc 147.
          (combiner-cons (progn
@@ -13101,7 +13108,7 @@ genuine general interpreter for the 11 special forms + installed builtins."
                            "combiner-cons-ct-doc147.o"
                            (nelisp-standalone--patch-combiner-cons-full
                             (symbol-value 'nelisp-cc-evalport-combiner-cons--source))
-                           nelisp-standalone--this-file)))
+                           (list nelisp-standalone--this-file (locate-library "nelisp-cc-evalport-combiner-cons")))))
          ;; M3: do_fset rc-fix patched combiner-apply.
          (combiner (progn
                      (require 'nelisp-cc-evalport-combiner-apply)
@@ -13109,7 +13116,7 @@ genuine general interpreter for the 11 special forms + installed builtins."
                       "combiner-apply-fix.o"
                       (nelisp-standalone--patch-combiner-apply
                        (symbol-value 'nelisp-cc-evalport-combiner-apply--source))
-                      nelisp-standalone--this-file)))
+                      (list nelisp-standalone--this-file (locate-library "nelisp-cc-evalport-combiner-apply")))))
          (extras (mapcar #'nelisp-standalone--reader-extra-unit
                          nelisp-standalone--reader-extra-manifest))
          (float-stub (nelisp-standalone--reader-float-unit))
