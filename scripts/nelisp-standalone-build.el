@@ -894,11 +894,15 @@ or the toolchain is newer than the cached object."
     ;; bump-block invariant (object starts all-zero), so every constructor
     ;; sees the clean memory it relies on.  Bump blocks need no zeroing (the
     ;; mmap already zero-fills untouched pages).
+    ;; PERF (2026-07-03): iterative zero-fill (was 8-bytes-per-recursive-call,
+    ;; so a large reused block cost thousands of native calls per alloc).
     (defun nl_alloc_zero_fill (obj off nbytes)
-      (if (< off nbytes)
-          (nl_seq2 (ptr-write-u64 (+ obj off) 0 0)
-                   (nl_alloc_zero_fill obj (+ off 8) nbytes))
-        0))
+      (let* ((o off))
+        (seq
+         (while (< o nbytes)
+           (nl_seq2 (ptr-write-u64 (+ obj o) 0 0)
+                    (setq o (+ o 8))))
+         0)))
     (defun nl_chunk_cursor_addr (chunk)
       (if (= chunk (ptr-read-u64 268436160 0))
           268435456
