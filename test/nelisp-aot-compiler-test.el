@@ -127,6 +127,73 @@ Caller is responsible for `delete-file' on cleanup."
       (should (eq (nelisp-aot-compiler--ir-kind vnode) 'imm))
       (should (= (nelisp-aot-compiler--ir-get vnode :value) 11)))))
 
+(ert-deftest nelisp-aot-compiler/parse-multi-let-fold-setq-guard ()
+  "A multi-binding `let' must not fold a binding the body setqs.
+Regression: `--parse-multi-let' lacked the `--form-setqs-var-p'
+guard both single-binding paths have, so `(let ((pass 0)) ...
+(setq pass ...))' folded PASS to a compile-time 0 — reads stayed
+constant while the setq either errored (default mode) or silently
+became a GLOBAL symbol write (object mode)."
+  (let* ((ir (nelisp-aot-compiler--parse
+              '(seq
+                (defun f ()
+                  (let ((found 0) (pass 0))
+                    (seq
+                     (while (< pass 2)
+                       (setq pass (+ pass 1)))
+                     (+ found pass)))))
+              nil))
+         (defun-ir (car (nelisp-aot-compiler--ir-get ir :forms)))
+         (body (nelisp-aot-compiler--ir-get defun-ir :body)))
+    (should (eq (nelisp-aot-compiler--ir-kind defun-ir) 'defun))
+    ;; PASS is setq'd -> must be a runtime binding, not a constant.
+    (should (eq (nelisp-aot-compiler--ir-kind body) 'let-rt-n))
+    (let ((bound (mapcar #'car (nelisp-aot-compiler--ir-get body :bindings))))
+      (should (memq 'pass bound))
+      ;; FOUND is never setq'd -> folding it stays correct.
+      (should-not (memq 'found bound)))))
+
+(ert-deftest nelisp-aot-compiler/parse-object-mode-multi-let-setq-stays-local ()
+  "Object mode: a setq'd multi-`let' local must not use the global bridge.
+Before the fold guard, the folded local's setq fell through to the
+`nelisp_env_set_value' value-cell bridge (a global symbol write) while
+reads kept the folded constant — a silently dropped mutation."
+  (let* ((nelisp-aot-compiler--allow-external-user-calls t)
+         (ir (nelisp-aot-compiler--parse
+              '(seq
+                (defun f ()
+                  (let ((found 0) (pass 0))
+                    (seq
+                     (while (< pass 2)
+                       (setq pass (+ pass 1)))
+                     (+ found pass)))))
+              nil)))
+    (should-not (string-match-p "nelisp_env_set_value"
+                                (prin1-to-string ir)))))
+
+(ert-deftest nelisp-aot-compiler/e2e-multi-let-fold-setq-loop ()
+  "Compile + exec the nl_gc_in_arena-shaped multi-`let' loop counters."
+  (unless (nelisp-aot-compiler-test--linux-p)
+    (ert-skip "Requires x86_64 Linux"))
+  (let ((path (nelisp-aot-compiler-test--tmp-binary "multi-let-setq")))
+    (unwind-protect
+        (progn
+          (nelisp-aot-compile-sexp
+           '(seq
+             (defun f ()
+               (let ((found 0) (pass 0))
+                 (seq
+                  (while (< pass 2)
+                    (setq pass (+ pass 1)))
+                  (while (= found 0)
+                    (setq found pass))
+                  (+ (* found 10) pass))))
+             (exit (f)))
+           path)
+          (let ((result (nelisp-aot-compiler-test--run-binary path)))
+            (should (= (plist-get result :exit) 22))))
+      (when (file-exists-p path) (delete-file path)))))
+
 (ert-deftest nelisp-aot-compiler/parse-free-symbol-errors ()
   "A free symbol reference signals `nelisp-aot-compiler-error'."
   (should-error
