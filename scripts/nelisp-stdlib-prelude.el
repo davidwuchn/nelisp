@@ -4133,7 +4133,21 @@ Doc 156: was `(apply #\\='vector ...)', but the reader now exposes a native
           (let* ((e (nelisp--rd-atom-end s i n))) (cons (intern (substring s i e)) e))))
        (t
         (let* ((e (nelisp--rd-atom-end s i n)) (tok (substring s i e)))
-          (cons (if (nelisp--rd-numeric-token-p tok) (string-to-number tok) (intern tok)) e)))))))
+          (cons (cond ((nelisp--rd-numeric-token-p tok) (string-to-number tok))
+                      ;; `intern' on "nil"/"t" allocates a fresh Symbol Sexp
+                      ;; that is NOT `eq' to the canonical nil/t sentinel this
+                      ;; runtime's `while'/`if'/`car'/`cdr' etc. compare
+                      ;; against -- it prints as "nil"/"t" (name-based printer)
+                      ;; but is truthy, so any caller that reads dynamic text
+                      ;; (e.g. an artifact manifest's `:features nil') and then
+                      ;; loops `(while features ...)' spins forever.  Route the
+                      ;; two self-evaluating symbols through the literal
+                      ;; embedded here so they resolve to the SAME sentinel
+                      ;; `defun'/`if' bodies use throughout the interpreter.
+                      ((string= tok "nil") nil)
+                      ((string= tok "t") t)
+                      (t (intern tok)))
+                e)))))))
 
 (unless (fboundp 'read-from-string)
   (defun read-from-string (string &optional start end)

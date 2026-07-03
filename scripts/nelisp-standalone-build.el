@@ -9435,7 +9435,9 @@ and the `string-match' family aliases over it."
       (seq
        (ptr-write-u64 268436216 0 0)
        (nl_alloc_str ,fbuf n ,src)
-       (nl_eval_source_all ,src ,cursor ,result ,pool ,out ,ctx ,builtin-sym)
+       ;; report_errors=0: this loads the trusted, build-time prelude, not
+       ;; user input -- keep prelude-priming tolerance exactly as before.
+       (nl_eval_source_all ,src ,cursor ,result ,pool ,out ,ctx ,builtin-sym 0)
        (ptr-write-u64 268436216 0 1)))))
 
 (defun nelisp-standalone--reader-repl-eval-suffix ()
@@ -9506,38 +9508,153 @@ suffix, which is why only `--repl' crashed)."
         0)))
   "Reader top-level boundary reclamation helpers for Doc 140 Stage 5.")
 
+(defun nelisp-standalone--name-words (nm)
+  "Return the little-endian u64 words packing NM's UTF-8 bytes (ceil(len/8) of
+them).  Used to install builtin names of ANY length: the stock single-u64
+buffer corrupts names > 8 bytes because nl_alloc_symbol reads `name_len' bytes
+from an 8-byte buffer."
+  (let* ((bytes (encode-coding-string nm 'utf-8 t))
+         (n (length bytes))
+         (words nil) (i 0))
+    (while (< i n)
+      (let ((w 0) (j 0))
+        (while (and (< j 8) (< (+ i j) n))
+          (setq w (logior w (ash (aref bytes (+ i j)) (* j 8))))
+          (setq j (1+ j)))
+        (push w words))
+      (setq i (+ i 8)))
+    (nreverse words)))
+
+(defun nelisp-standalone--byte-write-forms (buf-sym string)
+  "Return forms packing STRING's UTF-8 bytes into native buffer BUF-SYM via
+`ptr-write-u64', reusing `nelisp-standalone--name-words''s little-endian
+word-packing (works for names/strings of any length, not just <=8 bytes)."
+  (let ((i 0) (forms nil))
+    (dolist (word (nelisp-standalone--name-words string))
+      (push `(ptr-write-u64 ,buf-sym ,(* i 8) ,word) forms)
+      (setq i (1+ i)))
+    (nreverse forms)))
+
+(defun nelisp-standalone--eval-source-report-error-form ()
+  "Return the `nl_eval_source_report_error' defun form (Doc 152
+artifact-cli-silent-noop fix, DEFECT-2): write a short diagnostic for the
+top-level M6 stash (TAG @268435480, VAL @268435512 -- see the catch/throw
+unit's comment block for the stash contract) to stderr, then arm QUIT_FLAG
+\(268435464) so the existing `(if (= (ptr-read-u64 268435464 0) 0) 0 (setq
+more 0))' check in `nl_eval_source_all' stops the top-level loop and every
+`--eval'/`--load'/artifact-CLI caller that already does
+\"(- (ptr-read-u64 268435464 0) 1)\" reports a non-zero exit code."
+  (let ((prefix-buf (make-symbol "prefix-buf"))
+        (sep-buf (make-symbol "sep-buf"))
+        (nl-buf (make-symbol "nl-buf"))
+        (tag-ms (make-symbol "tag-ms"))
+        (tag-repr (make-symbol "tag-repr"))
+        (val-ms (make-symbol "val-ms"))
+        (val-repr (make-symbol "val-repr")))
+    `(defun nl_eval_source_report_error ()
+       (let* ((,prefix-buf (alloc-bytes 32 1))
+              (,sep-buf (alloc-bytes 8 1))
+              (,nl-buf (alloc-bytes 1 1))
+              (,tag-ms (alloc-bytes 32 8))
+              (,tag-repr (alloc-bytes 32 8))
+              (,val-ms (alloc-bytes 32 8))
+              (,val-repr (alloc-bytes 32 8)))
+         (seq
+          ,@(nelisp-standalone--byte-write-forms prefix-buf "nelisp: uncaught error: ")
+          (nl_os_write_stderr ,prefix-buf
+                               ,(length (encode-coding-string
+                                         "nelisp: uncaught error: " 'utf-8 t)))
+          (mut-str-make-empty ,tag-ms 32)
+          (m5_prin1 ,tag-ms 268435480)
+          (mut-str-finalize ,tag-ms ,tag-repr)
+          (nl_os_write_stderr (nl_bi_strptr ,tag-repr) (nl_bi_strlen ,tag-repr))
+          ,@(nelisp-standalone--byte-write-forms sep-buf ": ")
+          (nl_os_write_stderr ,sep-buf
+                               ,(length (encode-coding-string ": " 'utf-8 t)))
+          (mut-str-make-empty ,val-ms 32)
+          (m5_prin1 ,val-ms 268435512)
+          (mut-str-finalize ,val-ms ,val-repr)
+          (nl_os_write_stderr (nl_bi_strptr ,val-repr) (nl_bi_strlen ,val-repr))
+          (ptr-write-u8 ,nl-buf 0 10)
+          (nl_os_write_stderr ,nl-buf 1)
+          ;; QUIT_FLAG convention (see `nl_quit_flag_ptr'/explicit `exit'):
+          ;; stored value is (exit-code + 1); 2 here -> exit code 1.
+          (ptr-write-u64 268435464 0 2)
+          0)))))
+
 (defconst nelisp-standalone--reader-eval-source-source
-  '(defun nl_eval_source_all (src cursor result pool out ctx builtin_sym)
-     (seq
-      (ptr-write-u64 cursor 0 2) (ptr-write-u64 cursor 8 0)
-      (ptr-write-u64 out 0 0) (ptr-write-u64 out 8 0)
-      (let* ((more 1))
-        (while (= more 1)
-          (seq
-           (ptr-write-u64 result 0 0) (ptr-write-u64 result 8 0)
-           (let* ((mark_chunk (ptr-read-u64 268436168 0))
-                  (mark_cursor (nl_boundary_chunk_cursor mark_chunk))
-                  (epoch0 (ptr-read-u64 268435544 0))
-                  (prc (nelisp_reader_parse_one src cursor result pool 0)))
-             (if (= prc 1)
-                 (seq (ptr-write-u64 out 0 0) (ptr-write-u64 out 8 0)
-                      (nl_driver_eval_published result ctx out pool src cursor builtin_sym)
-                      (nl_boundary_maybe_reclaim mark_chunk mark_cursor epoch0 out)
-                      ;; GC trigger on TOTAL chunk-bytes-reserved (268436184),
-                      ;; not the chunk-0 bump offset.  See `bf_load_eval_loop'.
-                      (if (< (ptr-read-u64 268436184 0) (ptr-read-u64 268435560 0))
-                          0
-                        (let* ((live (nl_gc_collect_form_boundary ctx result out pool src cursor builtin_sym))
-                               (bump (ptr-read-u64 268436184 0))
-                               (lo (+ (* live 3) 1048576))
-                               (hi (+ bump 16777216)))
-                          (ptr-write-u64 268435560 0 (if (< lo hi) hi lo))))
-                      (if (= (ptr-read-u64 268435464 0) 0)
-                          0
-                        (setq more 0)))
-               (setq more 0))))))
-      0))
-  "Reader source parse/eval loop split out of the always-recompiled driver.")
+  `(seq
+    (defun nl_eval_source_all (src cursor result pool out ctx builtin_sym report_errors)
+      (seq
+       (ptr-write-u64 cursor 0 2) (ptr-write-u64 cursor 8 0)
+       (ptr-write-u64 out 0 0) (ptr-write-u64 out 8 0)
+       (let* ((more 1))
+         (while (= more 1)
+           (seq
+            (ptr-write-u64 result 0 0) (ptr-write-u64 result 8 0)
+            (let* ((mark_chunk (ptr-read-u64 268436168 0))
+                   (mark_cursor (nl_boundary_chunk_cursor mark_chunk))
+                   (epoch0 (ptr-read-u64 268435544 0))
+                   (prc (nelisp_reader_parse_one src cursor result pool 0)))
+              (if (= prc 1)
+                  (seq (ptr-write-u64 out 0 0) (ptr-write-u64 out 8 0)
+                       ;; DEFECT-2 fix (artifact-cli-silent-noop): capture the
+                       ;; per-form rc.  Previously this call's return value was
+                       ;; discarded entirely, so an uncaught signal/throw from
+                       ;; ANY top-level form (e.g. `--eval '(error "boom")'')
+                       ;; was silently swallowed -- the loop just moved on to
+                       ;; the next form (or fell off the end) as if nothing
+                       ;; happened, always exiting 0.  When REPORT_ERRORS=1
+                       ;; (every caller except `nl_repl_loop', which passes 0
+                       ;; to keep its documented form-error tolerance exactly
+                       ;; as-is) a non-zero rc now prints a diagnostic and arms
+                       ;; QUIT_FLAG so the caller's existing
+                       ;; "(- (ptr-read-u64 268435464 0) 1)" exit-code check
+                       ;; reports failure.
+                       (let* ((form_rc (nl_driver_eval_published
+                                        result ctx out pool src cursor builtin_sym)))
+                         (if (= report_errors 1)
+                             (if (= form_rc 0)
+                                 0
+                               ;; M6 stash flag @268435472: 0 = "nothing in
+                               ;; flight" (per the catch/throw unit's own
+                               ;; comment, "shouldn't happen on rc=1" -- but it
+                               ;; does: forms from an INLINE-embedded substrate
+                               ;; load, e.g. the eval-elisp-artifact/
+                               ;; eval-elisp-source dispatch's prelude splice,
+                               ;; can return a transient non-zero rc from
+                               ;; `nelisp_eval_call' with nothing actually
+                               ;; stashed.  Only report+abort when a genuine
+                               ;; signal/throw (flag 1 or 2) is stashed; a
+                               ;; flag==0 non-zero rc is treated as before this
+                               ;; fix (silently continues) so inline substrate
+                               ;; loading is unaffected.
+                               (if (= (ptr-read-u64 268435472 0) 0)
+                                   0
+                                 (nl_eval_source_report_error)))
+                           0))
+                       (nl_boundary_maybe_reclaim mark_chunk mark_cursor epoch0 out)
+                       ;; GC trigger on TOTAL chunk-bytes-reserved (268436184),
+                       ;; not the chunk-0 bump offset.  See `bf_load_eval_loop'.
+                       (if (< (ptr-read-u64 268436184 0) (ptr-read-u64 268435560 0))
+                           0
+                         (let* ((live (nl_gc_collect_form_boundary ctx result out pool src cursor builtin_sym))
+                                (bump (ptr-read-u64 268436184 0))
+                                (lo (+ (* live 3) 1048576))
+                                (hi (+ bump 16777216)))
+                           (ptr-write-u64 268435560 0 (if (< lo hi) hi lo))))
+                       (if (= (ptr-read-u64 268435464 0) 0)
+                           0
+                         (setq more 0)))
+                (setq more 0))))))
+       0))
+    ,(nelisp-standalone--eval-source-report-error-form))
+  "Reader source parse/eval loop split out of the always-recompiled driver.
+REPORT_ERRORS gates the DEFECT-2 (artifact-cli-silent-noop) top-level
+diagnostic: pass 1 from --eval/--load/--embedded/the artifact-and-runtime-
+image dispatch tail, 0 from `nl_repl_loop' and from prelude-priming call
+sites (repl semantics/prelude-bootstrap tolerance stay byte-for-byte
+unchanged).")
 
 (defun nelisp-standalone--runtime-image-command-src ()
   "Return embedded source implementing standalone-reader runtime-image commands."
@@ -10769,23 +10886,6 @@ copy instructions."
    "  (if (string= (car nelisp-standalone-argv) \"exec-elisp-artifact\")\n"
    "      (nelisp-standalone-direct-artifact-command nelisp-standalone-argv nil)\n"
    "    2))\n"))
-
-(defun nelisp-standalone--name-words (nm)
-  "Return the little-endian u64 words packing NM's UTF-8 bytes (ceil(len/8) of
-them).  Used to install builtin names of ANY length: the stock single-u64
-buffer corrupts names > 8 bytes because nl_alloc_symbol reads `name_len' bytes
-from an 8-byte buffer."
-  (let* ((bytes (encode-coding-string nm 'utf-8 t))
-         (n (length bytes))
-         (words nil) (i 0))
-    (while (< i n)
-      (let ((w 0) (j 0))
-        (while (and (< j 8) (< (+ i j) n))
-          (setq w (logior w (ash (aref bytes (+ i j)) (* j 8))))
-          (setq j (1+ j)))
-        (push w words))
-      (setq i (+ i 8)))
-    (nreverse words)))
 
 (defun nelisp-standalone--cstr-eq-defun (name string)
   "Return a Phase47 defun checking whether a C string equals STRING."
@@ -12219,7 +12319,13 @@ correctly."
                   0
                 (seq
                  (nl_repl_make_source linebuf n fbuf src print_p)
-                 (nl_eval_source_all src cursor result pool out ctx builtin_sym)
+                 ;; report_errors=0: REPL semantics MUST NOT change here -- a
+                 ;; form error must not abort the session (the vendor replay
+                 ;; harness depends on the REPL surviving form errors exactly
+                 ;; as it does today; QUIT_FLAG below is still honored so
+                 ;; explicit (exit N)/(kill-emacs N) from REPL-evaluated code
+                 ;; keeps working unchanged).
+                 (nl_eval_source_all src cursor result pool out ctx builtin_sym 0)
                  (if (= (ptr-read-u64 268435464 0) 0) 0
                    (setq done 1)))))))
          0)))
@@ -12327,6 +12433,24 @@ correctly."
         (nl_sexp_clone_into globals (+ ctx 0))
         (nl_sexp_clone_into frames (+ ctx 32))
         (nl_sexp_clone_into unbound (+ ctx 64))
+        ;; Doc 152 (artifact-cli-silent-noop fix): publish `nelisp-standalone-argv'
+        ;; HERE, at shallow nesting depth, right after `ctx' is fully built --
+        ;; NOT from deep inside the `path' dispatch `if' chain below.  Root cause
+        ;; (git log fix/artifact-cli-silent-noop): `nl_env_set_value ctx argv_sym
+        ;; argv_list' silently failed to publish a visible binding when called
+        ;; from ~10 `if' levels deep in that chain (a code-generation issue with
+        ;; this compiler for deeply nested forms) -- the write was lost/never
+        ;; observed by `boundp'/variable references in the SAME `ctx' evaluated
+        ;; moments later by `nl_eval_source_all', even though the identical
+        ;; primitive call at THIS shallow depth publishes a binding that is
+        ;; correctly visible.  Every artifact/runtime-image CLI subcommand
+        ;; (compile-elisp-artifact, eval-elisp-artifact, ...) silently no-op'd
+        ;; because of this: the dispatch `cond' in the generated source always
+        ;; saw `nelisp-standalone-argv' as unbound and fell through.  Building
+        ;; the list unconditionally here is cheap (nil for non-artifact/
+        ;; runtime-image commands) and sidesteps the deep-nesting bug entirely.
+        (nl_argv_list_from argc sp0 1 argv_list)
+        (nl_env_set_value ctx argv_sym argv_list)
         ;; rec_max 300000: the `_start' trampoline now runs the driver on a 1 GiB
 ;; mmap'd native stack whose ceiling is ~404k rec levels (each eval level ~5 KiB of
 ;; native frames; a self-recursive call burns ~2 rec increments).  300000 is ~74% of
@@ -12467,7 +12591,7 @@ correctly."
                        'fbuf 'src 'cursor 'result 'pool 'out 'ctx 'builtin_sym))
                  0)
                (nl_cli_eval_source arg2 fbuf src)
-               (nl_eval_source_all src cursor result pool out ctx builtin_sym)
+               (nl_eval_source_all src cursor result pool out ctx builtin_sym 1)
                (if (= (ptr-read-u64 268435464 0) 0)
                    0
                  (- (ptr-read-u64 268435464 0) 1)))
@@ -12495,7 +12619,7 @@ correctly."
                      (seq (nl_cli_write_help fbuf) 2)
                    (seq
                     (nl_alloc_str fbuf n src)
-                    (nl_eval_source_all src cursor result pool out ctx builtin_sym)
+                    (nl_eval_source_all src cursor result pool out ctx builtin_sym 1)
                     (if (= (ptr-read-u64 268435464 0) 0)
                         (nl_cli_write_value fbuf out)
                       (- (ptr-read-u64 268435464 0) 1))))))
@@ -12504,8 +12628,11 @@ correctly."
           (nl_neln_demo_exec ctx 41))
          ((= (nl_cstr_eq_embedded path) 1)
           (seq
+           ;; report_errors=0: `--embedded' backs `nelisp-standalone-reader-test'`s
+           ;; internal NELISP_SRC exit-code check (default "(+ 40 2)"), not a
+           ;; user-facing subcommand -- leave its numeric-exit contract as-is.
            (sexp-write-str-lit src ,(nelisp-standalone--reader-src))
-           (nl_eval_source_all src cursor result pool out ctx builtin_sym)
+           (nl_eval_source_all src cursor result pool out ctx builtin_sym 0)
            (ptr-read-u64 out 8)))
          ((= (nl_cstr_eq_repl path) 1)
           (if (= (nl_repl_usage_error_p argc arg2 arg3) 1)
@@ -12547,10 +12674,7 @@ correctly."
            ;; --- source selection: embedded vs. file (M7 dual mode) ---
            (if (and (= (nl_runtime_image_eval_exec_command_p path) 1)
                     (= (nl_runtime_image_cache_eval_p sp0 argc) 1))
-               (seq
-                (nl_argv_list_from argc sp0 1 argv_list)
-                (nl_env_set_value ctx argv_sym argv_list)
-                (sexp-write-str-lit src ,(nelisp-standalone--runtime-image-command-src)))
+               (sexp-write-str-lit src ,(nelisp-standalone--runtime-image-command-src))
              (if (= (nl_cstr_eq_eval_runtime_image path) 1)
                  (if (> argc 3)
                      (nl_runtime_image_eval_source sp0 argc fbuf src)
@@ -12560,35 +12684,23 @@ correctly."
                        (nl_runtime_image_exec_source sp0 argc fbuf src)
                      (sexp-write-str-lit src "1"))
                (if (= (nl_runtime_image_command_p path) 1)
-                   (seq
-                    (nl_argv_list_from argc sp0 1 argv_list)
-                    (nl_env_set_value ctx argv_sym argv_list)
-                    (sexp-write-str-lit src ,(nelisp-standalone--runtime-image-command-src)))
+                   (sexp-write-str-lit src ,(nelisp-standalone--runtime-image-command-src))
 	                 (if (= (nl_cstr_eq_eval_elisp_artifact path) 1)
 	                     (if (> argc 2)
-	                         (seq
-	                          (nl_argv_list_from argc sp0 1 argv_list)
-	                          (nl_env_set_value ctx argv_sym argv_list)
-	                          (sexp-write-str-lit src ,(nelisp-standalone--artifact-direct-command-src)))
+	                         (sexp-write-str-lit src ,(nelisp-standalone--artifact-direct-command-src))
 	                       (sexp-write-str-lit src "1"))
 	                   (if (= (nl_cstr_eq_exec_elisp_artifact path) 1)
 	                       (if (> argc 2)
-	                           (seq
-	                            (nl_argv_list_from argc sp0 1 argv_list)
-	                            (nl_env_set_value ctx argv_sym argv_list)
-	                            (sexp-write-str-lit src ,(nelisp-standalone--artifact-direct-command-src)))
+	                           (sexp-write-str-lit src ,(nelisp-standalone--artifact-direct-command-src))
 	                         (sexp-write-str-lit src "1"))
 	                 (if (= (nl_artifact_command_p path) 1)
-	                     (seq
-	                      (nl_argv_list_from argc sp0 1 argv_list)
-	                      (nl_env_set_value ctx argv_sym argv_list)
-	                      (if (and (= (nl_artifact_runtime_cache_command_p path) 1)
+	                     (if (and (= (nl_artifact_runtime_cache_command_p path) 1)
 	                               (= (nl_artifact_runtime_cache_enabled_p fbuf) 1)
 	                               (= (nl_artifact_runtime_cache_exists_p fbuf) 1))
 	                          (if (= (nl_artifact_source_cache_command_p path) 1)
 	                              (sexp-write-str-lit src ,(nelisp-standalone--artifact-source-command-cache-src))
 	                            (sexp-write-str-lit src ,(nelisp-standalone--artifact-command-cache-src)))
-	                        (sexp-write-str-lit src ,(nelisp-standalone--artifact-command-src))))
+	                        (sexp-write-str-lit src ,(nelisp-standalone--artifact-command-src)))
 	                   ;; file path: open(path,O_RDONLY) -> read -> close -> wrap as Str
 	                   (let* ((n (nl_os_read_file_cpath
 	                              path fbuf
@@ -12600,9 +12712,17 @@ correctly."
            ;; value.  parse_one advances the shared cursor; it returns 1 per form
            ;; and != 1 (e.g. -1 at EOF) when no more forms remain.
            (ptr-write-u64 268436216 0 0)
-           (nl_eval_source_all src cursor result pool out ctx builtin_sym)
+           ;; report_errors=1: this tail serves compile-elisp-artifact/
+           ;; compile-elisp-artifacts/audit-elisp-artifact/inspect-elisp-artifact/
+           ;; eval-elisp-artifact/exec-elisp-artifact/runtime-image commands and
+           ;; the bare-file-path fallback -- all genuine CLI subcommand paths, so
+           ;; an uncaught error should report+exit non-zero like --eval/--load
+           ;; (DEFECT-1/DEFECT-2 fix; not the REPL).
+           (nl_eval_source_all src cursor result pool out ctx builtin_sym 1)
            (ptr-write-u64 268436216 0 1)
-           (ptr-read-u64 out 8))))))))
+           (if (= (ptr-read-u64 268435464 0) 0)
+               (ptr-read-u64 out 8)
+             (- (ptr-read-u64 268435464 0) 1)))))))))
 
 ;; REAL special-form + env machinery (Doc 137 M2/M3 un-trap).  Replaces the
 ;; baked path's trap.o stubs so the binary is a GENUINE general interpreter for
