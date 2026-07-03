@@ -1852,11 +1852,23 @@ arm64 Linux has no legacy x86 numbering)."
           (nl_seq2 (nl_gc_mark_block src)
            (nl_seq2 (nl_gc_mark_block cursor)
                     (nl_gc_mark_block bsym))))))))
+    ;; Explicitly mark the globals mirror fast-hash bucket vector.  Direct
+    ;; named-call resolution walks these buckets, so the bucket vector is part
+    ;; of the root surface for the mirror, not just an ordinary record child.
+    (defun nl_gc_mark_mirror_buckets (mirror)
+      (if (= (sexp-tag mirror) 12)
+          (let* ((ht (record-slot-ref-ptr mirror 0)))
+            (if (= (sexp-tag ht) 12)
+                (nl_gc_mark_slot (record-slot-ref-ptr ht 1))
+              0))
+        0))
     ;; Mark every root (split out so the DEBUG skip-mark gate is a single if).
     (defun nl_gc_mark_roots (ctx result out pool src cursor bsym)
       (nl_seq2 (nl_gc_conserv_maybe)             ; Doc 152 §11.21 conservative stack scan
        (nl_seq2 (nl_gc_mark_root_blocks ctx result out pool src cursor bsym)
-       (nl_seq2 (nl_seq2 (nl_gc_mark_slot (+ ctx 0)) (nl_gc_mark_rootstack)) ; mirror / globals + Doc 152 §11.37 Stage 2 dynamic root stack scan
+       (nl_seq2 (nl_seq2 (nl_gc_mark_slot (+ ctx 0))
+                         (nl_seq2 (nl_gc_mark_mirror_buckets (+ ctx 0))
+                                  (nl_gc_mark_rootstack))) ; mirror / globals + Doc 152 §11.37 Stage 2 dynamic root stack scan
         (nl_seq2 (nl_gc_mark_slot (+ ctx 32))    ; frame stack
          (nl_seq2 (nl_gc_mark_slot (+ ctx 64))   ; unbound marker
           (nl_seq2 (nl_gc_mark_slot result)      ; current parsed form
@@ -2342,6 +2354,7 @@ arm64 Linux has no legacy x86 numbering)."
     (defun nl_gc_mark_published_frame (env result out pool src cursor bsym)
       (nl_seq2 (nl_gc_mark_root_blocks env result out pool src cursor bsym)
        (nl_seq2 (nl_gc_mark_slot (+ env 0))     ; mirror / globals
+        (nl_seq2 (nl_gc_mark_mirror_buckets (+ env 0))
         (nl_seq2 (nl_gc_mark_slot (+ env 32))   ; frame stack
          (nl_seq2 (nl_gc_mark_slot (+ env 64))  ; unbound marker
           (nl_seq2 (nl_gc_mark_slot result)     ; executing form AST (§11.34 root)
@@ -2349,7 +2362,7 @@ arm64 Linux has no legacy x86 numbering)."
             (nl_seq2 (nl_gc_mark_pool pool (nl_gc_pool_cap))
              (nl_seq2 (nl_gc_mark_slot src)
               (nl_seq2 (nl_gc_mark_slot cursor)
-                       (nl_gc_mark_slot bsym)))))))))))
+                       (nl_gc_mark_slot bsym))))))))))))
     ;; Read the 7-slot frame at BASE (env@+0/result@+8/out@+16/pool@+24/src@+32/
     ;; cursor@+40/bsym@+48) and mark it.  Reads are passed straight as args (no
     ;; across-call locals; mirrors `nl_gc_ctx_store').
