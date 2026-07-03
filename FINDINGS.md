@@ -136,3 +136,77 @@ and `sh-script.el` form 122, preserving the replay wrapper forms.  The next
 useful instrumentation target is not just `nl_gc_collect_form_boundary`, but
 the `nl-write-file` / status-wrapper path immediately before form 122 and the
 first allocator/user of the `smie-bnf->prec2` result graph.
+
+---
+
+2026-07-04 second follow-on: form-boundary classification experiments
+
+Scope
+
+Ran the two sharper classification experiments requested for the full vendor
+REPL replay of the 10-file SMIE chain plus full `progmodes/sh-script.el`.
+Because this sandbox cannot write into the sibling `nelisp-emacs-lib` checkout,
+the replay was run by overriding `NELISP_ROOT` / `NELISP_BIN` to point at this
+worktree's freshly built `target/nelisp`, and by overriding
+`VENDOR_SOURCE_CACHE_DIR` to `/tmp`.  Every reader run was wrapped in
+`timeout 120`.
+
+Experiment 1: skip boundary reclaim
+
+Temporary patch: `nl_boundary_maybe_reclaim` returned `0` unconditionally.
+
+Result: FAIL.  The replay still SIGSEGVed at the same sentinel:
+
+- `exit=11`
+- `sentinel="form-start:sh-script.el:122:count=10"`
+
+Classification from experiment 1: the crash is not caused by
+`nl_boundary_maybe_reclaim` rewinding the Stage-5 bump cursor and freeing the
+grammar state.
+
+Experiment 2: huge form-boundary GC threshold
+
+Temporary patch: the initial GC trigger at `268435560` was set from 16 MiB to
+1 TiB (`1099511627776`), making the normal form-boundary mark/sweep trigger
+unreachable for this replay.
+
+Result: FAIL.  The replay still SIGSEGVed at the same sentinel:
+
+- `exit=11`
+- `sentinel="form-start:sh-script.el:122:count=10"`
+
+Classification from experiment 2: the crash is not explained by the normal
+form-boundary threshold collection sweeping an unrooted in-flight grammar value
+during or immediately after form 122.
+
+Current classification
+
+Both decisive gates failed to move the crash, so the current full replay
+failure is neither the Stage-5 boundary reclaim path nor the ordinary
+threshold-triggered `nl_gc_collect_form_boundary` path.  This is consistent
+with the prior boot-collection-disable negative result, but sharper: even
+removing the per-form reclaim call and separately preventing the threshold
+collection leaves the same form122 crash.
+
+The implicated live structure is still the SMIE grammar construction result
+graph built by `smie-bnf->prec2` / `smie-prec2->grammar`: nested alists,
+hash-tables, and shared mutable cons cells churned by `setcar` / `setcdr` /
+`puthash`.  Given these two negatives, the next likely root gap is not a
+form-boundary reclaim/collection scratch slot such as `func_slot` or `out_slot`;
+it is more likely an intra-form allocation/mutation path in the hash-table /
+alist graph, or a replay-wrapper status/write allocation that exposes stale
+state before the grammar form starts.
+
+Recommended next step
+
+Instrument mutation and allocation counters around the status wrapper and the
+first allocator/user inside form 122 rather than adding more roots to
+`nl_gc_mark_roots`.  Useful probes:
+
+- Count calls to `nl_boundary_maybe_reclaim` and
+  `nl_gc_collect_form_boundary` between sh-script forms 121 and 122 to confirm
+  the negative classification in the unpatched build.
+- Instrument `setcar`, `setcdr`, `puthash`, and hash-table rehash/allocation
+  while evaluating form 122, because the synthetic "new symbol + forced
+  boundary GC" negative rules out generic symbol interning and points at the
+  SMIE graph's specific mutable hash/alist allocation pattern.
