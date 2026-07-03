@@ -1191,7 +1191,9 @@ extend FENV only for BODY.  PARSE-BODY-FN is either
                    (var (nth 0 pair))
                    (val-sexp (nth 1 pair))
                    (root-p (nth 2 pair)))
-              (if (nelisp-aot-compiler--int-foldable-p val-sexp env fenv)
+              (if (and (nelisp-aot-compiler--int-foldable-p val-sexp env fenv)
+                       (not (nelisp-aot-compiler--form-setqs-var-p
+                             body-sexp var)))
                   (let ((val (nelisp-aot-compiler--fold-int val-sexp env)))
                     (push (cons var val) new-env))
                 (unless nelisp-aot-compiler--next-rt-let-slot
@@ -7727,6 +7729,16 @@ functions `((NAME . ARITY) ...)'."
                (rhs (cadr pairs))
                (value-slot
                 (nelisp-aot-compiler--gensym "aot-setq-value")))
+          ;; A `setq' target that is a compile-time-folded lexical local
+          ;; (in ENV) or a non-GP-slot binding (in FENV) must never fall
+          ;; through to the global value-cell bridge: reads of the local
+          ;; would keep seeing the folded constant / slot while the write
+          ;; silently lands on the runtime GLOBAL symbol of the same
+          ;; name, dropping the mutation.  Fail loudly instead.
+          (when (or (assq var env) (assq var fenv))
+            (signal 'nelisp-aot-compiler-error
+                    (list :setq-on-lexical-local-via-global-bridge
+                          var sexp)))
           (push
            `(let (((,value-slot :type sexp)
                    ,(nelisp-aot-compiler--runtime-boxed-sexp-form
