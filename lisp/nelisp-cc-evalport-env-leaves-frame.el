@@ -22,6 +22,16 @@
 ;;   nl_frame_build_push_scratch, nl_frame_write_symentry,
 ;;   nl_frame_build_bind_scratch, nl_push_captured_walk
 ;;
+;; PERF (2026-07-03): `nl_frame_scratch_write_lexframe_sym' /
+;; `_hashsym' are called exactly ONCE now, from the standalone driver's boot
+;; sequence (scripts/nelisp-standalone-build.el, before the BOOT WATERMARK
+;; write), to populate the driver-owned bss boxes `nl_frame_push_sym0' /
+;; `nl_frame_push_sym1'.  `nl_frame_build_push_scratch' (called by BOTH
+;; exports on every frame push) reads those shared boxes via the
+;; `nl_frame_push_sym0_ptr' / `nl_frame_push_sym1_ptr' getters instead of
+;; allocating + interning a fresh pair of constant Symbol Sexps per call.
+;; See the sharing-safety argument on `nl_frame_build_push_scratch' below.
+;;
 ;; Linux-x86_64 only — alloc-bytes / ptr-read-u64 / extern-call ABI.
 
 ;;; Code:
@@ -38,19 +48,46 @@
         (seq (ptr-write-u64 buf 0 8314040931539181926)
              (ptr-write-u64 (+ buf 8) 0 28548142445374824)
              (nl_alloc_symbol buf 15 sym_slot))))
+    ;; PERF (2026-07-03): sym0/sym1 used to be built fresh on every call (2x
+    ;; `alloc-bytes 32 8' Sexp slots + 2x `alloc-bytes 16 1' name-encode
+    ;; scratch + 2x `nl_alloc_symbol' intern hash/probe, via
+    ;; `nl_frame_scratch_write_lexframe_sym' / `_hashsym').  They are now two
+    ;; CONSTANT Symbol Sexps ("nelisp-lexframe" / "fast-hash-table") built
+    ;; ONCE at driver boot into driver-owned bss (`nl_frame_push_sym0' /
+    ;; `nl_frame_push_sym1' -- see `nelisp-standalone--arena-base-slot-unit'
+    ;; in scripts/nelisp-standalone-build.el) and read here via the
+    ;; `nl_frame_push_sym0_ptr' / `nl_frame_push_sym1_ptr' getters
+    ;; (arena-source).  `data-addr' is unproven in this combiner unit, so the
+    ;; getters do the `data-addr' load in a unit where it IS proven
+    ;; (arena-source already uses it for `nl_gc_diag' etc.) and this file
+    ;; only makes an ordinary cross-unit call, exactly like the existing
+    ;; `nl_alloc_vector' / `nl_vector_set_slot' calls below.
+    ;;
+    ;; Sharing-safety argument:
+    ;;   (1) the bss boxes live outside the GC arena -- `nl_gc_in_arena' is
+    ;;       false for them, so mark/sweep/compact never visit them and no
+    ;;       root-marking is needed.  Contrast the lazily-allocated
+    ;;       @268436328 shared symentry (env-leaves-logic.el), which lives
+    ;;       in GC arena memory allocated post-boot and therefore DOES need
+    ;;       explicit `nl_gc_mark_roots' / compaction-forwarding handling.
+    ;;   (2) `nelisp_frame_push' (nelisp-cc-frame-push.el) only ever READS
+    ;;       the two symbol slots -- `(vector-ref-ptr scratch-vec-ptr 0/1)'
+    ;;       feeds `record-make', which deep-clones the source Sexp into a
+    ;;       FRESH record `type_tag' field via `nl_sexp_clone_into' -- it
+    ;;       never mutates the source, so the same source pointer can be
+    ;;       reused across every call.
+    ;;   (3) Symbol Sexps are immutable in the reader (only tag-8 vectors are
+    ;;       ever `bf_aset'-mutated), so the shared boxes' bytes never change
+    ;;       after boot.
     (defun nl_frame_build_push_scratch (out_vec_sexp)
-      (let ((box_ptr (nl_alloc_vector 7))
-            (sym0_slot (alloc-bytes 32 8))
-            (sym1_slot (alloc-bytes 32 8)))
-        (seq (nl_frame_scratch_write_lexframe_sym sym0_slot)
-             (nl_frame_scratch_write_hashsym sym1_slot)
-             (seq (nl_vector_set_slot box_ptr 0 sym0_slot)
-                  (nl_vector_set_slot box_ptr 1 sym1_slot)
-                  (ptr-write-u64 out_vec_sexp 0 8)
-                  (ptr-write-u64 (+ out_vec_sexp 8) 0 box_ptr)
-                  (ptr-write-u64 (+ out_vec_sexp 16) 0 0)
-                  (ptr-write-u64 (+ out_vec_sexp 24) 0 0)
-                  out_vec_sexp))))
+      (let ((box_ptr (nl_alloc_vector 7)))
+        (seq (nl_vector_set_slot box_ptr 0 (nl_frame_push_sym0_ptr))
+             (nl_vector_set_slot box_ptr 1 (nl_frame_push_sym1_ptr))
+             (ptr-write-u64 out_vec_sexp 0 8)
+             (ptr-write-u64 (+ out_vec_sexp 8) 0 box_ptr)
+             (ptr-write-u64 (+ out_vec_sexp 16) 0 0)
+             (ptr-write-u64 (+ out_vec_sexp 24) 0 0)
+             out_vec_sexp)))
     (defun nl_frame_write_symentry (sym_slot)
       (let ((buf (alloc-bytes 16 1)))
         (seq (ptr-write-u64 buf 0 7290602597431212403)
