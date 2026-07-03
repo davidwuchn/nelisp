@@ -1628,14 +1628,14 @@ arm64 Linux has no legacy x86 numbering)."
               ;; Vector: mark box + data buffer, recurse slots.
               (let ((box (ptr-read-u64 sp 8)))
                 (if (= (nl_gc_mark_block box) 0) 0
-                  (let ((data_ptr (ptr-read-u64 box 8)) (len (ptr-read-u64 box 16)))
+                  (let* ((data_ptr (ptr-read-u64 box 8)) (len (ptr-read-u64 box 16)))
                     (seq (nl_gc_mark_buf data_ptr)
                          (nl_gc_mark_vec_slots data_ptr 0 len)))))
             (if (= tag 12)
                 ;; Record: type_tag@box+0, slots-Vec@box+32 (data@+40,len@+48).
                 (let ((box (ptr-read-u64 sp 8)))
                   (if (= (nl_gc_mark_block box) 0) 0
-                    (let ((data_ptr (ptr-read-u64 box 40)) (len (ptr-read-u64 box 48)))
+                    (let* ((data_ptr (ptr-read-u64 box 40)) (len (ptr-read-u64 box 48)))
                       (seq (nl_gc_mark_slot box)            ; type_tag @ box+0
                            (nl_gc_mark_buf data_ptr)
                            (nl_gc_mark_vec_slots data_ptr 0 len)))))
@@ -1713,7 +1713,7 @@ arm64 Linux has no legacy x86 numbering)."
       (if (= (nl_gc_is_boot hdr) 1)
           (nl_seq2 (nl_hdr_set_mark hdr 0)                ; boot block: keep live, reset mark
                    (nl_hdr_bt hdr))
-      (let ((m (nl_hdr_mark hdr)) (bt (nl_hdr_bt hdr)))
+      (let* ((m (nl_hdr_mark hdr)) (bt (nl_hdr_bt hdr)))
         ;; Doc155 §8.12: m==1 (recursed-live) OR m==4 (conserv-PINNED, a live
         ;; in-flight root never precisely recursed) both SURVIVE and reset to 0
         ;; for the next cycle.
@@ -1747,8 +1747,8 @@ arm64 Linux has no legacy x86 numbering)."
           0
         (nl_seq2 (nl_gc_sweep_one hdr) (+ hdr (nl_hdr_bt hdr)))))
     (defun nl_gc_sweep_chunk (chunk)
-      (let ((hdr (ptr-read-u64 (+ chunk 24) 0))
-            (end (nl_gc_chunk_end chunk)))
+      (let* ((hdr (ptr-read-u64 (+ chunk 24) 0))
+             (end (nl_gc_chunk_end chunk)))
         (while (and (> hdr 0) (< hdr end))
           (setq hdr (nl_gc_sweep_step hdr end)))
         0))
@@ -1852,11 +1852,23 @@ arm64 Linux has no legacy x86 numbering)."
           (nl_seq2 (nl_gc_mark_block src)
            (nl_seq2 (nl_gc_mark_block cursor)
                     (nl_gc_mark_block bsym))))))))
+    ;; Explicitly mark the globals mirror fast-hash bucket vector.  Direct
+    ;; named-call resolution walks these buckets, so the bucket vector is part
+    ;; of the root surface for the mirror, not just an ordinary record child.
+    (defun nl_gc_mark_mirror_buckets (mirror)
+      (if (= (sexp-tag mirror) 12)
+          (let* ((ht (record-slot-ref-ptr mirror 0)))
+            (if (= (sexp-tag ht) 12)
+                (nl_gc_mark_slot (record-slot-ref-ptr ht 1))
+              0))
+        0))
     ;; Mark every root (split out so the DEBUG skip-mark gate is a single if).
     (defun nl_gc_mark_roots (ctx result out pool src cursor bsym)
       (nl_seq2 (nl_gc_conserv_maybe)             ; Doc 152 §11.21 conservative stack scan
        (nl_seq2 (nl_gc_mark_root_blocks ctx result out pool src cursor bsym)
-       (nl_seq2 (nl_seq2 (nl_gc_mark_slot (+ ctx 0)) (nl_gc_mark_rootstack)) ; mirror / globals + Doc 152 §11.37 Stage 2 dynamic root stack scan
+       (nl_seq2 (nl_seq2 (nl_gc_mark_slot (+ ctx 0))
+                         (nl_seq2 (nl_gc_mark_mirror_buckets (+ ctx 0))
+                                  (nl_gc_mark_rootstack))) ; mirror / globals + Doc 152 §11.37 Stage 2 dynamic root stack scan
         (nl_seq2 (nl_gc_mark_slot (+ ctx 32))    ; frame stack
          (nl_seq2 (nl_gc_mark_slot (+ ctx 64))   ; unbound marker
           (nl_seq2 (nl_gc_mark_slot result)      ; current parsed form
@@ -1962,7 +1974,7 @@ arm64 Linux has no legacy x86 numbering)."
              0)
            (+ hdr bt)))))
     (defun nl_compact_fwd_chunk (chunk)
-      (let ((hdr (ptr-read-u64 (+ chunk 24) 0)) (end (nl_gc_chunk_end chunk)))
+      (let* ((hdr (ptr-read-u64 (+ chunk 24) 0)) (end (nl_gc_chunk_end chunk)))
         (while (and (> hdr 0) (< hdr end))
           (setq hdr (nl_compact_fwd_step hdr end)))
         0))
@@ -2078,7 +2090,7 @@ arm64 Linux has no legacy x86 numbering)."
           (if (= tag 8)
               (let ((old (nl_compact_rw_edge (+ sp 8))))
                 (if (= (nl_compact_rw_block old) 0) 0
-                  (let ((data_old (ptr-read-u64 old 8)) (len (ptr-read-u64 old 16)))
+                  (let* ((data_old (ptr-read-u64 old 8)) (len (ptr-read-u64 old 16)))
                     ;; SYMMETRY FIX (= mark walk写し, Doc146 §5.A-2): gate slot
                     ;; recursion ONLY on the BOX (already flipped above), NOT on
                     ;; the data buffer.  The old `(if rw_block data_old ...)' guard
@@ -2092,7 +2104,7 @@ arm64 Linux has no legacy x86 numbering)."
             (if (= tag 12)
                 (let ((old (nl_compact_rw_edge (+ sp 8))))
                   (if (= (nl_compact_rw_block old) 0) 0
-                    (let ((data_old (ptr-read-u64 old 40)) (len (ptr-read-u64 old 48)))
+                    (let* ((data_old (ptr-read-u64 old 40)) (len (ptr-read-u64 old 48)))
                       (seq (nl_compact_rw_slot old)
                            (nl_compact_rw_edge (+ old 40))
                            (nl_compact_rw_block data_old)
@@ -2152,7 +2164,7 @@ arm64 Linux has no legacy x86 numbering)."
     ;; address) + reset marks.  Boot (below watermark) is mark3 from the rewrite
     ;; walk but stays put (just clear its mark).
     (defun nl_compact_copy (src dst n)
-      (let ((s src) (d dst) (k n))
+      (let* ((s src) (d dst) (k n))
         (while (> k 7)
           (nl_seq2 (ptr-write-u64 d 0 (ptr-read-u64 s 0))
             (nl_seq2 (setq s (+ s 8))
@@ -2173,7 +2185,7 @@ arm64 Linux has no legacy x86 numbering)."
              0)
            (+ hdr bt)))))
     (defun nl_compact_move_chunk (chunk)
-      (let ((hdr (ptr-read-u64 (+ chunk 24) 0)) (end (nl_gc_chunk_end chunk)))
+      (let* ((hdr (ptr-read-u64 (+ chunk 24) 0)) (end (nl_gc_chunk_end chunk)))
         (while (and (> hdr 0) (< hdr end))
           (setq hdr (nl_compact_move_step hdr end)))
         0))
@@ -2250,8 +2262,8 @@ arm64 Linux has no legacy x86 numbering)."
     (defun nl_compact_munmap_growth (chunk tospace)
       (if (= chunk 0) tospace
         (if (= chunk tospace) tospace
-          (let ((next (ptr-read-u64 (+ chunk 48) 0))
-                (base (ptr-read-u64 chunk 0)) (size (ptr-read-u64 (+ chunk 8) 0)))
+          (let* ((next (ptr-read-u64 (+ chunk 48) 0))
+                 (base (ptr-read-u64 chunk 0)) (size (ptr-read-u64 (+ chunk 8) 0)))
             (if (= (nl_compact_chunk_pinned base size) 1)
                 ;; keep this chunk: link it ahead of the rest of the kept chain.
                 (nl_seq2 (ptr-write-u64 (+ chunk 48) 0
@@ -2342,6 +2354,7 @@ arm64 Linux has no legacy x86 numbering)."
     (defun nl_gc_mark_published_frame (env result out pool src cursor bsym)
       (nl_seq2 (nl_gc_mark_root_blocks env result out pool src cursor bsym)
        (nl_seq2 (nl_gc_mark_slot (+ env 0))     ; mirror / globals
+        (nl_seq2 (nl_gc_mark_mirror_buckets (+ env 0))
         (nl_seq2 (nl_gc_mark_slot (+ env 32))   ; frame stack
          (nl_seq2 (nl_gc_mark_slot (+ env 64))  ; unbound marker
           (nl_seq2 (nl_gc_mark_slot result)     ; executing form AST (§11.34 root)
@@ -2349,7 +2362,7 @@ arm64 Linux has no legacy x86 numbering)."
             (nl_seq2 (nl_gc_mark_pool pool (nl_gc_pool_cap))
              (nl_seq2 (nl_gc_mark_slot src)
               (nl_seq2 (nl_gc_mark_slot cursor)
-                       (nl_gc_mark_slot bsym)))))))))))
+                       (nl_gc_mark_slot bsym))))))))))))
     ;; Read the 7-slot frame at BASE (env@+0/result@+8/out@+16/pool@+24/src@+32/
     ;; cursor@+40/bsym@+48) and mark it.  Reads are passed straight as args (no
     ;; across-call locals; mirrors `nl_gc_ctx_store').
