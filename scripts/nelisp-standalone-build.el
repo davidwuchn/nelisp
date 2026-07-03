@@ -428,7 +428,25 @@ storage — not an arena reservation."
    ;; non-zero = a caller-chosen valid address (the multi-chunk dump puts the table
    ;; in the intern region's free area, since chunk-0 is full and dest+total+isz is
    ;; past chunk-0's mmap).
-   (list (cons 'bss (+ 3736 1048576)))
+   ;; PERF (2026-07-03): +3736/+3768 = nl_frame_push_sym0 / nl_frame_push_sym1
+   ;; (32B each) -- two driver-owned Symbol Sexp boxes shared by every
+   ;; `nl_push_and_bind' / `nl_env_push_captured' call.  `driver' writes each
+   ;; ONCE (via `nl_frame_scratch_write_lexframe_sym' / `_hashsym') before the
+   ;; BOOT WATERMARK write; `nl_frame_build_push_scratch' then reads them via
+   ;; `nl_frame_push_sym0_ptr' / `nl_frame_push_sym1_ptr' (arena-source)
+   ;; instead of allocating + interning a fresh Symbol Sexp on every call.
+   ;; Sharing is safe because: (1) this bss region is never part of any GC
+   ;; chunk -- `nl_gc_in_arena' is false for it, so mark/sweep/compact never
+   ;; visit it and no root-marking is needed (unlike the lazily-allocated
+   ;; @268436328 shared symentry, which lives in GC arena memory allocated
+   ;; post-boot and therefore DOES need explicit `nl_gc_mark_roots' /
+   ;; compaction handling); (2) `nelisp_frame_push' (nelisp-cc-frame-push.el)
+   ;; only READS the two symbol slots via `vector-ref-ptr' + `record-make'
+   ;; (which deep-clones into a fresh record type_tag field via
+   ;; `nl_sexp_clone_into') -- it never mutates the source Sexp, so aliasing
+   ;; the source across calls is sound; (3) Symbol Sexps are immutable in
+   ;; the reader (only tag-8 vectors are ever `bf_aset'-mutated).
+   (list (cons 'bss (+ 3800 1048576)))
    (list (nelisp-link-symbol "nl_arena_base" 0
                              :section 'bss :bind 'global :type 'object)
          (nelisp-link-symbol "nl_rootstack_top" 8
@@ -440,6 +458,10 @@ storage — not an arena reservation."
          (nelisp-link-symbol "nl_safepoint_ctx" (+ 80 1048576)
                              :section 'bss :bind 'global :type 'object)
          (nelisp-link-symbol "nl_fa_tbl_base" (+ 3728 1048576)
+                             :section 'bss :bind 'global :type 'object)
+         (nelisp-link-symbol "nl_frame_push_sym0" (+ 3736 1048576)
+                             :section 'bss :bind 'global :type 'object)
+         (nelisp-link-symbol "nl_frame_push_sym1" (+ 3768 1048576)
                              :section 'bss :bind 'global :type 'object))
    nil))
 
@@ -1044,7 +1066,20 @@ not linked."
           (seq
            (ptr-write-u64 268436288 0 rbase)
            (ptr-write-u64 268436296 0 (+ rbase 16777216))))))
-    (defun nl_quit_flag_ptr () 268435464)))
+    (defun nl_quit_flag_ptr () 268435464)
+    ;; PERF (2026-07-03): driver-owned bss addresses of the two shared
+    ;; Symbol Sexp boxes ("nelisp-lexframe" / "fast-hash-table") that every
+    ;; `nl_push_and_bind' / `nl_env_push_captured' frame-push used to
+    ;; allocate fresh (env-leaves-frame.el's `nl_frame_build_push_scratch').
+    ;; `data-addr' is proven-safe HERE (this arena-source unit already uses
+    ;; it for `nl_gc_diag' etc.) but is unproven inside the AOT combiner
+    ;; units, so the combiner reads the address via an ordinary cross-unit
+    ;; call to these getters instead of using `data-addr' directly.  Slots
+    ;; are declared in `nelisp-standalone--arena-base-slot-unit' and
+    ;; populated ONCE by `driver' before the BOOT WATERMARK write -- see
+    ;; that unit's PERF comment for the sharing-safety argument.
+    (defun nl_frame_push_sym0_ptr () (data-addr nl_frame_push_sym0))
+    (defun nl_frame_push_sym1_ptr () (data-addr nl_frame_push_sym1))))
 
 (defconst nelisp-standalone--windows-stack-reserve #x40000000
   "Windows standalone PE stack reserve size.
@@ -12262,6 +12297,14 @@ correctly."
         (if (< _cl 0) 0 (nl_cold_overwrite_globals globals))
         (ptr-write-u64 builtin_buf 0 31078196194145634)
         (nl_alloc_symbol builtin_buf 7 builtin_sym)
+        ;; PERF (2026-07-03): populate the two shared frame-push-scratch
+        ;; Symbol Sexp boxes ONCE, here, before the BOOT WATERMARK write
+        ;; below -- see `nelisp-standalone--arena-base-slot-unit' for the
+        ;; sharing-safety argument.  Re-populating on the cold-load path
+        ;; (`_cl >= 0') is harmless (idempotent overwrite of the same two
+        ;; constant symbols) so no `_cl' gate is needed here.
+        (nl_frame_scratch_write_lexframe_sym (nl_frame_push_sym0_ptr))
+        (nl_frame_scratch_write_hashsym (nl_frame_push_sym1_ptr))
         ;; cold path: the loaded image's mirror already carries every native
         ;; builtin (registered by the dumping process) AND the prelude OVERRIDES
         ;; of them (A1 floor, A20 eq string-identity, ...).  Re-running
