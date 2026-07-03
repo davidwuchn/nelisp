@@ -13298,6 +13298,38 @@ genuine general interpreter for the 11 special forms + installed builtins."
                              ("sf-frame-ensure-cap.o"
                               (nelisp-standalone--reader-extra-unit-epoch
                                entry '(nelisp_frame_stack_ensure_capacity_grow)))
+                             ;; FIX (2026-07-03): `nelisp_frame_push' installs the
+                             ;; freshly-pushed frame into the persistent frames-record
+                             ;; backing[depth] (slot 0) AND bumps the persistent depth
+                             ;; Int (slot 1) via `record-slot-set' / `vector-slot-set' --
+                             ;; the exact same "install a box into a PERSISTENT record"
+                             ;; escape-site pattern already covered above for backing-
+                             ;; vector GROWTH.  Growth was epoch-protected but ordinary
+                             ;; push/pop (which fires on every lambda/let, not just
+                             ;; growth) was not, so a net-balanced push+pop pair inside a
+                             ;; top-level form whose own result is immediate would let
+                             ;; `nl_boundary_maybe_reclaim' rewind the arena PAST the
+                             ;; freshly-allocated depth-Int box that frames-record slot 1
+                             ;; still points at.  The next top-level form's reader (cons
+                             ;; allocation while parsing) then reuses that exact address,
+                             ;; silently corrupting the live depth counter (observed: a
+                             ;; correctly-written depth=0 box read back as depth=2 moments
+                             ;; later with no intervening write to the slot word itself --
+                             ;; the WORD was untouched, its POINTEE got clobbered).  This
+                             ;; is the root cause of the lexframe capture SIGSEGV in
+                             ;; `nl_capture_walk_frame' / `nl_record_slot_ptr' (frame_ptr+8
+                             ;; reads a NULL box_ptr because backing[i] itself was reused
+                             ;; the same way).  Mirrors the growth/setq fix exactly.
+                             ("frame-push.o"
+                              (nelisp-standalone--reader-extra-unit-epoch
+                               entry '(nelisp_frame_push)))
+                             ;; FIX (2026-07-03): companion to the push fix above --
+                             ;; `nelisp_frame_pop_inner' is the leaf that actually writes
+                             ;; Nil into backing[new-depth] and the new depth Int into the
+                             ;; persistent frames-record slot 1; same escape-site hazard.
+                             ("frame-pop.o"
+                              (nelisp-standalone--reader-extra-unit-epoch
+                               entry '(nelisp_frame_pop_inner)))
                              ("sf-env-set-value.o"
                               (progn
                                 (require 'nelisp-cc-evalport-env-leaves-bind)
