@@ -65,3 +65,74 @@ Files investigated
 Recommended next step
 
 Start from the partial `let*` GC hot-path fix above and continue reducing the residual Variant A failure in the direct named-call path only. The most promising next probe is to instrument the boundary collection that runs after `defun f2`, because the remaining crash disappears when that single collection is disabled.
+
+---
+
+2026-07-04 follow-on: SMIE sh-script form-boundary crash
+
+Scope
+
+Investigated the follow-on report on branch `fix/gc-formboundary-rootgap` at
+merged main `56352428` / record-offset fix `cee2f9d9` present.  The requested
+reproducer is the vendor REPL replay of the minimal SMIE chain plus full
+`progmodes/sh-script.el`, with every reader run wrapped in `timeout`.
+
+Confirmed evidence
+
+- `make standalone-reader` succeeded.
+- The vendor replay reproducer failed deterministically with SIGSEGV:
+  `status=fail exit=11`, sentinel
+  `form-start:sh-script.el:122:count=10`.
+- The saved replay input showed form 121 is:
+  `(defun sh-smie--newline-semi-p ...)`
+  and form 122 is the `sh-smie-sh-grammar` computation.
+- Enabling poison-on-free with a prepended `(nelisp--gc-diag 1)` file still
+  failed at the same form-start sentinel with `exit=11`.
+- Running the compact local proof shape directly did not fail:
+  loading `tmp-smie-repro/shprefix-120.el` followed by `tmp-smie-repro/pair-proof.el`
+  returned `t`.
+- Loading `tmp-smie-repro/shprefix-120.el`, then `shform121.el`, then
+  `shform122.el` through a small temporary `load` wrapper also returned `t`.
+
+Important negative result
+
+I temporarily rebuilt the reader with collection disabled at boot
+(`collect-disabled` slot reported as `1` via `(nelisp--gc-diag 0)`).  The full
+vendor REPL replay still SIGSEGVed at the same sh-script form 122 sentinel,
+and did so faster (~24s).  This means the current full replay failure is not
+explained solely by mark/sweep freeing an unrooted live block during the
+form-boundary collection.  Either the replay is exposing an additional
+non-GC heap/state corruption, or the user-level diagnosis is missing a
+separate prerequisite that is absent from the reduced direct-load proof.
+
+Patch attempts rejected
+
+1. Kept `nl_safepoint_ctx` published until after the boundary collection by
+   moving `nl_gc_ctx_pop` out of `nl_driver_eval_published` into the three
+   caller loops.  Result: build succeeded, but the reproducer still failed at
+   `form-start:sh-script.el:122:count=10`, `exit=11`.
+2. Added `nl_gc_mark_published_contexts` to `nl_gc_collect_form_boundary`
+   before the direct `nl_gc_collect` call.  Result: build succeeded, but the
+   same SIGSEGV remained.
+3. Tried to capture a native backtrace with gdb, but ptrace is blocked in the
+   sandbox (`Operation not permitted`), so no native stack was available.
+
+Interpretation
+
+The original differential is still useful, but the full replay contains more
+top-level forms than the simplified proof: each status `setq` / `nl-write-file`
+wrapper is also replayed as a separate form.  The crash happens after the
+`form-start` status write and while evaluating the sh-script form 122 line.  A
+sound fix was not reached within the small-change budget because the strongest
+GC-root hypotheses above did not change the failure, and boot-level collection
+disable did not eliminate it.
+
+Recommended next step
+
+Reduce from the saved replay input rather than from `tmp-smie-repro` alone.
+Start with `/tmp/nemacs-vendor-repl-standalone-6IjFtB.repl` (or regenerate with
+`VENDOR_REPL_KEEP_TEMP=t`) and bisect the prefix between the end of `smie.el`
+and `sh-script.el` form 122, preserving the replay wrapper forms.  The next
+useful instrumentation target is not just `nl_gc_collect_form_boundary`, but
+the `nl-write-file` / status-wrapper path immediately before form 122 and the
+first allocator/user of the `smie-bnf->prec2` result graph.
