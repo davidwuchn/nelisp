@@ -1632,10 +1632,10 @@ arm64 Linux has no legacy x86 numbering)."
                     (seq (nl_gc_mark_buf data_ptr)
                          (nl_gc_mark_vec_slots data_ptr 0 len)))))
             (if (= tag 12)
-                ;; Record: type_tag@box+0, slots-Vec@box+32 (data@+40,len@+48).
+                ;; Record: type_tag@box+0, slots-Vec@box+32 (data@+32,len@+48).
                 (let ((box (ptr-read-u64 sp 8)))
                   (if (= (nl_gc_mark_block box) 0) 0
-                    (let* ((data_ptr (ptr-read-u64 box 40)) (len (ptr-read-u64 box 48)))
+                    (let* ((data_ptr (ptr-read-u64 box 32)) (len (ptr-read-u64 box 48)))
                       (seq (nl_gc_mark_slot box)            ; type_tag @ box+0
                            (nl_gc_mark_buf data_ptr)
                            (nl_gc_mark_vec_slots data_ptr 0 len)))))
@@ -2104,9 +2104,9 @@ arm64 Linux has no legacy x86 numbering)."
             (if (= tag 12)
                 (let ((old (nl_compact_rw_edge (+ sp 8))))
                   (if (= (nl_compact_rw_block old) 0) 0
-                    (let* ((data_old (ptr-read-u64 old 40)) (len (ptr-read-u64 old 48)))
+                    (let* ((data_old (ptr-read-u64 old 32)) (len (ptr-read-u64 old 48)))
                       (seq (nl_compact_rw_slot old)
-                           (nl_compact_rw_edge (+ old 40))
+                           (nl_compact_rw_edge (+ old 32))
                            (nl_compact_rw_block data_old)
                            (nl_compact_rw_vec_slots data_old 0 len)))))
               (if (= tag 11)
@@ -2960,7 +2960,7 @@ unresolved at link time."
     ;; prelude `recordp' is aliased to `vectorp' (nelisp-stdlib-prelude.el:3113) so
     ;; it returns nil for tag-12, and host `aref'/`length' do not traverse the
     ;; 1024-bucket hash mirror.  These helpers read the verified runtime layout
-    ;; (Record: type_tag @box+0, data_ptr @box+40, len @box+48; Vector: data_ptr
+    ;; (Record: type_tag @box+0, data_ptr @box+32, len @box+48; Vector: data_ptr
     ;; @box+8, len @box+16; Cons: car/cdr WORDS @box+0/+8) and rewrite the WHOLE
     ;; subgraph into cons/atoms (records + vectors -> plain lists, conses -> conses),
     ;; which the codec already handles.  Slot/element WORDS are value-words: low bit
@@ -2992,7 +2992,7 @@ unresolved at link time."
             (let* ((box (ptr-read-u64 v 8)) (typ (alloc-bytes 32 8)) (sl (alloc-bytes 32 8)))
               (seq
                (bf_expand_slot box typ)   ; type_tag @ box+0 (box viewed as a Sexp slot)
-               (bf_expand_words_list (ptr-read-u64 box 40) 0 (ptr-read-u64 box 48) sl)
+               (bf_expand_words_list (ptr-read-u64 box 32) 0 (ptr-read-u64 box 48) sl)
                (nelisp_cons_construct typ sl out)
                0))
           (if (= tag 8)
@@ -3425,9 +3425,9 @@ unresolved at link time."
                 (let ((box (ptr-read-u64 sp 8)))
                   (nl_seq2 (nl_fa_field (+ sp 8) box ds span dest cin cout dir)
                     (if (= (nl_gc_mark_block box) 0) 0
-                      (let ((data_ptr (ptr-read-u64 box 40)) (len (ptr-read-u64 box 48)))
+                      (let ((data_ptr (ptr-read-u64 box 32)) (len (ptr-read-u64 box 48)))
                         (nl_seq2 (nl_fa_slot box ds span dest cin cout dir)
-                          (nl_seq2 (nl_fa_field (+ box 40) data_ptr ds span dest cin cout dir)
+                          (nl_seq2 (nl_fa_field (+ box 32) data_ptr ds span dest cin cout dir)
                                    (nl_fa_vec_slots data_ptr 0 len ds span dest cin cout dir)))))))
               (if (= tag 11)
                   (let ((box (ptr-read-u64 sp 8)))
