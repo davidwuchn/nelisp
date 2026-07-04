@@ -19,6 +19,12 @@
 #+STATUS:   (2026-07-04, fix/e2e-repl-gate-parity): the harness probe wrapped conjuncts in
 #+STATUS:   ignore-errors, which on this reader returns nil instead of the body value; bare
 #+STATUS:   probes show featurep org / org-element = t in BOTH columns (see §7).
+#+STATUS: ORG-MODE INSTALL CAVEAT CLOSED (2026-07-04, feat/org-cold-image-v2) — root cause was
+#+STATUS:   the standalone reader dropping backquote-template macro invocations (the
+#+STATUS:   define-derived-mode bridge), fixed upstream in nelisp-emacs-lib commit bd6d06d.
+#+STATUS:   fboundp org-mode / commandp org-mode are now t in BOTH replay and cold-boot columns
+#+STATUS:   under the DEFAULT (fast) prelude — no gate-prelude fallback needed. See §7 "v2
+#+STATUS:   re-attempt".
 #+BRANCH: spike/flat-arena-boot-install
 
 * 0. Purpose
@@ -687,3 +693,155 @@ investigation; the concrete fix belongs to
 detail forms through the same single-physical-line-safe normalization used
 for vendor files, or make the reader's REPL loop support cross-line form
 continuation) and is left for a follow-up change.
+
+** v2 re-attempt (2026-07-04, branch =feat/org-cold-image-v2=): org-mode-inclusive image PROVEN, caveat CLOSED
+
+Re-ran the org-cold-image E2E after an unrelated, independently-landed
+substrate fix (nelisp-emacs-lib commit =bd6d06d=, "Fix define-derived-mode
+on the standalone bootstrap path", merged to its =main= as =165b50c=):
+this standalone reader silently dropped the invocation line of any
+user-defined macro whose expansion body is a backquote template, and both
+layers of the =define-derived-mode= bridge (=emacs-mode-builtins.el= ->
+=emacs-mode.el='s =emacs-mode-define-derived-mode=) were backquote
+templates, so every vendor =(define-derived-mode CHILD PARENT ...)= call —
+=org-mode= included — silently vanished, leaving the parent keymap/hook
+defvars installed but no mode command ever =fset=.  That is the actual
+root cause this doc's H1 finding (proof-scaffold-never-evaluates) left
+undiagnosed: H1 explained why the *gate's* =status=done= carried no
+evidential weight, but the org-mode/=commandp= gap itself was real and
+had a different, independent cause, unrelated to any prelude/gate-proof
+difference (§7 "Gate-prelude opt-in probe" had already ruled out prelude
+text as sufficient by itself).
+
+*** Bootstrap freshness check (before re-running anything)
+
+Per this task's own gating instruction, verified whether
+nelisp-emacs-lib's =build/nemacs-bootstrap.repl= (the default
+=E2E_BOOTSTRAP_REPL= input) actually reflected the =bd6d06d= fix before
+trusting it.  The live =nelisp-emacs-lib= checkout is an actively-used
+shared working tree (an external automation loop was observed flipping it
+between =main= and =integ/org-agenda-daily= every 1-3 hours via the
+reflog, mid-investigation), so rather than run =make
+build-nelisp-bootstrap= against that moving target, a throwaway
+=git clone --no-hardlinks --no-checkout= of it was made into a private
+scratch dir, checked out to the exact pinned commit =bd6d06d=, and
+rebuilt there.  The independently-rebuilt =.repl= was byte-identical
+(same size, same md5) to the live checkout's =build/nemacs-bootstrap.repl=
+(mtime 15:28, i.e. *older* than the =bd6d06d= commit timestamp 15:42 —
+misleading by mtime alone, but content-verified current: the fix had been
+applied to the working tree and the bundle regenerated locally *before*
+being committed, so the untracked build artifact's content matched the
+eventual commit the whole time).  No edits were made to nelisp-emacs-lib;
+the pinned clone was used read-only, both to confirm freshness and — for
+extra isolation from the live checkout's churn during the ~10 s replay-load
+window — as the =NELISP_LIB_ROOT= for the first E2E run below (a second,
+completely unmodified default run against the live checkout, see
+Regression below, confirms the live path independently gives the same
+result).
+
+*** Result: DEFAULT prelude now installs org-mode — no gate-prelude fallback needed
+
+=scripts/cold-image-org-e2e.sh 1= with =E2E_LOAD_TIMEOUT=900= and
+=NELISP_LIB_ROOT= pointed at the pinned, fix-verified clone (this
+worktree's own default =scripts/nelisp-stdlib-prelude.el=, i.e. the FAST
+default prelude that previously left =org-mode= unfbound per Increment 3):
+
+| phase                     |    result |
+|----------------------------+-----------|
+| host =.repl= generation    |   0.819 s |
+| replay load                |   9.909 s |
+| dump (in-process)          |   0.700 s |
+| cold boot to first eval    |   0.876 s |
+| cold-boot peak RSS         | 674624 KB |
+| image size                 | 689762616 B (~658 MiB) |
+| speedup (replay/cold)      |     11.3x |
+
+Faithfulness columns (bare conjuncts, replay vs cold-boot — IDENTICAL):
+
+| conjunct                              | replay-loaded | cold-booted |
+|----------------------------------------+---------------+-------------|
+| =(featurep 'org)=                      | t             | t           |
+| =(featurep 'org-element)=              | t             | t           |
+| =(fboundp 'org-mode)=                  | *t*           | *t*         |
+| =(fboundp 'org-element-parse-buffer)=  | t             | t           |
+| =(commandp 'org-mode)=                 | =(interactive)= | =(interactive)= |
+| =(fboundp 'commandp)=                  | t             | t           |
+
+The two conjuncts that were =nil= in every prior recording (Increment 3,
+the gate-prelude probe, and the original Doc 156 §7 finding) are now
+truthy in both columns, under the DEFAULT (fast, ~10 s) prelude — the
+slower =E2E_PRELUDE=vendor/nelisp/scripts/nelisp-stdlib-prelude.el= gate
+prelude (~250-400 s, ~3.8 GiB image) was *not needed* this time; the fix
+was in the reader's macro-expansion path, not in prelude content, exactly
+as the "Gate-prelude opt-in probe" section above had already narrowed it
+down to (prelude-text swap alone did not reproduce the gate's claimed
+install; the real defect was the reader dropping the bridge macro's own
+invocation).
+
+Note on the =commandp= conjunct's printed value: this reader's =commandp=
+shim returns the function's =(interactive ...)= spec form on success
+rather than a bare =t= (a pre-existing shim-implementation detail, not a
+regression) — both columns agree and the value is non-nil, so the
+=(and (fboundp 'commandp) (commandp 'org-mode))= conjunct is truthy,
+satisfying "=org-mode= is a real, invocable command" the same way a bare
+=t= would.
+
+*** Liveness checks (post-cold-load, same image)
+
+All bare, no =condition-case=/=ignore-errors= wrapping (per the
+already-documented quirk that those return nil regardless of the
+protected body's value on this reader):
+
+- =(garbage-collect)= — returns a normal GC-stats list, no crash.
+- =(make-string 64 ?x)= — returns the 64-char string correctly.
+- fresh =(defun f9 () 42)= then =(f9)= — returns =42=.
+- =(commandp 'org-mode)= — =(interactive)= (truthy, see above).
+- =(fboundp 'org-mode)= — =t=.
+
+Buffer-level smoke (=(with-temp-buffer (org-mode) ...)=) was also
+attempted per this task's "report what's feasible" allowance, and is
+reported honestly as NOT working cleanly: =(with-temp-buffer major-mode)=
+already returns =nil= (even with no mode call at all, and even after an
+explicit =(fundamental-mode)=), while =(default-value 'major-mode)=
+correctly returns =fundamental-mode= — so per-buffer =major-mode= tracking
+inside =with-temp-buffer= does not fall back to the default value the way
+it should.  Separately, =(with-temp-buffer (org-mode) t)= itself returns
+=nil= instead of =t=, i.e. invoking =(org-mode)= inside the buffer appears
+to discard the =with-temp-buffer= body's subsequent return value (no
+stderr output, no non-zero exit — silent, not a crash).  This is a
+buffer/major-mode substrate gap orthogonal to the =define-derived-mode=
+bridge fix and to MC-1/MC-2 cold-load faithfulness (both of which are
+about whether =org-mode= is =fboundp=/=commandp=-true and whether cold-load
+reproduces that faithfully, which it does); it is left unchased here as
+out of scope, consistent with this doc's existing practice of not chasing
+gaps beyond the caveat under investigation.
+
+*** Regression
+
+- =scripts/cold-image-org-e2e.sh 1= re-run with *no env overrides at all*
+  (default =NELISP_LIB_ROOT=, default prelude, default 180 s timeout,
+  against the live nelisp-emacs-lib checkout, not the pinned clone):
+  identical result — load 9.915 s, dump 0.695 s, cold boot 0.863 s, peak
+  RSS 676636 KB, image 691817320 B, faithfulness columns
+  =(t t t t (interactive) t)= in BOTH columns.  This independently confirms
+  the live checkout's =build/nemacs-bootstrap.repl= is fix-current (matches
+  the pinned-clone freshness check above) and that the org-mode install is
+  reproducible without any of the env-var overrides added in the prior
+  probe.
+- 4 make smokes (=standalone-reader-load-smoke=, =-fmt-smoke=,
+  =-repl-smoke=, =-prelude-test=): *PASS* (=./target/nelisp= relinked
+  cleanly, 107 units, from this checkout's current =main= tip).
+
+*** Status: CLOSED
+
+The org-mode-install caveat opened by Increment 3 and left unresolved by
+the "Gate-prelude opt-in probe" section is **CLOSED**: an org-mode-inclusive
+cold image is proven, with =fboundp org-mode= and =commandp org-mode= both
+truthy in replay and cold-boot alike, at boot times unchanged from the
+non-org-mode-fbound baseline (~9.9 s replay load / ~0.86-0.88 s cold boot
+to first eval, ~11.3-11.5x speedup) — i.e. closing the gap cost nothing in
+image size or boot time versus the prior (org-mode-less) proof, because the
+fix was a reader-macro-expansion correctness fix, not a heavier prelude.
+The remaining, separately-scoped gap is the buffer/major-mode substrate
+behavior noted above, which does not block this doc's cold-load
+faithfulness claim.
