@@ -12298,6 +12298,19 @@ same branch and emit the same byte count."
       ;; transient stack depth is not statically visible here.  Align the
       ;; outgoing area from the runtime rsp, then restore the exact pre-call rsp.
       ;; RBX is preserved by generated Win64 defun prologues and by WinAPI.
+      ;;
+      ;; NOTE: a save/restore-CALLER's-RBX-via-push/pop variant was tried here
+      ;; (wrapping this scratch use in `push rbx' / `pop rbx' instead of a bare
+      ;; clobber) to protect any live-in-RBX value the enclosing defun's
+      ;; register allocator might have across this call site.  It regressed
+      ;; the basic (non-nested) call-process smoke tests -- the extra 8-byte
+      ;; push shifts `rsp' by the time the win64 stack-arg copy loop below
+      ;; computes its `source-disp'/`dest-disp' offsets, corrupting stack-arg
+      ;; marshaling for calls with `stack-args' (which CreateProcessW always
+      ;; has).  Reverted; left as a known-bad direction for whoever revisits
+      ;; the still-open "call-process inside a live `let'/`let*' frame"
+      ;; corruption (a DIFFERENT bug from the repeat-call SIGSEGV this
+      ;; allowlist entry fixes -- see the windows-spawn regression report).
       (nelisp-asm-x86_64-emit-bytes buf (unibyte-string #x48 #x89 #xE3))
       (nelisp-asm-x86_64-emit-bytes buf (unibyte-string #x48 #x83 #xE4 #xF0)))
     (let* ((shadow (if win64-p 32 0))
