@@ -7399,12 +7399,31 @@ pre-existing `nl_os_process_fork' stub there."
                          dst p (nl_bi_strptr car_sx) (nl_bi_strlen car_sx)))
                 (nl_win_cmdline_write_args dst p (nl_cons_cdr_ptr lst))))
            pos))
+       ;; argv[0] gets forward slashes converted to backslashes: cmd.exe (and
+       ;; other programs that re-parse their own command line) treat a bare
+       ;; `C:/...' argv[0] token's `/' as a switch prefix ("The syntax of the
+       ;; command is incorrect").
+       (defun nl_win_prog_backslash_dup (ptr len)
+         (let* ((dst (alloc-bytes (+ len 1) 1))
+                (i 0))
+           (seq
+            (while (< i len)
+              (let* ((b (ptr-read-u8 ptr i)))
+                (seq
+                 (if (= b 47)
+                     (ptr-write-u8 dst i 92)
+                   (ptr-write-u8 dst i b))
+                 (setq i (+ i 1)))))
+            (ptr-write-u8 dst len 0)
+            dst)))
        (defun nl_win_build_cmdline (program_sx arglst)
-         (let* ((bound (+ (+ (* 2 (nl_bi_strlen program_sx)) 3)
+         (let* ((plen (nl_bi_strlen program_sx))
+                (pptr (nl_win_prog_backslash_dup
+                       (nl_bi_strptr program_sx) plen))
+                (bound (+ (+ (* 2 plen) 3)
                           (+ (nl_win_cmdline_bound arglst) 2)))
                 (dst (alloc-bytes bound 1))
-                (p (nl_win_quote_arg
-                    dst 0 (nl_bi_strptr program_sx) (nl_bi_strlen program_sx))))
+                (p (nl_win_quote_arg dst 0 pptr plen)))
            (seq
             (setq p (nl_win_cmdline_write_args dst p arglst))
             (ptr-write-u8 dst p 0)
@@ -7429,6 +7448,34 @@ pre-existing `nl_os_process_fork' stub there."
            (if (= file_sx 0)
                (nl_win_cstr3 78 85 76)   ; "NUL"
              (nl_bi_make_cpath file_sx))))
+       ;; --- feat/windows-spawn primary-hypothesis fix: lpCommandLine must be
+       ;; --- a dedicated writable buffer. MSDN documents that CreateProcessW
+       ;; --- "can modify the contents of this string" and that the pointer
+       ;; --- "cannot be a pointer to read-only memory"; the arena buffer
+       ;; --- returned by `nl_win_utf8_wcs_dup' (via `alloc-bytes') is not
+       ;; --- guaranteed to satisfy that contract. Copy the already-composed
+       ;; --- UTF-16 command line into a fresh VirtualAlloc(MEM_COMMIT|
+       ;; --- MEM_RESERVE, PAGE_READWRITE) region and pass that pointer
+       ;; --- instead.
+       (defun nl_win_wcs16_len (ptr)
+         (let* ((i 0) (done 0))
+           (seq
+            (while (= done 0)
+              (if (= (ptr-read-u16 ptr (* i 2)) 0)
+                  (setq done 1)
+                (setq i (+ i 1))))
+            i)))
+       (defun nl_win_cmdline_valloc (wcs_ptr)
+         (let* ((n (nl_win_wcs16_len wcs_ptr))
+                (nbytes (* (+ n 1) 2))
+                (dst (extern-call VirtualAlloc 0 nbytes 12288 4))
+                (i 0))
+           (seq
+            (while (<= i n)
+              (seq
+               (ptr-write-u16 dst (* i 2) (ptr-read-u16 wcs_ptr (* i 2)))
+               (setq i (+ i 1))))
+            dst)))
        ;; --- small runtime buffers: SECURITY_ATTRIBUTES / STARTUPINFOW / ---
        ;; --- PROCESS_INFORMATION need explicit zero-fill (alloc-bytes does ---
        ;; --- not guarantee zeroed memory for reused/freelist blocks). ---
@@ -7457,8 +7504,9 @@ pre-existing `nl_os_process_fork' stub there."
                 (sa (nl_win_inheritable_sa))
                 (out_handle (nl_win_open_write_inheritable
                              (nl_win_dest_cpath destination_sx) sa))
-                (cmdline (nl_win_utf8_wcs_dup
-                          (nl_win_build_cmdline program_sx arglst)))
+                (cmdline (nl_win_cmdline_valloc
+                          (nl_win_utf8_wcs_dup
+                           (nl_win_build_cmdline program_sx arglst))))
                 (in_handle (extern-call GetStdHandle 4294967286))
                 (si (nl_win_zero_words (alloc-bytes 104 8) 13))
                 (pi (nl_win_zero_words (alloc-bytes 24 8) 3))
@@ -7474,6 +7522,9 @@ pre-existing `nl_os_process_fork' stub there."
               (setq created
                     (extern-call CreateProcessW
                                  0 cmdline 0 0 1 0 0 0 si pi))
+              ;; The dedicated writable buffer is only needed across the
+              ;; CreateProcessW call itself; release it (MEM_RELEASE).
+              (extern-call VirtualFree cmdline 0 32768)
               (if (= created 0)
                   (seq
                    (extern-call CloseHandle out_handle)
