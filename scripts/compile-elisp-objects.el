@@ -1536,9 +1536,11 @@
     ;; words pass through; immediates materialise into SCRATCH32 via
     ;; `nl_sci_store_imm').  `nl_val_clone_into(src_slot, dst_word_ptr)'
     ;; turns a 32B-slot SRC into an 8B tagged WORD stored at DST
-    ;; (immediate passthrough; boxed/string clone into a FRESH 32B box
-    ;; via `nl_sexp_clone_into', never a transient scratch slot).
-    ;; Four-entry seq: nl_vl_prog2 / nl_val_load / nl_vci_box /
+    ;; (immediate passthrough; post-boot arena Symbol/String values
+    ;; shallow-rebox into a FRESH 32B box by default; non-arena/boot/
+    ;; forced-legacy/mutable boxed values clone via `nl_sexp_clone_into',
+    ;; never a transient scratch slot).  Six-entry seq: nl_vl_prog2 /
+    ;; nl_val_load / nl_vci_box / nl_vci_copy32 / nl_vci_rebox /
     ;; nl_val_clone_into.  Linux-x86_64 only.
     (nelisp-cc-val-load
      :source-var nelisp-cc-val-load--source
