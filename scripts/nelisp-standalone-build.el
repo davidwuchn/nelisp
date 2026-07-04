@@ -435,7 +435,7 @@ storage — not an arena reservation."
    ;; Doc 152 §11.39 Stage 3a: nl_gc_diag (64B) after the region = permanent GC
    ;; diagnostic block (+0 trip-count, +8/16/24 first-bad cur/bt/want, +32
    ;; poison-on-free enable, +40 poison-fill count).  Read/toggle via the
-   ;; `nelisp--gc-diag' builtin.  Zero-init = disabled = zero behaviour change.
+   ;; `nelisp--debug-switch' builtin.  Zero-init = disabled = zero behaviour change.
    ;; Doc 152 §11.41 Stage 4a: nl_gc_loop_ctx (3648B) after nl_gc_diag =
    ;; depth-indexed loop-GC-context stack.  64B control header (depth@+0,
    ;; enable@+8, precise_only@+16, in_progress@+24, alloc_debt@+32,
@@ -490,8 +490,8 @@ storage — not an arena reservation."
    ;; It shares `nl_mxcache_epoch' for compaction invalidation.
    ;; perf/bind-shallow-rebox: nl_bind_clone_force is an ordinary zero-fill
    ;; BSS flag (= allow `nl_val_clone_into' to shallow-rebox safe boxes).
-   ;; `(nelisp--gc-diag 15)' sets it to 1 to force the legacy fresh-box
-   ;; clone path, and `(nelisp--gc-diag 16)' clears it for A/B checks.
+   ;; `(nelisp--debug-switch 15)' sets it to 1 to force the legacy fresh-box
+   ;; clone path, and `(nelisp--debug-switch 16)' clears it for A/B checks.
    (list (cons 'bss (+ 3808 1048576 48)))
    (list (nelisp-link-symbol "nl_arena_base" 0
                              :section 'bss :bind 'global :type 'object)
@@ -923,7 +923,7 @@ not linked."
     ;; Doc 152 §11.39 Stage 3a: permanent guard-trip counter.  Records into the
     ;; nl_gc_diag bss block whenever the integrity guard drops a corrupt chain
     ;; (= a double-link event).  +0 count, +8/16/24 first-bad cur/bt/want.  Only
-    ;; on the rare drop path -> zero common-path cost.  Read via `nelisp--gc-diag'.
+    ;; on the rare drop path -> zero common-path cost.  Read via `nelisp--debug-switch'.
     (defun nl_fl_record_trip (cur bt want)
       (seq
         (ptr-write-u64 (data-addr nl_gc_diag) 0
@@ -2014,14 +2014,14 @@ arm64 Linux has no legacy x86 numbering)."
                    (ptr-write-u64 (data-addr nl_mxcache_table_base) 0 p))))
         0))
     ;; Correctness-gate hook (Doc 156-perf increment 1): MXCACHE_DISABLE_LOOKUP
-    ;; @(data-addr nl_mxcache_disable_lookup) (new, 8B, default 0).  When set to 1 via `(nelisp--gc-diag
+    ;; @(data-addr nl_mxcache_disable_lookup) (new, 8B, default 0).  When set to 1 via `(nelisp--debug-switch
     ;; 13)', every lookup unconditionally misses -- `nl_mxcache_store' still
     ;; runs unconditionally on every macro expansion (see
     ;; `nl_cons_macro_apply_eval'), so the interpreter behaves EXACTLY as it
     ;; did before this increment (every macro call genuinely re-expanded from
-    ;; source).  `(nelisp--gc-diag 14)' re-enables lookups.  This is the
+    ;; source).  `(nelisp--debug-switch 14)' re-enables lookups.  This is the
     ;; "compute both and compare" debug mode: run the SAME input chain once
-    ;; with lookups enabled (default) and once with `(nelisp--gc-diag 13)'
+    ;; with lookups enabled (default) and once with `(nelisp--debug-switch 13)'
     ;; issued first, and diff the two runs' output/final-state for byte-
     ;; identical equality -- any divergence would mean a cached expansion is
     ;; not equivalent to a fresh one.
@@ -2196,7 +2196,7 @@ arm64 Linux has no legacy x86 numbering)."
     ;; `nl_mxcache_epoch': `nl_gc_compact' bumps it before relocation, making
     ;; old pointer-keyed rows invisible.  Mark+sweep roots both key and value
     ;; for current-epoch rows.  `nl_fvcache_disable_lookup' is toggled by
-    ;; `(nelisp--gc-diag 17)' and `(nelisp--gc-diag 18)' for cached-vs-raw A/B
+    ;; `(nelisp--debug-switch 17)' and `(nelisp--debug-switch 18)' for cached-vs-raw A/B
     ;; replay checks.
     ;; ===================================================================
     (defun nl_fvcache_hash (args_ptr) (logand (sar args_ptr 4) 4095))
@@ -3140,7 +3140,9 @@ argument (reachability + in-arena bounds checks).")
     ((:lit "nelisp--arena-value-survival") . (bf_arena_value_survival args out))
     ((:lit "garbage-collect") . (seq (nl_gc_collect_from_recorded_roots 0)
                                      (bf_arena_stats out)))
-    ((:lit "nelisp--gc-diag") . (bf_gc_diag args out))
+    ((:lit "nelisp--debug-switch") . (bf_debug_switch args out))
+    ;; Compatibility alias for existing probes/scripts; prefer `nelisp--debug-switch'.
+    ((:lit "nelisp--gc-diag") . (bf_debug_switch args out))
     ((:lit "nelisp--arena-force-grow-smoke") . (bf_arena_force_grow_smoke out))
     ((:lit "nelisp--size-census") . (bf_size_census out))
     ;; --- M7 file I/O (impls in m7b-fileio.o glue unit) ---
@@ -3439,18 +3441,12 @@ unresolved at link time."
         (bf_arena_chunks_used
          (ptr-read-u64 (+ chunk 48) 0)
          (+ acc (bf_arena_chunk_used chunk)))))
-    ;; Doc 152 §11.39 Stage 3a: GC-diag read/toggle builtin.  ARG0:
-    ;; 0=read-only, 1=enable poison-on-free, 2=disable poison,
-    ;; 3/4=push/pop empty loop-GC context, 5/6=arm/disarm mid-form
-    ;; collect, 7/8=disable/enable collections, 9/10=disable/enable
-    ;; free-list reuse, 11/12=enable/disable compaction, 13/14=disable/
-    ;; enable macroexpansion-cache lookup, 15/16=force/allow legacy
-    ;; bind-path deep cloning, 17/18=disable/enable closure free-variable
-    ;; filter-cache lookup.
+    ;; Doc 152 §11.39 Stage 3a: debug-switch read/toggle builtin.  ARG0:
+    ;; 0=read, 1/2=poison on/off, 3/4=push/pop loop context, 5/6=arm/disarm mid-form collect, 7/8=collections off/on, 9/10=free-list reuse off/on, 11/12=compaction on/off, 13/14=macroexpansion-cache off/on, 15/16=force/allow legacy bind clone, 17/18=closure freevar-cache off/on.
     ;; Returns the list
     ;; (trip-count bad-cur bad-bt bad-want poison-count poison-enable
     ;;  context-depth mid-form-fired-count bind-legacy-force).
-    (defun bf_gc_diag (args out)
+    (defun bf_debug_switch (args out)
       (seq
         (if (= (wf_argval args 0) 1) (ptr-write-u64 (data-addr nl_gc_diag) 32 1)
           (if (= (wf_argval args 0) 2) (ptr-write-u64 (data-addr nl_gc_diag) 32 0)
@@ -10344,7 +10340,7 @@ value (matches the binary's M8 read+eval-loop driver)."
     "char-to-string" "string-to-char" "number-to-string" "string-to-number" "format"
     "nelisp--repr" "nelisp--json-encode" "nelisp--sha256" "nelisp--string-search" "nelisp--arena-stats" "garbage-collect"
     "nelisp--fmt-float"
-    "nelisp--gc-diag" "nelisp--arena-force-grow-smoke" "nelisp--size-census" "nelisp--arena-walk-verify"
+    "nelisp--debug-switch" "nelisp--gc-diag" "nelisp--arena-force-grow-smoke" "nelisp--size-census" "nelisp--arena-walk-verify"
     "nelisp--arena-dump-copy-verify" "nelisp--arena-mark-reach-verify" "nelisp--arena-swizzle-verify"
     "nelisp--arena-load-relocate-verify" "nelisp--arena-image-root-verify"
     "nelisp--arena-dump-table-verify"

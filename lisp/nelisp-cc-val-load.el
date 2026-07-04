@@ -56,7 +56,7 @@
 ;;
 ;;     Debug escape hatch: `nl_bind_clone_force_flag' returning 1 forces
 ;;     the legacy full-clone path for every non-immediate value.  The
-;;     standalone `nelisp--gc-diag' builtin toggles the BSS flag with
+;;     standalone `nelisp--debug-switch' builtin toggles the BSS flag with
 ;;     15/16 for A/B byte-identity checks.
 ;;
 ;; AOT `let' is FOLD-ONLY (cannot bind a runtime value); both entries

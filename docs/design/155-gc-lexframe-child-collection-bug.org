@@ -139,7 +139,7 @@ This SHARPENS §3: the crash is *not* a live object freed by a running collector
   unsound", =arena-boundary-reclaim-enabled-offset = 0=).
 - The precise mark+sweep =nl_gc_collect_from_recorded_roots= (via =nl_gc_midform_collect=, called
   from =nl_sf_while='s backedge, 16 MiB trigger) is OFF by default — ARMED only
-  by the =(nelisp--gc-diag 5)= test hook (=bf_gc_diag= mode 5), disarmed by mode
+  by the =(nelisp--debug-switch 5)= test hook (=bf_debug_switch= mode 5), disarmed by mode
   6.  Normal =nelix audit= never arms it.
 
 ⇒ During audit NO collector runs; the arena only GROWS.

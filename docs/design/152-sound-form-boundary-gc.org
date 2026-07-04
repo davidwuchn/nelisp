@@ -1841,7 +1841,7 @@ Rust 無改変）。**通常 mode 挙動不変**（poison default off、counter 
 - *poison-on-free*（nl_gc_diag+32 で gate）: free 時に payload を header/next-link を残して
   non-canonical sentinel (0xDEAD000000000000) で埋める。stale（未 root）pointer 経由の
   use-after-free read が即 fault → Stage 3b+ の missed root を pinpoint。
-- *nelisp--gc-diag builtin*: arg 0=read / 1=poison on / 2=poison off。返り値 =
+- *nelisp--debug-switch builtin*: arg 0=read / 1=poison on / 2=poison off。返り値 =
   (trip-count bad-cur bad-bt bad-want poison-count poison-enable)。
 - *検証*: 通常 mode で fib(22)=17711 / 2-form 500k=500000 / 4-form exit0 / smoke 5種全 PASS（退行ゼロ）。
   counter: =(+ 1 1)=→500k loop = trip 2（§11.38 一致、bad-want=32）/ loop 単独 = trip 0。
@@ -1853,7 +1853,7 @@ Rust 無改変）。**通常 mode 挙動不変**（poison default off、counter 
 ** Stage 3b 着手で判明: 二重リンク (A) は allocator バグ、leak (B) が真の Stage 3 — §11.38 (A)=(B) を訂正 (2026-06-17)
 3a の poison ツールを dogfood して 3b の前提を検証した結果、**(A) と (B) は別 root** と判明。§11.38 の
 「(A)=(B)=root-coverage」を訂正する。
-- *poison 診断*: =(nelisp--gc-diag 1)= → =(+ 1 1)=→500k loop → =(nelisp--gc-diag 0)= = **rc=0 / crash 無し**
+- *poison 診断*: =(nelisp--debug-switch 1)= → =(+ 1 1)=→500k loop → =(nelisp--debug-switch 0)= = **rc=0 / crash 無し**
   (104M block poison 済)。live block が freed→stale ptr で **read** されるなら poison sentinel で即 fault する
   はずだが、しない。= **read-after-free は無い**。loop の結果も正しい (500000) = live data の喪失も無い。
 - *帰結*: =(+ 1 1)=→loop の二重リンク (A) は **GC root-coverage gap でなく allocator の bucket 破損バグ**
@@ -1944,10 +1944,10 @@ Stage 4 の publish 側データ構造 + ops を dormant additive で導入（=s
 - *nl_gc_ctx_store / nl_gc_ctx_push / nl_gc_ctx_pop*: depth-indexed LIFO。push は depth<64 guard 付きで
   frame[depth] へ store → depth++、pop は depth>0 で depth--。cc-unit 制約（runtime 値 let 不可）回避のため
   frame base は inline 算出 + store は helper 引数渡し。
-- *nelisp--gc-diag 拡張*: 返り list を 7 要素化（末尾に ctx-depth 追加）。arg 3 = push 1 dummy frame /
+- *nelisp--debug-switch 拡張*: 返り list を 7 要素化（末尾に ctx-depth 追加）。arg 3 = push 1 dummy frame /
   arg 4 = pop（push/pop self-test hook、4b でも debug 用）。
 - *検証*: build 107 units / fib(22)=17711 / 2-form 500k=500000 / 4-form exit0 / smoke 5種全 PASS（挙動不変）。
-  push/pop balance: depth 0→1→2→1→0 を =nelisp--gc-diag 3/4= で実測確認。dormant（driver 未配線）なので通常
+  push/pop balance: depth 0→1→2→1→0 を =nelisp--debug-switch 3/4= で実測確認。dormant（driver 未配線）なので通常
   実行では depth=0 のまま。
 - *次 = 4b*: driver（bf_load_eval_loop / bf_eval_source_string_loop）に push（eval 前）/ pop（boundary collect
   後）を配線 + =nl_gc_collect_from_recorded_roots(mode)=（mark_published_contexts + rootstack + TOPLEVEL のみ conservative
@@ -1960,7 +1960,7 @@ driver が実行中 top-level form の precise root-set を nl_gc_loop_ctx に p
 - 配線箇所: 実 --load driver =nl_eval_source_all=（reader-eval-source-source）の eval call + bf_load_eval_loop /
   bf_eval_source_string_loop の eval call（後 2 者は当該経路では inert だが正配線）。
   ※当初 bf_* のみ配線して depth=0 のままだったので、実 --load 経路が nl_eval_source_all と判明し追加配線。
-- *検証*: build 107 units / =(nelisp--gc-diag 0)= の ctx-depth=**1**（eval 中に driver frame が live）/ form 跨ぎで
+- *検証*: build 107 units / =(nelisp--debug-switch 0)= の ctx-depth=**1**（eval 中に driver frame が live）/ form 跨ぎで
   balance / fib(22)=17711 / 500k=500000 / smoke 5種全 PASS（挙動不変）。
 - *次 = 4b step 2*: nl_gc_collect_from_recorded_roots(mode)（mark_frames[0,depth) precise + rootstack + symentry +
   MIDFORM は conserv 無し + sweep + IN_PROGRESS guard）+ nl_sf_while backedge safepoint（enable + alloc-debt gate）。
@@ -1981,7 +1981,7 @@ nelisp-standalone-build.el の gc-source + lisp/nelisp-cc-sf-while.el、Rust 無
 - *nl_gc_midform_collect*: enable(ctx+8) default OFF（= cheap branch + return、非 arm 実行は byte 不変）。alloc-debt =
   total-chunk-bytes-reserved(268436184、boundary GC と同じ monotonic counter) が next-trigger(ctx+40) 超で
   fire → +16MiB re-arm + fired-count(ctx+32)++。
-- *bf_gc_diag*: arg 5=arm（enable + next-trigger + fired reset）/ 6=disarm。返り list を 8 要素化
+- *bf_debug_switch*: arg 5=arm（enable + next-trigger + fired reset）/ 6=disarm。返り list を 8 要素化
   （末尾に fired-count）。
 - *nl_sf_while_safepoint*（lisp/nelisp-cc-sf-while.el）: arity-4・単一 extern-call。host-loop backedge
   （step 後・status==0 継続時）で hit。args/env/out は parameter、across-call local は status のみ（§11.14 不変）。
