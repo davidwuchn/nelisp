@@ -1984,6 +1984,95 @@ correctly."
       (ignore-errors (delete-file host-path))
       (ignore-errors (delete-file bin-path)))))
 
+(ert-deftest nelisp-aot-compiler/object-mode-nested-call-preserves-temp-stack-alignment ()
+  "Nested calls under saved outer args must see ABI-aligned rsp.
+
+Minimal repro for the standalone reader call-spill contract bug:
+
+  (defun probe (keep)
+    (extern-call ext_sum6
+                 keep
+                 (extern-call ext_align_ok)
+                 keep keep keep keep))
+
+The outer call must keep KEEP live while evaluating the second arg.  Before
+the fix, `--emit-extern-call' pushed KEEP, then emitted the nested
+`ext_align_ok' call as if no temporary word were on the stack.  The nested
+callee entered with rsp %% 16 == 0 instead of the SysV-required 8 and returned
+0, so the final sum was 35.  After the fix the nested call is padded and the
+sum is 36."
+  (skip-unless (and (executable-find "ld")
+                    (eq system-type 'gnu/linux)))
+  (let* ((probe-path (make-temp-file "nelisp-nested-align-probe-" nil ".o"))
+         (host-path (make-temp-file "nelisp-nested-align-host-" nil ".o"))
+         (bin-path (make-temp-file "nelisp-nested-align-bin-" nil ""))
+         (align-text
+          (concat
+           ;; ext_align_ok: return ((rsp & 15) == 8) ? 1 : 0.
+           (unibyte-string #x48 #x89 #xE0)
+           (unibyte-string #x83 #xE0 #x0F)
+           (unibyte-string #x83 #xF8 #x08)
+           (unibyte-string #x0F #x94 #xC0)
+           (unibyte-string #x0F #xB6 #xC0)
+           (unibyte-string #xC3)))
+         (sum6-off (length align-text))
+         (sum6-text
+          (concat
+           ;; ext_sum6: rax = rdi+rsi+rdx+rcx+r8+r9.
+           (unibyte-string #x48 #x89 #xF8)
+           (unibyte-string #x48 #x01 #xF0)
+           (unibyte-string #x48 #x01 #xD0)
+           (unibyte-string #x48 #x01 #xC8)
+           (unibyte-string #x4C #x01 #xC0)
+           (unibyte-string #x4C #x01 #xC8)
+           (unibyte-string #xC3)))
+         (start-off (+ (length align-text) (length sum6-text)))
+         (start-text
+          (concat
+           ;; _start: probe(7); exit(rax).
+           (unibyte-string #xBF #x07 0 0 0)
+           (unibyte-string #xE8 0 0 0 0)
+           (unibyte-string #x48 #x89 #xC7)
+           (unibyte-string #xB8 #x3C 0 0 0)
+           (unibyte-string #x0F #x05)))
+         (host-text (concat align-text sum6-text start-text)))
+    (unwind-protect
+        (progn
+          (nelisp-aot-compile-to-object
+           '(defun probe (keep)
+              (extern-call ext_sum6
+                           keep
+                           (extern-call ext_align_ok)
+                           keep keep keep keep))
+           probe-path)
+          (nelisp-elf-write-binary
+           host-path
+           (list :e-type 'rel
+                 :text host-text
+                 :symbols (list
+                           (list :name "ext_align_ok" :value 0
+                                 :size (length align-text)
+                                 :section 'text :bind 'global :type 'func)
+                           (list :name "ext_sum6" :value sum6-off
+                                 :size (length sum6-text)
+                                 :section 'text :bind 'global :type 'func)
+                           (list :name "_start" :value start-off
+                                 :size (length start-text)
+                                 :section 'text :bind 'global :type 'func)
+                           (list :name "probe" :section 'undef
+                                 :bind 'global :type 'notype))
+                 :relocs (list
+                          (list :section 'text :offset (+ start-off 6)
+                                :symbol "probe" :type 'plt32 :addend -4))))
+          (should (zerop (call-process "ld" nil nil nil
+                                       "-o" bin-path host-path probe-path)))
+          (set-file-modes bin-path #o755)
+          (let ((exit-status (call-process bin-path nil nil nil)))
+            (should (= exit-status 36))))
+      (ignore-errors (delete-file probe-path))
+      (ignore-errors (delete-file host-path))
+      (ignore-errors (delete-file bin-path)))))
+
 (ert-deftest nelisp-aot-compiler/object-mode-extern-call-7gp-smoke ()
   "Doc 129.7E: SysV extern-call passes the seventh GP arg on the stack."
   (skip-unless (and (executable-find "ld")
