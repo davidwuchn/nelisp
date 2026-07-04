@@ -1997,3 +1997,234 @@ interpreter/bind/alloc machinery is.
 `rss.txt` (t, VmRSS-kB pairs), `pid.txt`, `probe.out`, `probe.err`. No repo
 source files were modified this session; only this `FINDINGS.md` entry
 (branch `profwork`).
+
+---
+
+## 2026-07-05 post-corruption-fix bisection: the pathological repetition is `(org-mode)` itself, not `org-element-parse-buffer` -- a native lambda-closure capture primitive fires ~1000x/sec for the whole run with no completion in sight
+
+Investigation-only, branch `profwork` (clone `nelisp.clone-capture`), HEAD
+`36e353a1` ("Fix standalone reader call-spill value corruption"), 6 commits
+ahead of `origin/main`, merged to `main` as `b8581878`. Binary
+`target/nelisp` rebuilt fresh at this HEAD (mtime after `36e353a1`) --
+confirmed not stale. Task premise: with corruption bugs now fixed (3 stable
+builds), the probe `(with-temp-buffer (insert "* h") (org-mode)
+(org-element-parse-buffer))` still measures >900s on a 3-char buffer, a
+~10^6x factor beyond plausible uniform interpreter slowness, implying a
+genuine pathological loop/recomputation survives the corruption-fix era.
+This session bisects *inside* the parse per the task's method and finds the
+culprit sits upstream of `org-element-parse-buffer` entirely.
+
+### Setup
+
+Fresh cold image built via the task's own prescribed command,
+`NELISP_E2E_KEEP=1 timeout 900 bash scripts/cold-image-org-e2e.sh 1`, default
+env (no `E2E_PRELUDE`/`E2E_BOOTSTRAP_REPL` overrides -- the default file
+chain already includes `org.el`/`org-element.el` themselves, so real
+`org-mode` is installed). Completed in **7.3s wall** (replay-load 6.75s, dump
+0.56s), well inside the 900s budget -- no corruption, no crash. Cold boot to
+first eval: 0.66s, peak RSS 524 MB. Faithfulness conjuncts `(t t t t
+(interactive) t)` IDENTICAL between replay-loaded and cold-booted process.
+Image kept at `/tmp/cold-image-org-e2e.JyA1eQ/org-run1.img` for the session,
+deleted at the end per the task's cleanup constraint.
+
+### Method executed -- constituent bisection (step 1)
+
+**(a) `org-element--current-element` on the "* h" buffer, called directly**
+(`(with-temp-buffer (insert "* h") (org-mode) (goto-char (point-min))
+(org-element--current-element (point-max) nil 'first-section nil))`,
+`timeout 60`): **did not complete in 60s (RC=124).**
+
+**(b) isolate further -- does `(org-mode)` alone hang, before any
+`org-element--current-element` call?** Three narrower probes, each
+`timeout 30`:
+
+| probe | form | result |
+|---|---|---|
+| c1 | `(with-temp-buffer (insert "* h") (buffer-string))` | **0.64s, correct** -- insert/buffer-string are fine |
+| c2 | `(with-temp-buffer (org-mode) major-mode)` | **RC=124, did not complete in 30s** -- empty buffer, no "* h" content at all |
+| c3 | `(with-temp-buffer (insert "* h") (org-mode) major-mode)` | **RC=124, did not complete in 30s** |
+
+**This is the headline result: `(org-mode)` alone, on a completely empty
+temp buffer, with no heading text and no call to
+`org-element-parse-buffer` anywhere in the form, already fails to
+complete.** The pathology is not in the parser at all -- it is in
+`org-mode`'s own mode-setup body (macro-expanded from
+`define-derived-mode`), which the task's environment note's expectation of
+"`(org-mode)` completes ~4s" evidently no longer holds on this exact
+HEAD/image. `org-element--current-element`/headline-parser (step 1b) were
+never reached as an independent variable worth bisecting further -- the
+fault is strictly upstream of them.
+
+**(c) the org-inlinetask/cache-layer checks (step 1c) are moot** given (b):
+there is no buffer content and no parse call in the hanging probe, so
+`org-element-use-cache` (confirmed `t` by default in the vendored
+`org-element.el:5745`) and the headline/section parsers cannot be the
+mechanism here -- whatever loops, loops during major-mode initialization.
+
+### gdb sampling (step 2) -- corroborates a closure-capture hot loop, not a stuck/fixed stack
+
+Re-ran probe c2 in the background (`timeout 120`), attached with
+`gdb -p PID -batch -ex 'bt N'` at several points:
+
+- **t+5s** (`bt 25`): leaf frame `nl_alloc_consbox_init` ← `nl_capture_emit_one`
+  ← **`nl_capture_walk_filter_symbols` recursing on itself 20+ times** (hit
+  the depth-25 cutoff without reaching a caller).
+- **t+8s** (`bt 30`, different call): a `let`/`cond`/`defmacro`-evaluation
+  stack with no capture-walk frame visible at all -- confirms the process is
+  *advancing* between samples (not stuck replaying one fixed call), doing
+  real, varied interpreter work moment to moment.
+- **t+48s** (`bt 200`, RSS already 14.3 GiB and climbing): full chain
+  recovered top-to-bottom --
+  `nl_sf_lambda` → `nl_env_capture_lexical_filtered` →
+  `nl_env_capture_lexical_with_filter` → `nl_capture_descend_native` →
+  **`nl_capture_walk_frames` recursing 22x** (descending 22 enclosing
+  lexical frames) → per frame, **`nl_capture_walk_filter_symbols` recursing
+  ~20x** → leaf `nelisp_frame_stack_find_in_frame` → `nl_vector_slot_ptr` →
+  `nl_val_load`. Above that: a repeating
+  `let → dolist → while → apply-closure → progn → dolist → let → if → let →
+  apply-closure` shape that recurs **twice** inside the same 200-frame C
+  stack window -- i.e. real nested-loop structure, not one lucky snapshot.
+
+Every `(lambda ...)` evaluation goes through `nl_sf_lambda`
+(`lisp/nelisp-cc-sf-lambda.el:132-137`), which calls
+`nl_env_capture_lexical_filtered` once per lambda to build its captured
+closure environment. `nl_capture_descend_native`
+(`lisp/nelisp-cc-frame-stack-find.el:368`) is therefore the single
+choke point for every closure creation in the interpreter, at any nesting
+depth.
+
+### Counter instrumentation (step 3) -- gdb breakpoint hit-counting on `nl_capture_descend_native` (no source edits)
+
+Used `gdb -p PID -batch -ex 'break nl_capture_descend_native' -ex 'continue
+N'` to time exact hit-count batches (this is equivalent to the task's
+suggested prelude call-counter, without touching source):
+
+| batch (hits) | elapsed | rate |
+|---|---|---|
+| 1000 (very first, right after breakpoint set) | 0.0038s | 0.55 us/hit -- cheap, shallow-depth captures |
+| next 1000 | 0.864s | 864 us/hit |
+| next 2000 | 1.76s | 880 us/hit |
+| next 5000 (fresh run, later window) | 4.80s | 959 us/hit |
+| next 5000 | 4.88s | 976 us/hit |
+| next 8000 (`info breakpoints` confirmed "hit 8001 times") | 8.72s | 1090 us/hit |
+
+**The rate is flat, not accelerating**, once past the initial cheap/shallow
+calls: ~900-1000 us/hit sustained across three independent later
+measurements (864, 959, 976, 1090 us -- all within the same order of
+magnitude, no runaway per-call growth observed). Sustained throughput:
+**~900-1000 closure-captures/second for the whole run.**
+
+RSS cross-checked against the same PID at these times: 11.9 GiB at t+40s,
+23.2 GiB at t+82s -- a steady **~270-280 MB/s climb with no plateau** inside
+the sampled window, in sharp contrast to the *pre-corruption-fix* profiling
+session earlier in this file (2026-07-0x "first valid CPU profile" entry),
+which found a hard RSS plateau at 27.6 GiB after ~90s. Post-fix, on an
+*empty* buffer, RSS is already past that old plateau's magnitude by t+82s
+and still rising -- this is a different (and worse) failure shape than the
+one characterized before the corruption fix.
+
+### The pathological mechanism
+
+Two compounding facts, both load-bearing:
+
+1. **Sheer call volume.** At a sustained ~900-1000 hits/sec, reaching the
+   task's reported >900s hang implies on the order of **~800,000+**
+   `nl_capture_descend_native` calls (i.e. ~800,000+ `(lambda ...)`
+   evaluations at the ~22-deep nesting level) to get through `(org-mode)`
+   setup on an *empty* buffer. Real Emacs' `org-mode` does not create
+   remotely that many closures to initialize an empty buffer -- this is the
+   "pathological repetition" the task asked to find: some loop (or nested
+   pair of loops -- the repeating `dolist`/`while` shape recurred twice in
+   one stack sample) is iterating far more than it should, or is
+   re-creating the same closure redundantly on each pass, inside org-mode's
+   `define-derived-mode`-expanded body or one of the functions it calls
+   during mode-setup (hook running, keymap/syntax-table/font-lock
+   construction are the idiomatic org.el constructs that combine
+   `dolist`/`while` with inline `lambda`s at this call site).
+2. **Per-call cost is itself unnecessarily high at depth**, which is why
+   each of those ~800,000 calls costs ~1ms rather than being closer to
+   free: `nl_sf_lambda` calls `nl_env_capture_lexical_filtered(env, args,
+   out, 0)` (`lisp/nelisp-cc-sf-lambda.el:135`) passing **`args` -- the raw,
+   unevaluated `(FORMALS . BODY)` cons tree of the lambda form itself** --
+   as the capture filter. The AOT source's own commentary
+   (`lisp/nelisp-cc-sf-lambda.el:30-31`) confirms this is deliberate:
+   "using symbols from FORMALS+BODY as an over-approximate filter" -- i.e.
+   no free-variable analysis is done; the entire lambda source form stands
+   in for it. `nl_capture_walk_frames`
+   (`lisp/nelisp-cc-frame-stack-find.el:347-366`) then walks **every**
+   enclosing lexical frame (22, in the sampled case) and, per frame, calls
+   `nl_capture_walk_filter_symbols` (`:256-266`), which walks the
+   **top-level length of that FORMALS+BODY list** doing one
+   `nelisp_frame_stack_find_in_frame` hash probe per element (`:260`) --
+   i.e. O(depth × top-level-body-length) hash probes per lambda, instead of
+   O(1) or O(actual-free-variable-count). This does not by itself run
+   forever, but it turns an operation that should be cheap into a ~1ms
+   operation, and at the observed call volume that is enough on its own to
+   blow past any reasonable time budget.
+
+A synthetic isolation attempt (flat `dolist` over 15/50/200/800 elements,
+each iteration creating one `(lambda () x)`) did **not** reproduce the hang
+(each completed in the ~0.64s cold-boot-only baseline) -- but this synthetic
+test is confounded by a separate, apparently pre-existing correctness bug
+unrelated to this investigation: a top-level `(defvar v 0) (dolist (x
+'(...)) (setq v (1+ v))) v` sequence evaluated via successive REPL-piped
+forms consistently returned `v = 1` instead of the expected count, for every
+n tried (15, 50, 200, 800) -- i.e. either `dolist` is only running its body
+once in this cross-form REPL context, or top-level `defvar`+`setq`
+interaction across piped forms is broken independently of lambda capture.
+This confound means the synthetic test could not validate or invalidate the
+"real" hang's iteration count; it is flagged here as a distinct,
+not-yet-investigated correctness question rather than folded into this
+session's conclusion.
+
+### Recommended fix, ranked (scoped for codex)
+
+1. **Primary -- find and bound the actual loop.** Identify which
+   `org-mode`-setup-reachable code (define-derived-mode's expanded body,
+   `org-mode-hook` entries run via `run-mode-hooks`, or a helper it calls)
+   contains a `dolist`/`while` that creates a `(lambda ...)` per iteration
+   and is iterating on the order of 10^5-10^6 times for an *empty* buffer.
+   Since AOT backtraces carry no elisp source-line info, the fastest way to
+   localize this without further gdb archaeology is a targeted `advice-add`
+   or manual instrumentation of `define-derived-mode`-generated
+   `org-mode-hook`/`org-mode-abbrev-table`/`org-font-lock-set-keywords`-style
+   setup functions (or bisecting the file chain by loading `org.el`'s
+   dependencies incrementally and calling `(org-mode)` after each) to find
+   which specific top-level construct is over-iterating. Suspect idiomatic
+   org.el constructs: font-lock keyword compilation, syntax-table setup
+   from `org-emphasis-alist`/regexp components, or link-type/hook
+   registration loops that should run over a short alist but are instead
+   iterating over something whose size scales unexpectedly (e.g. a string
+   walked character-by-character where a list of entries was intended, or
+   a loop bound read from the wrong variable).
+2. **Secondary -- stop using the raw args tree as the capture filter.**
+   Independent of (1), `nl_env_capture_lexical_filtered`'s "over-approximate
+   filter = FORMALS+BODY verbatim" design (`lisp/nelisp-cc-sf-lambda.el:30-31`,
+   `:135`) makes every lambda evaluation cost O(depth ×
+   top-level-body-length) regardless of how many closures are actually
+   created. A real (even shallow, one-pass) free-variable scan of the
+   lambda body -- or at minimum flattening/deduplicating the filter list
+   once per distinct lambda AST node instead of re-deriving it from the
+   full body on every evaluation -- would cut the constant factor
+   substantially and make fix (1)'s remaining call volume (however large it
+   turns out to be) proportionally cheaper to pay down.
+3. **Tertiary -- add a live process-level guard.** Neither this session nor
+   the prior corruption-fix-era profiling session found a hard RSS ceiling;
+   this session's growth (11.9 GiB@40s → 23.2 GiB@82s, no plateau) is worse
+   than the old post-fix-era 27.6 GiB plateau. Until (1) is fixed, any
+   future probing of `org-mode`/`org-element-parse-buffer` on this
+   substrate should enforce a live kill-on-RSS-threshold in the sampling
+   loop itself (this session manually killed at 14.3-23.2 GiB observed,
+   consistent with the task's 8 GiB advisory being exceeded well before
+   loop termination).
+
+### Artifacts (not committed, scratch only)
+
+`/tmp/probe_a.el`, `/tmp/probe_b.el`, `/tmp/probe_c{1,2,3}.el`,
+`/tmp/probe_loopdepth.el`, `/tmp/probe_scale_{50,200,800}.el`,
+`/tmp/probe_dolist_plain.el`, `/tmp/probe_dolist_lambda2.el` (all inputs,
+scratch only). Cold image workdir `/tmp/cold-image-org-e2e.JyA1eQ/` was
+built with `NELISP_E2E_KEEP=1`, used for all probes in this session, and
+deleted at session end per the task's cleanup constraint. No repo source
+files were modified this session; only this `FINDINGS.md` entry (branch
+`profwork`).
