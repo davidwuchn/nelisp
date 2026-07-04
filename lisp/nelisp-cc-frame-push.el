@@ -93,7 +93,33 @@
 ;;; Code:
 
 (defconst nelisp-cc-frame-push--source
-  '(defun nelisp_frame_push (frames-ptr scratch-vec-ptr)
+  '(seq
+    (defun nelisp_frame_push_ensure_now (frames-ptr scratch-slot)
+      ;; Do not accept a caller-computed `needed' value here.  The AOT
+      ;; allocator has miscompiled call-crossing locals in
+      ;; `nelisp_frame_push' twice (first frames-ptr, then needed), so the
+      ;; required depth is re-read immediately before the capacity call.
+      (extern-call nelisp_frame_stack_ensure_capacity
+                   frames-ptr
+                   (+ (sexp-int-unwrap (record-slot-ref-ptr frames-ptr 1))
+                      1)
+                   scratch-slot))
+    (defun nelisp_frame_push_install_now (frames-ptr frame-slot)
+      ;; Re-read both backing and old depth at the install point.  This keeps
+      ;; the vector write independent of any early frame-push locals that
+      ;; crossed allocator / record calls.
+      (vector-slot-set
+       (record-slot-ref-ptr frames-ptr 0)
+       (sexp-int-unwrap (record-slot-ref-ptr frames-ptr 1))
+       frame-slot))
+    (defun nelisp_frame_push_bump_now (frames-ptr int-slot)
+      ;; Recompute depth+1 again after install; the depth bump must match the
+      ;; current frame record, not an old local that survived several calls.
+      (and (sexp-int-make
+            int-slot
+            (+ (sexp-int-unwrap (record-slot-ref-ptr frames-ptr 1)) 1))
+           (record-slot-set frames-ptr 1 int-slot)))
+    (defun nelisp_frame_push (frames-ptr scratch-vec-ptr)
      ;; frames-ptr:      *const Sexp pointing at Env::frames_record (=
      ;;                  Sexp::Record(`nelisp-lexframe-stack')).
      ;; scratch-vec-ptr: *const Sexp pointing at a Sexp::Vector with 7
@@ -140,10 +166,7 @@
      ;;   which was likewise never decremented.  Step-6 (`int-slot') holds
      ;;   only `Sexp::Int' immediates (no box, no rc).  No new owner, no
      ;;   leak, no double-free; invariant preserved.
-     (let* ((fp frames-ptr)
-            (depth (sexp-int-unwrap (record-slot-ref-ptr fp 1)))
-            (needed (+ depth 1))
-            (ht-slot (alloc-bytes 32 8))
+     (let* ((ht-slot (alloc-bytes 32 8))
             (buckets-slot (alloc-bytes 32 8))
             (frame-slot (alloc-bytes 32 8))
             (int-slot (alloc-bytes 32 8)))
@@ -176,22 +199,17 @@
         (record-slot-set frame-slot
                          0
                          ht-slot)
-        ;; Step 8: ensure backing capacity >= depth+1.  Side-effect only;
-        ;; threaded through `and' via the truthy i64 return.
-        (extern-call nelisp_frame_stack_ensure_capacity
-                     fp
-                     needed
-                     (vector-ref-ptr scratch-vec-ptr 2))
-        ;; Step 9: install fresh frame into backing[depth].
-        (vector-slot-set
-         (record-slot-ref-ptr fp 0) ; backing vector
-         depth ; old depth
-         frame-slot) ; frame
-        ;; Step 10: depth bump — frames.slot 1 = Sexp::Int(depth+1).
-        (sexp-int-make int-slot needed)
-        (record-slot-set fp
-                         1
-                         int-slot))))
+        ;; Step 8: ensure backing capacity >= depth+1.  The helper re-reads
+        ;; depth immediately before the extern call; no call-crossing
+        ;; `needed' local is trusted here.
+        (nelisp_frame_push_ensure_now
+         frames-ptr
+         (vector-ref-ptr scratch-vec-ptr 2))
+        ;; Step 9: install fresh frame into backing[old depth].  The helper
+        ;; re-reads backing/depth at the write point.
+        (nelisp_frame_push_install_now frames-ptr frame-slot)
+        ;; Step 10: depth bump — frames.slot 1 = Sexp::Int(current depth+1).
+        (nelisp_frame_push_bump_now frames-ptr int-slot)))))
   "AOT source for Doc 111 §111.E #21 / Doc 115 §115.3
 `frame_push_rust_direct'.
 

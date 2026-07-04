@@ -1697,3 +1697,100 @@ cold image `/tmp/cold-image-org-e2e.f2U2Hz/org-run1.img` (freshly built
 this session from this exact HEAD; regenerate with
 `NELISP_E2E_KEEP=1 timeout 300 bash scripts/cold-image-org-e2e.sh 1` if
 resuming).
+
+## 2026-07-05 fix follow-up: frame-push `needed` corruption is eliminated by call-adjacent recomputation
+
+Implementation branch attempt: requested branch creation could not be
+performed in this sandbox because `.git/index.lock` creation failed with a
+read-only filesystem error.  Work was done on the existing checkout, base
+HEAD `56a0f382` (`docs(FINDINGS): re-profile invalidated -- parse-buffer
+probe still crashes (exit 87), never reaches org-element-parse-buffer`).
+
+### Mechanism confirmed
+
+The latest `profwork` finding was correct: `93b011bc` pre-localized
+`frames-ptr`/`depth`/`needed`, but `nelisp_frame_push` still computed
+`needed` before four `alloc-bytes` calls and the subsequent
+`record-make`/`vector-make`/`record-slot-set`/`sexp-int-make` call chain.
+Fresh rebuilds could assign that local to storage later reused/clobbered by
+the same frame-push sequence.  The bad value then reached
+`nelisp_frame_stack_ensure_capacity` as `needed > 2^32`, tripping the loud
+exit-87 guard before `(org-mode)` completed.
+
+### Fix applied
+
+Chosen approach: **A, recompute just before use**, not BSS stash.
+
+`lisp/nelisp-cc-frame-push.el` now wraps the source in a `seq` and adds
+three small helpers:
+
+- `nelisp_frame_push_ensure_now`: re-reads `frames-ptr.slot1` and computes
+  `depth+1` immediately at the capacity call site.
+- `nelisp_frame_push_install_now`: re-reads backing/depth at the vector
+  install point instead of trusting the old early `depth` local.
+- `nelisp_frame_push_bump_now`: re-reads current depth after install and
+  materializes the depth bump from that fresh read.
+
+The main `nelisp_frame_push` no longer binds early `fp`, `depth`, or
+`needed`.  `frames-ptr` itself is passed through as the parameter; all
+derived frame-stack values are now call-adjacent to their use.  This keeps
+the patch local to the failing function and avoids extending the ordinary
+BSS layout/linker contract just for this bounded fix.
+
+### Systemic AOT hazard
+
+The AOT compiler's stated contract is that intervals live across a call are
+marked `crosses-call` and forced to spill (`src/nelisp-cc.el` linear-scan
+comments/implementation).  This incident shows a practical hole in that
+contract for DSL locals in long `let*` / `and` sequences: a value can still
+behave as if caller-saved or stack-slot storage was reused across intervening
+calls.
+
+One more same-shape site was found:
+`scripts/nelisp-standalone-build.el`'s
+`nl_env_capture_lexical_with_filter` binds `depth` from
+`frames_ptr.slot1`, then runs `vector-make` and several `vector-slot-set`
+calls before using that old `depth` in `sexp-int-make depth_slot depth`.
+That has the same "local computed, calls intervene, local used later as a
+call argument" shape.  It is not patched here because the bounded
+`nelisp_frame_push` fix removes the active crash, while the compiler-level
+local preservation bug needs its own audit/lint pass.  A useful lint is:
+flag DSL `let*` locals whose first use as an argument to `extern-call` or a
+native helper occurs after any intervening call-form, unless the value is
+recomputed or re-read in a helper at the call point.
+
+### Verification
+
+Fresh build #1:
+
+- `timeout 900 make standalone-reader`: PASS.
+- `NELISP_E2E_KEEP=1 timeout 300 bash scripts/cold-image-org-e2e.sh 1`:
+  PASS faithful; image `/tmp/cold-image-org-e2e.KdwoDy/org-run1.img`.
+- `(org-mode)` probe against that fresh image: 3/3 PASS, rc=0, no exit
+  87/88; walls 4.065s, 4.070s, 4.065s; output contained `OMDONE`.
+- `org-element-parse-buffer` probe against the same image: no crash, timed
+  out honestly at `timeout 300` (`rc=124`, wall 5m02s).
+
+Fresh rebuild #2:
+
+- `timeout 300 make standalone-eval-clean` then `timeout 900 make
+  standalone-reader`: PASS, cache removed and binary relinked.
+- `NELISP_E2E_KEEP=1 timeout 300 bash scripts/cold-image-org-e2e.sh 1`:
+  PASS faithful; image `/tmp/cold-image-org-e2e.nN5am7/org-run1.img`.
+- `(org-mode)` probe against that second fresh image: PASS, rc=0, wall
+  4.077s, no exit 87/88; output contained `OMDONE`.
+
+Regression:
+
+- `standalone-reader-test`: PASS.
+- Reader smokes: load/fmt/prelude-equal-reload/nested-backquote-macro/
+  derived-mode-shape/ffi/process/realrt/repl/prelude PASS; TLS smoke SKIP
+  due no egress to `1.1.1.1:443`.
+- `standalone-chunk-growth-test`: PASS.
+- GCR: `/tmp/gcr1.el` 10/10 PASS (`out=1`), `/tmp/gcr2.el` 10/10 PASS
+  (`out=3`).
+- REPL tolerance: undefined function followed by `(+ 40 3)` continued and
+  printed `43`, rc=0.
+- Capture probes all rc=0: nested `42`, loop-var `(2 1 0)`, shared-var `2`,
+  setq-visibility `41`, macro-ref `42`, unused-exclusion `42` (REPL echoes
+  duplicate values when `prin1` is used, e.g. `4242`).
