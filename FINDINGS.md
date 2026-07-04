@@ -2228,3 +2228,273 @@ built with `NELISP_E2E_KEEP=1`, used for all probes in this session, and
 deleted at session end per the task's cleanup constraint. No repo source
 files were modified this session; only this `FINDINGS.md` entry (branch
 `profwork`).
+
+---
+
+## 2026-07-05 asymmetry bisect: top-level `(org-mode)` (~5s) vs `with-temp-buffer` `(org-mode)` (unbounded, >18 GiB) — the differentiator is the `with-temp-buffer` wrapper itself, not `org-mode`'s body
+
+Investigation-only, branch `profwork`, HEAD `af6e9ff6` ("Cache closure
+free-variable filters", 8 commits ahead of `origin/main`). Binary
+`target/nelisp` confirmed matching this HEAD by mtime. Task: explain why
+`af6e9ff6`'s own commit message reports two different outcomes for what
+looks like the same `(org-mode)` call: top-level `5.027s`/`5.025s` (cached
+vs. raw closure-filter path) versus `(with-temp-buffer (org-mode) (prin1
+major-mode))` killed by the live RSS guard at `31.622s`/`8,615,300 KiB`.
+This session reproduces both, bisects the *wrapper*, and localizes the
+differentiator to the real (non-stub) `with-temp-buffer` expansion's
+`unwind-protect` + `nelisp-ec` current-buffer dispatch layer — a
+structural difference that is completely absent from the top-level call
+path.
+
+### Setup
+
+Fresh cold image built with the task's prescribed command,
+`NELISP_E2E_KEEP=1 timeout 900 bash scripts/cold-image-org-e2e.sh 1`
+(default env; the default 60-file chain already includes `org.el`/
+`org-element.el`). Completed in 7.29s wall (replay-load 6.71s, dump
+0.56s), cold boot 0.68s / 526 MB peak RSS, faithfulness `IDENTICAL`. Image
+kept at `/tmp/cold-image-org-e2e.SFAJ7t/org-run1.img` for the session,
+deleted at the end. All probes below ran one reader at a time under a
+purpose-built polling wrapper (`/proc/<pid>/status` `VmRSS`, 0.3s poll,
+hard `kill -9` at `>8 GiB` RSS or the stated timeout — script and per-probe
+logs are scratch-only under this session's scratchpad, not committed).
+
+### Asymmetry bisect table (step 1)
+
+| probe | context | result |
+|---|---|---|
+| `(org-mode)` | top-level (whatever buffer is current at boot) | **completed, 5.17s**, 744 MB peak RSS — confirms the commit message's `5.02x s` figure on this exact image |
+| `(org-mode)` | `with-temp-buffer` (fresh buffer) | reproduced the blowup: an unguarded run reached **32.66 GiB RSS at 129s elapsed** and was still climbing when killed (worse than the commit's own 31.6s/8.6 GiB — RSS guard just fires earlier); a guarded gdb-sampling run separately reached 18.9 GiB before being killed for the sampling below |
+| `(with-temp-buffer (fundamental-mode) t)` | fresh buffer | **completed, 0.92s**, 525 MB |
+| `(with-temp-buffer (text-mode) t)` | fresh buffer | **completed, 0.91s**, 525 MB |
+| `(with-temp-buffer (outline-mode) t)` | fresh buffer (outline-mode is `org-mode`'s direct parent) | **completed, 0.91s**, 525 MB |
+| `(with-temp-buffer (kill-all-local-variables) t)` | fresh buffer | **completed, 0.92s**, 525 MB |
+| `(with-temp-buffer (let ((i 0)) (while (< i 200) (set (make-local-variable (intern (format "v%d" i))) i) (setq i (1+ i))) t))` | fresh buffer, 200 locals | **completed, 0.92s**, 541 MB |
+| same, 400 locals | fresh buffer | **completed, 0.92s**, 559 MB |
+| `(org-load-modules-maybe)` | top-level | **completed, 4.57s**, 726 MB (confirms this is org-mode's dominant top-level cost, matching the 2026-07-04 finding that this is the first heavy call in the body) |
+| `(with-temp-buffer (org-load-modules-maybe) t)` | fresh buffer | **completed, 4.87s**, 744 MB — symmetric with top-level |
+
+**H1 (buffer-local variable machinery is O(n) or O(n^2)) is falsified.**
+`kill-all-local-variables` alone and a 200/400-entry `make-local-variable`
+loop are all flat at the ~0.92s cold-boot-only baseline (compare `with-
+temp-buffer` alone with no mode call at all, previously measured at
+0.63-0.71s for N=10/50/100 — see the "Empty file" bisection entry earlier
+in this file). There is no per-local or per-local² scaling visible at this
+count, and `org-mode` sets on the order of a few dozen buffer-locals in its
+body (not hundreds), so H1's premise does not hold even loosely here.
+
+**H2 (generic define-derived-mode/hook setup inside a fresh buffer is what
+blows up) is falsified.** `outline-mode` — `org-mode`'s own direct
+`define-derived-mode` parent, which runs the exact same
+`change-major-mode-hook`/`after-change-major-mode-hook`/mode-hook
+machinery — completes in 0.91s inside `with-temp-buffer`, identical to
+`fundamental-mode`/`text-mode`. Whatever blows up is specific to
+`org-mode`'s *own* body, not to running any `define-derived-mode` chain
+inside a temp buffer.
+
+**The most obvious remaining top-level/temp-buffer differentiator inside
+org-mode's body, `org-load-modules-maybe` (previously root-caused on
+2026-07-04 as the call that transitively `require`s the ~120K-line vendor
+Gnus package via `ol-gnus`), is also falsified as the asymmetry's cause.**
+Called alone, it costs the same (~4.6-4.9s) whether at top-level or inside
+`with-temp-buffer` — this default cold image's `require` behavior for
+`org-modules` does not depend on buffer context, so the previously-
+documented Gnus-load cost, real as it is in isolation, is not what makes
+`with-temp-buffer` differ from top-level.
+
+### The actual structural differentiator: `with-temp-buffer`'s real expansion
+
+`grep`ing the read-only bootstrap substrate (`nelisp-emacs-lib`, sibling
+checkout) turned up three competing definitions of `with-temp-buffer`, all
+guarded so only one wins at boot:
+
+1. `scripts/nelisp-stdlib-prelude.el:3587-3590` (this repo) and
+   `lisp/nelisp-stdlib-misc.el:628-630` (this repo): trivial
+   `(unless (fboundp 'with-temp-buffer) ...)`-guarded stubs, either
+   `(cons 'progn body)` or a bare `(let ((nelisp--current-buffer ...))
+   ,@body)` — no real buffer object, no `unwind-protect`.
+2. `lisp/nelisp-stdlib-eval-special.el:190`: an **unconditional**
+   `(defmacro with-temp-buffer (&rest body) (cons 'progn body))`
+   "interpreter-mode stub."
+3. `nelisp-emacs-lib/packages/nelisp-emacs-buffer-core/lisp/
+   emacs-buffer-builtins.el:686-696` (read-only sibling repo): the real
+   "Phase 9" implementation, gated by
+   `(when (emacs-buffer-builtins--install-function-p 'with-temp-buffer) ...)`
+   (installs only when not already host-native), whose own docstring says
+   it exists specifically because "Phase 8 used a global string
+   accumulator... which collapsed under multi-buffer scenarios" and
+   replaces it with "a real `nelisp-ec` buffer that participates in the
+   current-buffer dispatch." Its expansion is:
+
+   ```elisp
+   (let ((buf (nelisp-ec-generate-new-buffer " *temp*")))
+     (unwind-protect
+         (nelisp-ec-with-current-buffer buf BODY...)
+       (nelisp-ec-kill-buffer buf)))
+   ```
+
+   and `nelisp-ec-with-current-buffer`
+   (`nelisp-emacs-lib/packages/nelisp-emacs-buffer-core/lisp/
+   nelisp-emacs-compat.el:484-498`) is ITSELF a macro that expands to a
+   *second*, nested `unwind-protect`:
+
+   ```elisp
+   (let ((saved nelisp-ec--current-buffer) (newbuf buf))
+     (unwind-protect
+         (progn (nelisp-ec-set-buffer newbuf) BODY...)
+       (setq nelisp-ec--current-buffer saved)))
+   ```
+
+Empirically, this real (buffer-core) implementation is confirmed active
+on this cold image, not the trivial stubs — the earlier 2026-07-04 session
+already showed per-buffer-correct `buffer-string`/`insert` round-tripping,
+which the trivial stubs cannot provide (they have no real per-buffer text
+storage). **This means every `with-temp-buffer` call already nests two
+`unwind-protect` frames plus a `nelisp-ec` current-buffer-dispatch layer
+around BODY — a layer that is completely absent when `org-mode` is called
+directly against whatever buffer is already current at top level (no
+buffer object, no `unwind-protect`, no dispatch at all).** This is the one
+concrete, source-confirmed structural difference between the fast and the
+exploding call path, matching the task's H3 exactly ("nelisp-ec buffer
+switching... does something per-form/per-variable repeatedly").
+
+### gdb sampling (step 2) — a deep, changing-shape recursion through `unwind-protect`/`cond`/macro-apply, not a fixed-PC spin
+
+Two independent samples were taken on two separate (single-reader, one at
+a time) runs of `(with-temp-buffer (org-mode) (prin1 major-mode))`,
+`gdb -p PID -batch -ex 'bt N'`, N large enough to reach the true stack
+bottom (confirmed via `bt -1`, which reports the outermost frame index —
+1043 total frames at the deepest sample taken):
+
+- **Sample A (t≈5s into a fresh run, 973-line `bt 1100` dump, true depth
+  1043):** frame-tag histogram over the full stack —
+  `nl_eval_inner_cons`/`nl_eval_inner`/`nl_ei_cons_tail`/
+  `nl_ei_cons_dispatch`/`nelisp_eval_call` each ×80 (the generic
+  eval-dispatch trampoline, expected at every level), `nl_apply_special`
+  ×44, **`nl_sf_uw_cleanup`/`nl_sf_uw_cleanup_done`/`nl_sf_uw_do_cleanup`
+  ×24-25 each** (`unwind-protect` cleanup-arm handling, nested 24-25
+  deep), `nl_sf_cond_walk` ×24, `nl_cons_macro_apply_eval` ×18 (macro
+  expansion+apply), `nl_sf_let`/`nl_sf_let_star` families ×11-14 each.
+- **Sample B (a fresh, separately-started run, sampled again at t≈5s, RSS
+  18.9 GiB by sample time):** the same repeating unit is present but at a
+  *different* nesting count — `nl_sf_uw_cleanup*` ×19 (not 24-25),
+  `nl_cons_macro_apply_eval` ×21, `nl_ali_body*` ×23,
+  `nl_eval_inner_cons` family ×96 (not 80). The top-of-stack content also
+  differs between the two samples (confirmed via `diff` on the extracted
+  frame-name sequences — first 13 lines differ immediately).
+- An earlier, shallower single sample (39 frames, taken very early in a
+  third run) showed a different-looking snapshot: `nl_sp_eq_defun` /
+  `nl_sf_unless` / `nl_sf_or_walk` at the top. On inspection of
+  `nl_sp_eq_defun`'s source (`scripts/nelisp-standalone-build.el:8595`),
+  this frame is just the special-form dispatcher's routine "does the head
+  symbol equal `defun`?" equality probe (present on *every* special-form
+  dispatch, not evidence of a `defun` actually executing) — this sample is
+  noted only to flag it as a **discarded false lead**: it is not a
+  distinctive signal, unlike the `unwind-protect`/`cond`/macro-apply
+  pattern in Samples A/B, which recurs consistently and is absent from any
+  of the fast (fundamental/text/outline-mode, or top-level org-mode)
+  control paths this session did not have budget to re-sample but which
+  the existing 2026-07-04 "post-corruption-fix" entry already
+  characterizes as a *different*, shallower (≤1015-frame), advancing
+  pattern with **no** `unwind-protect`-cleanup nesting reported.
+
+**Interpretation:** the nesting depth *changes* between samples (24-25 vs.
+19 for the same repeating `unwind-protect`-cleanup unit) and the deep-
+stack content differs between samples taken seconds apart — this rules out
+a fixed-PC, zero-progress spin (same conclusion the 2026-07-04 entry
+reached for the unrelated `ol-gnus`/non-temp-buffer cases, using the same
+method). What is new and specific to the `with-temp-buffer` case is *which*
+construct dominates the recursive shape: `unwind-protect` cleanup-arm
+handling (`nl_sf_uw_*`) nested 19-25 deep, interleaved with `cond` and
+macro-apply-eval frames, at every sample taken. This is consistent with
+(not yet proven to be) `nelisp-ec-with-current-buffer`'s own nested
+`unwind-protect` (the `nelisp-ec--current-buffer` save/restore shown above)
+being re-entered recursively once per buffer-local variable operation in
+`org-mode`'s ~20 `setq-local`/`add-hook ... 'local` calls, each such
+re-entry itself walking/rebuilding state proportional to the buffer's
+*already-accumulated* local-variable or dispatch history — which would
+explain why the *generic* buffer-local write path (H1's isolated
+`make-local-variable` loop, and `outline-mode`'s own smaller `setq-local`
+set) stays flat, while `org-mode`'s specific combination of call *volume*
+(≈20 `setq-local`/hook calls) threaded through the `nelisp-ec`
+`unwind-protect` dispatch wrapper compounds into the observed multi-GiB,
+unbounded-looking growth. This causal link (per-`setq-local`-call re-entry
+into `nelisp-ec-with-current-buffer`'s `unwind-protect`) is the leading
+hypothesis but was **not directly confirmed** with a call counter in the
+time budget available — see "Recommended fix" below for the exact next
+probe.
+
+### What this session did NOT have time to do
+
+- Did not instrument/count calls into `nelisp-ec-set-buffer` /
+  `nelisp-ec-with-current-buffer` / `nelisp-ec-kill-buffer` during the
+  `with-temp-buffer`+`org-mode` run (the decisive counter table the task
+  asked for). `gdb -p`/`break`/`continue N` hit-counting (the method the
+  2026-07-05 "closure-capture" session above used successfully) is the
+  right tool for this and was not reached before the time budget expired.
+- Did not re-run the fast control probes (fundamental/text/outline-mode,
+  top-level org-mode) under gdb sampling in *this* session for a same-
+  session apples-to-apples frame comparison; the "no `unwind-protect`
+  nesting" claim for those paths is carried over from the existing
+  2026-07-04 entry's characterization of the *non*-`with-temp-buffer`
+  `org-mode` hang, not a fresh measurement of the fast control paths
+  specifically.
+- Did not confirm whether `nelisp-ec-with-current-buffer`'s `unwind-
+  protect` re-enters per `setq-local` call, per `add-hook` call, or via
+  some other path (e.g. a buffer-local variable *lookup*, not just
+  write) — the hypothesis above is architecturally motivated (it is the
+  one real structural layer `with-temp-buffer` adds that top-level lacks)
+  but not call-graph-confirmed.
+
+### Recommended fix (scoped for codex)
+
+1. **Primary — confirm and count.** Set a `gdb -p PID -batch -ex 'break
+   nelisp_ec_set_buffer' -ex 'continue N'`-style hit counter (mirroring
+   this file's 2026-07-05 `nl_capture_descend_native` methodology) on the
+   AOT-compiled entry points for `nelisp-ec-set-buffer` and the
+   `unwind-protect` cleanup path specifically reached from
+   `nelisp-ec-with-current-buffer`'s expansion, during a *bounded* prefix
+   of `org-mode`'s body inside `with-temp-buffer` (e.g., just the first
+   ~10 `setq-local` lines of the `define-derived-mode` body, extracted
+   into a standalone probe form) versus the same prefix at top level.
+   If the temp-buffer path shows call counts or per-call cost growing
+   with the number of `setq-local` calls already executed (not flat, the
+   way the isolated `make-local-variable` loop was flat), that confirms
+   the per-`setq-local`-call `unwind-protect` re-entry hypothesis above
+   and localizes the fix to `nelisp-ec-with-current-buffer`
+   (`nelisp-emacs-lib/packages/nelisp-emacs-buffer-core/lisp/
+   nelisp-emacs-compat.el:484-498`, read-only sibling repo — flag upstream
+   rather than patch here) or to whatever `setq-local`/`add-hook` real
+   implementation invokes it.
+2. **Secondary — bisect `org-mode`'s body directly.** This session
+   confirmed `org-load-modules-maybe` (the body's first call) is
+   symmetric-fast; the remaining ~20 body forms after it
+   (`org-persist-load`, `org-set-regexps-and-options`,
+   `org-fold-initialize`, `org-set-font-lock-defaults`,
+   `org-macro-initialize-templates`, the `add-hook .. 'local` calls, etc.,
+   see `nelisp-emacs-lib/vendor/emacs-lisp/org/org.el:4945-5070`,
+   read-only) were not individually bisected this session for budget
+   reasons. A per-form incremental probe (call `org-load-modules-maybe`
+   then add one more body form at a time, inside `with-temp-buffer`,
+   timing each) would pin the exact line where the asymmetry first
+   appears, the same way the 2026-07-04 session bisected
+   `org-load-modules-maybe` out of `org-mode`'s full body.
+3. **Tertiary — RSS guard in the harness.** Independent of the root
+   cause: any future automated smoke of `(with-temp-buffer (org-mode)
+   ...)` on this substrate must enforce a live RSS-threshold kill in the
+   driver itself (this session observed unguarded growth reach 32.66 GiB
+   at 129s with no plateau) — this is already effectively established
+   practice per the task's own constraints, just re-confirmed here.
+
+### Artifacts (not committed, scratch only)
+
+Scratchpad probe forms, the RSS-guarded runner script, and raw `gdb`
+dumps under this session's `scratchpad/asym/` directory (outside the
+repo). Cold image workdir `/tmp/cold-image-org-e2e.SFAJ7t/` was built with
+`NELISP_E2E_KEEP=1`, used for all probes in this session, and deleted at
+session end. No repo source files were modified this session; only this
+`FINDINGS.md` entry (branch `profwork`). One unguarded background probe
+(`with-temp-buffer`+`org-mode`, no polling wrapper attached) briefly ran to
+32.66 GiB/129s before being noticed and killed — noted here as a
+methodology lapse for this session (the RSS-guarded runner script was used
+for all *other* probes in the table above) and folded into item 3 above.
