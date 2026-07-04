@@ -11793,6 +11793,34 @@ correctly."
         (seq
          (while (< i n) (nl_seq2 (ptr-write-u64 (+ start i) 0 0) (setq i (+ i 8))))
          0)))
+    ;; Increment 2 (multi-chunk cold-load, this branch): grow chunk-0 to a
+    ;; single big contiguous mmap when the image's coalesced region does not
+    ;; fit the default first-chunk reservation.  Preserves the interned-region
+    ;; pointer pair (+832/+840) across the swap -- that mmap is a SEPARATE
+    ;; region from chunk-0 and is untouched by this, only the control-block
+    ;; slot that records its address moves to the new base.  The OLD chunk-0
+    ;; mmap is deliberately NOT munmap'd: it holds nothing but its own
+    ;; bootstrap control block at this point (nothing has been allocated past
+    ;; it yet), so abandoning it just leaves an orphaned, never-walked mmap
+    ;; (virtual address space only, demand-paged, no physical cost) -- far
+    ;; simpler and safer than racing a free against the fresh reservation.
+    (defun nl_cold_realloc_chunk0 (newbase newsize)
+      (seq
+       ,@(nelisp-standalone--arena-init-metadata-forms-dynamic 'newbase 'newsize)
+       0))
+    (defun nl_cold_grow_chunk0 (needed)
+      (let* ((oldbase (ptr-read-u64 (data-addr nl_arena_base) 0))
+             (oldib (ptr-read-u64 (+ oldbase 832) 0))
+             (oldie (ptr-read-u64 (+ oldbase 840) 0))
+             (newbase (nl_os_alloc_chunk needed)))
+        (if (= newbase 0)
+            (nl_os_alloc_fail)
+          (seq
+           (ptr-write-u64 (data-addr nl_arena_base) 0 newbase)
+           (nl_cold_realloc_chunk0 newbase needed)
+           (ptr-write-u64 (+ newbase 832) 0 oldib)
+           (ptr-write-u64 (+ newbase 840) 0 oldie)
+           0))))
     ;; Load the cold image into the LIVE arena.  Run BEFORE the driver allocates
     ;; globals/etc. (so they land after the image).  Reads {header|table|regions}
     ;; via the OS helpers directly into final/scratch arena locations (no
@@ -11802,46 +11830,77 @@ correctly."
     ;;   chunk-0 region -> DS, interned region -> intern base.
     ;; Then split-relocate, set the bump cursor (base+0 = 1024+slen) and the
     ;; interned bump (+840 = ib+isz).  Returns 1 if loaded, -1 if no marker.
-    (defun nl_cold_load_arena ()
-      (let ((fd (nl_os_open_read (nl_cold_marker_cpath))))
+    ;; OVERRIDE: 0 uses the default marker path (`nl_cold_marker_cpath'); a
+    ;; non-zero C-string pointer cold-loads from that path instead (the
+    ;; `--cold-load-from PATH' CLI flag), so tests need not clobber the
+    ;; marker file.
+    ;; Increment 2: the header (header+8 = `slen', the COALESCED total since
+    ;; Increment 1's streaming dump fix) is read FIRST -- before touching
+    ;; chunk-0's data area -- so the destination size can be decided before
+    ;; any image bytes are written.  If the coalesced region plus its
+    ;; relocation table (read at DS+slen, `tlen' 8-byte entries) would not
+    ;; fit inside the CURRENT chunk-0 reservation, `nl_cold_grow_chunk0'
+    ;; swaps in one big contiguous mmap first -- the relocation model requires
+    ;; the whole coalesced region to stay contiguous (every reloc entry does
+    ;; `image[f] += newbase').
+    (defun nl_cold_load_arena (override)
+      (let* ((cpath (if (= override 0) (nl_cold_marker_cpath) override))
+             (fd (nl_os_open_read cpath)))
         (if (< fd 0) -1
-          (let* ((base (ptr-read-u64 (data-addr nl_arena_base) 0))
-                 (ds (+ base 1024))
-                 (ib (ptr-read-u64 (+ base 832) 0)))
+          (let* ((base0 (ptr-read-u64 (data-addr nl_arena_base) 0))
+                 (ib0 (ptr-read-u64 (+ base0 832) 0)))
             (seq
-             (nl_fa_read_all fd ib 64 0)
-             (let* ((slen (ptr-read-u64 ib 8))
-                    (isz (ptr-read-u64 ib 16))
-                    (tlen (ptr-read-u64 ib 24))
+             (nl_fa_read_all fd ib0 64 0)
+             (let* ((slen (ptr-read-u64 ib0 8))
+                    (isz (ptr-read-u64 ib0 16))
+                    (tlen (ptr-read-u64 ib0 24))
                     ;; capture the dumping run's intern base BEFORE the interned
-                    ;; region read below overwrites the header sitting in `ib'.
-                    (oldib (ptr-read-u64 ib 56))
-                    (tbl (+ ds slen)))
+                    ;; region read below overwrites the header sitting in `ib0'.
+                    (oldib (ptr-read-u64 ib0 56))
+                    ;; required chunk-0 bytes: control block + coalesced region
+                    ;; + reloc table (its transient DS+slen scratch) + 8 MiB
+                    ;; slack (room for the boot allocs that land right after
+                    ;; the cursor before the next natural chunk growth), 64 KiB
+                    ;; aligned (matches `nl_chunk_size_for's convention).
+                    (needed (nl_align_up
+                             (+ 1024 (+ slen (+ (* tlen 8) 8388608)))
+                             65536))
+                    (cursize (ptr-read-u64 (+ base0 216) 0)))
                (seq
-                (nl_fa_read_all fd tbl (* tlen 8) 0)
-                (nl_fa_read_all fd ds slen 0)
-                (nl_fa_read_all fd ib isz 0)
-                (nl_os_close_handle fd)
-                (nl_cold_reloc tbl tlen ds slen ib)
-                (nl_cold_reloc_intern ib oldib)
-                ;; scrub the now-dead relocation table so the bump cursor (set to
-                ;; 1024+slen below) re-arms over ZEROED memory -- matching the
-                ;; fresh-mmap invariant the boot constructors depend on.
-                (nl_cold_zero tbl (* tlen 8))
-                (nl_cold_clear_marks ds (+ ds slen))
-                (ptr-write-u64 base 0 (+ 1024 slen))
-                (ptr-write-u64 (+ base 840) 0 (+ ib isz))
-                ;; push the GC next-trigger far out so a collection does not fire
-                ;; on the freshly-loaded (already-live) image during early eval.
-                (ptr-write-u64 (+ base 104) 0 (+ (+ 1024 slen) 1073741824))
-                1)))))))
+                (if (> needed cursize) (nl_cold_grow_chunk0 needed) 0)
+                (let* ((base (ptr-read-u64 (data-addr nl_arena_base) 0))
+                       (ds (+ base 1024))
+                       (ib (ptr-read-u64 (+ base 832) 0))
+                       (tbl (+ ds slen)))
+                  (seq
+                   (nl_fa_read_all fd tbl (* tlen 8) 0)
+                   (nl_fa_read_all fd ds slen 0)
+                   (nl_fa_read_all fd ib isz 0)
+                   (nl_os_close_handle fd)
+                   (nl_cold_reloc tbl tlen ds slen ib)
+                   (nl_cold_reloc_intern ib oldib)
+                   ;; scrub the now-dead relocation table so the bump cursor (set to
+                   ;; 1024+slen below) re-arms over ZEROED memory -- matching the
+                   ;; fresh-mmap invariant the boot constructors depend on.
+                   (nl_cold_zero tbl (* tlen 8))
+                   (nl_cold_clear_marks ds (+ ds slen))
+                   (ptr-write-u64 base 0 (+ 1024 slen))
+                   (ptr-write-u64 (+ base 840) 0 (+ ib isz))
+                   ;; push the GC next-trigger far out so a collection does not fire
+                   ;; on the freshly-loaded (already-live) image during early eval.
+                   (ptr-write-u64 (+ base 104) 0 (+ (+ 1024 slen) 1073741824))
+                   1)))))))))
     ;; cold path globals install: re-read the header for globals_off and point
     ;; the GLOBALS slot at the loaded globals Record (tag 12, box = DS + goff).
     ;; Frames/unbound keep the fresh ones from `nl_bootstrap_make_mirror'.
-    (defun nl_cold_overwrite_globals (globals)
-      (let ((fd (nl_os_open_read (nl_cold_marker_cpath))))
+    ;; OVERRIDE mirrors `nl_cold_load_arena's: 0 = default marker path,
+    ;; non-zero = the `--cold-load-from PATH' path (must be the SAME path
+    ;; used for the load, since both re-open + re-read the header).
+    (defun nl_cold_overwrite_globals (globals override)
+      (let* ((cpath (if (= override 0) (nl_cold_marker_cpath) override))
+             (fd (nl_os_open_read cpath)))
         (if (< fd 0) 0
-          (let ((hdr (alloc-bytes 64 8)))
+          (let* ((hdr (alloc-bytes 64 8)))
             (seq
              (nl_fa_read_all fd hdr 64 0)
              (nl_os_close_handle fd)
@@ -11895,6 +11954,8 @@ correctly."
                                        "inspect-elisp-artifact")
     ,(nelisp-standalone--cstr-eq-defun 'nl_cstr_eq_repl
                                        "--repl")
+    ,(nelisp-standalone--cstr-eq-defun 'nl_cstr_eq_cold_load_from
+                                       "--cold-load-from")
     ,(nelisp-standalone--cstr-eq-defun 'nl_cstr_eq_eval
                                        "--eval")
     ,(nelisp-standalone--cstr-eq-defun 'nl_cstr_eq_load
@@ -12076,11 +12137,13 @@ correctly."
                 1
               (if (= (nl_cstr_eq_repl ptr) 1)
                   1
-                (if (= (nl_cstr_eq_embedded ptr) 1)
+                (if (= (nl_cstr_eq_cold_load_from ptr) 1)
                     1
-                  (if (= (nl_runtime_image_command_p ptr) 1)
+                  (if (= (nl_cstr_eq_embedded ptr) 1)
                       1
-                    (nl_artifact_command_p ptr)))))))))
+                    (if (= (nl_runtime_image_command_p ptr) 1)
+                        1
+                      (nl_artifact_command_p ptr))))))))))
     (defun nl_cli_bare_legacy_command_p (ptr)
       (if (= (nl_cstr_eq_bare_eval ptr) 1)
           1
@@ -12414,20 +12477,13 @@ correctly."
     (defun driver (sp)
      (let* ((arena (nl_arena_init))
             (_sptop (ptr-write-u64 268436456 0 (aot-current-sp))) ; Doc 152 §11.21: capture mmap stack-top (driver-entry rsp, AFTER arena mmap) for the conservative GC stack scan
-            ;; flat-arena cold loader: BEFORE any boot alloc, if the marker image
-            ;; exists, load it into the arena + bump the cursor past it so every
-            ;; following alloc lands after the image (no clobber).  -1 = no marker.
-            (_cl (nl_cold_load_arena))
-            (globals (alloc-bytes 32 8)) (frames (alloc-bytes 32 8)) (unbound (alloc-bytes 32 8))
-            (ctx (alloc-bytes 120 8))
-            (builtin_buf (alloc-bytes 8 1)) (builtin_sym (alloc-bytes 32 8))
-            (src (alloc-bytes 32 8)) (cursor (alloc-bytes 32 8))
-            ;; Doc 147 Phase 1.5 Group P — RAW parse-pool buffer (32768*32
-            ;; bytes); `pool' IS the base, slot N @ pool+N*32.
-            (result (alloc-bytes 32 8)) (pool (alloc-bytes (* 32768 32) 8)) (out (alloc-bytes 32 8))
-            (argv_list (alloc-bytes 32 8))
-            (argv_sym_buf (alloc-bytes ,(* 8 (length (nelisp-standalone--name-words "nelisp-standalone-argv"))) 1))
-            (argv_sym (alloc-bytes 32 8))
+            ;; Increment 2 (`--cold-load-from PATH'): argv parsing moved UP,
+            ;; ahead of the cold-load gate below, so the gate can recognize an
+            ;; explicit override path (previously this block ran AFTER the
+            ;; gate, since the gate only ever consulted the fixed marker
+            ;; file).  Nothing here depends on the arena beyond `nl_arena_init'
+            ;; already having run (`nl_os_argv_init' is the identity on
+            ;; Linux/`sp'-passthrough, no allocation).
             (sp0 (nl_os_argv_init sp))
             (argc (if (= sp0 0) 1 (logand (ptr-read-u64 sp0 0) 4294967295)))
             (slot0 (if (= sp0 0) 0 (ptr-read-u64 sp0 8)))
@@ -12445,6 +12501,22 @@ correctly."
             (arg3 (if (= argv_shifted_p 1)
                       slot2
                     (if (> argc 3) slot3 0)))
+            ;; flat-arena cold loader: BEFORE any boot alloc, if the marker image
+            ;; exists (or `--cold-load-from PATH' named an image), load it into
+            ;; the arena + bump the cursor past it so every following alloc
+            ;; lands after the image (no clobber).  -1 = no marker / no flag.
+            (cold_override (if (= (nl_cstr_eq_cold_load_from path) 1) arg2 0))
+            (_cl (nl_cold_load_arena cold_override))
+            (globals (alloc-bytes 32 8)) (frames (alloc-bytes 32 8)) (unbound (alloc-bytes 32 8))
+            (ctx (alloc-bytes 120 8))
+            (builtin_buf (alloc-bytes 8 1)) (builtin_sym (alloc-bytes 32 8))
+            (src (alloc-bytes 32 8)) (cursor (alloc-bytes 32 8))
+            ;; Doc 147 Phase 1.5 Group P — RAW parse-pool buffer (32768*32
+            ;; bytes); `pool' IS the base, slot N @ pool+N*32.
+            (result (alloc-bytes 32 8)) (pool (alloc-bytes (* 32768 32) 8)) (out (alloc-bytes 32 8))
+            (argv_list (alloc-bytes 32 8))
+            (argv_sym_buf (alloc-bytes ,(* 8 (length (nelisp-standalone--name-words "nelisp-standalone-argv"))) 1))
+            (argv_sym (alloc-bytes 32 8))
             (prompt_p (if (= (nl_cstr_eq_no_prompt arg2) 1)
                           0
                         (if (= (nl_cstr_eq_no_prompt arg3) 1) 0 1)))
@@ -12458,7 +12530,7 @@ correctly."
         (nl_bootstrap_make_mirror globals frames unbound)
         ;; cold path: replace the fresh empty globals with the loaded image's
         ;; globals Record (frames/unbound stay fresh).  -1 = normal boot.
-        (if (< _cl 0) 0 (nl_cold_overwrite_globals globals))
+        (if (< _cl 0) 0 (nl_cold_overwrite_globals globals cold_override))
         (ptr-write-u64 builtin_buf 0 31078196194145634)
         (nl_alloc_symbol builtin_buf 7 builtin_sym)
         ;; PERF (2026-07-03): populate the two shared frame-push-scratch
@@ -12698,6 +12770,31 @@ correctly."
             (seq
              ;; cold path: the loaded image already carries the prelude; skip the
              ;; redundant (and free/reuse-risky) re-eval.  Normal boot runs it.
+             (if (< _cl 0)
+                 (seq
+                  ,@(nelisp-standalone--reader-repl-prelude-forms
+                     'fbuf 'src 'cursor 'result 'pool 'out 'ctx 'builtin_sym))
+               0)
+             (ptr-write-u64 268436216 0 0)
+             (nl_repl_loop prompt_p print_p linebuf fbuf src cursor result pool out ctx builtin_sym)
+             (ptr-write-u64 268436216 0 1)
+             (if (= (ptr-read-u64 268435464 0) 0)
+                 0
+               (- (ptr-read-u64 268435464 0) 1)))))
+         ;; `--cold-load-from PATH': explicit cold-load (Increment 2), so
+         ;; tests / callers don't have to clobber the fixed marker file.
+         ;; `cold_override' (bound above, before `_cl') already carries PATH
+         ;; through to `nl_cold_load_arena' / `nl_cold_overwrite_globals'; this
+         ;; branch just runs the same REPL-loop body `--repl' does (PATH
+         ;; consumes the arg2 slot, so only arg3 is available for
+         ;; --no-prompt/--no-print, same as `--repl' with one fewer free slot).
+         ;; If the named image failed to open (`_cl' < 0), fall back to a
+         ;; normal-boot prelude so the session is still usable instead of
+         ;; silently running bare.
+         ((= (nl_cstr_eq_cold_load_from path) 1)
+          (if (= arg2 0)
+              (seq (nl_cli_write_help fbuf) 2)
+            (seq
              (if (< _cl 0)
                  (seq
                   ,@(nelisp-standalone--reader-repl-prelude-forms
