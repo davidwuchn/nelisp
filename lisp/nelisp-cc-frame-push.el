@@ -140,10 +140,13 @@
      ;;   which was likewise never decremented.  Step-6 (`int-slot') holds
      ;;   only `Sexp::Int' immediates (no box, no rc).  No new owner, no
      ;;   leak, no double-free; invariant preserved.
-     (let ((ht-slot (alloc-bytes 32 8))
-           (buckets-slot (alloc-bytes 32 8))
-           (frame-slot (alloc-bytes 32 8))
-           (int-slot (alloc-bytes 32 8)))
+     (let* ((fp frames-ptr)
+            (depth (sexp-int-unwrap (record-slot-ref-ptr fp 1)))
+            (needed (+ depth 1))
+            (ht-slot (alloc-bytes 32 8))
+            (buckets-slot (alloc-bytes 32 8))
+            (frame-slot (alloc-bytes 32 8))
+            (int-slot (alloc-bytes 32 8)))
        (and
         ;; Step 1: allocate fresh fast-hash-table record (3 slots).
         (record-make (vector-ref-ptr scratch-vec-ptr 1) ; ht-sym
@@ -176,22 +179,17 @@
         ;; Step 8: ensure backing capacity >= depth+1.  Side-effect only;
         ;; threaded through `and' via the truthy i64 return.
         (extern-call nelisp_frame_stack_ensure_capacity
-                     frames-ptr
-                     (+ (sexp-int-unwrap
-                         (record-slot-ref-ptr frames-ptr 1))
-                        1)
+                     fp
+                     needed
                      (vector-ref-ptr scratch-vec-ptr 2))
         ;; Step 9: install fresh frame into backing[depth].
         (vector-slot-set
-         (record-slot-ref-ptr frames-ptr 0) ; backing vector
-         (sexp-int-unwrap (record-slot-ref-ptr frames-ptr 1)) ; depth
+         (record-slot-ref-ptr fp 0) ; backing vector
+         depth ; old depth
          frame-slot) ; frame
         ;; Step 10: depth bump — frames.slot 1 = Sexp::Int(depth+1).
-        (sexp-int-make int-slot
-                       (+ (sexp-int-unwrap
-                           (record-slot-ref-ptr frames-ptr 1))
-                          1))
-        (record-slot-set frames-ptr
+        (sexp-int-make int-slot needed)
+        (record-slot-set fp
                          1
                          int-slot))))
   "AOT source for Doc 111 §111.E #21 / Doc 115 §115.3

@@ -32,10 +32,8 @@
 ;;      refcount-aware `record-slot-set'.
 ;;   7. Return new-cap.
 ;;
-;; Recursion is used for the two loops (compute-new-cap and copy-
-;; elem) because AOT has no mutable local variables — only
-;; immutable let-bound integer constants.  Each recursive call passes
-;; the iteration state through arg registers.
+;; The two loops (compute-new-cap and copy-elem) are iterative.  Deep frame
+;; stacks must not burn native call stack while growing their backing vector.
 ;;
 ;; Signature change: the function now takes a `scratch-slot' 3rd
 ;; parameter (= caller-owned `*mut Sexp' initialised to `Sexp::Nil')
@@ -63,9 +61,11 @@
       ;;
       ;; Mirrors Rust:
       ;;   while new_cap < needed { new_cap *= 2; }
-      (if (< c n)
-          (nelisp_frame_stack_ensure_capacity_compute_cap (* c 2) n)
-        c))
+      (let* ((cap c))
+        (seq
+         (while (< cap n)
+           (setq cap (* cap 2)))
+         cap)))
     (defun nelisp_frame_stack_ensure_capacity_copy (src dst i n)
       ;; Element-by-element copy from src vector (= `*const Sexp'
       ;; pointing at the OLD `Sexp::Vector') into dst vector (= `*mut
@@ -83,11 +83,13 @@
       ;; rax = 1 after the helper call so this `and' threading works
       ;; — matching the convention `record-slot-set' established in
       ;; §111.B.
-      (if (< i n)
-          (and (vector-slot-set dst i (vector-ref-ptr src i))
-               (nelisp_frame_stack_ensure_capacity_copy
-                src dst (+ i 1) n))
-        1))
+      (let* ((k i))
+        (seq
+         (while (< k n)
+           (seq
+            (vector-slot-set dst k (vector-ref-ptr src k))
+            (setq k (+ k 1))))
+         1)))
     (defun nelisp_frame_stack_ensure_capacity_grow
         (frames-ptr scratch-slot new-cap _pad)
       ;; Allocate new vector of capacity new-cap into scratch-slot,
@@ -115,6 +117,55 @@
       ;; freshly-bootstrapped Sexp::Nil-backed stacks, but the doubling
       ;; loop must start at 1 to actually grow.
       (if (< cap 1) 1 cap))
+    (defun nelisp_frame_stack_ensure_capacity_bad_needed_msg (buf)
+      (and (ptr-write-u8 buf 0 110)   ; n
+           (ptr-write-u8 buf 1 101)   ; e
+           (ptr-write-u8 buf 2 108)   ; l
+           (ptr-write-u8 buf 3 105)   ; i
+           (ptr-write-u8 buf 4 115)   ; s
+           (ptr-write-u8 buf 5 112)   ; p
+           (ptr-write-u8 buf 6 58)    ; :
+           (ptr-write-u8 buf 7 32)    ; space
+           (ptr-write-u8 buf 8 102)   ; f
+           (ptr-write-u8 buf 9 114)   ; r
+           (ptr-write-u8 buf 10 97)   ; a
+           (ptr-write-u8 buf 11 109)  ; m
+           (ptr-write-u8 buf 12 101)  ; e
+           (ptr-write-u8 buf 13 45)   ; -
+           (ptr-write-u8 buf 14 115)  ; s
+           (ptr-write-u8 buf 15 116)  ; t
+           (ptr-write-u8 buf 16 97)   ; a
+           (ptr-write-u8 buf 17 99)   ; c
+           (ptr-write-u8 buf 18 107)  ; k
+           (ptr-write-u8 buf 19 32)   ; space
+           (ptr-write-u8 buf 20 99)   ; c
+           (ptr-write-u8 buf 21 111)  ; o
+           (ptr-write-u8 buf 22 114)  ; r
+           (ptr-write-u8 buf 23 114)  ; r
+           (ptr-write-u8 buf 24 117)  ; u
+           (ptr-write-u8 buf 25 112)  ; p
+           (ptr-write-u8 buf 26 116)  ; t
+           (ptr-write-u8 buf 27 32)   ; space
+           (ptr-write-u8 buf 28 110)  ; n
+           (ptr-write-u8 buf 29 101)  ; e
+           (ptr-write-u8 buf 30 101)  ; e
+           (ptr-write-u8 buf 31 100)  ; d
+           (ptr-write-u8 buf 32 101)  ; e
+           (ptr-write-u8 buf 33 100)  ; d
+           (ptr-write-u8 buf 34 32)   ; space
+           (ptr-write-u8 buf 35 62)   ; >
+           (ptr-write-u8 buf 36 32)   ; space
+           (ptr-write-u8 buf 37 50)   ; 2
+           (ptr-write-u8 buf 38 94)   ; ^
+           (ptr-write-u8 buf 39 51)   ; 3
+           (ptr-write-u8 buf 40 50)   ; 2
+           (ptr-write-u8 buf 41 10))) ; newline
+    (defun nelisp_frame_stack_ensure_capacity_bad_needed (needed)
+      (let* ((buf (alloc-bytes 42 1)))
+        (seq
+         (nelisp_frame_stack_ensure_capacity_bad_needed_msg buf)
+         (nl_os_write_stderr buf 42)
+         (syscall-direct 60 87 0 0 0 0 0))))
     (defun nelisp_frame_stack_ensure_capacity (frames-ptr needed scratch-slot)
       ;; frames-ptr:   *const Sexp pointing at Env::frames_record (=
       ;;               Sexp::Record(`nelisp-lexframe-stack')).
@@ -131,24 +182,26 @@
       ;; bootstrap-installed Sexp::Vector(BACKING) / Sexp::Int(DEPTH)
       ;; shape.  No tag-check here because the only legal frames-
       ;; record shape meets the precondition.
-      (if (< (vector-len (record-slot-ref-ptr frames-ptr 0)) needed)
-          (nelisp_frame_stack_ensure_capacity_grow
-           frames-ptr
-           scratch-slot
-           (nelisp_frame_stack_ensure_capacity_compute_cap
-            (nelisp_frame_stack_ensure_capacity_initial
-             (vector-len (record-slot-ref-ptr frames-ptr 0)))
-            needed)
-           0) ; _pad — Doc 124.F-blocker even-arity fix
-        (vector-len (record-slot-ref-ptr frames-ptr 0)))))
+      (if (> needed 4294967296)
+          (nelisp_frame_stack_ensure_capacity_bad_needed needed)
+        (if (< (vector-len (record-slot-ref-ptr frames-ptr 0)) needed)
+            (nelisp_frame_stack_ensure_capacity_grow
+             frames-ptr
+             scratch-slot
+             (nelisp_frame_stack_ensure_capacity_compute_cap
+              (nelisp_frame_stack_ensure_capacity_initial
+               (vector-len (record-slot-ref-ptr frames-ptr 0)))
+              needed)
+             0) ; _pad — Doc 124.F-blocker even-arity fix
+          (vector-len (record-slot-ref-ptr frames-ptr 0))))))
   "AOT source for Doc 111 §111.E #20 / Doc 115 §115.1
 `frame_stack_ensure_capacity'.
 
 Pure-elisp capacity-doubling grow.  Composes `record-slot-ref-ptr'
 (§111.B), `record-slot-set' (§111.B), `vector-len' / `vector-ref-
 ptr' / `vector-slot-set' (§111.C / §111.E), `vector-make' (§115.1
-new), `sexp-int-unwrap' (§100), and recursive helper-function calls
-for the two inner loops (= compute-new-cap doubling + copy-elem).
+new), `sexp-int-unwrap' (§100), and iterative helper loops for
+compute-new-cap doubling and copy-elem.
 
 Replaces the 47 LOC Rust shim `nl_frame_stack_ensure_capacity'
 which has been removed from `env_lexframe_aot_shims.rs'.")
