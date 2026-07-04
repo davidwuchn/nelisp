@@ -972,3 +972,214 @@ session per the task's "if the culprit is the open upstream defect itself,
 park it" guidance, applied here to the sibling defect (unconditional
 per-bind clone cost + absent macroexpansion cache) rather than the GC
 mark/sweep corruption defect the earlier entries in this file track.
+
+---
+
+2026-07-05 `org-element-parse-buffer` sampling-profile scoping session
+(branch `diag/parse-buffer-profile`, investigation-only, no runtime edits;
+run against worktree `nelisp.wt-coldgrow` @ `7ce7b13a`, reusing the kept
+cold image `/tmp/cold-image-org-e2e.10laLp/org-run1.img` and probe
+`/tmp/parse-probe.el` from the same-day cold-heap-growth work)
+
+Scope
+
+Task: profile where `(with-temp-buffer (insert "* h") (org-mode)
+(org-element-parse-buffer))` spends its time on this cold (org.el +
+org-element.el pre-loaded) image, which does not terminate within 300 s
+(rc=124) while consuming real CPU. Method: gdb sampling (`bt`) every 3-10 s
+over two runs, then micro-decomposition timing of smaller pieces, then
+source reading to explain the dominant frames. No source files changed;
+only this file.
+
+Sampling results (2 runs, 9 backtraces total, `gdb -p PID -batch -ex 'bt
+15..20'`, RSS-based 6 GB kill-switch tripped both times before a fixed
+sample-count budget was exhausted)
+
+RSS growth was extreme and monotonic, not a stall: run 2 alone measured
+673 MB (t=3s) -> 1.44 GB (6s) -> 2.55 GB (9s) -> 3.65 GB (12s) -> 4.76 GB
+(15s) -> 5.87 GB (18s) -> 6.98 GB (21s, killed) -- a sustained ~330-360
+MB/s allocation rate. This is real, large, genuine work, consistent with
+the earlier entries in this file, not a spin/sentinel bug.
+
+The 9 backtraces cluster into two closure-lifecycle families plus the
+already-documented generic eval/bind-path frames:
+
+- **Closure *application* side** (3/9 samples: run1 s1, run2 s1, run2 s5):
+  `nelisp_frame_bind` <- `nl_pc_bind_one` <- `nl_push_captured_walk`
+  (self-recursive, one stack frame per captured `(NAME . CELL)` pair, 12-19+
+  deep in a `bt 15-20` window that did not reach the base case) <-
+  `nl_env_push_captured`. This walks a closure's entire captured alist and
+  re-binds every entry into a fresh frame on every *call* of that closure
+  (`lisp/nelisp-cc-evalport-env-leaves-frame.el:144-174`).
+- **Closure *creation* side** (2/9 samples: run1 s2 via `nl_sf_cond_walk`
+  chains ending in alloc; run2 s2 via `nl_capture_walk_buckets` x8+ <-
+  `nl_capture_walk_frame`): walks *every bucket* of the captured frame's
+  `fast-hash-table`, explicitly regardless of population --
+  `lisp/nelisp-cc-frame-stack-find.el:274-296` ("Iterate the bucket array
+  slots j = 0..bc-1 ... `sexp-payload-ptr` on `Sexp::Nil` yields 0 ... which
+  the inner bucket walker handles" -- i.e. empty buckets are cheap to
+  reject but are still visited one recursive call each), then repeats this
+  for *every enclosing frame* from the current depth down to 0
+  (`nl_capture_walk_frames`, same file lines 316-335). The public entry is
+  `nelisp-lexframe-stack-capture-to-depth` (`lisp/nelisp-lexframe.el:254`,
+  wired through `nl_capture_descend_native` /
+  `lisp/nelisp-cc-frame-stack-find.el:337-365`), invoked once per `(lambda
+  ...)` literal evaluated, with `max-depth` = the *current* active-frame
+  stack depth at that point -- i.e. every closure created anywhere in a
+  deep call chain re-walks the *entire* lexical scope chain currently in
+  effect, not just the frames that hold its actual free variables.
+- Remaining 4/9 samples are the already-documented generic path: `nl_let_*`
+  / `nl_val_clone_into` / `nl_sexp_clone_into` / `nl_apply_lambda_inner` /
+  `nl_apply_function` chains (per-bind fresh-box clone, same mechanism as
+  the `nl_val_clone_into` finding earlier in this file,
+  `lisp/nelisp-cc-val-load.el:108`).
+
+Micro-decomposition (single-line probes, `time`, cold-image unless noted
+"vanilla" = bare `./target/nelisp --eval`, no cold-load)
+
+| probe | condition | N | wall | per-call (less ~0.6s cold-boot/~0.03s vanilla floor) |
+|---|---|---|---|---|
+| `(let ((x 1)) x)` in a `while` | vanilla | 100000 | 1.636s | ~16.4 us |
+| `(let ((x 1)) x)` in a `while` | cold image | 1000/5000 | 0.641/0.712s | ~17.8 us (delta) |
+| `(funcall (lambda () 1))` | vanilla | 10000 | 0.189s | ~15.9 us |
+| `(let ((y 5)) (funcall (lambda () y)))` (capturing) | vanilla | 10000 | 0.265s | ~20 us |
+| named trivial `(defun my-triv-fn () 1)` call | cold image | 100 | 0.623s | negligible (~= boot floor) |
+| named trivial defun call | vanilla | 10000 | 0.128s | ~10-13 us |
+| `(string-match "^\*+ " "* h")` in a `while` | vanilla | 10000 | 18.694s | **~1869 us** |
+| `(string-match "\*+" "* h")` in a `while` | cold image | 100 | 2.264s | **~16.6 ms (delta)** |
+| `with-temp-buffer` alone (no insert/goto-char/looking-at) | cold image | 10/50/100 | 0.630/0.653/0.706s | ~0.8 ms |
+| `with-temp-buffer` + `(insert "* h")` | cold image | 100 | 0.974s | ~2.7 ms (delta over temp-buffer-alone) |
+| `with-temp-buffer` + insert + `(goto-char 1)` | cold image | 100 | 1.142s | ~1.7 ms (delta over insert-alone) |
+| `with-temp-buffer` + insert + `(looking-at "\*+")` | cold image | 100 | 2.773s | **~18 ms (delta over insert-alone)** |
+| `with-temp-buffer` + insert + goto-char + looking-at (task's probe (d)) | cold image | 10/50/100 | 0.890/1.794/2.953s | ~23 ms/iter, linear in N (no acceleration) |
+| full task probe (org-mode + org-element-parse-buffer) | cold image | 1 | timeout (300s / 60s both) | n/a -- non-terminating in budget |
+
+The dominant cost, with evidence
+
+**Regex matching (`string-match`/`looking-at`) has an enormous per-call
+baseline cost even in isolation, and both `string-match` on a bare string
+and `looking-at` on a buffer show an additional ~10x regression once
+running inside the org-loaded cold image, while plain binds, plain
+closures, and plain named-function calls show *no* such regression
+between vanilla and cold image.** This rules out "any bind" and "any
+function call" as the org-specific driver (both measured within noise of
+each other, ~16-20 us, in both conditions) and narrows the org-specific 10x
+to something reached specifically from inside the search/regex call chain.
+
+`string-match`/`looking-at` are pure-Elisp (not native) --
+`nelisp-emacs-lib/packages/nelisp-emacs-buffer-core/lisp/emacs-buffer-builtins.el:87,248`
+delegate to `nelisp-emacs-lib/src/nelisp-regex.el`'s hand-written NFA
+engine (`nelisp-rx-compile` / `nelisp-rx--scan` / `nelisp-rx--match-from`,
+lines 657-877), which already has a compile-result cache
+(`nelisp-rx--compile-cache`, line 896, keyed by pattern string) precisely
+*because* "org-element matches the same handful of regexps thousands of
+times" per its own comment. A fresh cold boot's cache has only 2 entries
+before the probe runs (checked directly:
+`(hash-table-count nelisp-rx--compile-cache)` => `2`), and per-iteration
+cost in the `looking-at`/`string-match` loops above was flat/linear across
+N=10/50/100 (not "slow first call, fast rest"), so a bloated compile-cache
+from org.el's own *loading* is not the direct driver of the loop-level
+measurements here (loading mostly just `defun`s/`defvar`s org.el's forms
+without executing them). Two source-confirmed, independently real defects
+remain the leading candidates for *why calling into org.el/org-element.el's
+own function/closure machinery is expensive*, and best explain both the
+10x regex-path regression above and the full parse's multi-minute/multi-GB
+blowup:
+
+1. **Capture-on-creation walks the entire active frame stack, all buckets,
+   regardless of population** (`nl_capture_walk_buckets` /
+   `_frame` / `_frames`, `lisp/nelisp-cc-frame-stack-find.el:274-335`,
+   entered via `nelisp-lexframe-stack-capture-to-depth`,
+   `lisp/nelisp-lexframe.el:254`, `max-depth` = current call depth). This is
+   an O(depth x total-buckets-across-all-enclosing-frames) cost paid on
+   *every* `(lambda ...)` literal evaluated anywhere in a deep call chain,
+   not gated by the lambda's actual free variables. org.el/org-element.el
+   are large `lexical-binding: t` files with hundreds of top-level
+   forms/functions; a recursive-descent parser (org-element's own
+   architecture) both recurses deeply (growing `max-depth`) and evaluates
+   closures pervasively (`dolist`/`mapcar`/`cl-case`/`pcase` bodies,
+   `save-excursion`-adjacent helper closures inside the buffer-core
+   compat shim, etc.), so this cost compounds with parse depth -- a
+   plausible root cause for a superlinear-*looking* wall-clock curve
+   without a literal O(n^2) algorithm anywhere.
+2. **Hash tables never rehash/grow their bucket vector as entries
+   accumulate** (`wf_ht_put`, `scripts/nelisp-standalone-build.el:4790-4833`
+   -- every insert path, vector-backed or not, only ever *prepends* to
+   whatever bucket/chain already exists; no code path resizes the bucket
+   vector or reorganizes the flat pre-bucketing cons chain). Any
+   long-lived table that accumulates many entries (a large closure's
+   captured-variable table, or `nelisp-rx--compile-cache` after a real
+   parse run, or org.el's own module-level symbol tables if similarly
+   represented) degrades from O(1) toward O(chain length) per lookup/put,
+   permanently, with no self-healing.
+
+What was *not* isolated in the ~30-minute budget (flag for next session,
+before attempting a fix)
+
+The exact call site inside the `looking-at`/`string-match` chain that
+creates the closure(s) the profiler caught mid-capture-walk was not pinned
+down to a specific line -- `nelisp-ec-looking-at`
+(`nelisp-emacs-lib/packages/nelisp-emacs-buffer-core/lisp/nelisp-emacs-compat.el:1027-1038`)
+itself has no literal `(lambda` in its body, so the walk is most likely
+reached one or more frames deeper (inside `nelisp-rx--scan`/
+`nelisp-rx--match-from`'s own control flow, or inside a macro-expanded
+`dolist`/`cl-case` in a caller), or is in fact **not regex-specific at
+all** -- calling *any* function defined deep inside org.el/org-element.el
+(as opposed to a function freshly `defun`'d at the top of a throwaway
+probe script, which is what the "named trivial defun call" row above
+actually measured) may be equally expensive if defect #1 is the real
+driver, since a function's own closure over its *defining file's*
+accumulated module scope would be captured once and then re-walked on
+every subsequent lambda creation nested under it. The single highest-value
+next experiment is: call a small **non-regex** helper already defined deep
+inside org.el (e.g. `org-back-to-heading-or-point-min` or similar) 100x on
+this same cold image and compare against the "named trivial defun" and
+"looking-at" rows above -- if it is also ~ms-per-call, defect #1 (capture
+walk cost scales with *which module defined the callee*, not with regex)
+is confirmed as the primary driver and the fix should target
+`nl_capture_walk_buckets`/`nelisp-lexframe-stack-capture-to-depth` (replace
+whole-stack, whole-bucket capture with static free-variable-set capture,
+computed once per lambda source location and cached the same way the
+existing macroexpansion cache is, per the design already flagged in this
+file's `nl_val_clone_into` finding); if it is cheap, the regex engine
+itself (`nelisp-rx--scan`/`match-from`) is the correct target instead.
+
+Recommended fix, ranked by expected leverage (for whoever implements next)
+
+1. **First**: run the one experiment above to disambiguate "closure-capture
+   cost scales with enclosing module size" (fix target:
+   `lisp/nelisp-cc-frame-stack-find.el:274-335` +
+   `lisp/nelisp-lexframe.el:254`) vs. "the NFA regex engine itself is slow"
+   (fix target: `nelisp-emacs-lib/src/nelisp-regex.el:732-877`). Both are
+   real, source-confirmed inefficiencies regardless of which one turns out
+   to dominate `org-element-parse-buffer` specifically.
+2. If capture cost dominates: change `nl_capture_walk_frame`
+   (`lisp/nelisp-cc-frame-stack-find.el:298-314`) to skip the full
+   bucket-array scan for frames whose live-entry count
+   (`ht-record.slots[2]`, already tracked per that function's own comment
+   at lines 306-308 but currently *unused* by the walk) is 0, and to walk
+   only as many buckets as there are live entries once a cheap
+   free-variable filter is available -- or, for a bigger win with the same
+   risk profile as the already-proposed `nl_val_clone_into` fast path,
+   compute the lambda body's free-variable set once per distinct lambda
+   *source position* (cacheable the same way `nelisp-rx--compile-cache` and
+   the existing macroexpansion cache already are) and capture only those
+   bindings instead of the whole reachable frame stack.
+3. Independently of #2, fix `wf_ht_put`
+   (`scripts/nelisp-standalone-build.el:4790-4833`) to rehash/grow the
+   bucket vector past a load-factor threshold -- currently a correctness-
+   neutral but performance-unbounded gap that will keep re-manifesting
+   (regex compile-cache, closure captured-var tables, anything else
+   hash-table-backed that grows large over a long-lived run) even after
+   #2 lands.
+4. Out of scope for a quick fix, noted for completeness: the 4/9 generic-
+   path samples reconfirm the pre-existing `nl_val_clone_into`
+   unconditional-fresh-box-per-bind cost
+   (`lisp/nelisp-cc-val-load.el:108`) already tracked elsewhere in this
+   file; no new evidence here changes that finding's status.
+
+No source files were modified in this session; only this FINDINGS.md
+entry. Probe artifacts reused from the same-day cold-heap-growth session
+(`/tmp/parse-probe.el`,
+`/tmp/cold-image-org-e2e.10laLp/org-run1.img`) plus this session's own
+scratch probes under `/tmp/test-*.el` (not committed, scratch only).
