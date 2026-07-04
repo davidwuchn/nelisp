@@ -6,7 +6,7 @@
         standalone-tarball standalone-tarball-verify \
         verify-elisp-fixtures \
         standalone-eval standalone-eval-clean standalone-eval-test standalone-eval-j \
-        standalone-reader standalone-reader-test standalone-reader-load-smoke standalone-reader-fmt-smoke standalone-reader-ffi-smoke standalone-reader-tls-smoke standalone-reader-process-smoke standalone-reader-realrt-smoke standalone-reader-repl-smoke standalone-reader-prelude-test standalone-selfhost-test standalone-selfhost-mt-test standalone-parallel-compile-test standalone-chunk-growth-test \
+        standalone-reader standalone-reader-test standalone-reader-load-smoke standalone-reader-fmt-smoke standalone-reader-prelude-equal-reload-smoke standalone-reader-nested-backquote-macro-smoke standalone-reader-ffi-smoke standalone-reader-tls-smoke standalone-reader-process-smoke standalone-reader-realrt-smoke standalone-reader-repl-smoke standalone-reader-prelude-test standalone-selfhost-test standalone-selfhost-mt-test standalone-parallel-compile-test standalone-chunk-growth-test \
         nelisp-performance-gate nelisp-nelix-command-gate nelisp-native-artifact-gate nelisp-nelix-native-hot-gate \
         nelisp-nelix-operational-gate \
         nelisp-runtime-image-cache-gate nelisp-source-command-substrate-gate
@@ -202,6 +202,64 @@ standalone-reader-fmt-smoke: standalone-reader
 	  echo "[standalone-reader-fmt-smoke] PASS: --load -> $$out"; \
 	else \
 	  echo "[standalone-reader-fmt-smoke] FAIL: --load -> $$out"; \
+	  exit 1; \
+	fi
+
+# Regression smoke for the stdlib prelude's `equal' idempotent native-capture
+# guard (fix 4503ba28, "make nelisp--native-X captures idempotent across
+# re-load").  The prelude is baked into the reader image AND can be re-loaded
+# at runtime (scripts/nelisp-stdlib-prelude.el, Doc 22 A3): before that fix, a
+# second `(load ...)' of the prelude re-captured the ALREADY-INSTALLED elisp
+# `equal' wrapper into `nelisp--native-equal', turning its native delegate
+# into a self-call and breaking every subsequent `equal' call.  Investigated
+# 2026-07: this exact regression was independently observed against a STALE
+# vendored nelisp copy (nelisp-emacs-lib's vendor/nelisp, which predates this
+# fix); it does not reproduce against this reader.  This smoke pins that down
+# so a future prelude edit cannot silently reintroduce it.
+standalone-reader-prelude-equal-reload-smoke: standalone-reader
+	@mkdir -p target
+	@printf '%s\n' \
+	  '(load "scripts/nelisp-stdlib-prelude.el")' \
+	  '(list (equal 1 1) (equal 1 2) (equal (list 1 2 3) (list 1 2 3)) (equal [1 2 3] [1 2 3]))' \
+	  > target/standalone-reader-prelude-equal-reload-smoke.el
+	@out="$$(./target/nelisp --load target/standalone-reader-prelude-equal-reload-smoke.el)"; \
+	if [ "$$out" = "(t nil t t)" ]; then \
+	  echo "[standalone-reader-prelude-equal-reload-smoke] PASS: -> $$out"; \
+	else \
+	  echo "[standalone-reader-prelude-equal-reload-smoke] FAIL: -> $$out (expected (t nil t t))"; \
+	  exit 1; \
+	fi
+
+# Regression smoke for user-defined macros whose expansion-producing body is a
+# backquote template, INCLUDING one macro's body invoking ANOTHER backquote
+# macro through `,@' splicing -- the shape of the Track H
+# `define-derived-mode' substrate bridge (nelisp-emacs-lib commit bd6d06d,
+# Doc 33 section 8 item 221) before that commit rewrote it backquote-free.
+# Feeds the REPL's one-physical-line-per-form input (this reader's --repl
+# loop reads and evaluates exactly one physical line at a time with no
+# continuation; every form below is written on its own physical line for
+# that reason -- a multi-physical-line form is silently dropped, which is
+# the REPL's documented contract, not a defect).  Investigated 2026-07: with
+# input correctly normalized to one physical line per form, nested
+# macro-calling-macro backquote templates (including a computed `,'
+# expression, `,@' splicing, and a nil-vs-non-nil "parent" argument mirroring
+# define-derived-mode's own shape) fully expand and evaluate on this reader;
+# this smoke pins that down so a future reader change cannot silently
+# reintroduce a nested-macro/backquote regression.
+standalone-reader-nested-backquote-macro-smoke: standalone-reader
+	@mkdir -p target
+	@printf '%s\n' \
+	  '(defmacro nbm-inner (child parent doc &rest body) `(progn (defvar ,(intern (concat (symbol-name child) "-hook")) nil) (put (quote ,child) (quote nbm-test-parent) (quote ,parent)) (defun ,child () ,doc (interactive) ,@body 42) (quote ,child)))' \
+	  '(defmacro nbm-outer (child parent &optional doc &rest body) `(nbm-inner ,child ,parent ,doc ,@body))' \
+	  '(nbm-outer nbm-child-a nil "control: nil parent" (setq nbm-var-a 1))' \
+	  '(nbm-outer nbm-child-b nbm-child-a "target: non-nil parent" (setq nbm-var-b 2))' \
+	  '(list (fboundp (quote nbm-child-a)) (fboundp (quote nbm-child-b)) (nbm-child-a) (nbm-child-b) (get (quote nbm-child-b) (quote nbm-test-parent)))' \
+	  > target/standalone-reader-nested-backquote-macro-smoke.el
+	@out="$$(./target/nelisp --repl --no-prompt < target/standalone-reader-nested-backquote-macro-smoke.el | tail -1)"; \
+	if [ "$$out" = "(t t 42 42 nbm-child-a)" ]; then \
+	  echo "[standalone-reader-nested-backquote-macro-smoke] PASS: -> $$out"; \
+	else \
+	  echo "[standalone-reader-nested-backquote-macro-smoke] FAIL: -> $$out (expected (t t 42 42 nbm-child-a))"; \
 	  exit 1; \
 	fi
 
