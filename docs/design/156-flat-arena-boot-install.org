@@ -15,6 +15,10 @@
 #+STATUS:   Increment 3 (2026-07-04) added a reproducible E2E harness
 #+STATUS:   (=scripts/cold-image-org-e2e.sh=) and verified faithfulness: a replay-loaded and a
 #+STATUS:   cold-booted process produce IDENTICAL (featurep/fboundp/commandp) conjunct columns.
+#+STATUS:   The Increment-3 "featurep org = nil vs the make gate" caveat is RESOLVED
+#+STATUS:   (2026-07-04, fix/e2e-repl-gate-parity): the harness probe wrapped conjuncts in
+#+STATUS:   ignore-errors, which on this reader returns nil instead of the body value; bare
+#+STATUS:   probes show featurep org / org-element = t in BOTH columns (see §7).
 #+BRANCH: spike/flat-arena-boot-install
 
 * 0. Purpose
@@ -451,37 +455,68 @@ between separate script invocations — not chased further, well within the
 *** Faithfulness columns (Increment-3 proof-gap check)
 
 Both a replay-loaded process and a cold-booted process (from the SAME image)
-were probed with the identical conjunct list, each wrapped in
-=ignore-errors= (=commandp= is void-function in this standalone reader
-independent of the org-mode question below — =(fboundp 'commandp)= is =nil=
-at bare boot and becomes =t= only after the Org chain loads, i.e. one of the
-60 vendor files defines a =commandp= compatibility shim):
+are probed with the identical conjunct list, evaluated BARE (the =commandp=
+conjunct is guarded with =(and (fboundp 'commandp) ...)= because =commandp=
+is a shim defined by one of the 60 vendor files — =(fboundp 'commandp)= is
+=nil= at bare boot and becomes =t= only after the Org chain loads).
+Columns re-measured 2026-07-04 after the probe fix described below
+(=RUNS=1=: replay load 9.843 s, dump 0.686 s, cold boot 0.830 s, cold-boot
+peak RSS 679112 KB, image 694418472 B, speedup 11.9x):
 
 | conjunct                              | replay-loaded | cold-booted |
 |----------------------------------------+---------------+-------------|
-| =(featurep 'org)=                      | nil           | nil         |
-| =(featurep 'org-element)=              | nil           | nil         |
+| =(featurep 'org)=                      | t             | t           |
+| =(featurep 'org-element)=              | t             | t           |
 | =(fboundp 'org-mode)=                  | nil           | nil         |
-| =(fboundp 'org-element-parse-buffer)=  | nil           | nil         |
+| =(fboundp 'org-element-parse-buffer)=  | t             | t           |
 | =(commandp 'org-mode)=                 | nil           | nil         |
 | =(fboundp 'commandp)=                  | t             | t           |
 
 *Columns are IDENTICAL* — cold-load reproduces exactly what the
-=.repl=-driven replay produces, proving MC-1/MC-2 faithfulness independent
-of the org-mode question.  The columns differ from the 2026-06-23 Increment
-2 dev-time acceptance notes (which recorded =(featurep 'org)=t=,
-=(featurep 'org-element)=t=, =(fboundp 'org-element-parse-buffer)=t=, and
-only =(commandp 'org-mode)=nil=, using a reused image from that session)
-because this driver-generated =.repl= run does not fully bring up
-=org-mode='s definition — a separate, pre-existing gap the task explicitly
-scoped OUT of this increment ("the make-level Org gate passed a proof...
-but driver-generated =.repl= runs show =fboundp org-mode = nil=" — an
-already-known discrepancy between the full =nemacs= driver path and the raw
-standalone-reader =.repl= replay path).  What Increment 3 establishes is
-narrower and sufficient: cold-load is a FAITHFUL bit-for-bit continuation of
-whatever a replay produces, whatever that happens to be — it does not
-itself introduce any divergence.  Chasing the org-mode gap itself is out of
-scope here; it is unaffected by, and orthogonal to, MC-1/MC-2.
+=.repl=-driven replay produces, proving MC-1/MC-2 faithfulness.
+
+*Caveat RESOLVED (2026-07-04, branch =fix/e2e-repl-gate-parity=)*: the
+first Increment-3 run of this harness reported ALL of the featurep/fboundp
+conjuncts as nil (only the unwrapped =(fboundp 'commandp)= showed =t=) and
+recorded that as a ".repl-generation settings difference vs the make-level
+Org gate to reconcile".  Diffing the two generation paths showed the
+generated =.repl= was never the problem: the harness's =.repl= and the
+gate's =VENDOR_REPL_KEEP_TEMP=t= canonical =.repl= contain the same
+per-file forms, the same in-file =(provide (quote org))=, and the same
+per-file provide-safety-net tail, and the harness replay does load the full
+chain (60/60 files ok, marker =ok:org-element.el:count=60=).  The setting
+that differed was the HARNESS'S OWN PROBE: every conjunct was wrapped in
+=ignore-errors=, and this standalone reader's =ignore-errors= /
+=condition-case= returns nil instead of the protected body's value
+(=(ignore-errors 42)= → =nil=, =(ignore-errors t)= → =nil=, verified
+directly against the replay-loaded process), so each wrapped conjunct
+reported nil regardless of the actual feature state.  Probing the same
+replay-loaded state with BARE conjuncts returns =(featurep 'org)=t= and
+=(featurep 'org-element)=t= — matching the make gate.  The fix removes the
+=ignore-errors= wrappers from both the replay probe and the cold-boot probe
+(same conjuncts verbatim in both columns).
+
+The two remaining nil conjuncts (=fboundp org-mode= / =commandp org-mode=)
+are a separate, pre-existing gap vs the make-level gate's all-true proof,
+and were isolated to the PRELUDE input, not to cold-load: the gate's
+=vendor-repl-standalone-batch= defaults =VENDOR_REPL_PRELUDE= to
+=NELISP_ROOT/scripts/nelisp-stdlib-prelude.el= with
+=NELISP_ROOT=vendor/nelisp= (nelisp-emacs-lib's vendored nelisp mirror,
+commit f1ef06e1), under which =org.el='s
+=(define-derived-mode org-mode ...)= form evaluates (slowly — the reader
+spends >170 s inside =org.el= alone, most of the gate's 242 s wall) and
+installs =org-mode=; this harness pairs the reader with THIS worktree's
+newer =scripts/nelisp-stdlib-prelude.el=, under which the whole chain
+replays in ~10 s and =org.el='s other definitions install (=org-todo=,
+=org-insert-heading=, =org-entry-get=, ... all fbound) but that single
+=define-derived-mode org-mode= form does not.  The generated =.repl= line
+for that form is byte-identical between the two paths — only the prelude
+environment it evaluates in differs.  The harness deliberately keeps this
+worktree's prelude (reader and prelude from the same commit, and a ~10 s
+replay instead of ~4 min); chasing the =org-mode= bring-up difference
+between the two preludes is out of scope here and orthogonal to MC-1/MC-2,
+whose faithfulness statement is: cold-load is a FAITHFUL continuation of
+whatever the replay produces — it does not itself introduce divergence.
 
 *** Regression (final binary, target/nelisp @ commit 1f486838)
 
