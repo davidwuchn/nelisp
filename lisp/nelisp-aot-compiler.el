@@ -12214,7 +12214,15 @@ same branch and emit the same byte count."
          (win64-dynamic-align-p
           (and win64-p (memq name '(CreateFileW ReadFile WriteFile CloseHandle
                                      CreateProcessW WaitForSingleObject
-                                     GetExitCodeProcess VirtualAlloc VirtualFree))))
+                                     GetExitCodeProcess VirtualAlloc VirtualFree
+                                     ;; fix/windows-env-inherit: startup
+                                     ;; `nl_os_environ_init' reaches these from a
+                                     ;; nested `let*' -- same corruption-risk
+                                     ;; depth as the CreateFileW/... entries
+                                     ;; above (see nelisp-standalone-build.el's
+                                     ;; windows os-base-forms comment).
+                                     GetEnvironmentStringsW
+                                     FreeEnvironmentStringsW))))
          (call-temp-save-count 0)
          (call-needs-align needs-align))
     (when (and (not win64-p)
