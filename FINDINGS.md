@@ -1183,3 +1183,238 @@ entry. Probe artifacts reused from the same-day cold-heap-growth session
 (`/tmp/parse-probe.el`,
 `/tmp/cold-image-org-e2e.10laLp/org-run1.img`) plus this session's own
 scratch probes under `/tmp/test-*.el` (not committed, scratch only).
+
+---
+
+## Post-all-fixes re-probe of `org-element-parse-buffer`: it no longer hangs -- it crashes with a corrupted frame-stack argument (exit 88)
+
+Ran at `perf/closure-capture-narrowing` @ `5d8bd34b` (closure-capture
+narrowing, macroexpansion cache, `wf_ht` rehash/growth, and the cold-heap
+chunk-cursor fix are all merged into this history). Binary
+`./target/nelisp` was already built matching this HEAD (no source file
+newer than the binary). Re-ran the exact task probe from the prior
+FINDINGS entry above --
+
+```
+(with-temp-buffer (insert "* h") (org-mode)
+  (prin1 (if (org-element-parse-buffer) 'PARSE-OK 'PARSE-NIL)))
+```
+
+-- against the freshest matching cold image
+(`/tmp/cold-image-org-e2e.A0Gb1u/org-run1.img`, dumped by this same
+binary at 01:12, one commit before HEAD; verified compatible: `(featurep
+'org)` / `(fboundp 'org-element-parse-buffer)` both `t` on this image
+under this binary).
+
+**Headline result: this is no longer a >300s hang. It is now a
+sub-second crash.** `timeout 15 ./target/nelisp --cold-load-from
+.../org-run1.img --no-prompt < /tmp/parse-probe.el` exits with code 88
+almost immediately, with *no* stdout at all (not even a partial print).
+`strace -f -e trace=mmap,exit` on the same invocation shows the process
+issuing a handful of legitimate chunk-growth `mmap`s (64 MiB / 256 MiB
+range, consistent with normal arena/chunk growth) and then one final:
+
+```
+mmap(NULL, 1125899906908160, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) = -1 ENOMEM
+exit(88)
+```
+
+1125899906908160 bytes is ~1 PiB (`0x4000000010000` = 2^50 + the 64 KiB
+chunk-alignment pad). `exit(88)` is this runtime's own designated
+out-of-memory panic exit (`nl_os_alloc_fail`, `scripts/nelisp-standalone-
+build.el:1282` on this Linux x86_64 path: `(syscall-direct 60 88 0 0 0 0
+0)` = `exit_group(88)`), not a signal/segfault -- the runtime detected
+the failed allocation and exited cleanly on purpose.
+
+### gdb: the exact call chain and the corrupted argument
+
+Breakpoints on `nl_chunk_alloc_new`, `nl_os_alloc_fail`, and
+`nelisp_frame_stack_ensure_capacity` (all present as ELF symbols in the
+release binary -- `nm target/nelisp` resolves 1462 of them) against the
+same cold-load + `parse-probe.el` invocation give a full, symbol-named
+native backtrace at the point of the fatal allocation:
+
+```
+nl_chunk_alloc_new
+  <- nl_alloc_bytes
+  <- nl_alloc_vector
+  <- nelisp_frame_stack_ensure_capacity_grow
+  <- nelisp_frame_stack_ensure_capacity
+  <- nelisp_frame_push
+  <- nl_push_and_bind
+  <- nl_ali_push_frame
+  <- nl_apply_lambda_inner
+  <- nl_apply_closure_or_lambda
+  <- nl_apply_function
+  <- nl_eval_inner_cons
+  <- nl_ei_cons_tail / nl_ei_cons_dispatch
+  <- nl_eval_inner
+  <- nelisp_eval_call
+  <- nl_driver_eval_published
+  <- bf_load_eval_loop
+  <- bf_load
+  <- nelisp_apply_function
+```
+
+i.e. the crash is in ordinary function-call machinery (applying a
+lambda pushes a new lexical frame, which must first ensure the
+frame-stack backing vector is big enough), not in regex, not in
+org-element's own logic, and not in `wf_ht` (hash-table) growth.
+
+Directly inspecting registers at the `nelisp_frame_stack_ensure_capacity`
+breakpoint (`(frames-ptr needed scratch-slot)` = `rdi rsi rdx` on this
+SysV target, `lisp/nelisp-cc-frame-ensure-capacity.el:118`) on the hit
+that leads to the crash:
+
+```
+frames_ptr (rdi) = 0x7fffa288ce38
+needed     (rsi) = 140735301062233   (~1.4e14)
+scratch    (rdx) = 0x7fff7da097e8
+```
+
+`frames_ptr` is a **native-C-stack address** (`0x7fff...` range) -- every
+legitimate arena/heap allocation observed in this same run lands in the
+`0x7ff3...`/`0x7ff9...` mmap range instead. Per
+`lisp/nelisp-cc-frame-push.el:96,178-183`, `frames-ptr` must be a
+persistent `Env::frames_record` living in the arena, and `needed` is
+computed as `(+ (sexp-int-unwrap (record-slot-ref-ptr frames-ptr 1)) 1)`
+-- i.e. a small depth counter read off of that same record. Here `needed
+- frames_ptr == 33`, i.e. `needed` is almost exactly `frames_ptr`'s own
+address plus a small constant, not a plausible depth+1 value. A
+"legitimate" explanation (the interpreter really did push ~1.4x10^14
+frames) is physically impossible in the sub-second wall time actually
+elapsed (this would require ~10^14 frame pushes/sec). This is therefore a
+**corrupted-argument bug**: some caller in this chain is handing
+`nelisp_frame_stack_ensure_capacity`/`nelisp_frame_push` a stack-resident
+garbage value in place of the real arena `frames-ptr`, and the resulting
+garbage "depth" propagates through
+`nelisp_frame_stack_ensure_capacity_compute_cap`'s power-of-two doubling
+(`lisp/nelisp-cc-frame-ensure-capacity.el:60-68`) to `new-cap = 2^47`,
+which `nelisp_frame_stack_ensure_capacity_grow` then asks `vector-make`
+to allocate (2^47 slots x 8 bytes = 2^50 bytes) -- the mmap that fails.
+
+### What was ruled out
+
+- **Not `wf_ht` rehash/growth** (the 7355c5e7/e9b42390 fix). Three
+  targeted micro-repros, each a plain `(make-hash-table)` grown then
+  round-tripped through the identical `nelisp--arena-dump-image-stream`
+  -> `--cold-load-from` path this task's harness uses, then grown
+  further *after* cold-load:
+  - 20 entries, no growth involved: count reads back correctly (20 ->
+    21) after cold-load, no corruption.
+  - 5000 entries (growth already triggered live, pre-dump, at the
+    2048->4096-bucket boundary): count reads back correctly (5000 ->
+    5001) after cold-load.
+  - 4095 entries pre-dump (just under the 4096 growth threshold), then
+    2 more puthashes *after* cold-load specifically crossing the growth
+    boundary for the first time post-restore: count reads back
+    correctly (4095 -> 4097), grows cleanly, no corruption, no extra
+    chunk mmap even needed.
+  All three: exit 0, correct counts, no huge mmap. `wf_ht_meta_count` /
+  `wf_ht_maybe_grow` are exonerated as the origin of this specific crash.
+- **Not the closure-capture-narrowing commit's own new allocations.**
+  5d8bd34b's new runtime code
+  (`nl_env_capture_lexical_with_filter`/`nl_clx_symbol_filter_walk`,
+  `scripts/nelisp-standalone-build.el:14010-14070`) only ever calls
+  `alloc-bytes 32 8` (fixed-size 32-byte scratch slots) or builds a small
+  cons-list filter -- it has no size-scaled `vector-make` call anywhere,
+  so it cannot be the direct source of a 2^47-element vector allocation.
+  It remains the leading suspect for *clobbering an adjacent call's
+  register/stack-slot* (see below), since the corruption is new/newly-
+  reachable specifically after this commit landed (its own commit
+  message reports "parse-buffer target timeout 300s -> timeout 300s" as
+  of 01:15; the crash reported here reproduces reliably against the
+  matching binary/image less than an hour later with no source changes
+  in between -- i.e. this session's own re-run is what surfaced the
+  crash, not a code change since that commit).
+- **Not literally a >300s hang any more** for this exact probe/image --
+  confirmed 5+ repeated runs, all exit 88 in well under a second.
+
+### Attempted minimal repro outside org.el (inconclusive in budget)
+
+`--eval` (vanilla boot, no cold image) of a recursive closure-creating
+function:
+
+```elisp
+(defun deep-rec (n)
+  (if (<= n 0) 0
+    (let ((clo (lambda () n)))
+      (+ (funcall clo) (deep-rec (1- n))))))
+(prin1 (deep-rec N))
+```
+
+- N=3000: completes correctly (`4501500`), <1s, no corruption.
+- N=50000: does **not** crash/corrupt -- it times out (>20s, the *old*
+  slow-hang symptom, not the new corrupted-argument crash).
+
+So plain "create one capturing closure per recursion level, N deep" does
+not by itself reproduce the corrupted-`frames-ptr` crash at either depth
+tried -- the real org-element call graph has some additional ingredient
+(pervasive macro-expanded closures, non-tail helper recursion inside
+org-element.el/org-macs.el, and/or `nelisp_frame_stack_ensure_capacity
+_copy`'s own native recursion cost scaling with current depth,
+`lisp/nelisp-cc-frame-ensure-capacity.el:69-90`, being non-tail and thus
+itself consuming native stack proportional to live frame count on every
+single grow event) that this synthetic repro didn't hit within the N
+values tried in this session's time budget.
+
+### Recommended fix, ranked (for whoever/whatever implements next)
+
+1. **First**: bisect a minimal non-org repro between N=3000 (clean) and
+   N=50000 (slow-hang, not crash) from the synthetic `deep-rec' probe
+   above -- ideally add nested/non-tail helper calls per level (not just
+   one closure) to better mirror org-element's own call shape -- so the
+   corrupted-`frames-ptr` crash can be hit in under a second instead of
+   only via the multi-minute org cold-image pipeline. This is the
+   single highest-leverage next step; everything else is much slower to
+   iterate on without it.
+2. Audit the AOT-generated calling convention for the call chain
+   `nl_ali_push_frame` -> `nl_push_and_bind` -> `nelisp_frame_push` ->
+   (`extern-call`) `nelisp_frame_stack_ensure_capacity`
+   (`lisp/nelisp-cc-frame-push.el:178-183`), specifically cross-
+   referenced against the 5d8bd34b diff to
+   `nl_env_capture_lexical_with_filter` (widened its internal `invec`
+   from 3 to 5 slots, `scripts/nelisp-standalone-build.el` around line
+   14041-14060) and its two new callers `nl_env_capture_lexical` /
+   `nl_env_capture_lexical_filtered`. The corrupted `frames-ptr` reads as
+   a stack slot rather than the real arena Record pointer, which is the
+   signature of a caller-saved register or stack slot getting clobbered
+   by a widened call signature emitted earlier in the same native frame
+   (i.e. lambda-creation immediately preceding the next `frame_push` for
+   applying it) -- check whether the AOT compiler's register/stack-slot
+   allocation for calls into the newly 5-slot `invec` path correctly
+   preserves whatever slot the *subsequent* `nelisp_frame_push` still
+   expects to hold `frames-ptr`.
+3. Independently of #2: `nelisp_frame_stack_ensure_capacity_copy` and
+   `_compute_cap` (`lisp/nelisp-cc-frame-ensure-capacity.el:60-90`) are
+   non-tail-recursive elisp helpers whose own native recursion depth is
+   O(live frame count) / O(log(needed/cap)) respectively -- every single
+   grow event burns additional native call-stack frames proportional to
+   how many live interpreter frames are being copied, stacking on top of
+   the ~11-native-frames-per-Elisp-level cost already visible in the
+   backtrace above. This is a plausible contributor to the N=50000
+   synthetic repro's hang-instead-of-crash and to native stack pressure
+   generally; converting these two to real iteration (if/when the AOT
+   DSL gains mutable locals) removes one axis of native-stack
+   consumption independent of whichever call site turns out to own the
+   register-clobber from #2.
+4. Do **not** re-open "regex is slow" or "closure-capture walks every
+   bucket" as explanations for the current blocker -- both are prior,
+   now-separately-fixed/mitigated findings in this file about a
+   *different* bottleneck. The mechanism documented here is new (or was
+   previously masked by the old bottleneck timing out before the
+   interpreter ever recursed deep enough to hit it) and is a distinct
+   defect in the frame-stack/call machinery, not the regex engine or the
+   `wf_ht` hash-table implementation.
+
+No source files were modified in this session; only this FINDINGS.md
+entry (branch `diag/parse-buffer-focus`). Reused the prior session's
+`/tmp/parse-probe.el`. New scratch artifacts from this session (not
+committed): `/tmp/mini-ht-repl.txt`, `/tmp/mini-ht-cold-repl.txt`,
+`/tmp/mini-ht-grow-repl.txt`, `/tmp/mini-ht-grow-cold-repl.txt`,
+`/tmp/mini-ht-boundary-repl.txt`, `/tmp/mini-ht-boundary-cold-repl.txt`,
+`/tmp/deep-closure-repro.el`, `/tmp/deep-closure-repro2.el`,
+`/tmp/gdb-chunk-trace.gdb`, `/tmp/gdb-depth-trace.gdb` (gdb batch
+scripts used for the backtraces/register dumps above), and the cold
+image reused from the pre-existing e2e run at
+`/tmp/cold-image-org-e2e.A0Gb1u/org-run1.img`.
