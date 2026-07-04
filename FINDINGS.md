@@ -1418,3 +1418,282 @@ committed): `/tmp/mini-ht-repl.txt`, `/tmp/mini-ht-cold-repl.txt`,
 scripts used for the backtraces/register dumps above), and the cold
 image reused from the pre-existing e2e run at
 `/tmp/cold-image-org-e2e.A0Gb1u/org-run1.img`.
+
+## 2026-07-05 re-profile session: the >300s parse-buffer probe does NOT run at all on this HEAD -- it still crashes (exit 87), inside `(org-mode)` itself, before `org-element-parse-buffer` is ever reached
+
+Investigation-only, branch `profwork` (clone `nelisp.clone-capture`, tracking
+`origin/main`), HEAD `f36e6e82` ("Merge fix/frames-ptr-corruption: exit-88
+crash eliminated, loud guard added"). Task handed down asserted this probe
+was, on the current binary, "a genuine >300s CPU-bound computation" needing
+a real cost profile (gdb sampling, RSS growth, loop-vs-advance). **That
+premise does not hold on this exact HEAD/build: the probe crashes
+deterministically in well under a second, via the guard `93b011bc` itself
+added, and it crashes before `org-element-parse-buffer` runs at all.** This
+finding -- not a performance profile -- is this session's headline result.
+
+### Reproduction
+
+Built `./target/nelisp` fresh from this HEAD (`make standalone-reader`,
+binary timestamped after both `93b011bc` and the `f36e6e82` merge commit --
+not a stale pre-fix binary). Generated a fresh cold image with this exact
+binary via `NELISP_E2E_KEEP=1 timeout 300 bash scripts/cold-image-org-e2e.sh
+1` (default env, no overrides -- matching this file's own established
+methodology): replay-load 6.28s, dump 0.56s, cold-boot 0.52s/513,808 KB
+peak RSS, faithfulness conjuncts `(t t t t (interactive) t)` IDENTICAL
+between replay-loaded and cold-booted process. Image kept at
+`/tmp/cold-image-org-e2e.f2U2Hz/org-run1.img`.
+
+Reused the existing task probe verbatim (`/tmp/parse-probe.el` from a
+prior session):
+
+```elisp
+(with-temp-buffer (insert "* h") (org-mode)
+  (prin1 (if (org-element-parse-buffer) 'PARSE-OK 'PARSE-NIL)))
+(prin1 'probe-end)
+```
+
+`timeout 10 ./target/nelisp --cold-load-from .../org-run1.img --no-prompt <
+/tmp/parse-probe.el` -- **3/3 repeated runs, exit code 87, zero stdout,
+stderr `nelisp: frame-stack corrupt needed > 2^32`, in well under a
+second each time.** This is the loud guard `93b011bc` added at
+`lisp/nelisp-cc-frame-ensure-capacity.el:185-186` /
+`nelisp_frame_stack_ensure_capacity_bad_needed` (`:163-168`, writes the
+message and `exit_group(87)`), not a hang and not the old exit-88
+PiB-mmap crash -- but it is still a crash, and it fires on a completely
+fresh cold image built from this exact HEAD.
+
+**Isolation: the crash is entirely inside `(org-mode)`, never reaches
+`org-element-parse-buffer`.** A second probe with `org-element-parse-buffer`
+removed --
+
+```elisp
+(with-temp-buffer (insert "* h") (org-mode) (prin1 'ORG-MODE-OK))
+(prin1 'probe-end)
+```
+
+-- crashes identically: exit 87, same stderr message, same wall time (well
+under a second). gdb (`break nelisp_frame_stack_ensure_capacity`, print
+`$rdi`/`$rsi`/`$rdx` on every hit, `bt` when `$rsi > 4294967296`) confirms
+the two probes hit the **bit-identical** bad call --
+`frames-ptr=0x7fffa28d2ce0 needed=140735301062233 (0x7fff7da08e59)
+scratch=0x7fff7da097e8` -- after the *same* number of preceding legitimate
+`nelisp_frame_stack_ensure_capacity` calls (2163, all with small correct
+`needed` values climbing normally, e.g. `...14 15 140735301062233`
+immediately before the bad one) regardless of whether
+`org-element-parse-buffer` is present in the script at all. The backtrace
+at the bad call:
+
+```
+nelisp_frame_stack_ensure_capacity <- nelisp_frame_push <- nl_push_and_bind
+  <- nl_ali_push_frame <- nl_apply_lambda_inner <- nl_apply_closure_or_lambda
+  <- nl_apply_function <- nl_eval_inner_cons <- nl_ei_cons_tail
+  <- nl_ei_cons_dispatch <- nl_eval_inner <- nelisp_eval_call
+  <- nl_driver_eval_published <- bf_load_eval_loop <- bf_load
+  <- nelisp_apply_function <- nl_apply_builtin <- nl_apply_function
+  <- nl_eval_inner_cons <- ... <- nl_sf_progn_body_step <- nl_sf_progn_get_cdr
+```
+
+-- the identical call-chain shape `93b011bc`'s own commit documented fixing
+(`nl_apply_lambda_inner -> nl_ali_push_frame -> nl_push_and_bind ->
+nelisp_frame_push -> nelisp_frame_stack_ensure_capacity`). This is a
+**sibling instance of the same defect class**, not a new bug family: this
+time it is the `needed` argument (2nd arg, `rsi`) that goes bad while
+`frames-ptr` (`rdi`) stays the same, correct-looking value across all 2163+
+calls in the run (`0x7fffa28d2ce0`, constant); previously (`11346ea0`
+entry) it was `frames-ptr` itself that went bad while `needed` looked
+plausible. `93b011bc`'s commit message says it "pre-localize[d]
+frames-ptr/depth/needed [in `nelisp_frame_push`] so extern-call argument
+evaluation does not re-read them" -- i.e. it already specifically targeted
+`needed` as a clobber-risk local, and this session's reproduction shows
+that mitigation is incomplete.
+
+### Likely exact site: `nelisp_frame_push`'s own `needed` local, `lisp/nelisp-cc-frame-push.el:143-184`
+
+```elisp
+(let* ((fp frames-ptr)
+       (depth (sexp-int-unwrap (record-slot-ref-ptr fp 1)))
+       (needed (+ depth 1))                    ; computed here, line 145
+       (ht-slot (alloc-bytes 32 8))
+       (buckets-slot (alloc-bytes 32 8))
+       (frame-slot (alloc-bytes 32 8))
+       (int-slot (alloc-bytes 32 8)))
+  (and
+   (record-make ... 3 ht-slot)                 ; 7 intervening calls
+   (vector-make 16 buckets-slot)               ; (record-make / vector-make /
+   (record-slot-set ht-slot 1 buckets-slot)    ;  record-slot-set x3 /
+   (sexp-int-make int-slot 16)                 ;  sexp-int-make x2)
+   (record-slot-set ht-slot 0 int-slot)
+   (sexp-int-make int-slot 0)
+   (record-slot-set ht-slot 2 int-slot)
+   (record-make ... 1 frame-slot)
+   (record-slot-set frame-slot 0 ht-slot)
+   (extern-call nelisp_frame_stack_ensure_capacity
+                fp needed (vector-ref-ptr scratch-vec-ptr 2))  ; used here, line 183
+   ...))
+```
+
+`needed` is computed once, early, from a fully legitimate small `depth`
+value, then must survive across 7 intervening AOT-compiled calls (4 of
+them freshly-added `alloc-bytes 32 8` scratch buffers on the same call's
+native stack) before its only use. The corrupted value observed,
+`0x7fff7da08e59`, sits in the *same page* as this run's most recent
+`alloc-bytes`-derived scratch/`scratch-slot` pointers (e.g.
+`0x7fff7da07bd8`, `0x7fff7da08ec8`, `0x7fff7da097e8` -- all within the same
+~2.4 KB region) -- i.e. `needed`'s storage (register or stack slot) is
+most plausibly being overwritten by one of `ht-slot`/`buckets-slot`/
+`frame-slot`/`int-slot`'s own `alloc-bytes` result or by a call that
+reuses whatever slot the AOT allocator assigned to `needed`. This is the
+single most concrete, narrowly-scoped lead produced by this session:
+audit the AOT compiler's register/stack-slot allocation for
+`nelisp_frame_push` specifically across the 4 `alloc-bytes 32 8` +
+`record-make`/`vector-make`/`record-slot-set` sequence between `needed`'s
+binding and its use at the `extern-call` -- `93b011bc`'s "pre-localize"
+fix evidently did not give `needed` a slot/register that survives this
+particular sequence of intervening calls.
+
+### Regex engine location (asked for, previously unresolved) -- definitively answered
+
+`string-match`/`string-match-p`/`match-beginning`/`match-end`/
+`match-string`/`split-string`/`replace-regexp-in-string` are **interpreted
+prelude Elisp**, not DSL-native/AOT-compiled and not sourced from the
+sibling `nelisp-emacs-lib` repo. They are thin aliases
+(`scripts/nelisp-standalone-build.el:10332-10347`,
+`nelisp-standalone--reader-repl-prelude-source`) over a from-scratch
+backtracking regex matcher, `lisp/nelisp-stdlib-regexp.el` (364 lines,
+"Doc 143": `nlre--parse`/`nlre--parse-alt`/`nlre--parse-seq`/
+`nlre--parse-atom`/`nlre--parse-set` build an AST; `nlre--match-list`/
+`nlre--match-atom1`/`nlre--match-star` do the actual backtracking match;
+entry point `nlre-string-match`, line 287). This file is concatenated
+into the reader's REPL prelude text and evaluated by the ordinary
+interpreter at boot (`nelisp-standalone--reader-repl-prelude-forms`,
+`:10350-10360`) -- it is genuinely interpreted, dynamically-scoped
+(`-*- lexical-binding: nil -*-` per its own header), plain Elisp, not
+compiled to native code by the `nelisp-cc-*` pipeline. Landed in commits
+`7a69693c`/`c8677e73` ("Doc 143"), superseding (in this repo) an older
+regex engine an earlier FINDINGS entry (the `7ce7b13a`-era gdb-sampling
+session, above) described living in the *sibling* repo
+(`nelisp-emacs-lib/src/nelisp-regex.el`, a hand-written NFA with a
+`nelisp-rx--compile-cache`) -- that description is now **stale for this
+worktree**: `nelisp-rx`/`nelisp-emacs-lib` do not appear anywhere in this
+repo's actual matching code path any more; `nelisp-emacs-lib` is used
+*only* for host-side `.repl` generation (`cold-image-org-e2e.sh`'s phase
+(a), read-only), never for the runtime string-match implementation baked
+into `./target/nelisp`.
+
+**Cache status: there is no compiled-pattern cache at all.**
+`nlre-string-match` (`lisp/nelisp-stdlib-regexp.el:287-305`) calls
+`(nlre--parse regexp)` -- a fresh recursive-descent parse allocating a new
+AST -- on **every single call**, unconditionally, before any matching is
+attempted. There is no `defvar`/hash-table anywhere in this file keyed on
+pattern text, no memoization of `nlre--parse`'s result, nothing analogous
+to the sibling repo's now-superseded `nelisp-rx--compile-cache`. Every
+`string-match`/`looking-at`/`re-search-forward` call pays a full O(pattern
+length) parse cost from scratch, independent of how many times that exact
+pattern string was already seen -- a large fixed per-call overhead for
+org.el's own giant precompiled regexps (`org-element-paragraph-separate`
+and friends, built via `regexp-opt`-style alternation and potentially
+thousands of characters), on top of the O(buffer length x backtracking)
+match cost proper. This is a real, source-confirmed inefficiency
+independent of the crash above, and matches this session's task
+description's suspicion exactly ("is a compiled-pattern cache present").
+
+### Micro-timing (this HEAD's binary; org.el loaded but `(org-mode)` never
+called, to stay clear of the crash above)
+
+| probe | condition | N | wall | delta vs. empty-loop baseline (same N) | per-call |
+|---|---|---|---|---|---|
+| `(let ((i 0)) (while (< i 1000) (setq i (1+ i))))` | vanilla `--repl` | 1000 | 0.046s | -- (baseline) | -- |
+| `(let ((i 0)) (while (< i 1000) (string-match "\*+" "* h") (setq i (1+ i))))` | vanilla `--repl` | 1000 | 1.287s | +1.241s | **~1.24 ms/call** |
+| single `(prin1 (string-match "\*+" "* h"))` | vanilla `--repl` | 1 | -- | -- | prints `00` correctly -- sanity OK |
+| empty-loop baseline | cold org image, no `(org-mode)` call | 10000 | 0.563s | -- | -- |
+| `string-match` loop, same pattern | cold org image, no `(org-mode)` call | 10000 | 0.501s | **not measurable -- see anomaly below** | n/a |
+
+Vanilla-boot per-call cost (~1.24 ms for a trivial 2-char pattern against a
+2-char string, no cache -- consistent with this file's prior ~1.87 ms/call
+vanilla measurement, same order of magnitude) is confirmed genuine: the
+`while` loop's own auto-printed return value (this runtime prints a
+top-level form's final value after evaluating it) correctly showed `1000`
+for the baseline, confirming real completion, not a truncated loop.
+
+**New anomaly found this session, NOT chased to root cause (flag for next
+session): on the cold-loaded org image specifically (not vanilla), calling
+`string-match` -- even exactly once, e.g. bare
+`(prin1 (string-match "\*+" "* h"))` as the only top-level form -- produces
+*zero* stdout for that form, silently, while the reader continues normally
+and the *next* top-level form (e.g. a subsequent `(prin1 'done)`) prints
+fine.** Verified at N=1 (single bare call), N=3 (loop with a `prin1` on
+every iteration -- none of the 3 print), and N=1000/5000/10000/50000
+(loop wall time stays flat at ~0.49-0.51s regardless of N, i.e. *not*
+scaling with N the way the baseline empty loop does, e.g. baseline
+0.563s@10000 -> 0.871s@50000 while the string-match version stays
+~0.50s@10000 and ~0.51s@50000) -- both facts together indicate the loop
+body is not actually completing anywhere near N real iterations of
+`string-match` on this image, and/or its output is being suppressed, via
+some cold-load-specific state (the reader's own "quit flag" /
+epoch-boundary check at a fixed arena offset,
+`nelisp-standalone--reader-repl-eval-suffix`'s
+`(ptr-read-u64 (+ (car (nelisp--arena-stats)) 8) 0)` gate and/or
+`nl_boundary_maybe_reclaim`'s epoch check, `scripts/nelisp-standalone-
+build.el` -- both consulted around chunk/form boundaries -- are the
+leading suspects, unverified). This makes **any** cold-image loop-based
+wall-clock string-match timing (including this file's own prior "~16.6
+ms/call org image" figure from the earlier gdb-sampling entry above,
+which used the same loop-timing methodology without verifying the loop's
+own return value) suspect until this is root-caused: a suppressed/short-
+circuited loop and a genuinely-fast loop are wall-clock-indistinguishable
+without checking the loop's actual completion value, which this session's
+probes did check (and found inconsistent with real completion) but the
+prior session's probes, as documented, did not.
+
+### What could not be done, and why
+
+The task's Method steps 1 (gdb sampling of the parse loop, 12+ samples
+over ~2 min), 3 (loop-vs-advance verdict via buffer-position progress
+between samples), and the `org-element--current-element` direct-call
+probe are all **inapplicable**: there is no multi-minute (or even
+multi-second) `org-element-parse-buffer` execution to sample. The call
+never begins -- `(org-mode)` itself crashes first, deterministically, in
+well under a second, every time, on this exact binary/image. RSS growth
+during the (nonexistent) parse could not be measured for the same reason.
+
+### Recommended fix, ranked
+
+1. **First**: audit `nelisp_frame_push`'s AOT codegen
+   (`lisp/nelisp-cc-frame-push.el:143-184`) for why the `needed` local
+   (bound line 145, used only at the `extern-call` on line 183) does not
+   survive the 4 `alloc-bytes 32 8` + `record-make`/`vector-make`/
+   `record-slot-set` x3/`sexp-int-make` x2 calls in between -- despite
+   `93b011bc` already claiming to "pre-localize" exactly this variable.
+   The corrupted value's proximity to this same `let*`'s own
+   `alloc-bytes`-derived scratch addresses is a strong, specific lead:
+   check whether the AOT compiler is reusing `needed`'s assigned
+   register/stack slot for one of `ht-slot`/`buckets-slot`/`frame-slot`/
+   `int-slot`, or failing to reload `needed` from its spill slot before
+   the final `extern-call`.
+2. Do **not** re-run this exact probe again expecting a >300s CPU-bound
+   result until (1) is fixed and independently re-verified (e.g. a bare
+   `(org-mode)`-only smoke test exiting 0, not 87) -- this session's
+   reproduction was 3/3 deterministic on a freshly-built binary from
+   current HEAD, so this is not a flake.
+3. Separately, root-cause the cold-image-only `string-match`
+   output/loop-completion anomaly above before trusting any future
+   cold-image wall-clock timing of regex-calling code (including
+   re-validating this file's own prior "~16.6 ms/call" org-image figure).
+4. Independent of both crashes: `nlre-string-match`
+   (`lisp/nelisp-stdlib-regexp.el:287-305`) has no compiled-pattern
+   cache and re-parses every regexp from scratch on every call -- adding
+   one (keyed on pattern string, analogous to the already-existing
+   macroexpansion cache) is a real, source-confirmed, independent
+   optimization opportunity for whenever `org-element-parse-buffer`
+   becomes reachable again.
+
+No source files were modified in this session; only this FINDINGS.md
+entry (branch `profwork`). New scratch artifacts (not committed):
+`/tmp/parse-sanity*.{out,err}`, `/tmp/gdb-parse-probe2.{gdb,out}`,
+`/tmp/orgmode-only-probe.el`, `/tmp/gdb-orgmode-only.{gdb,out}`,
+`/tmp/regex-len-probe.el`, `/tmp/sm-*.el`, `/tmp/baseline-*.el`,
+`/tmp/t1.el`..`/tmp/t5.el`, `/tmp/sm-single*.el`, `/tmp/sm-n3.el`, and the
+cold image `/tmp/cold-image-org-e2e.f2U2Hz/org-run1.img` (freshly built
+this session from this exact HEAD; regenerate with
+`NELISP_E2E_KEEP=1 timeout 300 bash scripts/cold-image-org-e2e.sh 1` if
+resuming).
