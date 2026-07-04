@@ -283,8 +283,10 @@ for the correctness argument."
   ;;              reuses this as the destination for each inner
   ;;              (NAME . CELL) cons cell; refcount-safe per the
   ;;              `cons-make-with-clone' alias-safety contract).
+  ;; scratch[3] = filter symbol list (Nil here: unfiltered public wrapper)
+  ;; scratch[4] = filtered flag (0 here: preserve original capture-all API)
   (nl-jit-call-out-1 "nl_capture_descend_native"
-                     (vector stack max-depth nil)))
+                     (vector stack max-depth nil nil 0)))
 
 (defun nelisp-lexframe-stack-push-captured! (stack alist)
   "Build a fresh frame populated from ALIST = ((NAME . CELL) ...),

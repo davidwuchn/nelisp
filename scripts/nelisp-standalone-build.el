@@ -13999,8 +13999,8 @@ signalled abort it builds err_out=(TAG . VAL) from the M6 arena stash so
 
 ;; CORRECTED closure-capture (Doc 137 M3).  The shipped AOT
 ;; `nelisp-cc-evalport-capture-lexical' passes the raw frames-record pointer to
-;; `nl_capture_descend_native', which expects a 3-slot in-vec ([0]=stack record,
-;; [1]=depth Int, [2]=scratch) -- so it misreads the depth and segfaults on every
+;; `nl_capture_descend_native', which expects an in-vec ([0]=stack record,
+;; [1]=depth Int, [2]=scratch, [3]=filter list, [4]=filter flag) -- so it misreads the depth and segfaults on every
 ;; lambda creation.  (The real Emacs path builds the in-vec in an elisp JIT
 ;; wrapper; the AOT port never did.)  This override reads the real depth from
 ;; frames.slot1 and builds the proper in-vec; depth 0 (top level) -> nil capture.
@@ -14010,14 +14010,25 @@ signalled abort it builds err_out=(TAG . VAL) from the M6 arena stash so
     (defun nl_clx_write_nil (slot)
       (seq (ptr-write-u64 slot 0 0) (ptr-write-u64 (+ slot 8) 0 0)
            (ptr-write-u64 (+ slot 16) 0 0) (ptr-write-u64 (+ slot 24) 0 0) 0))
-    (defun nl_env_capture_lexical (env out)
+    (defun nl_clx_symbol_filter_walk (node-ptr out)
+      (let* ((tag (sexp-tag node-ptr)))
+        (if (= tag 4)
+            (seq (cons-make-with-clone node-ptr out out) 0)
+          (if (= tag 7)
+              (let* ((car-ptr (nl_cons_car_ptr node-ptr))
+                     (cdr-ptr (nl_cons_cdr_ptr node-ptr)))
+                (seq
+                 (nl_clx_symbol_filter_walk car-ptr out)
+                 (nl_clx_symbol_filter_walk cdr-ptr out)))
+            0))))
+    (defun nl_env_capture_lexical_with_filter (env filter-ptr filtered out)
       (let* ((frames_ptr (+ env 32))
              (depth (sexp-int-unwrap (record-slot-ref-ptr frames_ptr 1))))
         (seq
          (nl_clx_write_nil out)
          (if (= depth 0)
              0
-           ;; Doc 147 Phase 1.5: build the 3-slot `invec' WITHOUT holding a
+           ;; Doc 147 Phase 1.5: build the `invec' WITHOUT holding a
            ;; raw write-through interior pointer into its data buffer.  The
            ;; old code did `(... (vector-ref-ptr invec N))' as a 32B write
            ;; DESTINATION, which stomps neighbouring slots once the Phase-2
@@ -14030,9 +14041,10 @@ signalled abort it builds err_out=(TAG . VAL) from the M6 arena stash so
            ;; read-safe) — only the producer side changes here.
            (let* ((invec (alloc-bytes 32 8)) (alist (alloc-bytes 32 8))
                   (depth_slot (alloc-bytes 32 8))
-                  (nil_slot (alloc-bytes 32 8)))
+                  (nil_slot (alloc-bytes 32 8))
+                  (filtered_slot (alloc-bytes 32 8)))
              (seq
-              (vector-make 3 invec)
+              (vector-make 5 invec)
               ;; slot 0 = stack record: clone frames_ptr straight in.
               (vector-slot-set invec 0 frames_ptr)
               ;; slot 1 = max-depth Int: build in scratch, clone in.
@@ -14041,10 +14053,25 @@ signalled abort it builds err_out=(TAG . VAL) from the M6 arena stash so
               ;; slot 2 = pair-slot scratch, Nil on entry.
               (nl_clx_write_nil nil_slot)
               (vector-slot-set invec 2 nil_slot)
+              ;; slot 3 = lambda symbol filter; slot 4 = filter enabled flag.
+              (vector-slot-set invec 3 filter-ptr)
+              (sexp-int-make filtered_slot filtered)
+              (vector-slot-set invec 4 filtered_slot)
               (nl_clx_write_nil alist)
               (nl_capture_descend_native invec alist)
               (nl_sexp_clone_into alist out)
-              0))))))))
+              0))))))
+    (defun nl_env_capture_lexical (env out)
+      (let* ((nil_slot (alloc-bytes 32 8)))
+        (seq
+         (nl_clx_write_nil nil_slot)
+         (nl_env_capture_lexical_with_filter env nil_slot 0 out))))
+    (defun nl_env_capture_lexical_filtered (env lambda-args out)
+      (let* ((filter_slot (alloc-bytes 32 8)))
+        (seq
+         (nl_clx_write_nil filter_slot)
+         (nl_clx_symbol_filter_walk lambda-args filter_slot)
+         (nl_env_capture_lexical_with_filter env filter_slot 1 out))))))
 
 ;; ===================================================================
 ;; TOP-LEVEL FORM-BOUNDARY ARENA RECLAMATION (the safe reclamation point).

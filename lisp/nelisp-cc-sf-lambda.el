@@ -27,7 +27,8 @@
 ;;
 ;; The AOT body builds `(closure captured FORMALS BODY...)':
 ;;   1. Checks args is Cons (tag 7).
-;;   2. Captures lexical env into `out' via `nl_env_capture_lexical'.
+;;   2. Captures lexical env into `out' via `nl_env_capture_lexical_filtered',
+;;      using symbols from FORMALS+BODY as an over-approximate filter.
 ;;   3. `nl_cons_prepend_clone(out, args, out)' → out = (captured . args)
 ;;      = (captured FORMALS BODY...).  Clones both out (captured-env) and
 ;;      args (borrowd from caller) with proper refcount management.
@@ -44,8 +45,9 @@
 ;;
 ;; ABI constants used (§100.B frozen):
 ;;   SEXP_TAG_CONS = 7
-;;   nl_env_capture_lexical: (*mut c_void, *mut Sexp) → i64
-;;     Captures current lexical env; writes result into *out; returns 0.
+;;   nl_env_capture_lexical_filtered: (*mut c_void, *const Sexp, *mut Sexp) → i64
+;;     Captures current lexical env filtered by lambda args; writes result into
+;;     *out; returns 0.
 ;;   nl_cons_prepend_clone: (*const Sexp, *const Sexp, *mut Sexp) → i64
 ;;     Clones both car and cdr; builds Sexp::Cons; assigns to *out; returns 0.
 ;;
@@ -108,7 +110,7 @@
        (nl_sf_lambda_alloc_sym s1 0)
        out s1 0))
 
-    ;; After nl_env_capture_lexical: out = captured env (cap-rc=0 always).
+    ;; After nl_env_capture_lexical_filtered: out = captured env (cap-rc=0 always).
     ;; Prepend captured env before args: nl_cons_prepend_clone(out, args, out) — FIRST ✓.
     ;; nl_cons_prepend_clone clones *out (captured-env) and *args (borrowed from caller).
     ;; nl_cons_prepend_clone drops old *out via assignment before writing new Cons.
@@ -130,7 +132,7 @@
     (defun nl_sf_lambda (args env out s1)
       (if (= (sexp-tag args) 7)
           (nl_sf_lambda_captured
-           (extern-call nl_env_capture_lexical env out)   ; FIRST ✓
+           (extern-call nl_env_capture_lexical_filtered env args out)   ; FIRST ✓
            args out s1)
         1)))
 
@@ -140,7 +142,8 @@ Six defuns (seq form).  Uses nl_cons_prepend_clone for refcount-safe cons buildi
 
 Algorithm:
   1. Check args is Cons (tag 7).
-  2. nl_env_capture_lexical(env, out) → out = captured-env  [extern-call FIRST ✓].
+  2. nl_env_capture_lexical_filtered(env, args, out) → out = captured-env
+     [extern-call FIRST ✓].
   3. nl_cons_prepend_clone(out, args, out) → out = (captured FORMALS BODY...)
      [extern-call FIRST ✓; clones captured-env + args with proper refcounts].
   4. nl_sf_lambda_alloc_sym: alloc-bytes + fill 7 bytes + sexp-write-symbol
