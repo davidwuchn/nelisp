@@ -7477,18 +7477,24 @@ pre-existing `nl_os_process_fork' stub there."
                (setq i (+ i 1))))
             dst)))
        ;; --- small runtime buffers: SECURITY_ATTRIBUTES / STARTUPINFOW / ---
-       ;; --- PROCESS_INFORMATION need explicit zero-fill (alloc-bytes does ---
-       ;; --- not guarantee zeroed memory for reused/freelist blocks). ---
-       (defun nl_win_zero_words (ptr nwords)
-         (let* ((i 0))
-           (seq
-            (while (< i nwords)
-              (seq (ptr-write-u64 ptr (* i 8) 0) (setq i (+ i 1))))
-            ptr)))
+       ;; --- PROCESS_INFORMATION / exit-code slot are handed to raw Win32 ---
+       ;; --- APIs that the OS itself reads (SECURITY_ATTRIBUTES, ---
+       ;; --- STARTUPINFOW) or writes (PROCESS_INFORMATION, the exit-code ---
+       ;; --- out-param) synchronously.  feat/windows-spawn regression ---
+       ;; --- (post multi-chunk-arena rebase): a second call-process in the ---
+       ;; --- same process deterministically SIGSEGVs when these lived in ---
+       ;; --- the shared `alloc-bytes' arena.  Give each its own dedicated ---
+       ;; --- VirtualAlloc(MEM_COMMIT|MEM_RESERVE, PAGE_READWRITE) region ---
+       ;; --- instead -- the same already-proven pattern `cmdline' uses via ---
+       ;; --- `nl_win_cmdline_valloc' below -- and release it (MEM_RELEASE) ---
+       ;; --- once the OS is done with it.  VirtualAlloc(MEM_COMMIT) pages ---
+       ;; --- are always zero-filled by the OS, so no separate zero-fill ---
+       ;; --- pass is needed either. ---
+       (defun nl_win_valloc (nbytes)
+         (extern-call VirtualAlloc 0 nbytes 12288 4))
        (defun nl_win_inheritable_sa ()
-         (let* ((sa (alloc-bytes 24 8)))
+         (let* ((sa (nl_win_valloc 24)))
            (seq
-            (nl_win_zero_words sa 3)
             (ptr-write-u32 sa 0 24)      ; nLength
             (ptr-write-u32 sa 16 1)      ; bInheritHandle = TRUE
             sa)))
@@ -7508,12 +7514,18 @@ pre-existing `nl_os_process_fork' stub there."
                           (nl_win_utf8_wcs_dup
                            (nl_win_build_cmdline program_sx arglst))))
                 (in_handle (extern-call GetStdHandle 4294967286))
-                (si (nl_win_zero_words (alloc-bytes 104 8) 13))
-                (pi (nl_win_zero_words (alloc-bytes 24 8) 3))
+                (si (nl_win_valloc 104))
+                (pi (nl_win_valloc 24))
                 (created 0))
-           (if (< out_handle 0)
-               (wf_write_int out 1)
-             (seq
+           (seq
+            ;; `sa' is only needed across the `CreateFileW' call above.
+            (extern-call VirtualFree sa 0 32768)
+            (if (< out_handle 0)
+                (seq
+                 (extern-call VirtualFree si 0 32768)
+                 (extern-call VirtualFree pi 0 32768)
+                 (wf_write_int out 1))
+              (seq
               (ptr-write-u32 si 0 104)          ; STARTUPINFOW.cb
               (ptr-write-u32 si 60 256)         ; dwFlags = STARTF_USESTDHANDLES
               (ptr-write-u64 si 80 in_handle)   ; hStdInput
@@ -7525,21 +7537,27 @@ pre-existing `nl_os_process_fork' stub there."
               ;; The dedicated writable buffer is only needed across the
               ;; CreateProcessW call itself; release it (MEM_RELEASE).
               (extern-call VirtualFree cmdline 0 32768)
+              (extern-call VirtualFree si 0 32768)
               (if (= created 0)
                   (seq
+                   (extern-call VirtualFree pi 0 32768)
                    (extern-call CloseHandle out_handle)
                    (wf_write_int out 1))
                 (seq
                  (extern-call CloseHandle (ptr-read-u64 pi 8)) ; hThread
                  (extern-call WaitForSingleObject
                               (ptr-read-u64 pi 0) 4294967295)  ; INFINITE
-                 (let* ((code_slot (nl_win_zero_words (alloc-bytes 8 8) 1)))
+                 (let* ((proc_handle (ptr-read-u64 pi 0))
+                        (code_slot (nl_win_valloc 8)))
                    (seq
-                    (extern-call GetExitCodeProcess
-                                 (ptr-read-u64 pi 0) code_slot)
-                    (extern-call CloseHandle (ptr-read-u64 pi 0))
+                    (extern-call GetExitCodeProcess proc_handle code_slot)
+                    (extern-call VirtualFree pi 0 32768)
+                    (extern-call CloseHandle proc_handle)
                     (extern-call CloseHandle out_handle)
-                    (wf_write_int out (ptr-read-u32 code_slot 0))))))))))))
+                    (let* ((exit_code (ptr-read-u32 code_slot 0)))
+                      (seq
+                       (extern-call VirtualFree code_slot 0 32768)
+                       (wf_write_int out exit_code))))))))))))))
     (_
      '(
        (defun nl_bi_process_call_process (args out)
@@ -10481,6 +10499,8 @@ runtime cache does not replay source file loads on every command invocation."
     "lisp/nelisp-artifact.el" inline)
 	   (format "(setq nelisp-artifact-standalone-repo-root %S)\n"
 	           nelisp-standalone--repo-root)
+	   (format "(setq nelisp-artifact-standalone-target %S)\n"
+	           (list 'quote nelisp-standalone--target))
 	   "(fset 'nelisp-artifact--read-file-as-string\n"
 	   "      (symbol-function 'nelisp-standalone-artifact--read-file-as-string))\n"
    "(defun nelisp-standalone-artifact--read-all-from-string (source)\n"

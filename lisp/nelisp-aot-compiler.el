@@ -12174,7 +12174,9 @@ same branch and emit the same byte count."
           ;; args, not the enclosing arity (matches the win64 branch).
           (= (logand (+ (length stack-args) arg-count) 1) 1))
          (win64-dynamic-align-p
-          (and win64-p (memq name '(CreateFileW ReadFile WriteFile CloseHandle))))
+          (and win64-p (memq name '(CreateFileW ReadFile WriteFile CloseHandle
+                                     CreateProcessW WaitForSingleObject
+                                     GetExitCodeProcess VirtualAlloc VirtualFree))))
          (call-temp-save-count 0)
          (call-needs-align needs-align))
     (when (and (not win64-p)
