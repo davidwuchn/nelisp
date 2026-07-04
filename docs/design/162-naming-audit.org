@@ -1,0 +1,150 @@
+#+TITLE: 162 — Naming Audit: Concurrency-Sounding Names on Single-Thread Machinery
+#+STATUS: DRAFT (investigation + proposal only, no renames applied)
+
+* Motivation
+
+While debugging the Doc 152 mid-form GC work this week, a reasonable reader
+looking at ~nl_safepoint_ctx~ / ~nl_gc_collect_published~ hypothesized a
+*multithreading* mechanism (safepoints and cross-thread publication are
+textbook concurrent-GC vocabulary — JVM/Go-style stop-the-world safepoints,
+publish/subscribe between threads). The actual code is a *single-thread*,
+mid-form GC: a context stack the collector reads back from at a loop
+back-edge, inside one interpreter, one OS thread, no shared memory between
+threads at all.
+
+The risk is compounded by the fact that this codebase's Makefile and
+~lisp/nelisp-cc-atomic-raw-mem.el~ *do* contain genuine concurrency
+machinery elsewhere (an actual actor runtime bench, a real
+clone(2)+atomics multi-threaded self-host test, `fork(2)`-based parallel
+compilation, and hardware `SeqCst` atomic refcount ops used because the
+standalone tool really can run multiple OS threads/processes during
+parallel builds — see `scripts/nelisp-standalone-build.el:4566`). Those
+uses are legitimately named. That real concurrency vocabulary living a few
+files away from purely single-thread interpreter/GC internals is exactly
+what makes misleading names in the latter dangerous: the reader has no
+local signal to tell the two apart, and correctly-named neighbors lend
+false credibility to the incorrect hypothesis.
+
+This document inventories every case of that pattern found in the
+standalone-reader codebase, confirms or refutes each by reading the
+implementation, and proposes replacement names. **No renames are applied
+in this branch** — this is audit-only, per task scope.
+
+* Scope swept
+
+- ~scripts/nelisp-standalone-build.el~ (15,618 lines)
+- ~lisp/nelisp-cc-*.el~ (188 files), ~lisp/nelisp-lexframe.el~,
+  ~lisp/nelisp-stdlib-*.el~ (20 files), ~lisp/nelisp-aot-compiler.el~
+  (17,217 lines), ~src/nelisp-cc.el~ (2,097 lines)
+- Builtin surface (~nelisp--*~ names reachable from the reader),
+  ~Makefile~ targets, ~lisp/nelisp-cli.el~ flags
+
+Note: ~packages/nelisp-actor~, ~packages/nelisp-jit~ (the older
+host-Emacs-hosted NeLisp interpreter's *real* runtime JIT), and the
+Makefile's `actor-bench` / `soak-worker` / `standalone-selfhost-mt-test` /
+`standalone-parallel-compile-test` targets were checked and are **correctly
+named** — they describe genuine concurrency (real OS threads, `fork(2)`
+workers, an actual actor mailbox runtime). They are out of scope for
+renaming and are called out only as contrast/context above.
+
+* Findings
+
+** P1 — actively misleading (concurrency vocabulary on single-thread code)
+
+| # | Current name | What it actually does (evidence) | Why misleading | Proposed name | Rename risk | Priority |
+|---+-----------------------------------------------------------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+---------------------------------------------------------------------------------------------------------------------+--------------------------------------------------------------------+---------------------------------------------------------------------------------------------------+----------|
+| 1 | ~nl_safepoint_ctx~ (BSS symbol, ~scripts/nelisp-standalone-build.el:504~) | A depth-indexed stack of "what's currently live" root-set frames, written by the eval driver before executing a top-level form (~scripts/nelisp-standalone-build.el:2743~, ~:2751~ `nl_gc_mark_published_frame`) and read by a single collector call inside a `while` loop's back-edge (~lisp/nelisp-cc-sf-while.el:128-161~, `nl_gc_safepoint`). One thread, one call stack. | "Safepoint" in GC literature (JVM, Go, .NET) means a point where *all mutator threads* pause so the collector can run safely relative to concurrent mutation. Here there is exactly one mutator and no concurrency to synchronize against — it is just "a point in the interpreter loop where a GC call is legal/cheap." | ~nl_gc_loop_ctx~ (or ~nl_gc_midform_ctx~) | 63 occurrences across 5 files (~scripts/nelisp-standalone-build.el~, ~lisp/nelisp-cc-sf-while.el~); referenced in ~docs/design/152-sound-form-boundary-gc.org~, ~docs/design/155-gc-lexframe-child-collection-bug.org~, FINDINGS.md; it is a linked BSS data symbol (`nelisp-link-symbol`), so it is visible in objdump/gdb symbol tables during crash debugging. | P1 |
+| 2 | ~nl_gc_safepoint~ (defun, ~scripts/nelisp-standalone-build.el:2831~) | The gated mid-form collector entry point itself, called from a `while` loop's back-edge check (~lisp/nelisp-cc-sf-while.el:137-138~). Disabled by default; enabled via alloc-debt threshold. | Same "safepoint = thread pause" collision as #1. | ~nl_gc_midform_collect~ | Same call graph as #1 (they're always mentioned together); ~14~ direct call/def sites. | P1 |
+| 3 | ~nl_gc_collect_published~ (defun, ~scripts/nelisp-standalone-build.el:2807~) and the "published context/frame" family (~nl_gc_mark_published_frame~, ~nl_gc_mark_published_frame_at~, ~nl_gc_mark_published_contexts[_from]~, comments' "GC-published frame-0 context") | Marks the root-set frame(s) that the eval driver wrote into ~nl_safepoint_ctx~ before executing the current top-level form, then sweeps (~scripts/nelisp-standalone-build.el:1983-1988~, ~:2751-2795~). This is "the driver told the collector what's currently reachable," not cross-thread data publication. | "Published" is the standard term for making a value visible to *other threads* with the right memory-ordering guarantees (Java's `volatile`/`Publish`, Rust's `Arc`/`Ordering::Release` "publish" idiom). No other thread ever reads ~nl_safepoint_ctx~; "publish" here just means "the driver recorded roots before the collector might run." | ~nl_gc_collect_from_recorded_roots~ (or ~nl_gc_collect_marked_frames~); rename "published" → "recorded"/"registered" throughout the family (~nl_gc_mark_recorded_frame~, etc.) | 20 occurrences of `*_published*` + 14 of `nl_gc_collect_published` across ~scripts/nelisp-standalone-build.el~ and ~scripts/nelisp-flat-arena-probe.el~; also referenced from ~docs/design/155-*.org~. Not a linked symbol itself (elisp-level defun name baked at AOT-compile time), so rename is source-only, no ABI symbol table impact beyond re-running the build. | P1 |
+| 4 | ~nl_val_clone_into~ / ~nl_sexp_clone_into~ / "clone" family (~lisp/nelisp-cc-val-load.el:149~, ~lisp/nelisp-cc-sexp-clone-into.el:136~) | Since commit ~0f66cb1c~ ("Speed up safe bind cloning with shallow rebox," 2026-07-05), the *common* fast path for post-boot arena Symbol/String binds does **not** deep-copy: it allocates a fresh 32-byte descriptor box and bit-copies the four Sexp words, aliasing the underlying string/symbol-name buffer. The function's own updated commentary says so explicitly: "This is a shallow rebox, not a transitive clone" (~lisp/nelisp-cc-val-load.el~, diff of ~0f66cb1c~). The slow/legacy path (still reachable via ~nl_bind_clone_force~ / ~nelisp--gc-diag 15~) still does a real deep clone. | "Clone" (and the public C-ABI docstring "= ~ptr::write(dst,(*src).clone())~") implies an independent deep copy. As of this week the *default* behavior for the hottest case is a shallow, buffer-aliasing rebox — same category of surprise as #1-3, but about aliasing/ownership rather than threading; flagged because the name now actively contradicts the code's own new comment. | Keep ~nl_sexp_clone_into~ (the full clone, still deep) as-is; rename the new fast-path entry points to make sharing explicit: ~nl_vci_rebox~ is already honestly named (good precedent) — but the *public* ~nl_val_clone_into~ dispatcher should gain a doc-only caveat or be renamed to ~nl_val_bind_store~ / ~nl_val_clone_or_rebox_into~ so callers don't assume deep-clone semantics from the name alone. | 314 occurrences of the `*clone_into*` family repo-wide; public C-ABI entry referenced from Rust build-tool docs and multiple AOT-compiler comments. High blast radius — recommend *doc-caveat only*, not a rename, for ~nl_val_clone_into~ itself; only add the new ~_rebox~-suffixed helper names going forward (already done for ~nl_vci_rebox~/~nl_vci_copy32~). | P1 (doc fix), not a structural rename |
+
+** P2 — opaque / overloaded (not concurrency-misleading, but unclear to a new reader)
+
+| # | Current name | What it actually does (evidence) | Why misleading/opaque | Proposed name | Rename risk | Priority |
+|---+---------------------------------------------------------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+---------------------------------------------------------------------------------------------------------------------------+------------------------------------------------------------------+------------------------------------------------------------------------------------------------------+----------|
+| 5 | ~nelisp--gc-diag~ (builtin, dispatch at ~scripts/nelisp-standalone-build.el:3143~, body ~bf_gc_diag~ at ~:3453~) | A single numeric-argument multiplexer covering 19 unrelated switches (0=read-only dump; 1/2=poison-on-free; 3/4=push/pop empty GC context; 5/6=arm/disarm mid-form collector; 7/8=disable/enable collections; 9/10=disable/enable free-list reuse; 11/12=enable/disable compaction; 13/14=disable/enable macroexpansion-cache lookup; 15/16=force/allow legacy bind-clone path; 17/18=disable/enable closure free-variable cache lookup). Full switch table read at ~scripts/nelisp-standalone-build.el:3442-3499~. | Only about a third of the switches (1/2, 7-12) are actually GC knobs; the rest toggle macro-expansion cache (13/14), the bind-clone fast path (15/16, added this week), and a closure free-variable cache (17/18) — none of which are GC. The name "gc-diag" hides that this is a general interpreter-correctness-gate switchboard, and magic numbers 0-18 are undocumented at call sites (only documented in one comment block). | Split into named per-subsystem toggles is the "right" fix long-term, but as a minimum: rename the builtin to ~nelisp--diag-toggle~ or ~nelisp--interp-diag~, and replace bare integers at call sites with symbolic constants (e.g. ~diag-poison-on~, ~diag-mxcache-off~) resolved by the dispatcher. | 57 occurrences of `nelisp--gc-diag`/`nl_gc_diag` repo-wide; referenced from 3 docs/design files + FINDINGS.md; it is a *user-facing builtin name* (callable from NeLisp source, listed in the builtins name table at ~scripts/nelisp-standalone-build.el:10347~), so renaming breaks any script/test that calls it directly — grep shows it is call-tested in the reader test suite. | P2 |
+| 6 | ~wf_*~ prefix (710 call sites in ~scripts/nelisp-standalone-build.el~, 889 repo-wide) | A grab-bag of helpers spanning at least three unrelated concerns: (a) argument-list access (~wf_argval~, ~wf_arg_ptr~, ~wf_name_is~), (b) output-slot writing (~wf_write_int~, ~wf_cons_int~, ~wf_write_nil~), and (c) a full hash-table implementation added later (~wf_ht_make~/~_put~/~_get~/~_find~/~_bucket_index~/... at ~:4752-4900~). No comment anywhere in the sweep defines what "wf" stands for. | An opaque 2-letter prefix reused across unrelated subsystems gives no hint to a reader what family a given ~wf_~ symbol belongs to (contrast with ~nl_gc_*~, ~nl_boundary_*~ which are self-describing). | Split the prefix by concern: keep a documented ~wf_~ (if it is, e.g., "wrapper function" or "walk/format") for the arg/write helpers, but move the hash-table block to a self-describing ~nl_ht_*~ prefix consistent with the rest of the runtime's ~nl_~ convention. | High call-site count (889) but purely a source-level elisp identifier (not an ABI symbol, since these are DSL-internal to the AOT compiler input, not the compiled output's exported names) — mechanical, low real risk. | P2 |
+| 7 | "mirror" (~nl_bootstrap_make_mirror~, ~nelisp_mirror_lookup_entry~, ~nelisp_mirror_set_*~, env-mirror family, e.g. ~lisp/nelisp-cc-mirror-install-entry.el~) | The global symbol table: a hash-bucket-vector of symbol-entry records holding each symbol's value/function/plist/constant slots (built once in ~nl_bootstrap_make_mirror~, ~scripts/nelisp-standalone-build.el~ near line 10008/13648). This is the *only* place global bindings live — Emacs's ~obarray~ equivalent. | "Mirror" conventionally means a synchronized *copy* of some other canonical source (a replica, cache, or read-model kept in sync with an original). There is no "original" that this mirrors — it IS the canonical store. A reader could reasonably (as happened this week with the GC terms) suspect a replication/consistency mechanism between two copies, when there is only one. | ~nl_globals_table~ / ~nl_env_symtab~ / ~nl_obarray~ (matching Emacs's own vocabulary, which this runtime otherwise imitates closely) | Very high blast radius: 1,435 occurrences across ~lisp/~+~scripts/~+~src/~, 32 docs/design files reference it, and it originates from a pre-existing Rust name (`build-tool/src/eval/env_mirror.rs`) this elisp code deliberately mirrors 1:1 in naming for cross-reference. Renaming the elisp side alone would desynchronize the two codebases' vocabulary. | P2 (documentation-only fix recommended over rename: add a top-of-family comment explaining "mirror" = canonical global table, not a replica) |
+| 8 | ~jit_~ / ~nelisp_jit_*~ prefix in ~lisp/nelisp-cc-jit-*.el~ (34 files) | AOT (ahead-of-time, build-time) compiled native replacements for what used to be Rust "trampoline" functions in `build-tool/src/jit/*.rs`, resolved once at *link time* via `dlsym`/static archive (see ~lisp/nelisp-cc-jit-arith.el:1-20~, ~lisp/nelisp-cc-jit-type-of.el~). Nothing is compiled or generated *at run time* in this path. | "JIT" (just-in-time) means code generated/compiled during program execution, in response to runtime information (contrast with the codebase's *other*, genuinely runtime ~packages/nelisp-jit/src/nelisp-jit.el~, which really does translate+`byte-compile` NeLisp lambdas at call time). Reusing "jit" for the build-time trampoline-replacement family is a historical carry-over from when these were Rust dispatch-table entries, not a description of current behavior. | Rename the family to reflect its actual nature, e.g. ~nelisp_nativefn_*~ or ~nelisp_trampoline_*~ (keeping "jit" reserved for the real ~packages/nelisp-jit~ runtime compiler) | 50 files reference `nelisp_jit_*`/`nl_jit_*`; these ARE linked object-file exported symbols (`.o` archives via `nelisp-aot-compile-to-object`), consumed by Rust `build.rs::link_elisp_cc_spike` and `unified_fn_ptr` by exact symbol name — a rename requires a coordinated Rust-side rename too (out of this repo's elisp-only scope). Also heavily cross-referenced in docs/design 48, 77, 77b, 100, 120. | P2 (rename Rust+elisp together in a dedicated pass, not part of this batch) |
+| 9 | Exit code ~87~ (observed in FINDINGS.md as "frame-stack corrupt needed > 2^32" crashes) vs. exit code ~88~ (~ExitProcess 88~, ~scripts/nelisp-standalone-build.el:1330~/~:1362~, documented as alloc-fail) | ~88~ is a deliberately chosen, source-defined exit code emitted by this repo's own crt0/allocator path. ~87~ appears repeatedly in FINDINGS.md observations but is **not** emitted by any ~ExitProcess~/exit call within the elisp-reader scope swept here — it looks like it originates from a Rust-side panic/guard path outside this sweep's scope (a "frame-stack guard"), and is not defined as a named constant anywhere the sweep covers. | Two magic numbers that look like a matched pair (87/88) but have very different discoverability: 88 is greppable and commented at its call site, 87 is not centrally defined/named anywhere in the elisp codebase, only observed empirically in debug logs. | Not a rename target (elisp side has nothing to rename); recommend adding a symbolic constant + central comment table for exit codes (0, 42, 87, 88, ...) wherever the Rust-side "frame-stack guard" lives, cross-referenced from ~scripts/nelisp-standalone-build.el~'s existing 88 comment. | N/A — informational, Rust-side, out of elisp scope. | P3 |
+
+** P3 — cosmetic / confirmed non-issues (checked, no action needed)
+
+| # | Name | Verdict |
+|---+-------------------------------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| 10 | ~nl_kw_is_keyword~ (~scripts/nelisp-standalone-build.el:14371~) | Confirmed correct: checks whether a Sexp is a Symbol(tag 4) whose first name byte is ~:~ (58). This week's crash was a NULL-name-buffer bug in a *caller*, not a naming problem. No rename needed. |
+| 11 | ~atomic-fetch-add~ / ~atomic-compare-exchange~ (~lisp/nelisp-cc-atomic-raw-mem.el~) | Confirmed correct: real hardware `lock xadd`/`lock cmpxchg` with `Ordering::SeqCst`, used for refcount ops that must be safe under the standalone tool's genuine multi-process/multi-thread parallel-build modes (~scripts/nelisp-standalone-build.el:4566~ comment: "SeqCst atomic increment so concurrent threads (parallel build) never..."). Not misleading — this is actually about concurrency. |
+| 12 | ~actor-bench~, ~soak-worker~, ~standalone-selfhost-mt-test~, ~standalone-parallel-compile-test~ (Makefile) | Confirmed correct: genuine actor-model runtime, real 3-lane worker pool, real `clone(2)`+atomics OS threads, real `fork(2)` multi-process build. Not part of this misleading-name problem; included above only as contrast. |
+| 13 | ~nl_boundary_maybe_reclaim~ / "boundary reclaim" vs. "form-boundary GC" | These are the *same* concept, not two: "boundary" consistently refers to the top-level-form execution boundary where the bump-arena tail can be reclaimed if nothing escaped (~scripts/nelisp-standalone-build.el:10479-10522~). No naming conflict found. |
+
+* Recommended rename batch plan
+
+Given the P1 findings are the highest-value fix (they are the ones that
+actively produce wrong mental models, as this week demonstrated) and the
+P2 findings are either high-blast-radius (mirror, jit_) or user-facing
+builtin surface (gc-diag), the recommended order is:
+
+1. **Batch 1 (P1, source-only, no ABI/binary-symbol impact) — do first:**
+   - ~nl_gc_collect_published~ family → ~nl_gc_collect_from_recorded_roots~
+     / ~nl_gc_mark_recorded_*~ (item 3). These are DSL-internal defun names
+     baked at AOT-compile time, not Rust-linked symbols — pure `sed`
+     rename inside ~scripts/nelisp-standalone-build.el~ and
+     ~scripts/nelisp-flat-arena-probe.el~.
+   - Add a one-paragraph doc-caveat (no rename) to ~nl_val_clone_into~'s
+     docstring clarifying the shallow-rebox fast path (item 4) — already
+     mostly done by commit ~0f66cb1c~'s own comment; just needs the public
+     C-ABI docstring at the top of ~lisp/nelisp-cc-sexp-clone-into.el~ and
+     ~lisp/nelisp-cc-val-load.el~ updated to stop calling the whole family
+     "clone" unconditionally.
+
+2. **Batch 2 (P1, linked BSS symbol — needs full rebuild to verify):**
+   - ~nl_safepoint_ctx~ → ~nl_gc_loop_ctx~, ~nl_gc_safepoint~ →
+     ~nl_gc_midform_collect~ (items 1-2). Mechanical `sed -i
+     's/nl_safepoint_ctx/nl_gc_loop_ctx/g; s/nl_gc_safepoint/nl_gc_midform_collect/g'`
+     across ~scripts/nelisp-standalone-build.el~ and
+     ~lisp/nelisp-cc-sf-while.el~, then rebuild — this symbol is emitted via
+     ~nelisp-link-symbol~ so the *name* only matters for source
+     readability/gdb-session friendliness, not ABI compat with anything
+     external (nothing outside this repo links against it by name).
+
+3. **Batch 3 (P2, user-facing builtin — needs a deprecation-style path):**
+   - ~nelisp--gc-diag~ → keep the old name as an alias for one release,
+     add ~nelisp--interp-diag~ as the new primary name, migrate the 3
+     docs/design references and the test suite call sites, then drop the
+     alias. Do NOT silently rename a builtin callable from user NeLisp
+     source without a grace period.
+
+4. **Batch 4 (P2, cross-repo/high-blast-radius — separate dedicated
+   effort, not part of a quick sed pass):**
+   - ~wf_ht_*~ → ~nl_ht_*~ (mechanical, source-only, moderate size).
+   - "mirror" family: recommend documentation-only fix, not a rename,
+     because it mirrors (no pun intended) a Rust-side name 1:1 and a
+     one-sided rename would desync the two codebases' vocabularies.
+   - ~jit_~/~nelisp_jit_*~ in ~lisp/nelisp-cc-jit-*.el~: recommend a
+     *joint* Rust+elisp rename in a dedicated Doc, since these are
+     linked object-file exported symbols consumed by exact name from
+     `build.rs`/`unified_fn_ptr`. Out of scope for a mechanical elisp-only
+     sed batch.
+
+**Verification for any batch that touches Batches 1-3 (source-only or
+linked-symbol renames):** full standalone build
+(~make standalone-reader~), ~make standalone-reader-test~, all
+~standalone-reader-*-smoke~ targets (load/fmt/prelude-equal/
+nested-backquote/derived-mode/process/realrt/repl/prelude/ffi/tls/
+chunk-growth), plus the AOT-compiler and CC test suites
+(~make standalone-eval-test~, existing ERT suites under ~test/~ that cover
+~nelisp-cc-*~ and ~nelisp-aot-compiler.el~). Diff before/after byte
+identity on a fixed input corpus (the existing 60-file org replay probe
+used in commit ~0f66cb1c~ is a good template) to confirm zero behavior
+change from a pure rename.
+
+* Summary counts
+
+| Priority | Count | Items |
+|----------+-------+----------------------------------------------------------------|
+| P1       |     4 | safepoint_ctx, gc_safepoint, gc_collect_published family, clone_into shallow-rebox doc gap |
+| P2       |     5 | gc-diag switch multiplexer, wf_ prefix overload, "mirror", jit_ prefix, exit-code 87 undocumented |
+| P3       |     4 | kw_is_keyword (fine), atomic ops (fine), Makefile actor/worker/mt targets (fine), boundary_maybe_reclaim (fine, single concept) |
+
+No code changes were made in this branch. This is an investigation and
+proposal document only.
