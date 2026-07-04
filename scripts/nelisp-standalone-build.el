@@ -1980,12 +1980,12 @@ arm64 Linux has no legacy x86 numbering)."
     ;;      body (only between top-level forms), so a hot loop's cache
     ;;      survives for that loop's entire run.
     ;;   2. Mark+sweep (both the non-default top-level escape-hatch AND the
-    ;;      ALWAYS-sweep-never-compact mid-form `nl_gc_collect_published'
+    ;;      ALWAYS-sweep-never-compact mid-form `nl_gc_collect_from_recorded_roots'
     ;;      safepoint collector that DOES fire inside a hot loop, from
     ;;      `nl_gc_safepoint's `while' back-edge) can free anything this
     ;;      cache is the only reference to.  `nl_mxcache_mark_all' is
     ;;      called from both `nl_gc_mark_roots' and
-    ;;      `nl_gc_collect_published' and marks BOTH the key (form_ptr) and
+    ;;      `nl_gc_collect_from_recorded_roots' and marks BOTH the key (form_ptr) and
     ;;      the value (expansion_ptr) of every CURRENT-epoch slot, mirroring
     ;;      the block+slot marking pair `nl_gc_mark_root_blocks'/
     ;;      `nl_gc_mark_slot' already use for the driver's own root
@@ -2715,7 +2715,7 @@ arm64 Linux has no legacy x86 numbering)."
                (nl_compact_unpin_src)
                (nl_compact_unpin_roots))))))))
     ;; Doc 152 §11.41 Stage 4a: safepoint-context stack ops (DORMANT — no caller
-    ;; yet; the driver publish + mid-form collect_published land in 4b under
+    ;; yet; the driver publish + mid-form collect_from_recorded_roots land in 4b under
     ;; poison validation, so these change no runtime behaviour).  The driver will
     ;; push the executing top-level form's precise root-set before eval and pop
     ;; after the boundary collect; a mid-form safepoint reads frame[depth-1].
@@ -2748,12 +2748,12 @@ arm64 Linux has no legacy x86 numbering)."
     ;; the poison validation is built to expose (§11.41 refinement 2).  It also
     ;; always SWEEPS (never compacts) -- mid-form objects must not move.
     ;;
-    ;; Mark ONE published frame precisely: the same root arms as `nl_gc_mark_roots'
+    ;; Mark ONE recorded frame precisely: the same root arms as `nl_gc_mark_roots'
     ;; MINUS the conservative scan, the rootstack and the shared symentry (those
     ;; are global -- marked once per collection, not per frame).  `env' is the eval
     ;; ctx (mirror@+0 / frames@+32 / unbound@+64 inside the env block); `result' is
     ;; the executing form AST -- the root §11.34 missed.
-    (defun nl_gc_mark_published_frame (env result out pool src cursor bsym)
+    (defun nl_gc_mark_recorded_frame (env result out pool src cursor bsym)
       (nl_seq2 (nl_gc_mark_root_blocks env result out pool src cursor bsym)
        (nl_seq2 (nl_gc_mark_slot (+ env 0))     ; mirror / globals
         (nl_seq2 (nl_gc_mark_mirror_buckets (+ env 0))
@@ -2768,12 +2768,12 @@ arm64 Linux has no legacy x86 numbering)."
     ;; Read the 7-slot frame at BASE (env@+0/result@+8/out@+16/pool@+24/src@+32/
     ;; cursor@+40/bsym@+48) and mark it.  Reads are passed straight as args (no
     ;; across-call locals; mirrors `nl_gc_ctx_store').
-    (defun nl_gc_mark_published_frame_at (base)
-      (nl_gc_mark_published_frame
+    (defun nl_gc_mark_recorded_frame_at (base)
+      (nl_gc_mark_recorded_frame
        (ptr-read-u64 base 0) (ptr-read-u64 base 8) (ptr-read-u64 base 16)
        (ptr-read-u64 base 24) (ptr-read-u64 base 32) (ptr-read-u64 base 40)
        (ptr-read-u64 base 48)))
-    ;; Mark every published frame [0,depth).  Nested eval / load / error paths
+    ;; Mark every recorded frame [0,depth).  Nested eval / load / error paths
     ;; push outer contexts, so all live frames must be marked (§11.41 refinement 1).
     ;; Walk frames [i,depth) by tail-recursion -- index/depth thread through
     ;; ARGS, not a mutated let-local.  (Historical: a constant-init let-local
@@ -2784,15 +2784,15 @@ arm64 Linux has no legacy x86 numbering)."
     ;; folded local is now a loud compile error.  The ARGS-threading style is
     ;; kept, but it is no longer a correctness requirement.)
     ;; depth<=64 so the recursion is bounded (mirrors nl_gc_sweep_chunks).
-    (defun nl_gc_mark_published_contexts_from (i depth)
+    (defun nl_gc_mark_recorded_contexts_from (i depth)
       (if (< i depth)
           (nl_seq2
-           (nl_gc_mark_published_frame_at
+           (nl_gc_mark_recorded_frame_at
             (+ (data-addr nl_safepoint_ctx) (+ 64 (* i 56))))
-           (nl_gc_mark_published_contexts_from (+ i 1) depth))
+           (nl_gc_mark_recorded_contexts_from (+ i 1) depth))
         0))
-    (defun nl_gc_mark_published_contexts ()
-      (nl_gc_mark_published_contexts_from
+    (defun nl_gc_mark_recorded_contexts ()
+      (nl_gc_mark_recorded_contexts_from
        0 (ptr-read-u64 (data-addr nl_safepoint_ctx) 0)))
     ;; Shared symentry symbol (268436328): mark the BLOCK + walk it as a Symbol
     ;; SLOT so its name buffer is kept alive (mirrors the `nl_gc_mark_roots' arm).
@@ -2804,16 +2804,16 @@ arm64 Linux has no legacy x86 numbering)."
     ;; allowed), mode 1 = MIDFORM (precise-only).  NL_GC_IN_PROGRESS (ctx+24) is a
     ;; reentrancy guard.  Always mark+sweep (never compact): mid-form objects must
     ;; stay put, and precise-only marking has no conservatively-found blocks to pin.
-    (defun nl_gc_collect_published (mode)
+    (defun nl_gc_collect_from_recorded_roots (mode)
       (if (= (ptr-read-u64 (data-addr nl_safepoint_ctx) 24) 1) 0
         (nl_seq2 (ptr-write-u64 (data-addr nl_safepoint_ctx) 24 1)
-         (nl_seq2 (nl_gc_mark_published_contexts)
+         (nl_seq2 (nl_gc_mark_recorded_contexts)
           (nl_seq2 (nl_gc_mark_rootstack)
            (nl_seq2 (nl_gc_mark_symentry)
             (nl_seq2 (if (= mode 0) (nl_gc_conserv_maybe) 0)
              ;; perf/macroexpansion-cache: this mid-form safepoint collector
              ;; is ALWAYS mark+sweep (never compact -- see the comment above
-             ;; `nl_gc_collect_published'), i.e. exactly the path a hot loop's
+             ;; `nl_gc_collect_from_recorded_roots'), i.e. exactly the path a hot loop's
              ;; `nl_gc_safepoint' back-edge can trigger.  Mark cache entries
              ;; alive here too, or a live cache value with no other root
              ;; would be freed between loop iterations.
@@ -2833,7 +2833,7 @@ arm64 Linux has no legacy x86 numbering)."
           (if (< (ptr-read-u64 268436184 0)
                  (ptr-read-u64 (data-addr nl_safepoint_ctx) 40))
               0
-            (nl_seq2 (nl_gc_collect_published 1)
+            (nl_seq2 (nl_gc_collect_from_recorded_roots 1)
              (nl_seq2 (ptr-write-u64 (data-addr nl_safepoint_ctx) 40
                                      (+ (ptr-read-u64 268436184 0) 16777216))
                       (ptr-write-u64 (data-addr nl_safepoint_ctx) 32
@@ -3138,7 +3138,7 @@ argument (reachability + in-arena bounds checks).")
     ((:lit "nelisp--arena-boot-load-verify") . (bf_arena_boot_load_verify args out))
     ((:lit "nelisp--arena-load-split-verify") . (bf_arena_load_split_verify args out))
     ((:lit "nelisp--arena-value-survival") . (bf_arena_value_survival args out))
-    ((:lit "garbage-collect") . (seq (nl_gc_collect_published 0)
+    ((:lit "garbage-collect") . (seq (nl_gc_collect_from_recorded_roots 0)
                                      (bf_arena_stats out)))
     ((:lit "nelisp--gc-diag") . (bf_gc_diag args out))
     ((:lit "nelisp--arena-force-grow-smoke") . (bf_arena_force_grow_smoke out))
@@ -3339,8 +3339,8 @@ unresolved at link time."
              (nelisp_cons_construct slot rest out)
              0)))
     ;; Env-bridge CAPTURE (Doc 17 §11.2 Bridge 1) for the heap-v0 cold-loader.
-    ;; Reads the codec's env-root-manifest 5 roots from the LIVE published EvalCtx
-    ;; (env = nl_safepoint_ctx+64, the GC-published frame-0 context) and returns the
+    ;; Reads the codec's env-root-manifest 5 roots from the LIVE recorded EvalCtx
+    ;; (env = nl_safepoint_ctx+64, the GC-recorded frame-0 context) and returns the
     ;; list (globals_record frames_record unbound_marker max_recursion use_elisp_apply),
     ;; directly consumable by `nelisp-heap-image-encode-roots'.  This is the "symmetric
     ;; getter to read the current globals_record" that Doc 17 §11.2 says standalone
@@ -3348,7 +3348,7 @@ unresolved at link time."
     ;; (tag 12 Record), frames SLOT @env+32 (tag 12), unbound SLOT @env+64 (tag 4
     ;; Symbol -- the whole 32B slot, NOT +8), max_recursion scalar @env+104, use_elisp
     ;; scalar @env+112.  Records/Symbol roots are returned as their Sexp value (slot
-    ;; copy); the two scalars as Int Sexps.  Returns nil if no frame is published.
+    ;; copy); the two scalars as Int Sexps.  Returns nil if no frame is recorded.
     (defun bf_env_capture_roots (out)
       (let* ((env (ptr-read-u64 (+ (data-addr nl_safepoint_ctx) 64) 0))
              (g (alloc-bytes 32 8)) (f (alloc-bytes 32 8)) (u (alloc-bytes 32 8))
@@ -3633,12 +3633,12 @@ unresolved at link time."
          (wf_cons_int slen s1 out)
          0)))
     ;; flat-arena spike step 3b-i (root-reachability precondition for the
-    ;; pointer swizzle): prove the published root set reaches the whole live
+    ;; pointer swizzle): prove the recorded root set reaches the whole live
     ;; object set, so a from-roots per-type walk that records pointer fields
     ;; (the actual swizzle, step 3b-ii) will cover every object the dump
     ;; bulk-copies.  REUSES the battle-tested GC mark-from-roots
-    ;; (`nl_gc_mark_published_contexts' / `-rootstack' / `-symentry', the same
-    ;; calls `nl_gc_collect_published' makes) so no per-type walker is
+    ;; (`nl_gc_mark_recorded_contexts' / `-rootstack' / `-symentry', the same
+    ;; calls `nl_gc_collect_from_recorded_roots' makes) so no per-type walker is
     ;; re-implemented; then linearly counts the marked (reachable) blocks and
     ;; CLEARS the marks back to 0, leaving the heap exactly as before (NO
     ;; sweep -> nothing freed).  The GC-in-progress flag (ctx+24) is held so a
@@ -3676,7 +3676,7 @@ unresolved at link time."
          (ptr-write-u64 reach 0 0)
          (ptr-write-u64 total 0 0)
          (ptr-write-u64 (data-addr nl_safepoint_ctx) 24 1)
-         (nl_gc_mark_published_contexts)
+         (nl_gc_mark_recorded_contexts)
          (nl_gc_mark_rootstack)
          (nl_gc_mark_symentry)
          (ptr-write-u64 (data-addr nl_safepoint_ctx) 24 0)
@@ -3888,8 +3888,8 @@ unresolved at link time."
                         (if (= tag 10)
                             (nl_fa_field (+ sp 8) (ptr-read-u64 sp 8) ds span dest cin cout dir)
                           0)))))))))))
-    ;; step 3c (all roots): walk every published frame's roots + the shared
-    ;; symentry, mirroring `nl_gc_mark_published_frame' / `-contexts_from' /
+    ;; step 3c (all roots): walk every recorded frame's roots + the shared
+    ;; symentry, mirroring `nl_gc_mark_recorded_frame' / `-contexts_from' /
     ;; `nl_gc_mark_symentry' so the swizzle/relocate reaches the COMPLETE live
     ;; graph (globals + frame stack + unbound marker + the per-frame reader
     ;; transients result/out/src/cursor/bsym), not just frame[0] globals.
@@ -6465,7 +6465,7 @@ unresolved at link time."
     ;; safepoint (in nl_sf_while) can invoke a sound collect.  push BEFORE eval /
     ;; pop AFTER (the boundary collect stays the direct nl_gc_collect and reads
     ;; the driver locals, not the ctx, so popping here is fine).  Returns rc.
-    (defun nl_driver_eval_published (result env out pool src cursor bsym)
+    (defun nl_driver_eval_with_recorded_roots (result env out pool src cursor bsym)
       (seq (nl_gc_ctx_push env result out pool src cursor bsym)
            (let* ((rc (nelisp_eval_call result env out)))
              (seq (nl_gc_ctx_pop) rc))))
@@ -6481,7 +6481,7 @@ unresolved at link time."
            (if (= prc 1)
                (seq
                 (ptr-write-u64 out 0 0) (ptr-write-u64 out 8 0)
-                (let* ((rc (nl_driver_eval_published result env out pool src cursor bsym)))
+                (let* ((rc (nl_driver_eval_with_recorded_roots result env out pool src cursor bsym)))
                   ;; GC trigger must compare TOTAL allocated bytes across all
                   ;; chunks (268436184 = chunk-bytes-reserved running counter),
                   ;; not the chunk-0 bump offset (268435456) — after Doc 140's
@@ -6509,7 +6509,7 @@ unresolved at link time."
            (if (= prc 1)
                (seq
                 (ptr-write-u64 out 0 0) (ptr-write-u64 out 8 0)
-                (let* ((rc (nl_driver_eval_published result env out pool src cursor bsym)))
+                (let* ((rc (nl_driver_eval_with_recorded_roots result env out pool src cursor bsym)))
                   (if (= rc 0)
                       ;; GC trigger on TOTAL chunk-bytes-reserved (268436184),
                       ;; not the chunk-0 bump offset (268435456).  See the note
@@ -6939,7 +6939,7 @@ Wave-2 (C) appends bf_ash (shl/sar compose) + bf_str_lt (byte-lexicographic).")
     ((:lit "ptr-read-u64") . (wf_write_int out (ptr-read-u64 (wf_argval args 0) (wf_argval args 1))))
     ((:lit "ptr-write-u64") . (seq (ptr-write-u64 (wf_argval args 0) (wf_argval args 1) (wf_argval args 2)) (wf_write_int out 0)))
     ((:lit "alloc-bytes") . (wf_write_int out (alloc-bytes (wf_argval args 0) (wf_argval args 1))))
-    ((:lit "garbage-collect") . (seq (nl_gc_collect_published 0)
+    ((:lit "garbage-collect") . (seq (nl_gc_collect_from_recorded_roots 0)
                                      (bf_arena_stats out)))
     ((:lit "nelisp-process-call-process") . (nl_bi_process_call_process args out))
     ((:lit "nelisp-process-start") . (nl_bi_process_start_process args out))
@@ -10634,7 +10634,7 @@ more 0))' check in `nl_eval_source_all' stops the top-level loop and every
                        ;; QUIT_FLAG so the caller's existing
                        ;; "(- (ptr-read-u64 268435464 0) 1)" exit-code check
                        ;; reports failure.
-                       (let* ((form_rc (nl_driver_eval_published
+                       (let* ((form_rc (nl_driver_eval_with_recorded_roots
                                         result ctx out pool src cursor builtin_sym)))
                          (if (= report_errors 1)
                              (if (= form_rc 0)

@@ -130,7 +130,7 @@
     ;; Invoke the GC unit's gated mid-form collect at the while backedge (after a
     ;; COMPLETE iteration, status==0) -- the one point where per-iteration scratch
     ;; (arg-list cons / materialising-accessor box / test+body intermediates) is
-    ;; provably dead, with only env / out / published-roots / rootstack holding
+    ;; provably dead, with only env / out / recorded-roots / rootstack holding
     ;; live values.  `nl_gc_safepoint' is gated (enable + alloc-debt, default OFF)
     ;; and reads its root-set from nl_safepoint_ctx, so this takes no arguments.
     ;; arity 4 (even -> rsp 16-aligned at the call site), exactly one extern-call.
