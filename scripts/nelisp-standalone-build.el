@@ -14066,7 +14066,7 @@ signalled abort it builds err_out=(TAG . VAL) from the M6 arena stash so
         (seq
          (nl_clx_write_nil nil_slot)
          (nl_env_capture_lexical_with_filter env nil_slot 0 out))))
-    (defun nl_env_capture_lexical_filtered (env lambda-args out)
+    (defun nl_env_capture_lexical_filtered (env lambda-args out _pad)
       (let* ((filter_slot (alloc-bytes 32 8)))
         (seq
          (nl_clx_write_nil filter_slot)

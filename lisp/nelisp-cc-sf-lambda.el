@@ -45,9 +45,9 @@
 ;;
 ;; ABI constants used (§100.B frozen):
 ;;   SEXP_TAG_CONS = 7
-;;   nl_env_capture_lexical_filtered: (*mut c_void, *const Sexp, *mut Sexp) → i64
+;;   nl_env_capture_lexical_filtered: (*mut c_void, *const Sexp, *mut Sexp, i64) → i64
 ;;     Captures current lexical env filtered by lambda args; writes result into
-;;     *out; returns 0.
+;;     *out; returns 0.  The final pad keeps the AOT callee arity even.
 ;;   nl_cons_prepend_clone: (*const Sexp, *const Sexp, *mut Sexp) → i64
 ;;     Clones both car and cdr; builds Sexp::Cons; assigns to *out; returns 0.
 ;;
@@ -132,7 +132,7 @@
     (defun nl_sf_lambda (args env out s1)
       (if (= (sexp-tag args) 7)
           (nl_sf_lambda_captured
-           (extern-call nl_env_capture_lexical_filtered env args out)   ; FIRST ✓
+           (extern-call nl_env_capture_lexical_filtered env args out 0) ; FIRST ✓
            args out s1)
         1)))
 
@@ -142,7 +142,7 @@ Six defuns (seq form).  Uses nl_cons_prepend_clone for refcount-safe cons buildi
 
 Algorithm:
   1. Check args is Cons (tag 7).
-  2. nl_env_capture_lexical_filtered(env, args, out) → out = captured-env
+  2. nl_env_capture_lexical_filtered(env, args, out, 0) → out = captured-env
      [extern-call FIRST ✓].
   3. nl_cons_prepend_clone(out, args, out) → out = (captured FORMALS BODY...)
      [extern-call FIRST ✓; clones captured-env + args with proper refcounts].
