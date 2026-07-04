@@ -123,7 +123,25 @@ touched.")
 
 The bytes below this offset are the bootstrap control block.  Doc 140 Stage 2
 adds chunk control slots and the first chunk descriptor there while allocation
-still uses the historical fixed first arena.")
+still uses the historical fixed first arena.
+
+perf/macroexpansion-cache (Increment 1) REVERTED an earlier attempt to raise
+this to #x460 (1120) to make room for new fixed control slots: `nl_cold_load_arena'
+(the `--cold-load-from' image restore path) hardcodes this SAME data-start
+offset as a raw 1024 literal (`(ds (+ base 1024))'), NOT derived from this
+constant, and the ~60-file Org cold-image e2e SIGSEGVs on cold-boot with the
+mismatch (a dump taken from a normal boot with real objects starting at 1120
+gets restored assuming 1024 -- every offset in the dumped image is shifted 96
+bytes from where cold-load expects it).  Changing this shared, dumped-image-
+format-relevant constant is unsafe without auditing (and fixing) every other
+hardcoded assumption of it across this file AND the sibling nelisp-emacs-lib
+repo's own tooling.  The cache's new control slots instead live in the
+SEPARATE, never-dumped BSS unit (`nelisp-standalone--arena-base-slot-unit',
+`nl_mxcache_*' symbols) -- ordinary process BSS is not part of the arena
+dump/restore format at all, so it needs no reasoning about cold-load
+alignment, and is naturally zero-fresh on every process start (cold-booted
+or not), which is exactly the \"flush the cache across a relocation event\"
+property this design needs for free.")
 
 (defconst nelisp-standalone--arena-chunk-head-offset #x2c0)
 (defconst nelisp-standalone--arena-chunk-current-offset #x2c8)
@@ -455,7 +473,19 @@ storage — not an arena reservation."
    ;; `nelisp-aot-compiler--win64-rsp-save-symbol' for the full rationale
    ;; (a callee-saved register clobbered live interpreter state; a fixed
    ;; absolute arena address is not guaranteed mapped post-Doc-140).
-   (list (cons 'bss (+ 3808 1048576)))
+   ;; perf/macroexpansion-cache: +3808+1MiB (after nl_dynalign_rsp_save) =
+   ;; three NEW 8B control slots for the macro-expansion cache
+   ;; (nl_mxcache_epoch / nl_mxcache_table_base / nl_mxcache_disable_lookup).
+   ;; Deliberately placed in this ordinary, never-dumped BSS unit rather than
+   ;; the fixed low-address arena control block: BSS is not part of the
+   ;; `--cold-load-from' image format at all (only chunk-0's bump-allocated
+   ;; DATA region is dumped/restored), so it needs no reasoning about
+   ;; cold-load offset alignment and is naturally zero-fresh on every
+   ;; process start -- see the commentary on
+   ;; `nelisp-standalone--arena-data-start-offset' for why the low-address
+   ;; block was tried first and reverted (a hardcoded-1024 cold-load
+   ;; assumption elsewhere in this file).
+   (list (cons 'bss (+ 3808 1048576 24)))
    (list (nelisp-link-symbol "nl_arena_base" 0
                              :section 'bss :bind 'global :type 'object)
          (nelisp-link-symbol "nl_rootstack_top" 8
@@ -469,6 +499,12 @@ storage — not an arena reservation."
          (nelisp-link-symbol "nl_fa_tbl_base" (+ 3728 1048576)
                              :section 'bss :bind 'global :type 'object)
          (nelisp-link-symbol "nl_frame_push_sym0" (+ 3736 1048576)
+                             :section 'bss :bind 'global :type 'object)
+         (nelisp-link-symbol "nl_mxcache_epoch" (+ 3808 1048576)
+                             :section 'bss :bind 'global :type 'object)
+         (nelisp-link-symbol "nl_mxcache_table_base" (+ 3816 1048576)
+                             :section 'bss :bind 'global :type 'object)
+         (nelisp-link-symbol "nl_mxcache_disable_lookup" (+ 3824 1048576)
                              :section 'bss :bind 'global :type 'object)
          (nelisp-link-symbol "nl_frame_push_sym1" (+ 3768 1048576)
                              :section 'bss :bind 'global :type 'object)
@@ -1889,6 +1925,245 @@ arm64 Linux has no legacy x86 numbering)."
                 (nl_gc_mark_slot (record-slot-ref-ptr ht 1))
               0))
         0))
+    ;; ===================================================================
+    ;; MACROEXPANSION CACHE (perf/macroexpansion-cache, Increment 1).
+    ;;
+    ;; FINDINGS.md documents that every macro call is re-expanded from its
+    ;; source form on every evaluation (no cache), which dominates cost in
+    ;; macro-heavy hot loops (the `(require 'ol-gnus)' / org-mode
+    ;; `nl_val_clone_into' findings).  This is a direct-mapped, fixed-size
+    ;; (65536 slots x 24B = 1.5 MiB) cache keyed on the CALL-SITE FORM's own
+    ;; Sexp-box pointer: stable for the life of the code, because a
+    ;; macro-call form is always Cons-tagged, and
+    ;; `nl_cons_car_ptr'/`nl_cons_cdr_ptr' only materialise a FRESH
+    ;; (unstable) box for an IMMEDIATE word -- a Cons is always a pointer
+    ;; word, returned as-is (see `nl_cons_car_ptr's own commentary in
+    ;; lisp/nelisp-cc-jit-cons-car-ptr.el).  Slot layout: {form_ptr@0,
+    ;; expansion_ptr@8, epoch@16}; hash = (form_ptr >> 4) & 65535, mirroring
+    ;; `nl_compact_hash's shift-4 spread; overwrite-on-collision (no
+    ;; chaining) bounds memory with no explicit LRU.  Table + epoch counter
+    ;; live in the fixed low-memory control page: MXCACHE_EPOCH @(data-addr nl_mxcache_epoch)
+    ;; (new, 8B), MXCACHE_TABLE_BASE @(data-addr nl_mxcache_table_base) (new, 8B, 0 until first
+    ;; store lazily `nl_os_alloc_chunk's the 1.5 MiB table) -- both
+    ;; immediately after the existing `nl_tty_slot_dev_tty_path' slot
+    ;; (268436520+8), well inside the documented "first low-memory page"
+    ;; (4096B from 268435456).
+    ;;
+    ;; INVALIDATION STORY (the two hazards a pointer-keyed cache must
+    ;; survive on THIS GC, confirmed by reading it rather than assumed):
+    ;;   1. Doc 146 §5 MOVING compaction (`nl_gc_compact', ON by default via
+    ;;      268435608) relocates every live object -- raw pointer identity
+    ;;      is NOT stable across it.  Rather than wire this cache into the
+    ;;      mark/rewrite/move phases (real GC-adjacent surgery, correctly
+    ;;      out of scope for this bounded increment), MXCACHE_EPOCH is
+    ;;      bumped once at the very top of every `nl_gc_compact' call (see
+    ;;      there).  A lookup only matches when a slot's stored epoch
+    ;;      equals the CURRENT epoch, so every entry from before a
+    ;;      compaction becomes O(1) invisible from then on: no dangling
+    ;;      pointer is ever dereferenced.  This is safe to lose cache-wise
+    ;;      because a form-boundary compaction never runs INSIDE a loop
+    ;;      body (only between top-level forms), so a hot loop's cache
+    ;;      survives for that loop's entire run.
+    ;;   2. Mark+sweep (both the non-default top-level escape-hatch AND the
+    ;;      ALWAYS-sweep-never-compact mid-form `nl_gc_collect_published'
+    ;;      safepoint collector that DOES fire inside a hot loop, from
+    ;;      `nl_gc_safepoint's `while' back-edge) can free anything this
+    ;;      cache is the only reference to.  `nl_mxcache_mark_all' is
+    ;;      called from both `nl_gc_mark_roots' and
+    ;;      `nl_gc_collect_published' and marks BOTH the key (form_ptr) and
+    ;;      the value (expansion_ptr) of every CURRENT-epoch slot, mirroring
+    ;;      the block+slot marking pair `nl_gc_mark_root_blocks'/
+    ;;      `nl_gc_mark_slot' already use for the driver's own root
+    ;;      scratch.  Consequence: a live cache entry's key form is kept
+    ;;      alive for as long as it stays hashed into the table (bounded to
+    ;;      at most 65536 entries, and in practice far fewer thanks to
+    ;;      hash-collision overwrite churn) -- a small, BOUNDED, deliberate
+    ;;      deviation from "never keep a dead form alive," traded for NOT
+    ;;      needing a fragile evict-before-sweep ordering dependency (which
+    ;;      would otherwise be required to stop a stale freed key's address
+    ;;      from being silently reused by an unrelated later allocation and
+    ;;      spuriously matching a hash bucket -- a real ABA/aliasing hazard
+    ;;      this design avoids by construction).
+    ;;
+    ;; This matches real Emacs's own byte-compiled semantics: a macro call
+    ;; site is expanded once and the expansion is reused, so redefining a
+    ;; macro after code referencing it has already been "compiled" (here:
+    ;; cached) is undefined behavior, same as byte-compiled Emacs.
+    ;; ===================================================================
+    (defun nl_mxcache_hash (form_ptr) (logand (sar form_ptr 4) 65535))
+    (defun nl_mxcache_table_init ()
+      (if (= (ptr-read-u64 (data-addr nl_mxcache_table_base) 0) 0)
+          (let ((p (nl_os_alloc_chunk 1572864)))
+            (if (= p 0) 0
+              (seq (nl_os_commit_range p 0 1572864)
+                   (ptr-write-u64 (data-addr nl_mxcache_table_base) 0 p))))
+        0))
+    ;; Correctness-gate hook (Doc 156-perf increment 1): MXCACHE_DISABLE_LOOKUP
+    ;; @(data-addr nl_mxcache_disable_lookup) (new, 8B, default 0).  When set to 1 via `(nelisp--gc-diag
+    ;; 13)', every lookup unconditionally misses -- `nl_mxcache_store' still
+    ;; runs unconditionally on every macro expansion (see
+    ;; `nl_cons_macro_apply_eval'), so the interpreter behaves EXACTLY as it
+    ;; did before this increment (every macro call genuinely re-expanded from
+    ;; source).  `(nelisp--gc-diag 14)' re-enables lookups.  This is the
+    ;; "compute both and compare" debug mode: run the SAME input chain once
+    ;; with lookups enabled (default) and once with `(nelisp--gc-diag 13)'
+    ;; issued first, and diff the two runs' output/final-state for byte-
+    ;; identical equality -- any divergence would mean a cached expansion is
+    ;; not equivalent to a fresh one.
+    ;; ROOT-CAUSE FIX #2 (found via gdb tracing every lookup's form_ptr/hit
+    ;; pair over lisp/nelisp-artifact.el, reduced to a two-form repro): a
+    ;; TOP-LEVEL form's OWN outermost dispatch into `nl_eval_inner' is keyed
+    ;; on the DRIVER'S fixed `result' scratch Sexp slot (one of the ~6
+    ;; boot-allocated root blocks nl_gc_mark_root_blocks protects) -- NOT a
+    ;; freshly-parsed, per-call-site address.  `nl_eval_source_all' zeroes
+    ;; and reuses this SAME slot for every single top-level form
+    ;; (`(ptr-write-u64 result 0 0) (ptr-write-u64 result 8 0)' at the top of
+    ;; its loop, before parsing the next form into it).  So if a macro call
+    ;; that IS its own top-level form (e.g. a bare `(some-macro ...)' at
+    ;; top level, not nested inside a defun/loop body) gets cached, its key
+    ;; is really "the reused result slot's address" -- and EVERY subsequent,
+    ;; textually unrelated top-level form reuses that exact same address as
+    ;; ITS OWN form_ptr, spuriously hits the stale cache entry, and gets
+    ;; silently evaluated as the OLD cached expansion instead of itself.
+    ;; Confirmed via gdb: form_ptr 0x7fffa7e00610 (the reused slot) recurred
+    ;; once per top-level form and, after the first top-level macro call
+    ;; cached it, every later top-level form's lookup at that same address
+    ;; returned a nonzero (wrong) hit.
+    ;;
+    ;; Fix: exclude any form_ptr in the BOOT region (`nl_gc_is_boot', already
+    ;; used elsewhere to identify the driver's permanently-live, allocated-
+    ;; once-at-startup blocks -- result/out/ctx/pool/src/cursor/bsym are all
+    ;; among them) from the cache entirely -- both lookup (always miss) and
+    ;; store (no-op).  A REAL per-call-site macro form -- reached by walking
+    ;; INTO a persistent structure via nl_cons_car_ptr/cdr_ptr, e.g. a form
+    ;; nested in a function body or a loop -- is always a POST-boot
+    ;; allocation (parsed from user source well after the boot watermark is
+    ;; finalised), so this excludes exactly the unsafe "reused driver
+    ;; scratch slot" case while keeping every genuinely-repeated,
+    ;; stable-address call site (the intended, motivating use case) cached.
+    (defun nl_mxcache_lookup (form_ptr)
+      (if (= (nl_gc_is_boot form_ptr) 1) 0
+      (if (= (ptr-read-u64 (data-addr nl_mxcache_disable_lookup) 0) 1) 0
+        (let* ((base (ptr-read-u64 (data-addr nl_mxcache_table_base) 0)))
+          (if (= base 0) 0
+            (let* ((slot (+ base (* (nl_mxcache_hash form_ptr) 24))))
+              (if (= (ptr-read-u64 (+ slot 16) 0) (ptr-read-u64 (data-addr nl_mxcache_epoch) 0))
+                  (if (= (ptr-read-u64 slot 0) form_ptr)
+                      (ptr-read-u64 (+ slot 8) 0)
+                    0)
+                0)))))))
+    ;; ROOT-CAUSE FIX (found via A/B debug-compare over lisp/nelisp-artifact.el
+    ;; and reduced to a two-line repro): storing exp_slot into this cache is
+    ;; ITSELF an "escape into persistent state", exactly like setcar/setcdr/
+    ;; aset/puthash/fset/nelisp_env_set_value -- all of which bump the shared
+    ;; MUTATION EPOCH counter @268435544 so `nl_boundary_maybe_reclaim' (Doc
+    ;; 140 Stage 5) knows NOT to rewind the arena bump cursor after this
+    ;; top-level form.  Without this bump, a macro call whose expansion
+    ;; result is an IMMEDIATE value (e.g. `(defmacro m () 42)' expanding to
+    ;; the Int 42, or any expansion that itself evaluates to nil/t/an int/a
+    ;; float) looks to `nl_boundary_maybe_reclaim' like "nothing escaped, the
+    ;; whole form's garbage is dead, rewind the bump cursor" -- but exp_slot
+    ;; (the CACHED expansion Cons/box `nl_mxcache_store' just stashed a
+    ;; pointer to) is very much still referenced, from THIS cache.  Rewinding
+    ;; frees/reuses that memory for whatever the reader parses next, and the
+    ;; NEXT top-level form's own freshly-parsed nodes can end up reusing that
+    ;; exact address -- so a later, unrelated cons-headed form can spuriously
+    ;; hash/pointer-match the stale cache entry and get evaluated as the OLD
+    ;; cached expansion instead of itself.  Observed effect: every top-level
+    ;; form after the first macro call whose expansion is an immediate value
+    ;; silently stops producing output (its real body never runs) while the
+    ;; process exits cleanly -- no crash, no error, just silently wrong.
+    ;;
+    ;; This fix and the SEPARATE boot-region exclusion in `nl_mxcache_lookup'
+    ;; above address two DIFFERENT hazards found in the same investigation:
+    ;; this one protects a legitimately-cached (non-boot) expansion from a
+    ;; premature bump-cursor rewind; the boot-region check stops a reused
+    ;; DRIVER SCRATCH SLOT's address (`result', overwritten fresh for every
+    ;; top-level form) from ever being treated as a stable cache key in the
+    ;; first place.  Both are required; skip the store entirely (mirroring
+    ;; the lookup-side skip) when form_ptr is boot-region, so a boot-region
+    ;; form_ptr never reaches the mutation-epoch bump either.
+    (defun nl_mxcache_store (form_ptr expansion_ptr)
+      (if (= (nl_gc_is_boot form_ptr) 1) 0
+      (seq
+       (nl_mxcache_table_init)
+       (let* ((base (ptr-read-u64 (data-addr nl_mxcache_table_base) 0)))
+         (if (= base 0) 0
+           (let* ((slot (+ base (* (nl_mxcache_hash form_ptr) 24))))
+             (seq (ptr-write-u64 slot 0 form_ptr)
+                  (ptr-write-u64 (+ slot 8) 0 expansion_ptr)
+                  (ptr-write-u64 (+ slot 16) 0 (ptr-read-u64 (data-addr nl_mxcache_epoch) 0))
+                  (atomic-fetch-add 268435544 1)
+                  0)))))))
+    ;; GUARD (found by a real SIGSEGV in development): the table is
+    ;; lazily `nl_os_alloc_chunk'-ed (zero-filled, like every other fresh OS
+    ;; page) and MXCACHE_EPOCH itself starts at 0 (boot-zeroed, same as
+    ;; every other control slot) -- so during the window before the FIRST
+    ;; `nl_gc_compact' ever runs (current epoch == 0), a slot that was NEVER
+    ;; written also reads epoch@+16 == 0, spuriously "matching" the current
+    ;; epoch and presenting form_ptr=0/expansion_ptr=0 as if they were a
+    ;; real cached entry.  Marking a null pointer immediately SIGSEGVs.
+    ;; Require form_ptr to be nonzero (a real cons/expansion box can never
+    ;; legitimately live at address 0) before treating a slot as occupied,
+    ;; regardless of the epoch compare.
+    (defun nl_mxcache_mark_one (base i epoch)
+      (let* ((slot (+ base (* i 24))))
+        (if (= (ptr-read-u64 (+ slot 16) 0) epoch)
+            (let* ((fp (ptr-read-u64 slot 0)))
+              (if (= fp 0) 0
+                (let* ((ep (ptr-read-u64 (+ slot 8) 0)))
+                  (seq (nl_gc_mark_block fp) (nl_gc_mark_slot fp)
+                       (nl_gc_mark_block ep) (nl_gc_mark_slot ep)))))
+          0)))
+    ;; ITERATIVE walk (mirrors nl_gc_mark_pool_slots / nl_gc_mark_vec_slots):
+    ;; a RECURSIVE version here would recurse up to 65536 deep every single
+    ;; GC, blowing the native call stack (confirmed by an actual SIGSEGV in
+    ;; development -- gdb showed 46+ nested `nl_mxcache_mark_walk' frames
+    ;; before the crash).  `i' is a `let'-bound local mutated via `setq'
+    ;; inside the loop's own scope, never a parameter, matching the
+    ;; established house style for large/unbounded walks in this file.
+    (defun nl_mxcache_mark_all ()
+      (let* ((base (ptr-read-u64 (data-addr nl_mxcache_table_base) 0)))
+        (if (= base 0) 0
+          (let* ((epoch (ptr-read-u64 (data-addr nl_mxcache_epoch) 0)) (i 0))
+            (seq
+             (while (< i 65536)
+               (nl_seq2 (nl_mxcache_mark_one base i epoch)
+                        (setq i (+ i 1))))
+             0)))))
+    ;; ROOT-CAUSE FIX #3 (found by re-running the same A/B trace against the
+    ;; standalone-reader-test artifact-command smoke, which loads through a
+    ;; DIFFERENT driver loop than the CLI --load/--eval path already fixed
+    ;; above): `nl_gc_is_boot' only excludes the MAIN CLI driver's `result'
+    ;; scratch slot, which is allocated once at process boot.  But the LISP-
+    ;; LEVEL `(load FILE)' primitive (`bf_load') and `eval-string'-style
+    ;; helpers (`bf_load_eval_loop' / `bf_eval_source_string_loop') each
+    ;; `alloc-bytes' their OWN, separate `result' scratch slot EVERY TIME
+    ;; they run -- a POST-boot allocation, so `nl_gc_is_boot' does not (and
+    ;; structurally cannot) catch it.  Each of those loops has the exact
+    ;; same shape as the CLI driver: `(ptr-write-u64 result 0 0)
+    ;; (ptr-write-u64 result 8 0))' to zero-then-reuse `result' for every
+    ;; top-level form in the file being loaded.  If a macro call that is
+    ;; ITS OWN top-level form gets cached while `result' held it, every
+    ;; LATER top-level form in that SAME `load' reuses that identical
+    ;; address and spuriously hits the stale entry.
+    ;;
+    ;; Rather than chase down (and keep chasing, as new driver loops are
+    ;; added) every place that reuses a scratch slot this way, invalidate
+    ;; AT THE REUSE SITE itself: right where a loop is about to overwrite
+    ;; `result' for the next form, evict any cache row currently keyed on
+    ;; that exact address first.  This is a targeted, O(1) counterpart to
+    ;; the O(1) epoch-based compaction invalidation above, and it is the
+    ;; general, driver-independent fix: `nl_mxcache_evict' clears a slot's
+    ;; form_ptr to 0 (never a valid key) iff it currently matches ADDR,
+    ;; leaving any OTHER (hash-colliding but distinct) entry untouched.
+    (defun nl_mxcache_evict (addr)
+      (let* ((base (ptr-read-u64 (data-addr nl_mxcache_table_base) 0)))
+        (if (= base 0) 0
+          (let* ((slot (+ base (* (nl_mxcache_hash addr) 24))))
+            (if (= (ptr-read-u64 slot 0) addr)
+                (seq (ptr-write-u64 slot 0 0) 0)
+              0)))))
     ;; Mark every root (split out so the DEBUG skip-mark gate is a single if).
     (defun nl_gc_mark_roots (ctx result out pool src cursor bsym)
       (nl_seq2 (nl_gc_conserv_maybe)             ; Doc 152 §11.21 conservative stack scan
@@ -1904,6 +2179,7 @@ arm64 Linux has no legacy x86 numbering)."
              (nl_seq2 (nl_gc_mark_slot src)      ; source string
               (nl_seq2 (nl_gc_mark_slot cursor)  ; reader cursor Sexp
                        (nl_seq2 (nl_gc_mark_slot bsym)
+                        (nl_seq2
                                 ;; Doc 146: shared symentry symbol (268436328) is
                                 ;; a standalone Symbol Sexp block referenced only by
                                 ;; this slot.  Mark the BLOCK (so the 32B slot box
@@ -1915,7 +2191,11 @@ arm64 Linux has no legacy x86 numbering)."
                                 (if (= (ptr-read-u64 268436328 0) 0) 0
                                   (nl_seq2
                                    (nl_gc_mark_block (ptr-read-u64 268436328 0))
-                                   (nl_gc_mark_slot (ptr-read-u64 268436328 0)))))))))))))))) ; bsym + shared symentry + conserv wrap
+                                   (nl_gc_mark_slot (ptr-read-u64 268436328 0))))
+                                ;; perf/macroexpansion-cache: keep every CURRENT-
+                                ;; epoch cache entry's key+expansion alive (mirrors
+                                ;; the block+slot marking pair above).
+                                (nl_mxcache_mark_all)))))))))))))) ; bsym + shared symentry + mxcache + conserv wrap
     ;; ===== Doc 146 §5 moving GC (compaction). Phase 2 = forwarding. =====
     ;; Behind flag 268435608 (1=ON by default, wired at boot init; 0 = mark+sweep
     ;; escape hatch).  Forwarding hash side-table base
@@ -2306,6 +2586,14 @@ arm64 Linux has no legacy x86 numbering)."
     ;; Orchestrate phases 2-6.  Takes the 7 roots (for phase 3 rewrite).
     (defun nl_gc_compact (ctx result out pool src cursor bsym)
       (seq
+       ;; perf/macroexpansion-cache: bump MXCACHE_EPOCH FIRST, before any
+       ;; relocation happens.  This makes every existing cache entry O(1)
+       ;; invisible to `nl_mxcache_lookup' from this point on (epoch
+       ;; mismatch), so a stale (pre-move) pointer is never dereferenced --
+       ;; the cheap alternative to wiring this cache into the mark/rewrite/
+       ;; move phases below (see the invalidation-story comment above
+       ;; `nl_gc_mark_roots').
+       (ptr-write-u64 (data-addr nl_mxcache_epoch) 0 (+ (ptr-read-u64 (data-addr nl_mxcache_epoch) 0) 1))
        (nl_compact_table_init)
        (nl_compact_pin_src src)
        (nl_compact_pin_roots ctx result out pool cursor bsym)       ; pin driver scratch
@@ -2436,8 +2724,15 @@ arm64 Linux has no legacy x86 numbering)."
           (nl_seq2 (nl_gc_mark_rootstack)
            (nl_seq2 (nl_gc_mark_symentry)
             (nl_seq2 (if (= mode 0) (nl_gc_conserv_maybe) 0)
-             (nl_seq2 (nl_gc_sweep)
-                      (ptr-write-u64 (data-addr nl_safepoint_ctx) 24 0)))))))))
+             ;; perf/macroexpansion-cache: this mid-form safepoint collector
+             ;; is ALWAYS mark+sweep (never compact -- see the comment above
+             ;; `nl_gc_collect_published'), i.e. exactly the path a hot loop's
+             ;; `nl_gc_safepoint' back-edge can trigger.  Mark cache entries
+             ;; alive here too, or a live cache value with no other root
+             ;; would be freed between loop iterations.
+             (nl_seq2 (nl_mxcache_mark_all)
+              (nl_seq2 (nl_gc_sweep)
+                       (ptr-write-u64 (data-addr nl_safepoint_ctx) 24 0))))))))))
     ;; Gated mid-form safepoint (called from nl_sf_while's backedge).  enable
     ;; (ctx+8) defaults OFF -> a single cheap branch + return, so non-test runs are
     ;; unchanged.  alloc-debt gate: fire when total chunk-bytes-reserved (268436184
@@ -3092,7 +3387,17 @@ unresolved at link time."
                                 (ptr-write-u64 268435608 0 1)
                               (if (= (wf_argval args 0) 12)
                                   (ptr-write-u64 268435608 0 0)
-                                0))))))))))))
+                                ;; perf/macroexpansion-cache correctness gate:
+                                ;; 13 = force every nl_mxcache_lookup to miss
+                                ;; (behaves exactly like no cache); 14 =
+                                ;; re-enable lookups.  See the commentary on
+                                ;; `nl_mxcache_lookup' / MXCACHE_DISABLE_LOOKUP
+                                ;; @(data-addr nl_mxcache_disable_lookup).
+                                (if (= (wf_argval args 0) 13)
+                                    (ptr-write-u64 (data-addr nl_mxcache_disable_lookup) 0 1)
+                                  (if (= (wf_argval args 0) 14)
+                                      (ptr-write-u64 (data-addr nl_mxcache_disable_lookup) 0 0)
+                                    0))))))))))))))
         (let* ((nils (alloc-bytes 32 8)) (s7 (alloc-bytes 32 8)) (s6 (alloc-bytes 32 8)) (s5 (alloc-bytes 32 8)) (s4 (alloc-bytes 32 8))
                (s3 (alloc-bytes 32 8)) (s2 (alloc-bytes 32 8)) (s1 (alloc-bytes 32 8)))
           (seq
@@ -5984,6 +6289,10 @@ unresolved at link time."
     (defun bf_load_eval_loop (src cursor result pool env out bsym more)
       (while (= more 1)
         (seq
+         ;; perf/macroexpansion-cache ROOT-CAUSE FIX #3: evict any cache row
+         ;; keyed on `result' before reusing it for the next form (see
+         ;; `nl_mxcache_evict').
+         (nl_mxcache_evict result)
          (ptr-write-u64 result 0 0) (ptr-write-u64 result 8 0)
          (let* ((prc (nelisp_reader_parse_one src cursor result pool 0)))
            (if (= prc 1)
@@ -6010,6 +6319,8 @@ unresolved at link time."
     (defun bf_eval_source_string_loop (src cursor result pool env out bsym more)
       (while (= more 1)
         (seq
+         ;; perf/macroexpansion-cache ROOT-CAUSE FIX #3: see `bf_load_eval_loop'.
+         (nl_mxcache_evict result)
          (ptr-write-u64 result 0 0) (ptr-write-u64 result 8 0)
          (let* ((prc (nelisp_reader_parse_one src cursor result pool 0)))
            (if (= prc 1)
@@ -8978,6 +9289,111 @@ never sees it), which blocked the anvil-pkg ERT suite at its first test."
                       form))
                   (cdr patched)))))
 
+;; ===================================================================
+;; perf/macroexpansion-cache, Increment 1 (revives the Doc 147-disabled
+;; macro-expansion cache above with a DIFFERENT, sound design): instead of
+;; overwriting the original form's cons box in place (unsound after Doc 147,
+;; per the comment on `nelisp-standalone--patch-combiner-cons-full' above --
+;; `head_ptr' there is a materialised 32B car VIEW, not the persistent box),
+;; this keys a SEPARATE lookup table (`nl_mxcache_*', added to
+;; `nelisp-standalone--gc-source') on the whole macro-call FORM's own stable
+;; Sexp-box pointer, threaded down from `nl_ei_cons_dispatch' (see
+;; `nelisp-standalone--patch-eval-inner-mxcache' above) through
+;; `nl_eval_inner_cons' to `nl_cons_macro_apply_eval', which stores the
+;; expansion into the cache right before evaluating it.  Both replacement
+;; defuns below are BYTE-FOR-BYTE the current shipped bodies (verified via
+;; `equal' against the live `nelisp-cc-evalport-combiner-cons--source' during
+;; development) plus exactly: (a) a new leading `form_ptr' parameter, (b) one
+;; token threading `form_ptr' into the `nl_cons_macro_apply_eval' call site,
+;; (c) in `nl_cons_macro_apply_eval', wrapping the successful-expansion
+;; `nelisp_eval_call' in a `seq' with a new `nl_mxcache_store' call first.
+;; The void-function-miss fix from `--patch-void-function-miss' is folded in
+;; unchanged (same shape it already has above) so this does not regress it.
+;; ===================================================================
+(defconst nelisp-standalone--mxcache-macro-apply-eval
+  '(defun nl_cons_macro_apply_eval (form_ptr func_ptr tail_ptr env out)
+     (let* ((func_cdr (nl_cons_cdr_ptr func_ptr)))
+       (if (= (sexp-tag func_cdr) 7)
+           (let*
+               ((macrofn_ptr (nl_cons_car_ptr func_cdr))
+                (exp_slot (alloc-bytes 32 8)) (env_ptr env))
+             (let*
+                 ((rc_mac
+                   (nl_apply_function macrofn_ptr tail_ptr env_ptr
+                                      exp_slot)))
+               (if (= rc_mac 0)
+                   (seq (nl_mxcache_store form_ptr exp_slot)
+                        (nelisp_eval_call exp_slot env_ptr out))
+                 1)))
+         (nl_cons_stash_void_function env func_ptr))))
+  "perf/macroexpansion-cache: nl_cons_macro_apply_eval gains a leading
+form_ptr (the whole macro-call FORM, = the cache key) and stores the freshly
+computed expansion into `nl_mxcache_store' before evaluating it.")
+
+(defconst nelisp-standalone--mxcache-eval-inner-cons
+  '(defun nl_eval_inner_cons (form_ptr head_ptr tail_ptr env out)
+     (let* ((env_ptr env) (head_tag (sexp-tag head_ptr)))
+       (if (= head_tag 4)
+           (let* ((sp (nl_apply_special head_ptr tail_ptr env out)))
+             (if (= sp 0) 0
+               (if (= sp 1) 1
+                 (let*
+                     ((func_slot (alloc-bytes 32 8))
+                      (mirror_ptr (+ env 0)) (unbound_ptr (+ env 64)))
+                   (let*
+                       ((rc_lu
+                         (nelisp_env_lookup_function mirror_ptr
+                                                     unbound_ptr head_ptr
+                                                     func_slot)))
+                     (if (= rc_lu 0)
+                         (if (= (nl_cons_is_macro func_slot) 1)
+                             (nl_cons_macro_apply_eval form_ptr func_slot
+                                                       tail_ptr env out)
+                           (let* ((args_slot (alloc-bytes 32 8)))
+                             (let*
+                                 ((rc_args
+                                   (nl_eval_arg_list tail_ptr env_ptr
+                                                     args_slot)))
+                               (if (= rc_args 0)
+                                   (nl_apply_function func_slot args_slot
+                                                      env_ptr out)
+                                 1))))
+                       (nl_cons_stash_void_function env head_ptr)))))))
+         (let* ((func_slot (alloc-bytes 32 8)))
+           (let*
+               ((rc_eval (nelisp_eval_call head_ptr env_ptr func_slot)))
+             (if (= rc_eval 0)
+                 (let* ((args_slot (alloc-bytes 32 8)))
+                   (let*
+                       ((rc_args
+                         (nl_eval_arg_list tail_ptr env_ptr args_slot)))
+                     (if (= rc_args 0)
+                         (nl_apply_function func_slot args_slot env_ptr
+                                            out)
+                       1)))
+               1))))))
+  "perf/macroexpansion-cache + the existing void-function-miss fix, combined:
+adds `form_ptr' as nl_eval_inner_cons's new first parameter (threaded from
+nl_ei_cons_tail) so `nl_cons_macro_apply_eval' can key the cache off it;
+also folds in the void-function-miss stash fix unchanged.")
+
+(defun nelisp-standalone--patch-combiner-cons-mxcache (src)
+  "Return combiner-cons SRC (already run through
+`nelisp-standalone--patch-combiner-cons-full') with `nl_cons_macro_apply_eval'
+and `nl_eval_inner_cons' swapped for the cache-aware versions above."
+  (cons (car src)
+        (mapcar
+         (lambda (form)
+           (cond
+            ((and (consp form) (eq (car form) 'defun)
+                  (eq (cadr form) 'nl_cons_macro_apply_eval))
+             nelisp-standalone--mxcache-macro-apply-eval)
+            ((and (consp form) (eq (car form) 'defun)
+                  (eq (cadr form) 'nl_eval_inner_cons))
+             nelisp-standalone--mxcache-eval-inner-cons)
+            (t form)))
+         (cdr src))))
+
 ;; CORRECTED arg-list walk.  Byte-identical to nelisp-cc-evalport-combiner-arglist
 ;; --source EXCEPT the success tail wraps the constructor in (seq ... 0): the
 ;; pure-elisp `cons-make' op returns the SLOT pointer (nonzero) in rax, which the
@@ -9988,6 +10404,10 @@ more 0))' check in `nl_eval_source_all' stops the top-level loop and every
        (let* ((more 1))
          (while (= more 1)
            (seq
+            ;; perf/macroexpansion-cache ROOT-CAUSE FIX #3: see
+            ;; `bf_load_eval_loop' (mirrors the same evict-then-reuse shape
+            ;; for this driver's own `result' scratch slot).
+            (nl_mxcache_evict result)
             (ptr-write-u64 result 0 0) (ptr-write-u64 result 8 0)
             (let* ((mark_chunk (ptr-read-u64 268436168 0))
                    (mark_cursor (nl_boundary_chunk_cursor mark_chunk))
@@ -13664,6 +14084,52 @@ self-eval clause wired in: insert `nl_kw_is_keyword' and rewrite the
              (t (push form out))))
           (nreverse out))))
 
+;; perf/macroexpansion-cache: thread the whole-FORM pointer (already a
+;; parameter of `nl_ei_cons_dispatch', just not of its callee
+;; `nl_ei_cons_tail') down so `nl_ei_cons_tail' can consult
+;; `nl_mxcache_lookup' BEFORE dispatching into `nl_eval_inner_cons' (which
+;; on a miss now also takes FORM as its new first argument -- see
+;; `nelisp-standalone--patch-combiner-cons-mxcache' below).  A cache HIT
+;; (nonzero) skips special-form dispatch / function lookup / macro
+;; classification entirely and evaluates the cached expansion directly:
+;; sound because `nl_mxcache_lookup' only ever returns nonzero for a form
+;; previously classified AND cached by `nl_cons_macro_apply_eval' as a
+;; macro-expansion result current for THIS compaction epoch.  COMPOSE
+;; AFTER `nelisp-standalone--patch-eval-inner' (the M4 keyword patch),
+;; which does not touch these two defuns.
+(defconst nelisp-standalone--mxcache-ei-cons-dispatch
+  '(defun nl_ei_cons_dispatch (car-ptr form env out)
+     (nl_ei_cons_tail
+      (extern-call nl_cons_cdr_ptr form)
+      car-ptr form env out))
+  "perf/macroexpansion-cache: nl_ei_cons_dispatch unchanged in arity (`form'
+was already its own parameter); only its callee `nl_ei_cons_tail' gains it.")
+
+(defconst nelisp-standalone--mxcache-ei-cons-tail
+  '(defun nl_ei_cons_tail (cdr-ptr car-ptr form env out)
+     (let* ((cached (extern-call nl_mxcache_lookup form)))
+       (if (= cached 0)
+           (extern-call nl_eval_inner_cons form car-ptr cdr-ptr env out)
+         (extern-call nelisp_eval_call cached env out))))
+  "perf/macroexpansion-cache: check the cache before dispatching into
+nl_eval_inner_cons; on a miss thread `form' as its new first argument.")
+
+(defun nelisp-standalone--patch-eval-inner-mxcache (src)
+  "Rewrite eval-inner SRC (already possibly M4-patched): swap
+`nl_ei_cons_dispatch'/`nl_ei_cons_tail' for the cache-aware versions above."
+  (cons (car src)
+        (mapcar
+         (lambda (form)
+           (cond
+            ((and (consp form) (eq (car form) 'defun)
+                  (eq (cadr form) 'nl_ei_cons_dispatch))
+             nelisp-standalone--mxcache-ei-cons-dispatch)
+            ((and (consp form) (eq (car form) 'defun)
+                  (eq (cadr form) 'nl_ei_cons_tail))
+             nelisp-standalone--mxcache-ei-cons-tail)
+            (t form)))
+         (cdr src))))
+
 ;; WAVE-2 (PATCH 3): un-defer `signal' in combiner-apply.  The AOT combiner's
 ;; `nl_apply_name_classify' tags `signal' as category 2 ("deferred") and routes
 ;; it to `nl_apply_stash_wta' (stashes a wrong-type-argument into the env var),
@@ -13889,22 +14355,30 @@ genuine general interpreter for the 11 special forms + installed builtins."
          (applyfn (nelisp-standalone--cached-unit
                    "applyfn-reader.o" (nelisp-standalone--applyfn-source)
                    nelisp-standalone--this-file))
-         ;; M4: keyword self-eval patched eval-inner.
+         ;; M4: keyword self-eval patched eval-inner, PLUS perf/macroexpansion-
+         ;; cache's `nl_ei_cons_dispatch'/`nl_ei_cons_tail' form-threading
+         ;; (composed after the M4 patch; unit renamed so any pre-existing
+         ;; "eval-inner-kw.o" cache entry from before this change can never
+         ;; be mistaken for the new patched shape).
          (eval-inner (progn
                        (require 'nelisp-cc-eval-inner)
                        (nelisp-standalone--cached-unit
-                        "eval-inner-kw.o"
-                        (nelisp-standalone--patch-eval-inner
-                         (symbol-value 'nelisp-cc-eval-inner--source))
+                        "eval-inner-mxcache.o"
+                        (nelisp-standalone--patch-eval-inner-mxcache
+                         (nelisp-standalone--patch-eval-inner
+                          (symbol-value 'nelisp-cc-eval-inner--source)))
                         (list nelisp-standalone--this-file (locate-library "nelisp-cc-eval-inner")))))
-         ;; M6 catch/throw dispatch + void-function miss fix.  The old
-         ;; macro-expansion cache is disabled inside the patch for Doc 147.
+         ;; M6 catch/throw dispatch + void-function miss fix, PLUS
+         ;; perf/macroexpansion-cache's `nl_cons_macro_apply_eval'/
+         ;; `nl_eval_inner_cons' cache-store wiring (composed after the M6
+         ;; patch; unit renamed for the same stale-cache-avoidance reason).
          (combiner-cons (progn
                           (require 'nelisp-cc-evalport-combiner-cons)
                           (nelisp-standalone--cached-unit
-                           "combiner-cons-ct-doc147.o"
-                           (nelisp-standalone--patch-combiner-cons-full
-                            (symbol-value 'nelisp-cc-evalport-combiner-cons--source))
+                           "combiner-cons-mxcache.o"
+                           (nelisp-standalone--patch-combiner-cons-mxcache
+                            (nelisp-standalone--patch-combiner-cons-full
+                             (symbol-value 'nelisp-cc-evalport-combiner-cons--source)))
                            (list nelisp-standalone--this-file (locate-library "nelisp-cc-evalport-combiner-cons")))))
          ;; M3: do_fset rc-fix patched combiner-apply.
          (combiner (progn
