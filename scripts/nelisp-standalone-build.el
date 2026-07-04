@@ -11559,9 +11559,6 @@ artifact before wiring that artifact into the marker command path."
      "        (last nil)\n"
      "        (done nil)\n"
      "        end res)\n"
-     "    (nelisp--write-stderr-line\n"
-     "     (concat \"nelisp-exec-diag replay-module content-len=\"\n"
-     "             (number-to-string len)))\n"
      "    (setq pos (nelisp-standalone-source-cache--skip-ws content pos))\n"
      "    (if (and (< pos len) (= (aref content pos) 40))\n"
      "        nil\n"
@@ -11621,16 +11618,10 @@ artifact before wiring that artifact into the marker command path."
      "         (module-result nil))\n"
      "    (nelisp-standalone-source-cache--stats \"artifact-before-read\")\n"
      "    (setq content (nelisp-standalone-source-cache--read-file artifact-path))\n"
-     "    (nelisp--write-stderr-line\n"
-     "     (concat \"nelisp-exec-diag after-read len=\"\n"
-     "             (number-to-string (length content))))\n"
      "    (nelisp-standalone-source-cache--stats \"artifact-after-read\")\n"
      "    (setq prefix-len\n"
      "          (nelisp-standalone-source-cache--validate-payload\n"
      "           content artifact-path))\n"
-     "    (nelisp--write-stderr-line\n"
-     "     (concat \"nelisp-exec-diag after-format prefix-len=\"\n"
-     "             (number-to-string prefix-len)))\n"
      "    (nelisp-standalone-source-cache--stats \"artifact-after-format\")\n"
      "    (setq module-result (nelisp-standalone-source-cache--replay-module\n"
      "                         content artifact-path prefix-len))\n"
@@ -11747,12 +11738,11 @@ copy instructions."
    "          (error \"artifact command requires FILE.nelc or FILE.neln\"))\n"
    "        (if forms nil\n"
    "          (error \"artifact command requires at least one FORM\"))\n"
-   "        (while forms\n"
-   "          (setq parsed (cons (car (read-from-string (car forms))) parsed))\n"
-   "          (setq forms (cdr forms)))\n"
-   "        (setq forms (reverse parsed))\n"
-   "        (nelisp--write-stderr-line (concat \"nelisp-exec-diag entry path=\" path))\n"
-   "        (nelisp-standalone-source-cache-load-artifact path)\n"
+     "        (while forms\n"
+     "          (setq parsed (cons (car (read-from-string (car forms))) parsed))\n"
+     "          (setq forms (cdr forms)))\n"
+     "        (setq forms (reverse parsed))\n"
+     "        (nelisp-standalone-source-cache-load-artifact path)\n"
    "        (while forms\n"
    "          (setq last (eval (car forms)))\n"
    "          (setq forms (cdr forms)))\n"
@@ -12802,6 +12792,11 @@ correctly."
                    (nl_cold_zero tbl (* tlen 8))
                    (nl_cold_clear_marks ds (+ ds slen))
                    (ptr-write-u64 base 0 (+ 1024 slen))
+                   ;; Keep the chunk-0 descriptor cursor in sync with the
+                   ;; legacy bump cursor immediately after cold-load.  The
+                   ;; head chunk normally reads `base+0', but descriptor-only
+                   ;; walkers must not see the bootstrap cursor (1024).
+                   (ptr-write-u64 (+ base 784) 0 (+ 1024 slen))
                    (ptr-write-u64 (+ base 840) 0 (+ ib isz))
                    ;; push the GC next-trigger far out so a collection does not fire
                    ;; on the freshly-loaded (already-live) image during early eval.
