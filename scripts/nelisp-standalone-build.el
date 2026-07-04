@@ -1490,8 +1490,14 @@ arm64 Linux has no legacy x86 numbering)."
     ;; Semantics unchanged: membership is [data-start, base+cursor) per
     ;; chunk; the head chunk's cursor lives at the legacy global 268435456,
     ;; growth chunk cursors at desc+16 (same fields nl_gc_chunk_contains /
-    ;; nl_gc_chunk_cursor read).  DSL constraints: let* (multi-binding
-    ;; plain `let' miscompiles here) and setq only on let*-bound locals.
+    ;; nl_gc_chunk_cursor read).  DSL style note: multi-binding plain
+    ;; `let' with setq'd constant-init locals used to miscompile (the
+    ;; fold guard was missing from --parse-multi-let, so reads froze at
+    ;; the folded constant while object-mode setq silently became a
+    ;; GLOBAL env write); FIXED in nelisp-aot-compiler (46e29def) — a
+    ;; setq'd binding now gets a frame slot, and any residual fold hole
+    ;; fails loudly (:setq-on-lexical-local-via-global-bridge).  let*
+    ;; is kept here as house style, not as a correctness requirement.
     (defun nl_gc_in_arena (addr)
       (let* ((head (ptr-read-u64 268436160 0))
              (chunk (ptr-read-u64 268436168 0))
@@ -2384,9 +2390,13 @@ arm64 Linux has no legacy x86 numbering)."
     ;; Mark every published frame [0,depth).  Nested eval / load / error paths
     ;; push outer contexts, so all live frames must be marked (§11.41 refinement 1).
     ;; Walk frames [i,depth) by tail-recursion -- index/depth thread through
-    ;; ARGS, not a mutated let-local.  A constant-init let-local (e.g. (i 0)) is
-    ;; constant-folded here, so a `setq' on it miscompiles to a DYNAMIC env store
-    ;; (nl_alloc_symbol + nelisp_env_set_value on a garbage env -> null deref).
+    ;; ARGS, not a mutated let-local.  (Historical: a constant-init let-local
+    ;; (e.g. (i 0)) constant-folded here, so a `setq' on it miscompiled to a
+    ;; DYNAMIC env store -- nl_alloc_symbol + nelisp_env_set_value on a garbage
+    ;; env -> null deref.  FIXED in nelisp-aot-compiler 46e29def: setq'd
+    ;; bindings are no longer folded, and the global-bridge fallback for a
+    ;; folded local is now a loud compile error.  The ARGS-threading style is
+    ;; kept, but it is no longer a correctness requirement.)
     ;; depth<=64 so the recursion is bounded (mirrors nl_gc_sweep_chunks).
     (defun nl_gc_mark_published_contexts_from (i depth)
       (if (< i depth)
