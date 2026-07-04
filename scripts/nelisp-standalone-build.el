@@ -9782,7 +9782,10 @@ dispatch arm in `nelisp-standalone--applyfn-dispatch-table'.")
                     ;; feat/windows-spawn (Doc 138 follow-on): call-process via
                     ;; the W32 spawn model -- see
                     ;; `nelisp-standalone--fileio-process-call-forms'.
-                    "CreateProcessW" "WaitForSingleObject" "GetExitCodeProcess"))
+                    "CreateProcessW" "WaitForSingleObject" "GetExitCodeProcess"
+                    ;; fix/windows-env-inherit: startup `nl_os_environ_init'
+                    ;; env-block walk (see the windows os-base-forms comment).
+                    "GetEnvironmentStringsW" "FreeEnvironmentStringsW"))
         (cons "SHELL32.dll" (list "CommandLineToArgvW")))
   "PE imports needed by the Windows-native standalone reader.")
 
@@ -11848,9 +11851,97 @@ boundary (Doc 151 Phase B):
 	       (defun nl_os_syscall_nr_dup2 () -1)
 	       (defun nl_os_syscall_nr_poll () -1)
 	       (defun nl_os_syscall_nr_fcntl () -1)
-	       (defun nl_os_syscall_nr_exit () -1)))
+	       (defun nl_os_syscall_nr_exit () -1)
+       ;; fix/windows-env-inherit: startup env population (Approach A).
+       ;; One GetEnvironmentStringsW walk at driver startup builds the
+       ;; `nelisp--environment' alist that the existing pure-elisp `getenv'/
+       ;; `setenv' polyfill (scripts/nelisp-stdlib-prelude.el) reads/writes --
+       ;; no per-call GetEnvironmentVariableW dispatch, so the WinAPI call runs
+       ;; exactly once, from the shallow `let*' depth of `nl_os_environ_init'
+       ;; itself (mirrors the already-proven `nl_os_argv_init' idiom above).
+       ;; `GetEnvironmentStringsW'/`FreeEnvironmentStringsW' are registered in
+       ;; the `win64-dynamic-align-p' allowlist (lisp/nelisp-aot-compiler.el)
+       ;; alongside CreateFileW/CreateProcessW/... since this call is reached
+       ;; from a nested `let*' -- the exact depth where the (now-fixed) win64
+       ;; dynamic-align corruption used to bite a prior GetEnvironmentVariableW
+       ;; attempt.
+       (defun nl_win_env_wcslen (ptr off)
+         (if (= (ptr-read-u16 ptr (* off 2)) 0)
+             off
+           (nl_win_env_wcslen ptr (+ off 1))))
+       (defun nl_win_env_find_eq (ptr start end)
+         (if (>= start end)
+             -1
+           (if (= (ptr-read-u16 ptr (* start 2)) 61)
+               start
+             (nl_win_env_find_eq ptr (+ start 1) end))))
+       (defun nl_win_env_wcs_slice_copy (src srcoff dst dstoff n)
+         (if (= dstoff n)
+             (nl_seq2 (ptr-write-u16 dst (* dstoff 2) 0) dst)
+           (nl_seq2
+            (ptr-write-u16 dst (* dstoff 2) (ptr-read-u16 src (* (+ srcoff dstoff) 2)))
+            (nl_win_env_wcs_slice_copy src srcoff dst (+ dstoff 1) n))))
+       ;; Copy the wide code units [START, END) of PTR into a fresh
+       ;; NUL-terminated UTF-16LE buffer.  END < START (defensive fallback
+       ;; when no '=' was found) clamps to an empty slice rather than
+       ;; underflowing the allocation size.
+       (defun nl_win_env_wcs_slice (ptr start end)
+         (let* ((n0 (- end start))
+                (n (if (< n0 0) 0 n0))
+                (dst (alloc-bytes (* (+ n 1) 2) 2)))
+           (nl_win_env_wcs_slice_copy ptr start dst 0 n)))
+       (defun nl_win_env_wcs_to_sexp (wptr result-slot)
+         (let* ((cbuf (nl_win_wcs_utf8_dup wptr)))
+           (nl_alloc_str cbuf (nl_cstr_len cbuf) result-slot)))
+       ;; Build one (NAME . VALUE) Sexp::Str cons for the "NAME=VALUE" wide
+       ;; entry occupying code-unit range [OFF, END) of BLOCK, with the '='
+       ;; separator at code-unit offset EQPOS.
+       (defun nl_win_env_pair (block off end eqpos)
+         (let* ((name_wcs (nl_win_env_wcs_slice block off eqpos))
+                (val_wcs (nl_win_env_wcs_slice block (+ eqpos 1) end))
+                (name_sx (alloc-bytes 32 8))
+                (val_sx (alloc-bytes 32 8))
+                (cell (alloc-bytes 32 8)))
+           (seq
+            (nl_win_env_wcs_to_sexp name_wcs name_sx)
+            (nl_win_env_wcs_to_sexp val_wcs val_sx)
+            (nelisp_cons_construct name_sx val_sx cell)
+            cell)))
+       ;; Recursively walk the double-NUL-terminated wide ENV block (as
+       ;; returned by GetEnvironmentStringsW) starting at code-unit offset
+       ;; OFF of BLOCK, consing one (NAME . VALUE) pair per "NAME=VALUE"
+       ;; entry into RESULT-SLOT.  Stops at the empty string (the second,
+       ;; block-terminating NUL).
+       (defun nl_win_environ_walk (block off result-slot)
+         (if (= (ptr-read-u16 block (* off 2)) 0)
+             (wf_write_nil result-slot)
+           (let* ((end (nl_win_env_wcslen block off))
+                  (eqpos0 (nl_win_env_find_eq block off end))
+                  ;; Entries that literally start with '=' are Windows'
+                  ;; internal per-drive cwd trackers (e.g. "=C:=C:\\foo") --
+                  ;; search again from the next code unit so the drive letter
+                  ;; isn't mistaken for the whole NAME.
+                  (eqpos1 (if (= eqpos0 off)
+                              (nl_win_env_find_eq block (+ off 1) end)
+                            eqpos0))
+                  ;; No '=' found at all (should not happen in practice):
+                  ;; fall back to treating the whole entry as NAME with an
+                  ;; empty VALUE rather than mis-indexing.
+                  (eqpos (if (< eqpos1 0) end eqpos1))
+                  (pair (nl_win_env_pair block off end eqpos))
+                  (rest (alloc-bytes 32 8)))
+             (seq
+              (nl_win_environ_walk block (+ end 1) rest)
+              (nelisp_cons_construct pair rest result-slot)))))
+       (defun nl_os_environ_init (result-slot)
+         (let* ((block (extern-call GetEnvironmentStringsW)))
+           (seq
+            (nl_win_environ_walk block 0 result-slot)
+            (extern-call FreeEnvironmentStringsW block)
+            result-slot)))))
     ('macos-aarch64
-     '((defun nl_darwin_skip_to_nul (ptr off)
+     '((defun nl_os_environ_init (result-slot) (wf_write_nil result-slot))
+       (defun nl_darwin_skip_to_nul (ptr off)
          (if (= (ptr-read-u8 ptr off) 0)
              off
            (nl_darwin_skip_to_nul ptr (+ off 1))))
@@ -11943,7 +12034,8 @@ boundary (Doc 151 Phase B):
      ;; absent — use openat(56, AT_FDCWD=-100)/dup3(24)/pipe2(59)/clone(220,
      ;; flags=SIGCHLD)/ppoll(73).  Entry stack already has the Linux
      ;; argc/argv shape, so argv init is the identity, same as x86_64.
-     '((defun nl_os_argv_init (sp) sp)
+     '((defun nl_os_environ_init (result-slot) (wf_write_nil result-slot))
+       (defun nl_os_argv_init (sp) sp)
        (defun nl_os_open_read (path)
          (syscall-direct 56 -100 path 0 0 0 0))
        (defun nl_os_open_write_truncate (path)
@@ -11995,7 +12087,8 @@ boundary (Doc 151 Phase B):
        (defun nl_os_syscall_nr_fcntl () 25)
        (defun nl_os_syscall_nr_exit () 93)))
     (_
-     '((defun nl_os_argv_init (sp) sp)
+     '((defun nl_os_environ_init (result-slot) (wf_write_nil result-slot))
+       (defun nl_os_argv_init (sp) sp)
        (defun nl_os_open_read (path)
          (syscall-direct 2 path 0 0 0 0 0))
        (defun nl_os_open_write_truncate (path)
@@ -12886,6 +12979,15 @@ correctly."
             (argv_list (alloc-bytes 32 8))
             (argv_sym_buf (alloc-bytes ,(* 8 (length (nelisp-standalone--name-words "nelisp-standalone-argv"))) 1))
             (argv_sym (alloc-bytes 32 8))
+            ;; fix/windows-env-inherit: startup population of the pure-elisp
+            ;; `getenv'/`setenv' polyfill's backing alist (`nelisp--environment',
+            ;; scripts/nelisp-stdlib-prelude.el).  Bound HERE via `nl_env_set_value'
+            ;; at the SAME shallow depth as `nelisp-standalone-argv' just above --
+            ;; see the Doc 152 artifact-cli-silent-noop comment below for why a
+            ;; deep `if'-nested `nl_env_set_value' call silently loses the binding.
+            (environ_list (alloc-bytes 32 8))
+            (environ_sym_buf (alloc-bytes ,(* 8 (length (nelisp-standalone--name-words "nelisp--environment"))) 1))
+            (environ_sym (alloc-bytes 32 8))
             (prompt_p (if (= (nl_cstr_eq_no_prompt arg2) 1)
                           0
                         (if (= (nl_cstr_eq_no_prompt arg3) 1) 0 1)))
@@ -12929,6 +13031,8 @@ correctly."
               (setq i (1+ i)))
             (nreverse forms))
         (nl_alloc_symbol argv_sym_buf ,(length (encode-coding-string "nelisp-standalone-argv" 'utf-8 t)) argv_sym)
+        ,@(nelisp-standalone--byte-write-forms 'environ_sym_buf "nelisp--environment")
+        (nl_alloc_symbol environ_sym_buf ,(length (encode-coding-string "nelisp--environment" 'utf-8 t)) environ_sym)
         (nl_sexp_clone_into globals (+ ctx 0))
         (nl_sexp_clone_into frames (+ ctx 32))
         (nl_sexp_clone_into unbound (+ ctx 64))
@@ -12950,6 +13054,12 @@ correctly."
         ;; runtime-image commands) and sidesteps the deep-nesting bug entirely.
         (nl_argv_list_from argc sp0 1 argv_list)
         (nl_env_set_value ctx argv_sym argv_list)
+        ;; fix/windows-env-inherit: `nl_os_environ_init' is the real
+        ;; GetEnvironmentStringsW-backed populator on Windows and a
+        ;; `wf_write_nil' no-op (POSIX unchanged) everywhere else -- same
+        ;; per-target-real/per-target-identity idiom as `nl_os_argv_init' above.
+        (nl_os_environ_init environ_list)
+        (nl_env_set_value ctx environ_sym environ_list)
         ;; rec_max 300000: the `_start' trampoline now runs the driver on a 1 GiB
 ;; mmap'd native stack whose ceiling is ~404k rec levels (each eval level ~5 KiB of
 ;; native frames; a self-recursive call burns ~2 rec increments).  300000 is ~74% of
