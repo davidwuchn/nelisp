@@ -622,3 +622,153 @@ design. Independently, re-run this exact repro
 (`(require 'ol-gnus)` on this cold image) after any such cache lands to see
 whether it alone is enough to bring the load into practical range, or
 whether the bind-path allocation (item 2 above) is also required.
+
+================================================================================
+
+Follow-up investigation (2026-07-04, branch fix/org-element-parse-tree):
+org-element-parse-buffer's "(error nil)" defect, and what it unmasks
+
+Context
+
+Merge be5a8304 (eval-time backquote spelling fix) left one item open: after
+that fix, `(with-temp-buffer (insert "* h") (org-mode)
+(org-element-parse-buffer) t)` no longer raised `(void-function \`)`, but hit
+"a distinct defect deeper in org-element parse-tree construction" -- one
+probe framing showed `(error nil)`, and isolating
+`org-element-org-data-parser` + `org-element--parse-elements` together had
+produced a SEGFAULT. This session diagnosed both.
+
+Manifestation (a): the "(error nil)" signal
+
+`(condition-case err (with-temp-buffer (insert "* h") (org-mode)
+(org-element-parse-buffer) 'OK) (error (list 'E err)))` prints `(E (error
+nil))`. Bisecting the call chain (`org-element-parse-buffer` ->
+`org-element-org-data-parser` -> `org-with-wide-buffer`) shows the ACTUAL
+defect is shallower and simpler than a signal-stashing bug: `(backquote 42)`
+-- typed directly, no reader sugar involved -- evaluates to `nil` instead of
+`42`, on this specific cold-loaded org image only. A bare `./target/nelisp
+--repl` (no cold-load) evaluates the identical form correctly. So this is a
+STATE defect introduced somewhere in the replay/cold-load pipeline for THIS
+image, not a bug in the reader's own backquote/quasiquote logic (confirmed:
+`nelisp--bq-expand`/`-list`/`-build`, the actual expansion logic `backquote`
+delegates to, are plain functions and give the CORRECT expansion for every
+shape tested, including interior `,`/`,@`, when called directly or via a
+differently-named clone macro with an IDENTICAL body -- only a macro
+literally named `backquote` is affected).
+
+Root cause (bisected via a binary search over the replay `.repl` stream,
+prefix-by-prefix, checking `(backquote 42)` after each prefix): the
+generated replay stream that feeds this worktree's cold-image build (see
+`scripts/cold-image-org-e2e.sh`, itself calling nelisp-emacs-lib's
+`scripts/vendor-repl-standalone-replay.el`) contains, near the very start of
+the chain (in the `nemacs-bootstrap.repl` "src/emacs-backquote.el" chunk,
+and twice more while replaying this worktree's own
+`scripts/nelisp-stdlib-prelude.el`), a BODY-LESS
+`(defmacro backquote (form))`. Verified against host Emacs 30.1:
+`(symbol-function 'backquote)` there is `(macro . #[byte-code ...])` -- a
+compiled byte-code object, not an interpreted closure with a Lisp-readable
+body. Whatever host-side machinery in nelisp-emacs-lib serializes "the body
+of this defmacro" for replay cannot recover one from a byte-code object and
+silently emits an empty body instead of skipping the (re)definition or
+otherwise preserving semantics. A body-less `defmacro` legitimately expands
+to `nil` on ANY Lisp implementation, including real Emacs -- this reader's
+evaluator is doing exactly the right thing with the (corrupted) input it is
+given. Replaying that hollow form clobbers this reader's own correctly-
+behaving, natively-prelude-baked `backquote` (and its real-Emacs-style
+`` \` `` alias) with a permanent always-nil stand-in for the remainder of the
+chain, which is why every macro that expands via backquote/`,@` syntax
+loaded AFTER that point -- notably org-macs.el's `org-with-wide-buffer` and
+`org-no-read-only`, both load-bearing for `org-element-org-data-parser` --
+silently breaks (their bodies are never executed; e.g. `(with-temp-buffer
+(org-no-read-only (insert "Z")) (buffer-string))` returns `""`, not `"Z"`).
+`org-element-org-data-parser` wraps its entire body in
+`org-with-wide-buffer`, so it always returns `nil`, and `org-element-parse-
+buffer` propagates that into an eventual `(error nil)` deeper in
+`org-element--parse-elements`'s consumption of the (wrongly-nil) org-data
+node.
+
+Classification: NOT a reader/evaluator/GC-core defect in this repo. It is a
+`.repl`-replay-generation defect in nelisp-emacs-lib (out of scope to touch
+per this task's brief). Confirmed bounded, low-risk workaround applied
+entirely within this repo (`scripts/cold-image-org-e2e.sh`): re-assert
+`(defmacro backquote (form) (nelisp--bq-expand form))` and the `` \` ``
+alias once, right after the vendor/bootstrap replay chain and before this
+worktree's own arena dump -- `nelisp--bq-expand` itself is never named
+"backquote" so it survives the clobber untouched and is already loaded and
+correct at that point. Verified on a freshly regenerated image: `(backquote
+42)` -> `42`, `(backquote (a (comma-at (list 1 2)) b))` -> `(a 1 2 b)`,
+`(with-temp-buffer (org-no-read-only (insert "Z")) (buffer-string))` ->
+`"Z"`. `scripts/cold-image-org-e2e.sh`'s own faithfulness/timing gate is
+unaffected (still `RESULT: IDENTICAL`, same ~10.6s replay / ~0.9s cold-boot
+shape as before the patch).
+
+Manifestation (b): the SEGFAULT, and what fixing (a) actually unmasks
+
+With backquote/,@ genuinely working (the workaround applied), `org-with-
+wide-buffer` and `org-no-read-only` now execute their real bodies instead of
+silently no-op'ing to nil -- and this exposes that `org-mode`'s (and
+`org-element-org-data-parser`'s) REAL initialization, once actually allowed
+to run instead of being silently skipped, does not complete in practical
+time on this interpreter: `(with-temp-buffer (insert "* h") (org-mode) t)`
+alone (no org-element-parse-buffer at all) does not return within 20 s and
+RSS grows past 900 MB in the first 5 s; `org-element-org-data-parser` alone
+was interrupted (SIGINT) under gdb at ~4.7 GB RSS / 16 s CPU with backtraces
+taken 6 s apart showing genuinely DIFFERENT call chains each time (once deep
+in `nl_push_captured_walk` closure-capture recursion, once inside a
+`while`/`setq` loop body) -- i.e. forward progress through real,
+increasingly expensive work, not a stuck infinite loop or a fixed-PC spin.
+The full task probe, `(with-temp-buffer (insert "* h") (org-mode)
+(org-element-parse-buffer) t)`, against the freshly-regenerated (backquote-
+fixed) cold image: killed by `timeout 90` at 91 s wall, zero output, zero
+error -- consistent with "would very plausibly complete given much more
+wall time and RAM," not a crash.
+
+This is the SAME mechanism already root-caused for `(require 'ol-gnus)`
+earlier in this file: no macroexpansion cache (every macro call is re-
+expanded from source every time it is reached) plus `nl_val_clone_into`
+paying a fresh 32-byte-box allocation + deep clone for every non-immediate
+`let`/`let*`/lambda-argument bind, unconditionally. `org.el`/`org-element.el`
+lean at least as heavily on macros (`org-with-wide-buffer`,
+`org-with-limited-levels`, `defcustom`/`defgroup`-shaped forms building
+keyword/outline regexps, etc.) as Gnus does, so the same superlinear cost
+applies here too -- it was simply MASKED until now by the (a) defect above
+silently skipping most of that work rather than paying for it. This also
+retroactively explains a previously-logged, only-partially-understood
+observation in `docs/design/156-flat-arena-boot-install.org` ("the reader
+spends >170 s inside org.el alone" under one prelude/bootstrap pairing,
+"...does not [install org-mode]" under another): both symptoms are
+consistent with `org-mode`'s bring-up being genuinely, independently
+expensive on this interpreter whenever its backquote-heavy setup code is
+allowed to actually execute, not a separate, additional defect.
+
+The originally-reported SEGFAULT for the combined
+`org-element-org-data-parser` + `org-element--parse-elements` probe was not
+independently reproduced this session (time/resource-bounded; every run in
+this class was killed by `timeout`/SIGINT well before any crash, always
+mid-progress, never at a stable PC) -- it is plausible under this same
+"real, unboundedly expensive computation, eventually resource-starved"
+mechanism that a longer, unbounded run previously ran the custom arena
+allocator (`nl_chunk_try_alloc`, seen live on the stack in both gdb
+snapshots this session) out of growable memory and THAT failure path
+segfaults rather than signalling a Lisp error; this was not chased further
+this session (would require deliberately running to OOM under gdb, which
+risks the shared machine -- CLAUDE.md already caps this class of
+investigation at "kill >6GB RSS").
+
+Classification: superlinear/impractically-expensive real computation (same
+class as the already-documented Gnus finding above), NOT GC, NOT a new
+reader-primitive defect, NOT a new spelling/macro-machinery gap. Evaluator-
+core surgery (macroexpansion cache and/or a `nl_val_clone_into` fast path,
+both already proposed above) would be required to make `org-mode`/
+`org-element-parse-buffer` complete in practical time -- out of scope for
+this session's bounded-fix brief. STOPPING here per that scope; the
+existing remediation proposal above (macroexpansion cache, then bind-path
+allocation fast path) applies unchanged and is now motivated by two
+independent call sites (Gnus, org-mode) rather than one.
+
+Net effect of this session: `org-with-wide-buffer`/`org-no-read-only`/any
+other backquote-splice-based macro are now CORRECT again on this cold image
+(previously silently wrong), and the true remaining blocker for the
+project's actual target probe is now cleanly isolated to the single,
+already-diagnosed evaluator-cost issue above -- rather than a mix of "wrong
+answer" and "unknown crash."
