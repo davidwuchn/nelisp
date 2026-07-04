@@ -485,11 +485,14 @@ storage — not an arena reservation."
    ;; `nelisp-standalone--arena-data-start-offset' for why the low-address
    ;; block was tried first and reverted (a hardcoded-1024 cold-load
    ;; assumption elsewhere in this file).
+   ;; perf/closure-freevar-cache: two NEW 8B control slots for a cached lambda
+   ;; free-symbol filter keyed by the lambda raw args cons (FORMALS . BODY).
+   ;; It shares `nl_mxcache_epoch' for compaction invalidation.
    ;; perf/bind-shallow-rebox: nl_bind_clone_force is an ordinary zero-fill
    ;; BSS flag (= allow `nl_val_clone_into' to shallow-rebox safe boxes).
    ;; `(nelisp--gc-diag 15)' sets it to 1 to force the legacy fresh-box
    ;; clone path, and `(nelisp--gc-diag 16)' clears it for A/B checks.
-   (list (cons 'bss (+ 3808 1048576 32)))
+   (list (cons 'bss (+ 3808 1048576 48)))
    (list (nelisp-link-symbol "nl_arena_base" 0
                              :section 'bss :bind 'global :type 'object)
          (nelisp-link-symbol "nl_rootstack_top" 8
@@ -511,6 +514,10 @@ storage — not an arena reservation."
          (nelisp-link-symbol "nl_mxcache_disable_lookup" (+ 3824 1048576)
                              :section 'bss :bind 'global :type 'object)
          (nelisp-link-symbol "nl_bind_clone_force" (+ 3832 1048576)
+                             :section 'bss :bind 'global :type 'object)
+         (nelisp-link-symbol "nl_fvcache_table_base" (+ 3840 1048576)
+                             :section 'bss :bind 'global :type 'object)
+         (nelisp-link-symbol "nl_fvcache_disable_lookup" (+ 3848 1048576)
                              :section 'bss :bind 'global :type 'object)
          (nelisp-link-symbol "nl_frame_push_sym1" (+ 3768 1048576)
                              :section 'bss :bind 'global :type 'object)
@@ -2172,6 +2179,77 @@ arm64 Linux has no legacy x86 numbering)."
             (if (= (ptr-read-u64 slot 0) addr)
                 (seq (ptr-write-u64 slot 0 0) 0)
               0)))))
+    ;; ===================================================================
+    ;; LAMBDA FREE-VARIABLE FILTER CACHE (perf/closure-freevar-cache).
+    ;;
+    ;; `nl_sf_lambda' captures lexical frames through a filter derived from
+    ;; the raw lambda args cons (FORMALS . BODY).  The old path rebuilt a raw
+    ;; symbol list from the entire tree for every lambda evaluation, leaving
+    ;; `nl_capture_walk_frames' to rescan duplicated body symbols per frame.
+    ;; This cache stores the already-deduplicated body-symbol filter, with all
+    ;; formal symbols excluded, keyed by that raw args cons pointer.
+    ;;
+    ;; Slot layout matches MXCACHE: {args_ptr@0, filter_ptr@8, epoch@16}.  The
+    ;; table is deliberately smaller (4096 slots x 24B = 96 KiB): each live row
+    ;; roots its lambda args tree, and org-mode creates many distinct lambdas.
+    ;; The compaction hazard is identical, so this cache shares
+    ;; `nl_mxcache_epoch': `nl_gc_compact' bumps it before relocation, making
+    ;; old pointer-keyed rows invisible.  Mark+sweep roots both key and value
+    ;; for current-epoch rows.  `nl_fvcache_disable_lookup' is toggled by
+    ;; `(nelisp--gc-diag 17)' and `(nelisp--gc-diag 18)' for cached-vs-raw A/B
+    ;; replay checks.
+    ;; ===================================================================
+    (defun nl_fvcache_hash (args_ptr) (logand (sar args_ptr 4) 4095))
+    (defun nl_fvcache_disabled ()
+      (ptr-read-u64 (data-addr nl_fvcache_disable_lookup) 0))
+    (defun nl_fvcache_table_init ()
+      (if (= (ptr-read-u64 (data-addr nl_fvcache_table_base) 0) 0)
+          (let* ((p (nl_os_alloc_chunk 98304)))
+            (if (= p 0) 0
+              (seq (nl_os_commit_range p 0 98304)
+                   (ptr-write-u64 (data-addr nl_fvcache_table_base) 0 p))))
+        0))
+    (defun nl_fvcache_lookup (args_ptr)
+      (if (= (nl_gc_is_boot args_ptr) 1) 0
+      (if (= (ptr-read-u64 (data-addr nl_fvcache_disable_lookup) 0) 1) 0
+        (let* ((base (ptr-read-u64 (data-addr nl_fvcache_table_base) 0)))
+          (if (= base 0) 0
+            (let* ((slot (+ base (* (nl_fvcache_hash args_ptr) 24))))
+              (if (= (ptr-read-u64 (+ slot 16) 0) (ptr-read-u64 (data-addr nl_mxcache_epoch) 0))
+                  (if (= (ptr-read-u64 slot 0) args_ptr)
+                      (ptr-read-u64 (+ slot 8) 0)
+                    0)
+                0)))))))
+    (defun nl_fvcache_store (args_ptr filter_ptr)
+      (if (= (nl_gc_is_boot args_ptr) 1) 0
+      (seq
+       (nl_fvcache_table_init)
+       (let* ((base (ptr-read-u64 (data-addr nl_fvcache_table_base) 0)))
+         (if (= base 0) 0
+           (let* ((slot (+ base (* (nl_fvcache_hash args_ptr) 24))))
+             (seq (ptr-write-u64 slot 0 args_ptr)
+                  (ptr-write-u64 (+ slot 8) 0 filter_ptr)
+                  (ptr-write-u64 (+ slot 16) 0 (ptr-read-u64 (data-addr nl_mxcache_epoch) 0))
+                  (atomic-fetch-add 268435544 1)
+                  0)))))))
+    (defun nl_fvcache_mark_one (base i epoch)
+      (let* ((slot (+ base (* i 24))))
+        (if (= (ptr-read-u64 (+ slot 16) 0) epoch)
+            (let* ((ap (ptr-read-u64 slot 0)))
+              (if (= ap 0) 0
+                (let* ((fp (ptr-read-u64 (+ slot 8) 0)))
+                  (seq (nl_gc_mark_block ap) (nl_gc_mark_slot ap)
+                       (nl_gc_mark_block fp) (nl_gc_mark_slot fp)))))
+          0)))
+    (defun nl_fvcache_mark_all ()
+      (let* ((base (ptr-read-u64 (data-addr nl_fvcache_table_base) 0)))
+        (if (= base 0) 0
+          (let* ((epoch (ptr-read-u64 (data-addr nl_mxcache_epoch) 0)) (i 0))
+            (seq
+             (while (< i 4096)
+               (nl_seq2 (nl_fvcache_mark_one base i epoch)
+                        (setq i (+ i 1))))
+             0)))))
     ;; Mark every root (split out so the DEBUG skip-mark gate is a single if).
     (defun nl_gc_mark_roots (ctx result out pool src cursor bsym)
       (nl_seq2 (nl_gc_conserv_maybe)             ; Doc 152 §11.21 conservative stack scan
@@ -2203,7 +2281,8 @@ arm64 Linux has no legacy x86 numbering)."
                                 ;; perf/macroexpansion-cache: keep every CURRENT-
                                 ;; epoch cache entry's key+expansion alive (mirrors
                                 ;; the block+slot marking pair above).
-                                (nl_mxcache_mark_all)))))))))))))) ; bsym + shared symentry + mxcache + conserv wrap
+                                (nl_seq2 (nl_mxcache_mark_all)
+                                         (nl_fvcache_mark_all))))))))))))))) ; bsym + shared symentry + caches + conserv wrap
     ;; ===== Doc 146 §5 moving GC (compaction). Phase 2 = forwarding. =====
     ;; Behind flag 268435608 (1=ON by default, wired at boot init; 0 = mark+sweep
     ;; escape hatch).  Forwarding hash side-table base
@@ -2739,8 +2818,9 @@ arm64 Linux has no legacy x86 numbering)."
              ;; alive here too, or a live cache value with no other root
              ;; would be freed between loop iterations.
              (nl_seq2 (nl_mxcache_mark_all)
+              (nl_seq2 (nl_fvcache_mark_all)
               (nl_seq2 (nl_gc_sweep)
-                       (ptr-write-u64 (data-addr nl_safepoint_ctx) 24 0))))))))))
+                       (ptr-write-u64 (data-addr nl_safepoint_ctx) 24 0)))))))))))
     ;; Gated mid-form safepoint (called from nl_sf_while's backedge).  enable
     ;; (ctx+8) defaults OFF -> a single cheap branch + return, so non-test runs are
     ;; unchanged.  alloc-debt gate: fire when total chunk-bytes-reserved (268436184
@@ -3365,7 +3445,8 @@ unresolved at link time."
     ;; safepoint, 7/8=disable/enable collections, 9/10=disable/enable
     ;; free-list reuse, 11/12=enable/disable compaction, 13/14=disable/
     ;; enable macroexpansion-cache lookup, 15/16=force/allow legacy
-    ;; bind-path deep cloning.
+    ;; bind-path deep cloning, 17/18=disable/enable closure free-variable
+    ;; filter-cache lookup.
     ;; Returns the list
     ;; (trip-count bad-cur bad-bt bad-want poison-count poison-enable
     ;;  context-depth mid-form-fired-count bind-legacy-force).
@@ -3411,7 +3492,11 @@ unresolved at link time."
                                         (ptr-write-u64 (data-addr nl_bind_clone_force) 0 1)
                                       (if (= (wf_argval args 0) 16)
                                           (ptr-write-u64 (data-addr nl_bind_clone_force) 0 0)
-                                        0))))))))))))))))
+                                        (if (= (wf_argval args 0) 17)
+                                            (ptr-write-u64 (data-addr nl_fvcache_disable_lookup) 0 1)
+                                          (if (= (wf_argval args 0) 18)
+                                              (ptr-write-u64 (data-addr nl_fvcache_disable_lookup) 0 0)
+                                            0))))))))))))))))))
         (let* ((nils (alloc-bytes 32 8)) (s8 (alloc-bytes 32 8)) (s7 (alloc-bytes 32 8)) (s6 (alloc-bytes 32 8)) (s5 (alloc-bytes 32 8)) (s4 (alloc-bytes 32 8))
                (s3 (alloc-bytes 32 8)) (s2 (alloc-bytes 32 8)) (s1 (alloc-bytes 32 8)))
           (seq
@@ -14025,7 +14110,14 @@ signalled abort it builds err_out=(TAG . VAL) from the M6 arena stash so
     (defun nl_clx_write_nil (slot)
       (seq (ptr-write-u64 slot 0 0) (ptr-write-u64 (+ slot 8) 0 0)
            (ptr-write-u64 (+ slot 16) 0 0) (ptr-write-u64 (+ slot 24) 0 0) 0))
-    (defun nl_clx_symbol_filter_walk (node-ptr out)
+    (defun nl_clx_filter_contains (filter-ptr name-ptr)
+      (if (= (sexp-tag filter-ptr) 7)
+          (let* ((sym-ptr (nl_cons_car_ptr filter-ptr)))
+            (if (= (str-eq sym-ptr name-ptr) 1)
+                1
+              (nl_clx_filter_contains (nl_cons_cdr_ptr filter-ptr) name-ptr)))
+        0))
+    (defun nl_clx_symbol_filter_walk_raw (node-ptr out)
       (let* ((tag (sexp-tag node-ptr)))
         (if (= tag 4)
             (seq (cons-make-with-clone node-ptr out out) 0)
@@ -14033,9 +14125,43 @@ signalled abort it builds err_out=(TAG . VAL) from the M6 arena stash so
               (let* ((car-ptr (nl_cons_car_ptr node-ptr))
                      (cdr-ptr (nl_cons_cdr_ptr node-ptr)))
                 (seq
-                 (nl_clx_symbol_filter_walk car-ptr out)
-                 (nl_clx_symbol_filter_walk cdr-ptr out)))
+                 (nl_clx_symbol_filter_walk_raw car-ptr out)
+                 (nl_clx_symbol_filter_walk_raw cdr-ptr out)))
             0))))
+    (defun nl_clx_formals_contain_symbol (node-ptr name-ptr)
+      (let* ((tag (sexp-tag node-ptr)))
+        (if (= tag 4)
+            (str-eq node-ptr name-ptr)
+          (if (= tag 7)
+              (let* ((car-ptr (nl_cons_car_ptr node-ptr))
+                     (cdr-ptr (nl_cons_cdr_ptr node-ptr)))
+                (if (= (nl_clx_formals_contain_symbol car-ptr name-ptr) 1)
+                    1
+                  (nl_clx_formals_contain_symbol cdr-ptr name-ptr)))
+            0))))
+    (defun nl_clx_symbol_filter_walk (formals-ptr node-ptr out)
+      (let* ((tag (sexp-tag node-ptr)))
+        (if (= tag 4)
+            (if (= (nl_clx_formals_contain_symbol formals-ptr node-ptr) 1)
+                0
+              (if (= (nl_clx_filter_contains out node-ptr) 1)
+                  0
+                (seq (cons-make-with-clone node-ptr out out) 0)))
+          (if (= tag 7)
+              (let* ((car-ptr (nl_cons_car_ptr node-ptr))
+                     (cdr-ptr (nl_cons_cdr_ptr node-ptr)))
+                (seq
+                 (nl_clx_symbol_filter_walk formals-ptr car-ptr out)
+                 (nl_clx_symbol_filter_walk formals-ptr cdr-ptr out)))
+            0))))
+    (defun nl_clx_build_symbol_filter (lambda-args out)
+      (seq
+       (nl_clx_write_nil out)
+       (if (= (sexp-tag lambda-args) 7)
+           (let* ((formals-ptr (nl_cons_car_ptr lambda-args))
+                  (body-ptr (nl_cons_cdr_ptr lambda-args)))
+             (nl_clx_symbol_filter_walk formals-ptr body-ptr out))
+         0)))
     (defun nl_env_capture_lexical_with_filter (env filter-ptr filtered out)
       (let* ((frames_ptr (+ env 32))
              (depth (sexp-int-unwrap (record-slot-ref-ptr frames_ptr 1))))
@@ -14043,50 +14169,79 @@ signalled abort it builds err_out=(TAG . VAL) from the M6 arena stash so
          (nl_clx_write_nil out)
          (if (= depth 0)
              0
-           ;; Doc 147 Phase 1.5: build the `invec' WITHOUT holding a
-           ;; raw write-through interior pointer into its data buffer.  The
-           ;; old code did `(... (vector-ref-ptr invec N))' as a 32B write
-           ;; DESTINATION, which stomps neighbouring slots once the Phase-2
-           ;; buffer stride shrinks 32B->8B.  Route every write through
-           ;; `vector-slot-set' (= refcount-safe `nl_vector_set_slot', clones
-           ;; *VAL-PTR into slot N with the live buffer stride).  Each value is
-           ;; first materialized into a fresh 32B scratch slot, then cloned
-           ;; into the Vector by `vector-slot-set'.  `nl_capture_descend_native'
-           ;; still reads invec[0..2] via `vector-ref-ptr' (a Phase-2 view,
-           ;; read-safe) — only the producer side changes here.
-           (let* ((invec (alloc-bytes 32 8)) (alist (alloc-bytes 32 8))
-                  (depth_slot (alloc-bytes 32 8))
-                  (nil_slot (alloc-bytes 32 8))
-                  (filtered_slot (alloc-bytes 32 8)))
-             (seq
-              (vector-make 5 invec)
-              ;; slot 0 = stack record: clone frames_ptr straight in.
-              (vector-slot-set invec 0 frames_ptr)
-              ;; slot 1 = max-depth Int: build in scratch, clone in.
-              (sexp-int-make depth_slot depth)
-              (vector-slot-set invec 1 depth_slot)
-              ;; slot 2 = pair-slot scratch, Nil on entry.
-              (nl_clx_write_nil nil_slot)
-              (vector-slot-set invec 2 nil_slot)
-              ;; slot 3 = lambda symbol filter; slot 4 = filter enabled flag.
-              (vector-slot-set invec 3 filter-ptr)
-              (sexp-int-make filtered_slot filtered)
-              (vector-slot-set invec 4 filtered_slot)
-              (nl_clx_write_nil alist)
-              (nl_capture_descend_native invec alist)
-              (nl_sexp_clone_into alist out)
-              0))))))
+           (if (= filtered 1)
+               (if (= (sexp-tag filter-ptr) 7)
+                   ;; Doc 147 Phase 1.5: build the `invec' WITHOUT holding a
+                   ;; raw write-through interior pointer into its data buffer.
+                   ;; The old code did `(... (vector-ref-ptr invec N))' as a
+                   ;; 32B write DESTINATION, which stomps neighbouring slots
+                   ;; once the Phase-2 buffer stride shrinks 32B->8B.  Route
+                   ;; every write through `vector-slot-set' (= refcount-safe
+                   ;; `nl_vector_set_slot', clones *VAL-PTR into slot N with
+                   ;; the live buffer stride).  Each value is first materialized
+                   ;; into a fresh 32B scratch slot, then cloned into the Vector
+                   ;; by `vector-slot-set'.  `nl_capture_descend_native' still
+                   ;; reads invec[0..2] via `vector-ref-ptr' (a Phase-2 view,
+                   ;; read-safe) — only the producer side changes here.
+                   (let* ((invec (alloc-bytes 32 8)) (alist (alloc-bytes 32 8))
+                          (depth_slot (alloc-bytes 32 8))
+                          (nil_slot (alloc-bytes 32 8))
+                          (filtered_slot (alloc-bytes 32 8)))
+                     (seq
+                      (vector-make 5 invec)
+                      (vector-slot-set invec 0 frames_ptr)
+                      (sexp-int-make depth_slot depth)
+                      (vector-slot-set invec 1 depth_slot)
+                      (nl_clx_write_nil nil_slot)
+                      (vector-slot-set invec 2 nil_slot)
+                      (vector-slot-set invec 3 filter-ptr)
+                      (sexp-int-make filtered_slot filtered)
+                      (vector-slot-set invec 4 filtered_slot)
+                      (nl_clx_write_nil alist)
+                      (nl_capture_descend_native invec alist)
+                      (nl_sexp_clone_into alist out)
+                      0))
+                 0)
+             (let* ((invec (alloc-bytes 32 8)) (alist (alloc-bytes 32 8))
+                    (depth_slot (alloc-bytes 32 8))
+                    (nil_slot (alloc-bytes 32 8))
+                    (filtered_slot (alloc-bytes 32 8)))
+               (seq
+                (vector-make 5 invec)
+                (vector-slot-set invec 0 frames_ptr)
+                (sexp-int-make depth_slot depth)
+                (vector-slot-set invec 1 depth_slot)
+                (nl_clx_write_nil nil_slot)
+                (vector-slot-set invec 2 nil_slot)
+                (vector-slot-set invec 3 filter-ptr)
+                (sexp-int-make filtered_slot filtered)
+                (vector-slot-set invec 4 filtered_slot)
+                (nl_clx_write_nil alist)
+                (nl_capture_descend_native invec alist)
+                (nl_sexp_clone_into alist out)
+                0)))))))
     (defun nl_env_capture_lexical (env out)
       (let* ((nil_slot (alloc-bytes 32 8)))
         (seq
          (nl_clx_write_nil nil_slot)
          (nl_env_capture_lexical_with_filter env nil_slot 0 out))))
     (defun nl_env_capture_lexical_filtered (env lambda-args out _pad)
-      (let* ((filter_slot (alloc-bytes 32 8)))
-        (seq
-         (nl_clx_write_nil filter_slot)
-         (nl_clx_symbol_filter_walk lambda-args filter_slot)
-         (nl_env_capture_lexical_with_filter env filter_slot 1 out))))))
+      (if (= (nl_fvcache_disabled) 1)
+          (let* ((raw_filter_slot (alloc-bytes 32 8)))
+            (seq
+             (nl_clx_write_nil raw_filter_slot)
+             (nl_clx_symbol_filter_walk_raw lambda-args raw_filter_slot)
+             (nl_env_capture_lexical_with_filter env raw_filter_slot 1 out)))
+        (let* ((cached (nl_fvcache_lookup lambda-args)))
+          (if (= cached 0)
+              (let* ((filter_slot (alloc-bytes 32 8)))
+                (seq
+                 (nl_clx_build_symbol_filter lambda-args filter_slot)
+                 (if (= (sexp-tag filter_slot) 7)
+                     (nl_fvcache_store lambda-args filter_slot)
+                   0)
+                 (nl_env_capture_lexical_with_filter env filter_slot 1 out)))
+            (nl_env_capture_lexical_with_filter env cached 1 out)))))))
 
 ;; ===================================================================
 ;; TOP-LEVEL FORM-BOUNDARY ARENA RECLAMATION (the safe reclamation point).
