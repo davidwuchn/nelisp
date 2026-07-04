@@ -533,3 +533,100 @@ No merge-blocking issues found.  The pre-existing org-mode/=commandp= gaps
 are orthogonal to this branch's scope (the multi-chunk cold-load mechanism)
 and are unchanged by it — replay and cold-load agree with each other either
 way.
+
+** Gate-prelude opt-in probe (2026-07-04, branch =feat/org-cold-image-gate-prelude=): caveat NOT closed
+
+=scripts/cold-image-org-e2e.sh= gained three env-var opt-ins
+(=E2E_BOOTSTRAP_REPL=, =E2E_PRELUDE=, =E2E_LOAD_TIMEOUT=; default behavior
+unchanged) so the replay-load phase can be re-pointed at
+nelisp-emacs-lib's =make diagnose-vendor-repl-replay= gate inputs instead of
+this worktree's own, to test the Increment-3 hypothesis above: that the
+=org-mode= install gap is purely a *prelude-text* difference, and swapping
+in the gate's prelude (keeping this worktree's own reader binary and
+=nemacs-bootstrap.repl=, which were already identical to the gate's
+defaults) would close it.
+
+One run (=RUNS=1=, =E2E_PRELUDE=$NELISP_LIB_ROOT/vendor/nelisp/scripts/nelisp-stdlib-prelude.el=,
+=E2E_LOAD_TIMEOUT=900=, this worktree's reader/bootstrap-repl otherwise
+unchanged) was executed end-to-end:
+
+| phase                    |    result |
+|--------------------------+-----------|
+| host =.repl= generation  |    0.77 s |
+| replay load              |  253.32 s |
+| dump (in-process)        |    3.45 s |
+| cold boot to first eval  |    4.43 s |
+| cold-boot peak RSS       | ~3.69 GiB |
+| image size               | ~3.78 GiB |
+
+The replay-load slowdown (9.8 s -> 253.3 s) reproduces the magnitude Doc
+156 §7 attributed to =org.el='s =(define-derived-mode org-mode ...)= form
+under the gate prelude (">170 s inside org.el alone"), and both the image
+and cold-boot peak RSS grew roughly 5.4x versus the default-prelude
+baseline (694 MB / 679 MB -> 3.78 GiB / 3.69 GiB) -- consistent with a much
+larger/more expensive parse or expansion state being retained.  However,
+the faithfulness columns came back *unchanged* from the Increment-3
+baseline for BOTH the replay-loaded and the cold-booted process:
+
+| conjunct                    | replay (default prelude) | replay (gate prelude) | cold-boot (gate-prelude image) |
+|------------------------------+---------------------------+------------------------+---------------------------------|
+| =(featurep 'org)=            | t                         | t                      | t                               |
+| =(featurep 'org-element)=    | t                         | t                      | t                               |
+| =(fboundp 'org-mode)=        | nil                       | nil                    | nil                             |
+| =(fboundp 'org-element-parse-buffer)= | t                | t                      | t                               |
+| =(commandp 'org-mode)=       | nil                       | nil                    | nil                             |
+| =(fboundp 'commandp)=        | t                         | t                      | t                               |
+
+So the prelude-text swap alone does *not* reproduce the gate's reported
+=org-mode= install.  A cheap follow-up probe against the already-dumped
+image (no re-load needed -- just an extra =--cold-load-from= boot, ~4 s)
+added more diagnostics: =(fboundp 'define-derived-mode)= = t and it IS a
+macro (=(eq (car-safe (symbol-function 'define-derived-mode)) 'macro)= =
+t, defined by =vendor/emacs-lisp/emacs-lisp/derived.el=, unchanged by the
+prelude swap); =(fboundp 'outline-mode)= = t (the parent mode =org-mode=
+derives from is present); =(boundp 'org-mode)= = nil; =(fboundp
+'org-mode-map)= = t and =(boundp 'org-mode-map)= = t (both set, which is
+itself an anomaly for what should be a plain keymap variable, not a
+function); =(fboundp 'org-mode-abbrev-table)= = nil.  Neither stdout nor
+stderr contained any error/signal text from the 253 s replay-load run (both
+empty under =--repl --no-prompt --no-print=) -- =define-derived-mode='s
+expansion runs to completion without a visible error, but the resulting
+=org-mode= command is never =fset=.
+
+*Root-cause reassessment*: Doc 156 §7 attributed the gap to "PRELUDE
+difference" and named the gate's default prelude path as
+=NELISP_ROOT/scripts/nelisp-stdlib-prelude.el= with
+=NELISP_ROOT=vendor/nelisp= (nelisp-emacs-lib's vendored nelisp mirror).
+That same =NELISP_ROOT= is *also* nelisp-emacs-lib's default reader binary
+root (=NELISP_ROOT/target/nelisp=, per its Makefile's
+=DEFAULT_NELISP_BIN=), i.e. the gate does not just feed a different prelude
+*file* into an otherwise-identical reader -- it runs a *different reader
+binary* to begin with.  Checked read-only: that vendored mirror
+(=nelisp-emacs-lib/vendor/nelisp=) is at commit =f1ef06e1= ("fix(eval):
+condition-case must not catch throw"), a commit that does not exist
+anywhere in this checkout's (=dev/nelisp=) git history -- confirmed via
+=git log --oneline -1 f1ef06e1= failing ("unknown revision") from this
+repo.  The vendored mirror is a separately-diverged interpreter build, not
+an older commit reachable from this checkout's current HEAD (=f89b346f=).
+This experiment held that binary fixed (this worktree's own
+=./target/nelisp=, current HEAD) and varied only the prelude *text*; the
+result shows prelude text is not sufficient by itself, so the original
+diagnosis conflated two uncontrolled variables (prelude text and reader
+binary version).
+
+*Status*: caveat is **NOT closed**.  Per the task's stop condition, no
+reader-internals changes were attempted to chase this further (that would
+mean either bisecting/porting whatever changed in this checkout's
+interpreter between the =f1ef06e1=-lineage build and current HEAD that
+affects this specific =define-derived-mode= interaction, or building the
+official cold image with the gate's own, differently-built binary and
+separately verifying that binary's arena/image format is compatible with
+this checkout's =--cold-load-from= consumer -- both out of scope here and
+deferred back for a decision).  The env-var opt-in infrastructure
+(=E2E_BOOTSTRAP_REPL=/=E2E_PRELUDE=/=E2E_LOAD_TIMEOUT=) itself is retained:
+it is what made this a controlled, one-line-diff experiment instead of a
+guess, and it remains available (default-off) for the next investigation
+pass.  The regression suite (4 make smokes; default
+=scripts/cold-image-org-e2e.sh 1= with no env overrides) was re-verified
+green after adding it, with faithfulness columns unchanged
+(=(t t nil t nil t)= both columns, matching Increment 3 exactly).
