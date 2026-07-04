@@ -82,7 +82,7 @@
 ;;
 ;; STEP 3b-i (DONE): root-coverage precondition for the pointer swizzle.
 ;; Baked `nelisp--arena-mark-reach-verify' reuses the GC mark-from-roots
-;; (`nl_gc_mark_published_contexts' / `-rootstack' / `-symentry') to mark the
+;; (`nl_gc_mark_recorded_contexts' / `-rootstack' / `-symentry') to mark the
 ;; reachable graph, linearly counts the marked blocks, then CLEARS the marks
 ;; (no sweep -> nothing freed; the heap is left exactly as before).  Returns
 ;; (REACHABLE TOTAL).  On target/nelisp the reachable set is ~76 k objects;
@@ -90,15 +90,15 @@
 ;; retains unreachable-not-yet-swept garbage -- after `(garbage-collect)' the
 ;; live count drops to ~83 k and REACHABLE ~= LIVE (~92%; the remainder are
 ;; transient C-stack roots, which a dump intentionally omits).  This proves
-;; the published roots reach the whole persistent live set the dump must
+;; the recorded roots reach the whole persistent live set the dump must
 ;; capture.  See `nelisp-flat-arena-probe-mark-reach'.
 ;;
 ;; STEP 3b-ii (DONE) + 3c all-roots: the pointer SWIZZLE proper.  Baked
 ;; `nelisp--arena-swizzle-verify' bulk-copies chunk-0, then mirrors the GC
 ;; per-type walk (`nl_gc_mark_slot' / `-cons' / `-vec_slots') from ALL roots
-;; (`nl_fa_roots' = every published frame's globals/frames/unbound + the
+;; (`nl_fa_roots' = every recorded frame's globals/frames/unbound + the
 ;; reader transients result/out/src/cursor/bsym + the shared symentry,
-;; mirroring `nl_gc_mark_published_frame') and, at every pointer FIELD, rewrites the matching
+;; mirroring `nl_gc_mark_recorded_frame') and, at every pointer FIELD, rewrites the matching
 ;; word IN THE COPIED buffer from an absolute address to an arena-relative
 ;; offset (in-place; no separate pointer list).  The SOURCE heap is never
 ;; written.  Verified by a round trip: swizzle then unswizzle restores the
@@ -122,7 +122,7 @@
 ;; memcpy+relocate round trip.  See `nelisp-flat-arena-probe-load-relocate'.
 ;;
 ;; STEP 3c (DONE): the image is now COMPLETE.
-;;   - all roots: swizzle/relocate walk from every published frame + reader
+;;   - all roots: swizzle/relocate walk from every recorded frame + reader
 ;;     transients + symentry (`nl_fa_roots'), not just frame[0] globals.
 ;;   - all chunks: measured chunk-count = 1 (the live heap is entirely in
 ;;     chunk-0; growth chunks were transient GC garbage), so the single-chunk
@@ -285,7 +285,7 @@ heap is never mutated.  Return a labelled plist."
 
 (defun nelisp-flat-arena-probe-mark-reach (&optional gc-first)
   "Root-coverage check via the baked `nelisp--arena-mark-reach-verify' op.
-Marks the reachable graph from the published roots, counts it, then clears
+Marks the reachable graph from the recorded roots, counts it, then clears
 the marks (no sweep).  With GC-FIRST non-nil, run `(garbage-collect)' first
 so the linear live count drops to the reachable set for a tight comparison.
 Return a labelled plist."

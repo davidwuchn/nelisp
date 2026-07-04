@@ -55,9 +55,9 @@ itself survives:
 
 The GC mark code *structurally* recurses this chain
 (=nl_gc_mark_slot= for tag-12 Record → slots; tag-8 Vector → buf + slots; tag-7
-Cons), and the root marker =nl_gc_mark_published_frame= marks
+Cons), and the root marker =nl_gc_mark_recorded_frame= marks
 =(nl_gc_mark_slot (+ env 32))= (the frame stack).  Yet live objects are
-collected → the gap is in GC *root traversal* (the =env= published to the
+collected → the gap is in GC *root traversal* (the =env= recorded to the
 collection during a deep eval likely does not reach the live frame stack's full
 child chain) or in *sweep*.  Pinpointing it needs GC-mark instrumentation
 (see §6).
@@ -93,7 +93,7 @@ deep frame-stack eval can resurface it.
    crashes 5/5.  Minimal reproducers (deep =let= recursion + churn / explicit
    =garbage-collect=) do NOT trigger it — it needs the audit/manifest-load frame
    pattern.  Consider building a closer repro from the audit eval shape.
-2. Instrument the GC mark phase (=nl_gc_mark_published_frame= /
+2. Instrument the GC mark phase (=nl_gc_mark_recorded_frame= /
    =nl_gc_mark_roots= / =nl_gc_mark_slot= / =nl_gc_mark_vec_slots=) to log:
    - whether the frame-stack root (=env+32=) is reached at all in the crashing
      collection,
@@ -137,9 +137,9 @@ This SHARPENS §3: the crash is *not* a live object freed by a running collector
   root/mark gap is a KNOWN, deliberately-worked-around issue.
 - Per-eval / boundary reclaim is DISABLED (Doc 140: "escape-epoch reset is
   unsound", =arena-boundary-reclaim-enabled-offset = 0=).
-- The precise mark+sweep =nl_gc_collect_published= (via =nl_gc_safepoint=, called
+- The precise mark+sweep =nl_gc_collect_from_recorded_roots= (via =nl_gc_midform_collect=, called
   from =nl_sf_while='s backedge, 16 MiB trigger) is OFF by default — ARMED only
-  by the =(nelisp--gc-diag 5)= test hook (=bf_gc_diag= mode 5), disarmed by mode
+  by the =(nelisp--debug-switch 5)= test hook (=bf_debug_switch= mode 5), disarmed by mode
   6.  Normal =nelix audit= never arms it.
 
 ⇒ During audit NO collector runs; the arena only GROWS.
@@ -200,7 +200,7 @@ inside the 256 MiB first chunk → no growth → no corruption.
 3. Proper fix: land a SOUND reclaiming GC (fix the root/mark gap so
    =nl_gc_collect= can be re-enabled, keeping the arena bounded so growth is
    rarely/never needed).  Existing machinery to make sound:
-   =nl_gc_mark_published_contexts= (precise roots, capacity 64; the frame stack
+   =nl_gc_mark_recorded_contexts= (precise roots, capacity 64; the frame stack
    is a shared backing, so one published env marks all frames) + the mode-0
    conservative scan (=nl_gc_conserv_maybe=).
 4. Interim mitigation option: a larger first chunk reduces growth frequency but
@@ -410,12 +410,12 @@ collection (line 1053 = 0) + close the marking gap.  Investigated on the
 838605da worktree (collection ON, crashes).  Findings:
 
 - First obvious fix — make the BOUNDARY =nl_gc_collect= also call
-  =nl_gc_mark_published_contexts= (mark every nested eval/load context, the arm
+  =nl_gc_mark_recorded_contexts= (mark every nested eval/load context, the arm
   the MIDFORM safepoint already uses): does NOT help (audit still 5/5 SIGSEGV).
-- Why: a depth probe (=exit(100+depth)= on the first collect with published
+- Why: a depth probe (=exit(100+depth)= on the first collect with recorded
   depth>0) shows depth reaches 2, so outer contexts ARE pushed — but the
-  BOUNDARY collect fires in =bf_load_eval_loop= AFTER =nl_driver_eval_published=
-  has POPPED its context, so at the top-level boundary published depth = 0
+  BOUNDARY collect fires in =bf_load_eval_loop= AFTER =nl_driver_eval_with_recorded_roots=
+  has POPPED its context, so at the top-level boundary recorded depth = 0
   (nothing to mark there) and the conservative C-stack scan range is tiny
   (=rsp..STACK_TOP= ≈ 368 B — the loop frame).  So neither published-context
   marking nor the conservative scan covers the live frame at the boundary.
@@ -437,7 +437,7 @@ should reach the growth-chunk ht via env→frames→backing→frame→ht (and
 =nl_gc_in_arena= DOES cover growth chunks), yet the crashing ht is not marked —
 so the real retention path is NOT the boundary collect's =ctx=+32 frame stack
 at the moment it fires.  Likely the live frame is retained via a path outside
-{the single =ctx=, the popped published stack, the 368 B conservative window}
+{the single =ctx=, the popped recorded stack, the 368 B conservative window}
 — e.g. a shared/cloned record or a closure-captured environment the traversal
 does not follow.  Closing this soundly is a substantial GC project (identify
 the exact retention edge, extend the marker, re-validate the full gate AND

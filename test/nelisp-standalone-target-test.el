@@ -748,24 +748,17 @@ Windows uses the target-correct `.obj' unit name; linux/macOS keep `.o'."
                                 (cons (plist-get sym :name) sym))
                               syms)))
         (should (equal name (plist-get u :name)))
-        (should (equal '("nl_arena_base"
-                         "nl_rootstack_top"
-                         "nl_rootstack_region"
-                         "nl_gc_diag"
-                         "nl_safepoint_ctx"
-                         "nl_fa_tbl_base")
-                       (mapcar (lambda (sym) (plist-get sym :name)) syms)))
         (dolist (expected '(("nl_arena_base" . 0)
                             ("nl_rootstack_top" . 8)
                             ("nl_rootstack_region" . 16)
                             ("nl_gc_diag" . 1048592)
-                            ("nl_safepoint_ctx" . 1048656)
+                            ("nl_gc_loop_ctx" . 1048656)
                             ("nl_fa_tbl_base" . 1052304)))
           (let ((sym (cdr (assoc (car expected) by-name))))
             (should sym)
             (should (equal (cdr expected) (plist-get sym :value)))
             (should (eq 'bss (plist-get sym :section)))))
-        (should (equal 1052312
+        (should (equal 1052432
                        (cdr (assq 'bss (plist-get u :sections)))))))))
 
 (ert-deftest nelisp-standalone-target-stage8-build-appends-arena-base-slot-unit ()

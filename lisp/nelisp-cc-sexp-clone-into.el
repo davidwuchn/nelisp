@@ -8,8 +8,10 @@
 
 ;;; Commentary:
 
-;; AOT replacement for `nl_sexp_clone_into(src, dst)' which
-;; reproduced the deleted Rust `core::ptr::write(dst, (*src).clone())'.
+;; AOT replacement for `nl_sexp_clone_into(src, dst)' which started as the
+;; deleted Rust `core::ptr::write(dst, (*src).clone())'.  Symbol/String values
+;; now take the Doc 149 shallow-buffer-alias path by default; the legacy deep
+;; string copy remains behind the compatibility flag in `nl_sci_dispatch'.
 ;;
 ;; `Sexp' is a 32-byte `#[repr(C, u8)]' slot:
 ;;   tag (u8) @ 0, payload @ 8.
@@ -141,15 +143,18 @@
       (if (= (logand src 1) 0)
           (nl_sci_dispatch src dst (ptr-read-u8 src 0))
         (nl_sci_store_imm src dst))))
-  "AOT source for nl_sexp_clone_into = ptr::write(dst,(*src).clone()).
+  "AOT source for nl_sexp_clone_into.
 
-Re-provides the deleted Rust `core::ptr::write(dst, (*src).clone())'
-from `build-tool/src/eval/sexp.rs'.  Sexp is a 32-byte #[repr(C,u8)]
-slot; the tag byte at offset 0 drives a 3-way dispatch:
+Re-provides the deleted Rust clone entry point from
+`build-tool/src/eval/sexp.rs', with Doc 149's shallow-buffer-alias fast path
+for immutable Symbol/String values enabled by default.  Sexp is a 32-byte
+#[repr(C,u8)] slot; the tag byte at offset 0 drives a 3-way dispatch:
 
   tag < 4  (Nil/T/Int/Float): plain 32-byte (4×u64) bit-copy.
-  tag = 4  (Symbol): deep String copy via nl_alloc_symbol.
-  tag = 5  (Str):    deep String copy via nl_alloc_str.
+  tag = 4  (Symbol): shallow string-buffer alias by default; legacy deep
+             copy via nl_alloc_symbol when the compatibility flag is off.
+  tag = 5  (Str):    shallow string-buffer alias by default; legacy deep
+             copy via nl_alloc_str when the compatibility flag is off.
   tag 6..12 (MutStr/Cons/Vector/CharTable/BoolVector/Cell/Record):
              refcount bump via the per-type nelisp_nl*_clone helper,
              then plain 32-byte bit-copy.
