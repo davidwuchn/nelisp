@@ -6,7 +6,7 @@
         standalone-tarball standalone-tarball-verify \
         verify-elisp-fixtures \
         standalone-eval standalone-eval-clean standalone-eval-test standalone-eval-j \
-        standalone-reader standalone-reader-test standalone-reader-load-smoke standalone-reader-fmt-smoke standalone-reader-prelude-equal-reload-smoke standalone-reader-nested-backquote-macro-smoke standalone-reader-ffi-smoke standalone-reader-tls-smoke standalone-reader-process-smoke standalone-reader-realrt-smoke standalone-reader-repl-smoke standalone-reader-prelude-test standalone-selfhost-test standalone-selfhost-mt-test standalone-parallel-compile-test standalone-chunk-growth-test \
+        standalone-reader standalone-reader-test standalone-reader-load-smoke standalone-reader-fmt-smoke standalone-reader-prelude-equal-reload-smoke standalone-reader-nested-backquote-macro-smoke standalone-reader-derived-mode-shape-smoke standalone-reader-ffi-smoke standalone-reader-tls-smoke standalone-reader-process-smoke standalone-reader-realrt-smoke standalone-reader-repl-smoke standalone-reader-prelude-test standalone-selfhost-test standalone-selfhost-mt-test standalone-parallel-compile-test standalone-chunk-growth-test \
         nelisp-performance-gate nelisp-nelix-command-gate nelisp-native-artifact-gate nelisp-nelix-native-hot-gate \
         nelisp-nelix-operational-gate \
         nelisp-runtime-image-cache-gate nelisp-source-command-substrate-gate
@@ -260,6 +260,50 @@ standalone-reader-nested-backquote-macro-smoke: standalone-reader
 	  echo "[standalone-reader-nested-backquote-macro-smoke] PASS: -> $$out"; \
 	else \
 	  echo "[standalone-reader-nested-backquote-macro-smoke] FAIL: -> $$out (expected (t t 42 42 nbm-child-a))"; \
+	  exit 1; \
+	fi
+
+# Regression smoke for the exact backquote shape underlying vendor
+# `define-derived-mode' (emacs-lisp/derived.el): a wrapper form whose
+# children are (1) a single-comma element `(,(or parent 'base-fn))', (2)
+# plain siblings, (3) a `,(when PARENT `(progn ...))' branch that is nil
+# on the PARENT=nil arm and a two-level-deep nested-backquote-through-comma
+# `(progn ...)' on the non-nil arm, followed by (4) more plain sibling
+# forms (`use-local-map'/`set-syntax-table'/`setq'-shaped calls in the real
+# macro).  Investigated 2026-07 (Doc merge 39e45d90 follow-up): a session
+# reported that expanding UNMODIFIED vendor derived.el's
+# `define-derived-mode' "misfolds" those trailing sibling forms into the
+# tail of the preceding form.  Root-caused: NOT a backquote/macroexpansion
+# defect.  Reproduced the exact vendor macro (byte-identical text) against
+# this reader with an accurate stub environment (real Emacs
+# `define-abbrev-table' side-effects a `set' on its table symbol before a
+# self-referencing `defvar' initializer reads it back; an earlier ad hoc
+# stub used during triage returned nil without binding anything).  With an
+# accurate stub, BOTH the printed `macroexpand-1' structure (siblings
+# intact, no misfold, for both the nil-parent and chained non-nil-parent
+# case) AND the resulting mode functions (`fboundp'/`commandp' both t) are
+# fully correct end-to-end -- matching real Emacs.  The original inaccurate
+# stub triggered a SEPARATE, genuine defect (silent, uncatchable-by-
+# `condition-case' abandonment of the rest of a compound top-level form
+# after an unbound-variable reference, with no diagnostic -- see
+# FINDINGS.md) which was mistaken for a structural misfold because later
+# sibling forms in the same top-level `progn' never ran.  That defect is
+# real but lives in the core eval/signal-flag substrate (`nl_eval_inner' /
+# `nelisp_eval_call' and the M6 stash flag @268435472 in
+# scripts/nelisp-standalone-build.el), not in the backquote engine, and is
+# out of scope for a DSL-level fix; this smoke pins down the part that IS
+# correct (the backquote engine) so it cannot silently regress.
+standalone-reader-derived-mode-shape-smoke: standalone-reader
+	@mkdir -p target
+	@printf '%s\n' \
+	  '(defmacro ddm-shape (child parent) (let ((map (intern (concat (symbol-name child) "-map")))) `(wrapper-hooks (,(or parent (quote base-fn))) (setq major-mode (quote ,child)) ,(when parent `(progn (setup-parent (quote ,parent)) ,(when t `(let ((p (parent-of ,map))) (maybe-set-parent ,map p))))) (use-local-map ,map) (set-syntax-table ,map) (setq local-abbrev-table ,map))))' \
+	  '(list (equal (macroexpand-1 (quote (ddm-shape ddm-child-a nil))) (quote (wrapper-hooks (base-fn) (setq major-mode (quote ddm-child-a)) nil (use-local-map ddm-child-a-map) (set-syntax-table ddm-child-a-map) (setq local-abbrev-table ddm-child-a-map)))) (equal (macroexpand-1 (quote (ddm-shape ddm-child-b ddm-parent))) (quote (wrapper-hooks (ddm-parent) (setq major-mode (quote ddm-child-b)) (progn (setup-parent (quote ddm-parent)) (let ((p (parent-of ddm-child-b-map))) (maybe-set-parent ddm-child-b-map p))) (use-local-map ddm-child-b-map) (set-syntax-table ddm-child-b-map) (setq local-abbrev-table ddm-child-b-map)))))' \
+	  > target/standalone-reader-derived-mode-shape-smoke.el
+	@out="$$(./target/nelisp --load target/standalone-reader-derived-mode-shape-smoke.el)"; \
+	if [ "$$out" = "(t t)" ]; then \
+	  echo "[standalone-reader-derived-mode-shape-smoke] PASS: -> $$out"; \
+	else \
+	  echo "[standalone-reader-derived-mode-shape-smoke] FAIL: -> $$out (expected (t t))"; \
 	  exit 1; \
 	fi
 

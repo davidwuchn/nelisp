@@ -210,3 +210,145 @@ first allocator/user inside form 122 rather than adding more roots to
   while evaluating form 122, because the synthetic "new symbol + forced
   boundary GC" negative rules out generic symbol interning and points at the
   SMIE graph's specific mutable hash/alist allocation pattern.
+
+---
+
+2026-07-04 third follow-on: `define-derived-mode` "misfold" retraction +
+minimal repro of the real defect
+
+Scope
+
+Follow-up to the merge-39e45d90 residual: "expanding UNMODIFIED vendor
+derived.el's `define-derived-mode` misfolds sibling forms (`use-local-map`/
+`set-syntax-table`/`(setq local-abbrev-table ...)`) into the preceding
+`delay-mode-hooks` tail." Built `make standalone-reader` fresh on
+`fix/derived-sibling-fold` (off `main` @ 39e45d90) and reproduced against
+the real, unmodified
+`nelisp-emacs-lib/vendor/emacs-lisp/emacs-lisp/derived.el` (read-only), not
+a hand-copied excerpt.
+
+Retraction
+
+There is no backquote/macroexpansion defect. Loading the byte-identical
+vendor `define-derived-mode` text and calling
+`(macroexpand-1 '(define-derived-mode my-m nil "M" "doc"))`, and separately
+a two-mode parent chain (`(define-derived-mode dm-child-a nil "A")` then
+`(define-derived-mode dm-child-b dm-child-a "B")`, exercising the non-nil
+`,(when parent \`(progn ...))` branch with its own nested
+`,(when declare-syntax \`(let ...))` / `,(when declare-abbrev \`(unless
+...))` sub-templates two levels deep), always printed a fully correct
+expansion: `use-local-map`, `set-syntax-table`, and
+`(setq local-abbrev-table ...)` appear as proper top-level siblings inside
+`delay-mode-hooks`, exactly matching real Emacs's expansion shape. With an
+accurate helper-function stub environment, `(fboundp 'dm-child-a)`,
+`(fboundp 'dm-child-b)`, `(commandp 'dm-child-a)`, `(commandp
+'dm-child-b')` are all `t` -- the vendor macro works end-to-end on this
+reader unmodified.
+
+Root cause of the original observation
+
+The apparent "misfold" was a session artifact, not a reader defect in the
+area under investigation:
+
+1. An ad hoc test stub used during triage, `(defun define-abbrev-table
+   (&rest _) nil)`, is not faithful to real Emacs: real `define-abbrev-table`
+   side-effects a `set` on its table-name argument. Vendor derived.el relies
+   on exactly that side effect: `(defvar CHILD-abbrev-table (progn
+   (define-abbrev-table 'CHILD-abbrev-table nil) CHILD-abbrev-table))` reads
+   back the symbol it just (in real Emacs) bound. With the inert stub, that
+   read-back is a genuine reference to a still-unbound variable.
+2. That triggered a second, real, and more interesting defect: an
+   unbound-variable reference partway through evaluating a compound
+   top-level form silently and uncatchably abandons the *rest of that form*,
+   with no diagnostic and no `condition-case`-catchable signal, letting the
+   driver loop move on to the next top-level form as if nothing happened.
+   Because `use-local-map`/`set-syntax-table`/`setq local-abbrev-table`
+   come *after* the abbrev-table `defvar` inside the same `(defun CHILD ()
+   ...)` body, they silently never ran when the CLI actually installed the
+   mode function (as opposed to only previewing it via `macroexpand-1`,
+   which never evaluates the body) -- producing symptoms (missing/absorbed-
+   looking trailing forms) that read like a structural cons misfold but
+   were actually a truncated evaluation.
+
+Minimal repro of the real defect (decoupled from derived.el entirely)
+
+```elisp
+(progn (defvar v2 (progn 1 v2)) (defun f2 () 42))
+(prin1 (fboundp (quote f2)))
+(terpri)
+```
+
+`./target/nelisp --load` prints `nil` for the `fboundp` (then `t` from the
+last form's auto-echo) -- `f2` was never defined, silently, exit code 0, no
+stderr output. The variable need not be self-referencing; any unbound
+reference reproduces it: `(progn (defvar v3 totally-unbound-name) (defun f3
+() 42))` also leaves `f3` unbound. Wrapping the protected form in
+`condition-case` does not catch it either (confirmed: the whole
+`condition-case` top-level form is itself silently abandoned), so this is
+not a normal signaled Elisp condition escaping uncaught -- it bypasses the
+catch/throw machinery entirely.
+
+By contrast, an outright `void-function` call (undefined symbol in head
+position) correctly halts the process with `nelisp: uncaught error:
+void-function: (...)` and a non-zero exit -- so top-level error reporting
+is not blanket-broken, only this specific path.
+
+Where this lives (not fixed -- see "why not fixed" below)
+
+`scripts/nelisp-standalone-build.el`:
+- `nl_eval_source_all` (~line 9958-10010, the `--eval`/`--load` top-level
+  driver) only calls `nl_eval_source_report_error` (the
+  "nelisp: uncaught error: ..." printer, ~line 9911-9956) when the per-form
+  `nelisp_eval_call` return code (`form_rc`) is nonzero *and* the M6 stash
+  flag @268435472 is nonzero (a genuine signal/throw was stashed). The
+  surrounding comment (line ~9992-10004) documents this as deliberate: "a
+  flag==0 non-zero rc is treated as before this fix (silently continues) so
+  inline substrate loading is unaffected." The unbound-variable path
+  reproduced above evidently does not stash the flag the same way a
+  `bf_signal`/`bf_error` call does (see those at ~line 5888-5905), so it
+  falls into the already-accepted "silently continue" branch.
+- `bf_load_eval_loop` (~line 5963-5988, backing the `load` primitive) does
+  not check `form_rc`/the flag at all between forms, unconditionally
+  looping to the next top-level form regardless of outcome.
+- `nl_eval_inner`/`nelisp_eval_call` (~line 2522 onward) is the shared
+  variable-lookup + dispatch core; finding exactly why a bare unbound-symbol
+  evaluation fails to route through the same stash path as
+  `bf_signal`/`bf_error` requires tracing this dispatcher, which is
+  intertwined with the GC safepoint/arena-mark protocol documented in the
+  large comment block just above `nelisp-standalone--shim-source`
+  (~line 2465-2520).
+
+Why not fixed here
+
+This is exactly the class of finding this investigation's brief said to
+STOP on rather than patch blind: the real defect is in the shared
+eval/signal-flag substrate (touching the same rc/flag protocol used by GC
+safepoints and every builtin's error path), not a small, local
+list-construction fix in the backquote engine
+(`nelisp--bq-expand`/`nelisp--bq-build` in
+`scripts/nelisp-stdlib-prelude.el`), which is where the original report
+pointed and where this session confirmed there is nothing to fix.
+
+Regression guard added
+
+`make standalone-reader-derived-mode-shape-smoke` (self-contained, no
+cross-repo vendor path) pins down the specific backquote shape at stake --
+single-comma list element, nil-vs-nested-`progn` branch through two levels
+of comma-escaped nested backquote, trailing plain siblings -- proving via
+`macroexpand-1`/`equal` that the engine builds proper sibling lists in both
+the nil-branch and populated-branch cases. All pre-existing reader smokes
+(`standalone-reader-test`, `-load-smoke`, `-fmt-smoke`,
+`-prelude-equal-reload-smoke`, `-nested-backquote-macro-smoke`) plus the
+scratchpad's saved 43-form REPL error-tolerance replay were re-run and are
+byte-for-byte unchanged.
+
+Recommended next step
+
+Treat "unbound-variable reference silently and uncatchably truncates the
+enclosing top-level form" as its own tracked defect, independent of
+derived.el. Trace `nl_eval_inner`'s symbol-evaluation arm to find why it
+does not reach the same `bf_signal`-style stash as an explicit `(error
+...)`/`(signal ...)` call, then decide whether `nl_eval_source_all`'s
+`flag==0` tolerance and `bf_load_eval_loop`'s missing rc check should also
+change once the stash itself is fixed. Do this as a dedicated GC/evaluator-
+substrate investigation, not folded into a "fix the backquote engine" task.
