@@ -188,6 +188,12 @@ The standalone reader command path is generated from
 when `default-directory' and OS environment variables are unavailable inside the
 NeLisp runtime.")
 
+(defvar nelisp-artifact-standalone-target nil
+  "Standalone build target symbol, e.g. `windows-x86_64' or `linux-x86_64'.
+Baked in as a literal by `scripts/nelisp-standalone-build.el' alongside
+`nelisp-artifact-standalone-repo-root'; nil/unbound outside a generated
+standalone runtime.")
+
 (defun nelisp-artifact--write-stdout (text)
   "Write TEXT to stdout."
   (if (fboundp 'nelisp--write-stdout-bytes)
@@ -3926,86 +3932,175 @@ is loaded into host Emacs, so FORMS are evaluated with host `eval'."
        (stringp nelisp-artifact-standalone-repo-root)
        (> (length nelisp-artifact-standalone-repo-root) 0)))
 
+(defun nelisp-artifact--standalone-windows-p ()
+  "Return non-nil when the generated standalone runtime targets Windows."
+  (and (boundp 'nelisp-artifact-standalone-target)
+       (memq nelisp-artifact-standalone-target '(windows-x86_64 windows-aarch64))))
+
+(defun nelisp-artifact--standalone-windows-cmd-query (expr)
+  "Run `cmd.exe /c EXPR' and return its trimmed stdout, or nil on failure.
+The standalone Windows runtime's `process-environment' is never populated
+from the real OS environment (nothing auto-inherits it at boot, and there is
+no `--setenv' entry point on this CLI today), so `getenv'/`executable-find'
+cannot see PATH or any real environment variable directly.  A CHILD process
+spawned via `call-process', however, DOES inherit the real environment
+(the Windows `CreateProcessW' spawn model passes `lpEnvironment = NULL',
+which means \"use the calling process's environment\").  Shelling out to
+`cmd.exe' is therefore the only currently-working way for standalone Windows
+code to observe the real environment; kept local to the artifact
+host-helper discovery below rather than a general `getenv' replacement."
+  (and (fboundp 'call-process)
+       (fboundp 'make-temp-file)
+       (let ((out (nelisp-artifact--make-temp-path "nelisp-win-env" "txt")))
+         (unwind-protect
+             (let ((status (call-process "C:/Windows/System32/cmd.exe" nil
+                                         (list :file out) nil "/c" expr)))
+               (when (eq status 0)
+                 (let ((text (nelisp-artifact--read-log-if-exists out)))
+                   (when (and (stringp text) (> (length text) 0))
+                     (string-trim text)))))
+           (nelisp-artifact--delete-if-exists out)))))
+
+(defun nelisp-artifact--standalone-windows-host-emacs ()
+  "Locate host Emacs on the standalone Windows runtime via `cmd.exe'.
+Tries the `NELISP_HOST_EMACS' override first (as a real path, verified with
+`file-exists-p'), then falls back to a PATH search via `where'.
+
+KNOWN-BROKEN, disabled for now: this runtime has a separate, deeper defect
+where any `call-process' invocation with a `let'/`let*'/`unwind-protect'
+frame still active in its dynamic extent corrupts the caller's state (root
+gap distinct from the feat/windows-spawn repeat-call SIGSEGV fixed
+separately -- reproduces even with the crash-free build).
+`nelisp-artifact--standalone-windows-cmd-query' needs exactly that shape
+(temp-file path bound, `unwind-protect'-guarded), so calling it here would
+intermittently corrupt this discovery rather than reliably finding Emacs.
+Until that interpreter-level gap is fixed, return nil so the caller falls
+through to the clean \"host-helper required but unavailable\" diagnostic
+instead of an unreliable result."
+  nil)
+
 (defun nelisp-artifact--host-helper-emacs ()
   "Return the host Emacs executable for standalone helper builds, or nil."
-  (let ((candidate (or (and (fboundp 'getenv)
-                            (getenv "NELISP_HOST_EMACS"))
-                       "emacs")))
-    (and (fboundp 'executable-find)
-         (executable-find candidate))))
+  (or (let ((candidate (or (and (fboundp 'getenv)
+                                (getenv "NELISP_HOST_EMACS"))
+                           "emacs")))
+        (and (fboundp 'executable-find)
+             (executable-find candidate)))
+      (and (nelisp-artifact--standalone-windows-p)
+           (nelisp-artifact--standalone-windows-host-emacs))))
 
-(defun nelisp-artifact--standalone-host-helper-eligible-p (opts kind)
-  "Return non-nil when OPTS/KIND should use the host native build helper."
+(defun nelisp-artifact--standalone-host-helper-disabled-p ()
+  "Return non-nil when the standalone host helper is explicitly disabled."
+  ;; NOTE: no `cmd.exe'-based fallback here for the same reason
+  ;; `nelisp-artifact--standalone-windows-host-emacs' has none right now --
+  ;; see its docstring.
+  (and (fboundp 'getenv)
+       (equal (getenv "NELISP_DISABLE_HOST_HELPER") "1")))
+
+(defun nelisp-artifact--standalone-host-helper-mode (opts kind)
+  "Return the host-helper requirement for OPTS/KIND, or nil if not needed.
+`required' means compilation must go through host Emacs -- the standalone
+`nelc'/`neln' compiler path is not reliable on Windows standalone builds
+today, so falling back to it silently would risk the old exit-with-no-output
+failure mode instead of a clear error.  `preferred' means host Emacs is used
+when available, but the native standalone path may still run otherwise."
   (and (nelisp-artifact--standalone-runtime-p)
-       (eq kind 'neln)
-       (eq (plist-get opts :native-policy) 'required)
-       (not (and (fboundp 'getenv)
-                 (equal (getenv "NELISP_DISABLE_HOST_HELPER") "1")))
-       (nelisp-artifact--host-helper-emacs)
        (file-exists-p
         (expand-file-name "lisp/nelisp-artifact.el"
-                          nelisp-artifact-standalone-repo-root))))
+                          nelisp-artifact-standalone-repo-root))
+       (cond
+        ((nelisp-artifact--standalone-windows-p) 'required)
+        ((and (eq kind 'neln)
+              (eq (plist-get opts :native-policy) 'required))
+         'preferred)
+        (t nil))))
+
+(defun nelisp-artifact--standalone-host-helper-unavailable-message (mode kind)
+  "Return a one-line diagnostic for an unavailable helper MODE/KIND."
+  (let ((prefix (format "host-helper required for --kind %s on standalone %s"
+                        kind
+                        (if (nelisp-artifact--standalone-windows-p)
+                            "Windows"
+                          "runtime"))))
+    (if (nelisp-artifact--standalone-host-helper-disabled-p)
+        (concat prefix " but NELISP_DISABLE_HOST_HELPER=1")
+      (concat prefix
+              " (set NELISP_HOST_EMACS or install emacs on PATH)"))))
 
 (defun nelisp-artifact--standalone-host-helper-compile (opts kind)
-  "Compile one required-native artifact through host Emacs.
-Return non-nil when the helper was used successfully.  On failure, emit a
-compact diagnostic and return nil so the caller can fall back to the native
-standalone implementation."
-  (when (nelisp-artifact--standalone-host-helper-eligible-p opts kind)
-    (let* ((start (nelisp-artifact--profile-time))
-           (root nelisp-artifact-standalone-repo-root)
-           (emacs (nelisp-artifact--host-helper-emacs))
-           (log (nelisp-artifact--make-temp-path "nelisp-host-helper" "log"))
-           (eval-form
-            (concat
-             "(progn (setq load-prefer-newer t)"
-             " (require 'nelisp-artifact)"
-             " (let ((nelisp-artifact-profile-stages "
-             (prin1-to-string (plist-get opts :profile-stages))
-             ") (nelisp-artifact-profile-forms "
-             (prin1-to-string (plist-get opts :profile-forms))
-             ")) (nelisp-artifact-compile-file "
-             (prin1-to-string (plist-get opts :input)) " "
-             (prin1-to-string (plist-get opts :output)) " "
-             (prin1-to-string (plist-get opts :manifest)) " "
-             (prin1-to-string (plist-get opts :target)) " "
-             (prin1-to-string (plist-get opts :load-paths)) " "
-             (prin1-to-string (plist-get opts :preloads)) " "
-             (prin1-to-string (plist-get opts :requested-feature)) " "
-             (prin1-to-string (list 'quote kind)) " "
-             (prin1-to-string (list 'quote (plist-get opts :native-policy))) " "
-             (let ((mp (plist-get opts :module-policy)))
-               (if mp
-                   (prin1-to-string (list 'quote mp))
-                 "nil"))
-             ")))"))
-           (status nil))
-      (unwind-protect
-          (progn
-            (setq status
-                  (call-process
-                   emacs nil (list :file log) nil
-                   "-Q" "--batch"
-                   "-L" (expand-file-name "lisp" root)
-                   "-L" (expand-file-name "src" root)
-                   "--eval" eval-form))
-            (if (eq status 0)
+  "Compile one artifact through host Emacs when required/preferred for KIND.
+Return `t' on success, a one-line diagnostic string when a REQUIRED helper
+could not be used (the caller should signal an error with it -- never fall
+back to the native standalone path silently in that case), or nil when no
+helper is needed and the caller may fall back to the native standalone path."
+  (let ((mode (nelisp-artifact--standalone-host-helper-mode opts kind)))
+    (cond
+     ((null mode) nil)
+     ((nelisp-artifact--standalone-host-helper-disabled-p)
+      (if (eq mode 'required)
+          (nelisp-artifact--standalone-host-helper-unavailable-message mode kind)
+        nil))
+     (t
+      (let ((emacs (nelisp-artifact--host-helper-emacs)))
+        (if (null emacs)
+            (if (eq mode 'required)
+                (nelisp-artifact--standalone-host-helper-unavailable-message
+                 mode kind)
+              nil)
+          (let* ((start (nelisp-artifact--profile-time))
+                 (root nelisp-artifact-standalone-repo-root)
+                 (log (nelisp-artifact--make-temp-path "nelisp-host-helper" "log"))
+                 (eval-form
+                  (concat
+                   "(progn (setq load-prefer-newer t)"
+                   " (require 'nelisp-artifact)"
+                   " (let ((nelisp-artifact-profile-stages "
+                   (prin1-to-string (plist-get opts :profile-stages))
+                   ") (nelisp-artifact-profile-forms "
+                   (prin1-to-string (plist-get opts :profile-forms))
+                   ")) (nelisp-artifact-compile-file "
+                   (prin1-to-string (plist-get opts :input)) " "
+                   (prin1-to-string (plist-get opts :output)) " "
+                   (prin1-to-string (plist-get opts :manifest)) " "
+                   (prin1-to-string (plist-get opts :target)) " "
+                   (prin1-to-string (plist-get opts :load-paths)) " "
+                   (prin1-to-string (plist-get opts :preloads)) " "
+                   (prin1-to-string (plist-get opts :requested-feature)) " "
+                   (prin1-to-string (list 'quote kind)) " "
+                   (prin1-to-string (list 'quote (plist-get opts :native-policy))) " "
+                   (let ((mp (plist-get opts :module-policy)))
+                     (if mp
+                         (prin1-to-string (list 'quote mp))
+                       "nil"))
+                   ")))"))
+                 (status nil))
+            (unwind-protect
                 (progn
-                  (when (plist-get opts :profile-stages)
-                    (let ((helper-log (nelisp-artifact--read-log-if-exists log)))
-                      (when (> (length helper-log) 0)
-                        (nelisp-artifact--write-stderr helper-log)))
-                    (nelisp-artifact--profile-log
-                     "host-helper" start
-                     (list :emacs emacs :kind kind
-                           :native-policy (plist-get opts :native-policy))))
-                  t)
-              (nelisp-artifact--write-stderr
-               (format "host-helper failed status=%S: %s"
-                       status
-                       (nelisp-artifact--read-log-if-exists log)))
-              nil))
-        (nelisp-artifact--delete-if-exists log)))))
+                  (setq status
+                        (call-process
+                         emacs nil (list :file log) nil
+                         "-Q" "--batch"
+                         "-L" (expand-file-name "lisp" root)
+                         "-L" (expand-file-name "src" root)
+                         "--eval" eval-form))
+                  (if (eq status 0)
+                      (progn
+                        (when (plist-get opts :profile-stages)
+                          (let ((helper-log (nelisp-artifact--read-log-if-exists log)))
+                            (when (> (length helper-log) 0)
+                              (nelisp-artifact--write-stderr helper-log)))
+                          (nelisp-artifact--profile-log
+                           "host-helper" start
+                           (list :emacs emacs :kind kind
+                                 :native-policy (plist-get opts :native-policy))))
+                        t)
+                    (let ((msg (format "host-helper failed status=%S: %s"
+                                        status
+                                        (nelisp-artifact--read-log-if-exists log))))
+                      (if (eq mode 'required)
+                          msg
+                        (progn (nelisp-artifact--write-stderr msg) nil)))))
+              (nelisp-artifact--delete-if-exists log)))))))))
 
 (defun compile-elisp-artifact (args)
   "CLI entry point for `nelisp compile-elisp-artifact'."
@@ -4025,18 +4120,28 @@ standalone implementation."
                (plist-get opts :load-paths)
                (plist-get opts :preloads)
                (plist-get opts :requested-feature))
-            (or (nelisp-artifact--standalone-host-helper-compile opts kind)
-            (nelisp-artifact-compile-file
-             (plist-get opts :input)
-             (plist-get opts :output)
-             (plist-get opts :manifest)
-	             (plist-get opts :target)
-	             (plist-get opts :load-paths)
-	             (plist-get opts :preloads)
-	             (plist-get opts :requested-feature)
-	             kind
-	             (plist-get opts :native-policy)
-	             (plist-get opts :module-policy)))))
+            (let ((helper-result
+                   (nelisp-artifact--standalone-host-helper-compile opts kind)))
+              (cond
+               ;; Helper ran successfully -- nothing else to do.
+               ((eq helper-result t) nil)
+               ;; Helper was REQUIRED but unavailable/failed: signal a hard
+               ;; error with the one-line diagnostic rather than silently
+               ;; falling through to the native standalone compiler (the old
+               ;; bug: exit 65/52/14 with no output on Windows).
+               ((stringp helper-result) (error "%s" helper-result))
+               (t
+                (nelisp-artifact-compile-file
+                 (plist-get opts :input)
+                 (plist-get opts :output)
+                 (plist-get opts :manifest)
+                 (plist-get opts :target)
+                 (plist-get opts :load-paths)
+                 (plist-get opts :preloads)
+                 (plist-get opts :requested-feature)
+                 kind
+                 (plist-get opts :native-policy)
+                 (plist-get opts :module-policy)))))))
         0)
     (error
      (nelisp-artifact--print-error
