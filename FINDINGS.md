@@ -352,3 +352,273 @@ does not reach the same `bf_signal`-style stash as an explicit `(error
 `flag==0` tolerance and `bf_load_eval_loop`'s missing rc check should also
 change once the stash itself is fixed. Do this as a dedicated GC/evaluator-
 substrate investigation, not folded into a "fix the backquote engine" task.
+
+---
+
+2026-07-04 follow-on: `(org-mode)` practical-hang / multi-GB growth after the
+GC fix (branch `diag/org-mode-perf-hang`, from `main` @ `f0c7e1e8`)
+
+Scope
+
+After the STACK_TOP-after-cold-load-grow GC fix (`1cfb42f4`), `(org-mode)` no
+longer crashes, but does not terminate in practical time and grows RSS by
+multiple GB, *even with GC fully disabled* via `(nelisp--gc-diag 7)`. This
+session root-caused the hang to a single, isolated, reproducible Lisp form
+and classified it as a superlinear/impractical real computation, not an
+infinite loop and not a GC pathology.
+
+Method
+
+- Built `./target/nelisp` (`make standalone-reader`) on this worktree.
+- Rebuilt the org cold-load image via `NELISP_E2E_KEEP=1 scripts/cold-image-org-e2e.sh 1`
+  (default, fast prelude — the same one the harness uses by default; 60
+  vendor files, 102,432 total lines, replay-load 9.97s, dump 0.74s, cold-boot
+  0.84s / 677,732 KB peak RSS, faithfulness conjuncts IDENTICAL between
+  replay-loaded and cold-booted process). Image kept at
+  `/tmp/cold-image-org-e2e.n1Jc4W/org-run1.img` for this session's probes
+  (a tmp path — regenerate with the same command if resuming this work).
+- Probed with `./target/nelisp --cold-load-from IMG --no-prompt < formfile`,
+  never wrapped in the `timeout` *binary* — that was an early methodology
+  trap in this session: `timeout` forks the real reader as a *child* and the
+  `timeout` process itself blocks in `sigsuspend()` waiting for
+  SIGALRM/SIGCHLD, so `$!` right after `cmd & ` under a `timeout` wrapper is
+  `timeout`'s own PID, not the reader's — every RSS sample and gdb backtrace
+  taken against that PID describes `timeout` (flat ~1.9 MB RSS, `sigsuspend`
+  backtrace), not the reader. Enforcing the deadline in the polling loop
+  itself and reading `/proc/<real-nelisp-pid>/status` fixed this; all
+  results below are against the real reader PID.
+
+Bisection trail
+
+1. `(org-mode)` alone: RSS climbs from ~6.5 MB to 6.48 GB by t=30 s (killed);
+   not naturally terminating.
+2. Read `(define-derived-mode org-mode outline-mode ...)` in vendor
+   `org/org.el` (read-only, `nelisp-emacs-lib/vendor/emacs-lisp/org/org.el:4927`).
+   First heavy call in the body is `(org-load-modules-maybe)`.
+3. `(org-load-modules-maybe)` alone: HANG (killed t=20 s, RSS 4.06 GB) —
+   reproduces standalone, nothing else from `org-mode`'s body is needed.
+4. `org-load-modules-maybe` (`org.el:727`) is `(dolist (ext org-modules)
+   (condition-case-unless-debug nil (require ext) (error ...)))` over
+   `org-modules` = `(ol-doi ol-w3m ol-bbdb ol-bibtex ol-docview ol-gnus
+   ol-info ol-irc ol-mhe ol-rmail ol-eww)` (confirmed via direct probe;
+   `org-modules-loaded` is `nil` in this image).
+5. Bisected the 11-element list via literal `progn`/`require` chains (one
+   process per prefix length, "ONE reader at a time"):
+   - First 3 (`ol-doi ol-w3m ol-bbdb`): PASS, 1.02 s.
+   - First 4 (adds `ol-bibtex`): PASS, 1.63 s.
+   - First 5 (adds `ol-docview`): PASS, 2.24 s.
+   - First 6 (adds `ol-gnus`): HANG (killed t=15 s, RSS 2.86 GB) —
+     reproduced twice (once alongside a second, unrelated concurrent probe
+     that should be disregarded per the "ONE reader at a time" rule; retested
+     alone and confirmed).
+   - **`(require 'ol-gnus)` alone, first form in a fresh process: HANG.**
+     Minimal, fully isolated repro — no `org-mode`, no `dolist`, no
+     `condition-case-unless-debug` needed.
+   - Confirmed byte-for-byte with GC explicitly disabled first:
+     `(progn (nelisp--gc-diag 7) (require 'ol-gnus))` — HANG, killed t=20.1 s,
+     RSS 5.45 GB. Matches the task's stated premise (not a GC pathology).
+
+Why `ol-gnus` differs from its 10 `org-modules` siblings
+
+`ol-gnus.el` (`vendor/emacs-lisp/org/ol-gnus.el:35-38`) does
+`(require 'gnus-sum) (require 'gnus-util) (require 'nnheader) ...`.
+`gnus-sum.el` itself (`vendor/emacs-lisp/gnus/gnus-sum.el:27,61-72`) requires
+`gnus`, `gnus-group`, `gnus-spec`, `gnus-range`, `gnus-int`, `gnus-undo`,
+`gnus-util`, `gmm-utils`, `mm-decode`, `shr`, `url` (already loaded), `nnoo`.
+The vendor mirror actually *contains* the full real Gnus package at
+`vendor/emacs-lisp/gnus/`: **106 files, 120,283 lines** — larger than the
+entire 60-file/102,432-line org chain this cold image was built from. By
+contrast the other 10 `org-modules` either have no real transitive
+dependency in this vendor tree (`ol-bbdb.el` requires `org-macs`/`cl-lib`/
+`org-compat`/`ol` only — no top-level `(require 'bbdb)`; `bbdb.el` itself
+isn't even present in the vendor mirror) or a single small file
+(`ol-bibtex.el` → `vendor/emacs-lisp/textmodes/bibtex.el`). `require`'ing
+those legitimately succeeds in well under a second each. `(require
+'ol-gnus)` is the one sibling whose *real* dependency graph is a
+120K-line subsystem, and this reader cannot get through that in practical
+time or memory.
+
+Evidence: growth rate
+
+Isolated `(require 'ol-gnus)` run, 1 s samples (`/proc/<pid>/status`
+VmRSS), representative window once past the initial ramp-up:
+
+| t (s) | RSS      | Δ/s (KB) |
+|-------|----------|----------|
+| 6     | 1,054,716| —        |
+| 7     | 1,297,104| 242,388  |
+| 8     | 1,539,388| 242,284  |
+| 9     | 1,779,508| 240,120  |
+| 10    | 2,021,644| 242,136  |
+| 15    | 3,231,748| ~242,000 (avg over 5-14)|
+| 20    | 4,452,568| ~242,000 (avg over 15-19)|
+| 25    | 5,661,748| ~242,000 (avg over 20-24)|
+| 28    | 6,387,016| ~245,300 (avg over 25-27, killed here) |
+
+Growth is **strikingly linear** (±1% variance) at ~240 MB/s sustained for
+the entire 22+ s window probed, both with GC at its default cadence and
+with GC explicitly disabled (`nelisp--gc-diag 7`, confirmed same order of
+growth, 5.45 GB/20.1 s ≈ 272 MB/s). No inflection/acceleration was observed
+in the window we could safely probe (killed at 6 GB per the task's budget).
+
+Evidence: gdb backtraces rule out a zero-progress/wrong-sentinel loop
+
+Samples taken with `gdb -p PID -batch -ex bt` at t=5 s and t=15 s during the
+isolated `(require 'ol-gnus)` run:
+
+- t=5 s: 1015 frames. Top of stack:
+  `nl_apply_sym_eq_w → nl_apply_name_eq_funcall → nl_apply_name_classify →
+  nl_apply_builtin → nl_apply_function → nl_eval_inner_cons → ... →
+  nl_sf_while_step → nl_sf_while → ... → nl_sf_dolist → ... → nl_sf_let_star`
+  (genuine Lisp-level `while`/`dolist`/`let*` special-form frames — the
+  interpreter is executing real loop/binding constructs from the loaded
+  Gnus source, not stuck inside a single native primitive).
+- t=15 s: 679 frames — a **different, shallower** call chain than t=5 s
+  (stack **shrank**, it did not just grow). This directly rules out both
+  hypotheses the task asked to discriminate: not a fixed-PC zero-progress
+  spin (the top frames and total depth both changed), and not runaway
+  unbounded recursion (depth went down, not up, between samples).
+- A separate `(org-mode)` full-body run (not just the isolated form) showed
+  the same pattern: 748 frames at t=5 s → 752 at t=15 s (near-flat, ±0.5%),
+  with the shallow frames showing entirely different dispatch functions at
+  each sample (`nl_bf_required`/frame-bind chain at t=5 s vs.
+  `nl_apply_sym_eq_w`/`nl_sf_setq`/`nl_sf_if` chain at t=15 s) — again,
+  forward motion through many distinct top-level forms, not a stuck loop.
+- The very first (methodologically-confounded) attempt to backtrace this
+  under a `timeout`-wrapped invocation is preserved above as a documented
+  trap: it showed a flat, unchanging `sigsuspend` backtrace at 3 separate
+  10-second intervals with RSS pinned at 1.9 MB — that pattern (identical
+  PC region, zero RSS movement) is what a *real* zero-progress hang would
+  look like, and is exactly what a naive read of those first three
+  backtraces could have been mistaken for, before the `timeout`-PID
+  confound was found and corrected.
+
+Allocation site (native): one representative t=5 s sample from the full
+`(org-mode)` run had, at the top of stack:
+
+```
+nl_hdr_set_mark → nl_freelist_take → nl_alloc_bytes → nl_val_clone_into
+  → nelisp_frame_bind_prepend → nelisp_frame_bind_in_ht → nelisp_frame_bind
+  → nelisp_env_bl_frame → nelisp_env_bind_local → nl_bf_bind_sym → ...
+```
+
+Mechanism
+
+`nl_val_clone_into` (`lisp/nelisp-cc-val-load.el:108`) is the shared,
+public entry point every non-immediate value bind goes through: binding a
+function-call argument or a `let`/`let*` local to any cons/vector/
+string/symbol-boxed value allocates a **fresh 32-byte box**
+(`alloc-bytes 32 8`, `nl_vci_box` at `lisp/nelisp-cc-val-load.el:98`) and
+deep-clones/rc-bumps the source into it (`nl_sexp_clone_into`), every
+single time, unconditionally — there is no "already uniquely owned, just
+move it" fast path. `nelisp_frame_bind_prepend`/`_in_ht`
+(`lisp/nelisp-cc-frame-bind.el:162,224`) call this on every local binding
+made while applying a lambda or evaluating `let`/`let*`/`dolist`. The
+evaluator also has no macroexpansion cache (each macro call is re-expanded
+from its source form every time it is reached), so files that lean heavily
+on macros (Gnus makes extremely heavy use of `defcustom`/`defgroup`/
+backquote-based helper macros, with large `:type` specs and docstrings)
+multiply this per-bind cost across however many such forms exist in the
+120K lines being loaded. Since everything a `load` defines this way
+(functions, variables, plists, custom metadata) stays genuinely reachable
+from the global symbol tables afterward, none of it is garbage — which is
+exactly why disabling GC entirely changes nothing (confirmed above): GC was
+never the bottleneck, there was never anything to collect.
+
+This is not a novel failure mode for this codebase — it is the same
+mechanism already named and worked around elsewhere. See
+`scripts/nelisp-standalone-build.el:2767-2770`:
+
+> "Native buffer-scan helpers (Doc 142 Gate 5 OOM fix): an interpreted
+> per-char while over a ~500KB buffer string churns ~1MB of arena PER
+> ITERATION (value-semantics clones + per-form eval garbage, GC only at
+> form boundaries) -> 60GB+ RSS. These do the scan natively instead."
+
+That fix routed four specific hot string-scan loops around the cost with
+dedicated native builtins. The `(require 'ol-gnus)` hang is the same
+"value-semantics clones + per-form eval garbage" mechanism, but distributed
+across the *load-time interpretation of a whole 120K-line package*, not a
+single hot loop — there is no single call site to route around.
+
+Classification
+
+**Superlinear / impractically expensive real computation — not an infinite
+loop, not a GC pathology.** `(org-mode)`'s default `org-modules` includes
+`ol-gnus`; in this vendor tree `require`'ing it is not a no-op or a
+file-missing fast-fail (as it would be for a real end user without Gnus
+configured) — it genuinely walks `load-path`, finds the real ~120K-line
+Gnus package, and interprets it form-by-form at a sustained, essentially
+constant ~240 MB/s. Nothing about the growth (linear rate, changing/
+shrinking backtrace depth across samples, genuine `while`/`dolist`/`let*`
+frames) indicates a wrong-sentinel spin; everything indicates the reader is
+plowing forward through a very large amount of real source at a cost per
+bind/macro-expansion that is far higher than practical for a package this
+size. It would very plausibly complete given enough wall time and RAM
+(tens of GB, many minutes+) — which is precisely why "does not terminate
+in practical time" is the accurate description, not "hangs forever."
+
+Why no fix is implemented this session
+
+The task's bounded-fix profile (one wrong-primitive sentinel, or one
+memoizable helper) does not apply:
+
+- Ruled out wrong-sentinel infinite loop (see backtrace evidence above:
+  changing/shrinking depth, changing dispatch functions across samples).
+- The allocation is not attributable to one call site: `nl_val_clone_into`/
+  `nelisp_frame_bind_*` sit on the path of *every* function call and
+  `let`/`let*`/`dolist` binding in the interpreter; narrowing a fix to "this
+  one form" is not meaningful.
+- A real fix is either (a) a general evaluator-level macroexpansion cache,
+  or (b) an ownership/refcount-aware fast path in `nl_val_clone_into` that
+  skips the fresh-box allocation when safe. Both are cross-cutting
+  evaluator/GC-adjacent architecture changes with real correctness risk
+  (cache invalidation on `defmacro`/`fset` redefinition; aliasing safety for
+  in-place mutation), well outside a single-session `let*`-only DSL patch,
+  and neither is a "swap one sentinel" change.
+
+Remediation proposal (not implemented)
+
+1. **Macroexpansion cache.** Key on the macro call form's own (stable
+   within one `load`) address; cache slot holds the expansion pointer plus
+   a generation counter bumped whenever the macro's symbol-function is
+   redefined (`defmacro`/`fset`). Common-case cost becomes one hash lookup
+   (the interpreter already has a bucket-table pattern in
+   `nelisp_frame_bind_in_ht` to model this on) before falling into
+   `nl_sf_*`/`nl_apply_special` macro dispatch. Expected impact: files that
+   invoke the same macro shape hundreds-to-thousands of times (Gnus's
+   `defcustom`/`defgroup`/backquote helpers; org's own
+   `define-derived-mode`-style macros) move from O(expansions ×
+   macro-body-size) to O(expansions) after the first hit per distinct call
+   site — likely the largest single lever here, but sized on a hunch, not a
+   microbenchmark; would need one before committing engineering time.
+2. **Bind-path allocation.** Give `nl_val_clone_into`
+   (`lisp/nelisp-cc-val-load.el:108`) a fast path for the case where the
+   source slot's refcount is already 1 (uniquely owned, e.g. a freshly
+   constructed argument that provably isn't aliased elsewhere) — mutate/move
+   in place instead of `alloc-bytes 32 8` + `nl_sexp_clone_into`. This is
+   exactly the class of change the repo's own DSL constraints (`let*`-only,
+   never `setq` a parameter) exist to make safe; it should be scoped as its
+   own investigation with a narrow, dedicated smoke (in the spirit of
+   `standalone-reader-derived-mode-shape-smoke`) rather than folded into
+   this session.
+3. **Bounded, safe, non-reader workaround (not applied here, flagged for
+   awareness):** the org e2e/smoke harness could bind `org-modules` to a
+   safe subset (or `nil`) before calling `(org-mode)` when the goal is to
+   smoke-test core mode setup rather than the optional link-type
+   integrations — this sidesteps the impractical Gnus load entirely without
+   touching interpreter internals, matching what a real end user without
+   Gnus configured would experience (a fast `file-missing` skip via the
+   existing `condition-case-unless-debug` in `org-load-modules-maybe`).
+   Not applied this session because the task's brief asked for a
+   reader/evaluator-level diagnosis, not a harness config change.
+
+Recommended next step
+
+Microbenchmark the macroexpansion-cache proposal against a synthetic file
+that repeats one non-trivial macro (e.g. a `defcustom`-shaped macro) a few
+thousand times, comparing wall time/RSS with and without a naive
+form-address-keyed cache, before investing in the real cache-invalidation
+design. Independently, re-run this exact repro
+(`(require 'ol-gnus)` on this cold image) after any such cache lands to see
+whether it alone is enough to bring the load into practical range, or
+whether the bind-path allocation (item 2 above) is also required.
