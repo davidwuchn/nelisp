@@ -1794,3 +1794,206 @@ Regression:
 - Capture probes all rc=0: nested `42`, loop-var `(2 1 0)`, shared-var `2`,
   setq-visibility `41`, macro-ref `42`, unused-exclusion `42` (REPL echoes
   duplicate values when `prin1` is used, e.g. `4242`).
+
+## 2026-07-05 first valid CPU profile of `org-element-parse-buffer`: 16-sample gdb sampling, no crash, computation genuinely advances
+
+Investigation-only session (no source changes). Confirms and quantifies, for
+the first time with a live sampling profile, the "known remaining cost"
+flagged by prior sessions (`nl_val_clone_into` per-bind fresh-box alloc) --
+and finds that regex is **not** the bottleneck for this workload, contrary
+to the working assumption going in.
+
+### Setup
+
+- Repo state used as-is, no rebuild: branch `profwork` @ `3b321567` (`Cache
+  compiled nlre patterns`), 3 commits ahead of `origin/main`. `target/nelisp`
+  binary (mtime 03:06) matches this HEAD; cold image
+  `/tmp/cold-image-org-e2e.w9ueh8/org-run1.img` (mtime 03:09, built after the
+  binary) used unmodified.
+- Probe: `printf '(with-temp-buffer (insert "* h") (org-mode)
+  (org-element-parse-buffer))\n' | timeout 330 ./target/nelisp
+  --cold-load-from IMG`. Real reader PID (child of the `timeout` wrapper) =
+  3085668.
+- stdout at exit: only the `nelisp>` prompt, no printed result -- matches the
+  already-documented cold-image "output vanishes after string-match-ish
+  calls" anomaly. stderr empty. No exit 87/88 this run.
+
+### Method executed
+
+Waited 20s past process start (past the ~4s `(org-mode)` phase), then took 16
+`gdb -p PID -batch -ex 'bt 20'` samples at a fixed 12s cadence, spanning
+t+20s..t+229s (~3.5 min), recording `/proc/PID/status` `VmRSS` alongside each
+sample. The process was not manually killed: it ran to the full `timeout 330`
+deadline and was reaped by the `timeout` wrapper itself (confirmed by wall
+clock -- gone at t+338s, ~8s past the 330s cutoff -- not a crash).
+
+### Frame aggregation
+
+Leaf (`#0`) frame, one per sample, all 16 distinct (no repeat leaf across the
+whole run):
+
+| # | t (s) | leaf frame | category |
+|---|---|---|---|
+| 1 | +20 | `nl_sci_copy` | clone |
+| 2 | +32 | `nl_vci_box` | clone |
+| 3 | +44 | `nl_vl_prog2` | special-form (prog2) |
+| 4 | +56 | `nl_alloc_zero_fill` | alloc/gc |
+| 5 | +68 | `nl_apply_sym_eq_w` | apply-dispatch |
+| 6 | +80 | `nl_chunk_try_alloc` | alloc/gc |
+| 7 | +92 | `nl_sf_if_branch` | special-form (if) |
+| 8 | +105 | `nelisp_frame_stack_find_walk_bucket` | frame/env lookup |
+| 9 | +121 | `nl_val_clone_into` | clone |
+| 10 | +137 | `nelisp_frame_stack_find_walk_bucket` | frame/env lookup |
+| 11 | +153 | `nl_env_pop_frame` | frame mgmt |
+| 12 | +168 | `nl_sp_eq_dolist` | special-form (dolist) |
+| 13 | +183 | `wf_arg_ptr` | builtin-arg marshal |
+| 14 | +199 | `nl_alloc_bytes` | alloc/gc |
+| 15 | +213 | `nl_record_set_slot` | clone/slot-set |
+| 16 | +229 | `nl_gc_free_block` | alloc/gc |
+
+Leaf-frame category tally: alloc/gc 4/16 (25%), clone/box/record-set 4/16
+(25%), frame/env lookup+mgmt 3/16 (19%), special-form body eval 3/16 (19%),
+apply-dispatch/builtin-arg marshal 2/16 (12%). **Zero of 16 samples show any
+`nelisp-rx-*` or `nlre-*` regex frame anywhere in the captured 20-deep
+stack.**
+
+Inclusive (appears-anywhere-in-stack) counts across all 16 backtraces, top
+entries: `nl_eval_inner_cons` 21, `nl_eval_inner` 21, `nl_ei_cons_tail` 21,
+`nelisp_eval_call` 21, `nl_ei_cons_dispatch` 20, `nl_eval_arg_list_walk` 18,
+`nl_push_captured_walk` 10 (all from one sample's depth-10 self-recursion
+capturing closure variables), `nl_eval_arg_list` 10, `nl_apply_special` 8,
+`nl_apply_function` 6, `nelisp_frame_stack_find_descend` 5,
+`nl_val_clone_into` 4, `nl_sf_or_walk` 4, `nl_let_star_walk` 4,
+`nl_apply_lambda_inner` 4. The top tier (`nl_eval_inner*`/`nelisp_eval_call`/
+`nl_ei_cons_*`) is the generic sexp-tree-walk dispatch loop recursing on
+itself for nested forms -- expected structure, not informative alone. The
+second tier is where the real signal is: frame bind/lookup
+(`nelisp_frame_stack_find_descend`, `nelisp_frame_bind_*` via the leaf hits
+above) and value-clone machinery (`nl_val_clone_into`, `nl_vci_box`,
+`nl_sci_copy`, `nl_record_set_slot`) recur across independent samples spread
+minutes apart -- i.e. this is not one lucky/unlucky snapshot, it is a
+persistent, recurring cost throughout the run.
+
+### Loop-or-advance verdict: **ADVANCING**
+
+All 16 stacks are pairwise distinct: different leaf frames, different call
+chains, and different special forms visible at different sample times (`if`,
+`let`, `let*`, `while`, `dolist`, `or`, `prog1`, `prog2` each appear in at
+least one sample). This spans a ~209s sampled window and the process kept
+running to the full 330s cutoff. This rules out a stuck/fixed-stack
+infinite loop -- the interpreter is doing real, varied forward work the
+entire time.
+
+### RSS growth
+
+| t (s) | RSS (GiB) |
+|---|---|
+| +20 | 10.72 |
+| +32 | 14.04 |
+| +44 | 17.35 |
+| +56 | 20.67 |
+| +68 | 23.99 |
+| +80 | 26.96 |
+| +92 | 27.33 |
+| +105 | 27.58 |
+| +121 | 27.58 |
+| +137 | 27.58 |
+| +153 | 27.58 |
+| +168 | 27.58 |
+| +183 | 27.58 |
+| +199 | 27.59 |
+| +213 | 27.59 |
+| +229 | 27.59 |
+
+Two distinct phases: a ~60s initial burst (~277 MB/s, +20s..+80s) followed
+by a hard plateau at ~27.6 GiB for the remaining ~124s of the sampled window
+(+105s..+229s: net +4540 KiB total, ~0.04 MB/s -- three orders of magnitude
+below the burst rate, effectively flat). `nl_gc_free_block` on the stack at the
+plateau (sample 16) confirms the allocator/GC is recycling within already-
+resident chunks rather than growing further once the plateau is reached. A
+post-hoc `ps` check at t+328s (just before the process was reaped) still
+showed 27.6 GiB, i.e. the plateau held to the end -- no runaway/unbounded
+growth, no host-level OOM materialized (host had ~8 GiB "available" +
+~28 GiB reclaimable buff/cache at that moment; this process's plateau was
+already established well before that check).
+
+Process safety note: RSS exceeded the task's 6 GiB advisory kill threshold
+by sample 1 (+20s, already 10.72 GiB) -- the sampling script recorded RSS
+but did not enforce a live kill-on-threshold check, so this was only
+noticed post-hoc, not caught in real time. The process was not manually
+killed; it self-terminated via the `timeout 330` wrapper before any
+intervention was needed. **Recommendation for future sessions**: add a live
+RSS check inside the sampling loop (e.g. abort and `kill` if `VmRSS` crosses
+the threshold between samples) rather than only recording it, in case a
+future workload's plateau is higher or never arrives.
+
+Separately, the absolute magnitude here -- ~27.6 GiB resident to run
+`(org-mode)` + parse a 4-character one-line buffer -- is itself anomalous
+and warrants its own investigation independent of the per-call costs below;
+it dwarfs any plausible real working-set size for this input.
+
+### Regex-cache relevance: none observed this run
+
+The task's method conditionally asks to verify the `nelisp-rx-*` /
+`nlre-*` regex-cache hit behavior if regex frames dominate. They do not --
+0/16 samples show any regex-family frame. This is consistent with the
+newest commit on this branch (`3b321567`, "Cache compiled nlre patterns"),
+whose own commit message notes "the org image has string-match overridden
+to nelisp-rx-string-match, so the nlre call counter did not advance and
+this cache is not on that org path yet" -- i.e. the reader's freshly-cached
+`nlre-*` engine is architecturally not reachable from org's path in the
+first place (org uses the separate `nelisp-rx-*` substrate polyfill), and
+this session's sampling additionally shows that *neither* regex engine
+occupies a measurable share of CPU time for this specific one-line-heading
+workload. Net: for this input, regex is not the bottleneck; generic
+interpreter/bind/alloc machinery is.
+
+### Recommended next fix, ranked (scoped for codex)
+
+1. **Primary -- per-bind fresh-box alloc, now empirically confirmed hot.**
+   `lisp/nelisp-cc-val-load.el:108-111` (`nl_val_clone_into`): every
+   non-immediate `src_slot` (low bit 0) unconditionally takes the
+   `(nl_vci_box (alloc-bytes 32 8) src_slot dst_word_ptr)` path
+   (`lisp/nelisp-cc-val-load.el:98-102`, `nl_vci_box`), i.e. a fresh 32B
+   heap box + `extern-call nl_sexp_clone_into` deep-copy on *every* bind,
+   with no fast path for values that are already uniquely owned or
+   trivially safe to alias (e.g. freshly-allocated temporaries about to be
+   discarded, or read-only literals). This function's callers
+   (`nelisp_frame_bind_prepend` at `lisp/nelisp-cc-frame-bind.el:162`,
+   `nelisp_frame_bind_in_ht` at `:224`, `nelisp_frame_bind` at `:252`) fire
+   on every `let`/`let*`/lambda-application binding, which is why this
+   showed up on 4/16 sampled leaves (`nl_sci_copy`, `nl_vci_box`,
+   `nl_val_clone_into`, `nl_record_set_slot`) plus repeated inclusive hits.
+   Suggested approach: add a cheap "safe to move, not clone" fast path
+   (e.g. a tag bit or refcount==1 check already available on the box) so
+   `nl_vci_box` can skip the `alloc-bytes`+deep-copy when the source is
+   about to be logically consumed/moved rather than aliased. Expected
+   impact: removes one `alloc-bytes 32 8` + one `nl_sexp_clone_into` call
+   per bind across the entire interpreter -- given clone/alloc collectively
+   covered half of sampled leaves, this is the single highest-leverage fix
+   found.
+2. **Secondary -- frame/env lookup depth.**
+   `lisp/nelisp-cc-frame-stack-find.el:111-136`
+   (`nelisp_frame_stack_find_descend`) recurses one frame per lexical scope
+   level per variable lookup, then `:54` `nelisp_frame_stack_find_walk_bucket`
+   linearly walks the hash bucket within the hit frame. This appeared as 2
+   of 16 sampled leaves plus 5 inclusive hits for `_descend` alone. A slot-
+   index cache for repeatedly-looked-up symbols in hot loops (analogous to
+   the existing macroexpansion cache) would let hot-loop variable access
+   skip the frame-chain walk entirely after the first lookup.
+3. **Tertiary, separate mechanism -- ~27.6 GiB RSS plateau.** Independent
+   of per-call cost: audit the chunk/GC allocator's growth policy (`grep
+   nl_chunk_try_alloc` sites, `lisp/nelisp-cc-alloc-mem.el`,
+   `lisp/nelisp-cc-alloc-dealloc.el`) for why cold `(org-mode)` setup for a
+   1-line buffer needs tens of GiB of resident chunks before the GC's
+   free-block recycling (`nl_gc_free_block`, sample 16) takes over. This is
+   an allocator-sizing/preallocation question, not a per-op hot-path
+   question, and should be scoped as its own investigation.
+
+### Artifacts (not committed, scratch only)
+
+`/tmp/claude-1000/-home-madblack-21-Cowork-Notes/01ae5b0e-0435-4dbf-86e1-be39b00c5058/scratchpad/profrun/`:
+`sample.sh` (sampling driver), `samples.txt` (16 raw `bt 20` dumps),
+`rss.txt` (t, VmRSS-kB pairs), `pid.txt`, `probe.out`, `probe.err`. No repo
+source files were modified this session; only this `FINDINGS.md` entry
+(branch `profwork`).
