@@ -5452,11 +5452,28 @@ unresolved at link time."
     ;; --- Doc 161 UTF-8 char-aware helpers (storage stays UTF-8 bytes) ---
     (defun nl_u8_clen_at (b)
       (if (< b 128) 1 (if (< b 224) 2 (if (< b 240) 3 4))))
-    (defun nl_str_charlen_loop (p i n acc)
-      (if (>= i n) acc
-        (nl_str_charlen_loop p (+ i 1) n
-          (if (= (logand (str-byte-at p i) 192) 128) acc (+ acc 1)))))
-    (defun nl_str_charlen (p) (nl_str_charlen_loop p 0 (str-len p) 0))
+    ;; §exec-diag (rc=127 native-exec crash root cause): this used to be a
+    ;; self-recursive `nl_str_charlen_loop' taking one native stack frame per
+    ;; INPUT BYTE (not per character) -- `nelisp-cc' does not eliminate tail
+    ;; calls (see lisp/nelisp-cc-sf-while.el), so `length' on any string
+    ;; whose byte length exceeded the native stack's capacity (empirically
+    ;; between ~2.04 MB, which survived, and ~3.2 MB, which crashed --
+    ;; roughly a few million frames) blew the native stack with no
+    ;; catchable Lisp-level signal, terminating the whole process (observed
+    ;; as rc=127 on Windows, no stdout/stderr).  `length' is the first
+    ;; operation `nelisp-standalone-source-cache-load-artifact' performs on
+    ;; freshly read `.neln'/`.nelc' artifact content, so any artifact whose
+    ;; content exceeded this threshold could never even begin replaying its
+    ;; `:module-init' list.  Rewritten as an explicit bounded `while' loop
+    ;; (matching the idiom already used for e.g. the Windows CreateProcessW
+    ;; helpers below) so character counting is O(1) native stack regardless
+    ;; of string length.
+    (defun nl_str_charlen (p)
+      (let* ((n (str-len p)) (i 0) (acc 0))
+        (while (< i n)
+          (if (= (logand (str-byte-at p i) 192) 128) nil (setq acc (+ acc 1)))
+          (setq i (+ i 1)))
+        acc))
     ;; char index TARGET -> byte offset (walks whole codepoints)
     (defun nl_u8_cidx_byte (p bi n c target)
       (if (>= c target) bi
@@ -6815,6 +6832,29 @@ extern arms in dynamic builds."
            (seq (ptr-write-u8 dst i (ptr-read-u8 src i))
                 (setq i (+ i 1))))
          0)))
+    ;; §exec-diag follow-on (characterized, NOT fixed here -- see report):
+    ;; this single read (request `8388608 - n0' bytes, accept whatever
+    ;; `nl_os_read_file_handle' returns as the WHOLE rest of the file)
+    ;; silently truncates any file bigger than ~8 MiB -- a single ReadFile is
+    ;; not guaranteed to fill an arbitrarily large request even mid-file, so
+    ;; a real ~21.9 MiB `.neln' artifact comes back as only ~8.3 MiB of
+    ;; content (cut off mid-form).  Before the `nl_str_charlen' fix above,
+    ;; this was masked by that stack-overflow crashing first; with `length'
+    ;; fixed, this truncation is now the visible remaining blocker for
+    ;; artifacts over ~8 MiB specifically (the reported 21.9 MiB corpus).
+    ;; A loop-until-EOF with a doubling buffer was tried here and reverted:
+    ;; the bump arena has no free, so each abandoned buffer stays live for
+    ;; the process's lifetime, and growing 8->16->32 MiB (needed for a
+    ;; 21.9 MiB file) crashed with SIGSEGV instead -- worse than the original
+    ;; truncation, and it depends on this DSL's nested `let*'/`setq' variable
+    ;; mutation across scopes, which was not proven safe here (see
+    ;; FINDINGS.md's `let'-vs-`let*' correctness history for this codebase).
+    ;; The correct fix needs the real file size up front (a `GetFileSizeEx'
+    ;; native helper on Windows, queried from the already-open handle) so
+    ;; exactly one right-sized buffer is allocated with no growth/waste --
+    ;; deliberately not attempted blind in the time available for this
+    ;; session; left as-is (matching pre-existing behavior exactly) rather
+    ;; than ship an unproven change to a foundational file-read primitive.
     (defun nl_bi_rf_read_rest (fd head n0 out)
       (let* ((buf (alloc-bytes 8388608 1)))
         (seq
@@ -11099,6 +11139,9 @@ artifact before wiring that artifact into the marker command path."
      "        (last nil)\n"
      "        (done nil)\n"
      "        end res)\n"
+     "    (nelisp--write-stderr-line\n"
+     "     (concat \"nelisp-exec-diag replay-module content-len=\"\n"
+     "             (number-to-string len)))\n"
      "    (setq pos (nelisp-standalone-source-cache--skip-ws content pos))\n"
      "    (if (and (< pos len) (= (aref content pos) 40))\n"
      "        nil\n"
@@ -11127,7 +11170,23 @@ artifact before wiring that artifact into the marker command path."
      "                (setq done t))\n"
      "            (setq end (nelisp-standalone-source-cache--item-end\n"
      "                       content pos len artifact-path))\n"
-     "            (setq res (read-from-string content pos))\n"
+     ;; Doc 142/§exec-diag: END is already known (the balanced-paren scan
+     ;; just above), but this call used to omit it -- `read-from-string'
+     ;; with only START copies the ENTIRE remainder of CONTENT via
+     ;; `(substring string base (or end (length string)))' (see its
+     ;; definition in scripts/nelisp-stdlib-prelude.el) on every single
+     ;; :module-init item, regardless of that item's own size.  For an
+     ;; artifact with many items this is an O(n) copy repeated per item
+     ;; (quadratic in the artifact's total content length); for an
+     ;; artifact whose first/only large item sits near the start of a
+     ;; multi-hundred-KB payload, it is one giant near-whole-file copy.
+     ;; On the standalone runtime's fixed-size arena this large
+     ;; unbounded allocation is what exhausted memory and crashed the
+     ;; process with no diagnostic output (observed as rc=127 on
+     ;; Windows) instead of raising a catchable Lisp error -- passing
+     ;; END bounds the copy to just this one item, matching what the
+     ;; scanner just computed.
+     "            (setq res (read-from-string content pos end))\n"
      "            (if res nil\n"
      "              (error \"invalid :module-init item in %s\" artifact-path))\n"
      "            (setq last (nelisp-standalone-source-cache--replay-item\n"
@@ -11142,10 +11201,16 @@ artifact before wiring that artifact into the marker command path."
      "         (module-result nil))\n"
      "    (nelisp-standalone-source-cache--stats \"artifact-before-read\")\n"
      "    (setq content (nelisp-standalone-source-cache--read-file artifact-path))\n"
+     "    (nelisp--write-stderr-line\n"
+     "     (concat \"nelisp-exec-diag after-read len=\"\n"
+     "             (number-to-string (length content))))\n"
      "    (nelisp-standalone-source-cache--stats \"artifact-after-read\")\n"
      "    (setq prefix-len\n"
      "          (nelisp-standalone-source-cache--validate-payload\n"
      "           content artifact-path))\n"
+     "    (nelisp--write-stderr-line\n"
+     "     (concat \"nelisp-exec-diag after-format prefix-len=\"\n"
+     "             (number-to-string prefix-len)))\n"
      "    (nelisp-standalone-source-cache--stats \"artifact-after-format\")\n"
      "    (setq module-result (nelisp-standalone-source-cache--replay-module\n"
      "                         content artifact-path prefix-len))\n"
@@ -11266,6 +11331,7 @@ copy instructions."
    "          (setq parsed (cons (car (read-from-string (car forms))) parsed))\n"
    "          (setq forms (cdr forms)))\n"
    "        (setq forms (reverse parsed))\n"
+   "        (nelisp--write-stderr-line (concat \"nelisp-exec-diag entry path=\" path))\n"
    "        (nelisp-standalone-source-cache-load-artifact path)\n"
    "        (while forms\n"
    "          (setq last (eval (car forms)))\n"
