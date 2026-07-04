@@ -772,3 +772,203 @@ other backquote-splice-based macro are now CORRECT again on this cold image
 project's actual target probe is now cleanly isolated to the single,
 already-diagnosed evaluator-cost issue above -- rather than a mix of "wrong
 answer" and "unknown crash."
+---
+
+2026-07-04 third follow-on: `.nelc` artifact-reader scale-dependent hang —
+same root mechanism, new trigger (branch `fix/nelc-reader-scale-hang`)
+
+Scope
+
+Investigated a separately-reported symptom: `eval-elisp-artifact FILE.nelc
+FORM` on the standalone reader hangs/never-returns-in-practical-time for a
+2.04 MB real-world `.nelc` (compiled from four `newDTW-nelisp` game-runtime
+`.el` files: `game-runner.el` + `gamedata-simple.el` +
+`gamedata-conditional.el` + `sumi-json.el`), while a 533 B one-defun
+`spike.nelc` loads instantly. Built the standalone reader fresh in this
+worktree (`nelisp-standalone-build-reader`, target `windows-x86_64`) and ran
+all reproduction/measurement under `timeout`, copying the exe to
+`nelisp-R.exe` per the parallel-worktree convention so as not to touch the
+other concurrent agent's `nelisp.exe` runs.
+
+Measurement curve (all `eval-elisp-artifact FILE.nelc '(princ "OK")'`, same
+binary, single-run wall-clock; system was also running another agent's
+concurrent, memory-heavy `emacs.exe` processes, so absolute seconds carry
+noise, but the qualitative shape is consistent across three independent
+probe families):
+
+- Real corpus, full 2.04 MB (267 top-level forms): did not return in 180 s+
+  (matches the reported measured fact).
+- Real corpus, first 37 top-level forms only (`game-runner.el` +
+  `gamedata-simple.el`, 57 KB — no `gamedata-conditional.el` data at all):
+  did not return in 240 s. This immediately falsified "it's about total file
+  size" — 57 KB of *this* content is already impractical.
+- Isolated synthetic probe, a single bare top-level `(quote (N-elements))`
+  literal with a small nested shape per element (mirrors the real corpus's
+  `("index-ref" (("index-ref" ...)) ...)` IR pattern): N=10 → 2 s, N=25 → 6 s,
+  N=50 → 12 s, N=100 → 50 s, N=200 → did not return in 90 s. A flat
+  same-length list of plain integers (`(quote (0 1 2 ... 399))`, N=400) loads
+  in 3 s — so raw element count is not the driver; nested/bound sub-structure
+  is.
+- Isolated synthetic probe, N sequential simple `(puthash "key-i" i tbl)`
+  top-level forms (no nesting at all): N=300 → 29 s, N=600 → did not return
+  in 150 s. So a large *count of top-level forms/binds*, independent of any
+  single form's nesting, reproduces the same wall.
+- Compiling any of the above (`compile-elisp-artifact`, which is host-Emacs-
+  backed per the `fix/artifact-host-helper` work merged at `d04c43d3`) is
+  fast regardless of size (1-2 s even for the 200/600-element cases) — the
+  cost is exclusively in the standalone runtime's own load-time replay/eval,
+  never in the `.el` → `.nelc` compiler.
+
+Hypotheses tested and ruled out
+
+1. **GC thrash.** Toggled the mid-form safepoint / collection gate at
+   runtime via the existing `(nelisp--gc-diag 7/8)` diagnostic builtin
+   (`scripts/nelisp-standalone-build.el:3059-3095`) around the identical
+   N=100 nested-literal probe on one unmodified binary: 23 s (collect
+   default-enabled) vs 22 s (`(nelisp--gc-diag 7)` collect force-disabled)
+   — no measurable difference. (An earlier same-session attempt to test this
+   by flipping the Windows dynamic-arena `collect ENABLED` literal at
+   `scripts/nelisp-standalone-build.el:1191` and rebuilding showed an
+   apparent ~2x speedup, but that comparison used two different binaries
+   built at different times while another agent's competing multi-GB
+   `emacs.exe` processes were active on the same machine; the clean, same-
+   binary, runtime-toggled `nelisp--gc-diag` comparison above supersedes it
+   and is trusted. That source edit was reverted before committing —
+   `git diff` against `scripts/nelisp-standalone-build.el` on this branch is
+   empty.) Conclusion: GC is not the driver here, consistent with the
+   `(require 'ol-gnus)` finding above ("GC was never the bottleneck, there
+   was never anything to collect").
+2. **Argument/quote-literal deep-copy per call.** Read
+   `lisp/nelisp-cc-sexp-clone-into.el`: cloning a `Cons` (tag 7) value is a
+   plain refcount bump (`nelisp_nlconsbox_clone`) + 32-byte slot copy, not a
+   recursive deep copy — O(1) regardless of list length. Ruled out as the
+   asymptotic driver (it does still fire on every bind, see below, just not
+   with a cost that scales with the cloned list's length).
+3. **Elisp-hosted hash-table exhaustive-fallback-scan bug (real, but a red
+   herring for *this* target).** `lisp/nelisp-stdlib-hash.el`'s `puthash`/
+   `gethash` do have a genuine O(current table size) "correctness fallback"
+   that scans every bucket on any miss in the key's own bucket (intended
+   only for `cons`-shaped keys per its own comment, but applied
+   unconditionally to every key type) — confirmed by an isolated 302-`puthash`
+   repro taking ~8 s. A fix (gate the fallback on `(consp key)`, since only
+   cons keys can have an unstable hash — atom keys are always stable) was
+   written and correctness-tested (atom-keyed table still overwrites/reads
+   correctly; cons-keyed table still uses the safe fallback and reads back
+   correctly) but then **reverted, unapplied**: the standalone reader does
+   not call this file's `puthash`/`gethash` at all — `puthash`/`gethash`/
+   `make-hash-table` are native builtins (`scripts/nelisp-standalone-build.el:2648`,
+   dispatch table around line 9717, implementation `wf_ht_put`/`wf_ht_get`/
+   `wf_ht_find_table` at lines 4429-4539). That native implementation
+   *already* has the correct optimization: `wf_ht_key_hash_stable_p`
+   (line 4402) gates the exhaustive fallback scan (`wf_ht_find_vec_from`) to
+   only unstable (deeply-nested/tag-7) keys, exactly the fix this session
+   would have made — atom keys (the common case, including every string key
+   in the real corpus's `gr-event-names`/`gr-funcs` tables) are already O(1).
+   Confirmed empirically: the isolated 302-entry `dolist`/`puthash` repro
+   measured the identical ~8 s both before and after the (later-reverted)
+   `lisp/nelisp-stdlib-hash.el` edit, on the same rebuilt binary. Branch is
+   clean of this change (`git diff --stat` empty) — noted here only because
+   `lisp/nelisp-stdlib-hash.el` may still be live for some other
+   (non-standalone-native) NeLisp configuration, where the same one-line
+   `(consp key)` gate would be a legitimate, low-risk parity fix if anyone
+   ever measures that path as hot.
+
+Root cause (same mechanism as the `(require 'ol-gnus)` finding above, new
+trigger)
+
+Both surviving, non-falsified probe families — many-form-count and single-
+nested-literal — bottom out in the same place already diagnosed earlier in
+this file: **`nl_val_clone_into` (`lisp/nelisp-cc-val-load.el:108`)
+unconditionally allocates a fresh 32-byte box (`alloc-bytes 32 8`) and deep-
+clones/refcount-bumps into it for every non-immediate value bind — every
+function-call argument, every `let`/`let*` local, every `setq` inside a
+`dolist`/`while` body — with no "value is already uniquely owned, just move
+it" fast path, called via `nelisp_frame_bind_prepend`/`_in_ht`
+(`lisp/nelisp-cc-frame-bind.el:162,224`) on every bind the interpreter
+performs.** (Verified this citation is still accurate on this branch's HEAD,
+not stale from the prior investigation.) Combined with the interpreter
+having no macroexpansion cache (`dolist`, used pervasively by exactly this
+kind of generated data-registration code, like every other macro, is
+reduced to primitives once per occurrence but every *iteration*'s `setq`/
+bind still pays the full unconditional-clone cost), this makes the standalone
+reader's per-bind cost high enough that:
+
+- A single top-level form holding a ~100-200 element nested data literal
+  (the `gr-defun "funcNNN" '(...)"` / bare-quote shape that `newDTW-nelisp`'s
+  generated `.el` files use pervasively for game-state IR) already costs
+  tens of seconds, because reading it recurses through `nelisp--rd-one`
+  once per sub-list/atom and now *evaluating* the resulting quoted structure
+  and the enclosing call also binds through the same unconditional-clone
+  path.
+- A `.nelc` module with hundreds of independent top-level forms (defuns
+  installed one by one, or bare calls like `gr-defun`/`puthash`) pays this
+  same high constant-factor cost once per form/bind, and a real corpus like
+  the 2.04 MB one under investigation here has both dimensions at once (267
+  top-level forms, several of which carry nested IR literals with hundreds
+  of elements) — compounding into the reported 180 s+ non-termination.
+
+This is consistent with the earlier classification for `(require
+'ol-gnus)`: **superlinear-looking from the outside because of a very large,
+constant per-bind cost multiplied across a large amount of genuine, reachable
+work — not an infinite loop, and not (per the ruled-out hypotheses above)
+primarily a GC pathology.** The apparent quadratic-ish curve shape in the
+N=50→100→200 bare-quote probe above is most parsimoniously explained as the
+same "sustained, high-constant-cost linear work" the `ol-gnus` investigation
+already measured directly (steady ~240 MB/s interpretation rate there), not
+as a distinct, newly-introduced O(n²) algorithm specific to the `.nelc`
+loader — this session did not have time to run the same rigorous multi-
+sample/backtrace-depth-tracking methodology that investigation used to
+confirm "linear, not wrong-sentinel-spin, not GC" as cleanly as it did there;
+that would be the highest-value next step before concluding the growth
+exponent precisely.
+
+Why no fix is implemented this session
+
+Same reasons as the `(require 'ol-gnus)` entry above, which this finding
+corroborates rather than supersedes: the cost sits on `nl_val_clone_into`/
+`nelisp_frame_bind_*`, the path *every* bind in the interpreter takes; there
+is no single call site specific to `.nelc` loading to route around, and the
+two real fixes on the table (a macroexpansion cache; an ownership/refcount-
+aware fast path in `nl_val_clone_into` that skips the fresh-box allocation
+when the source is provably uniquely owned) are both cross-cutting
+evaluator/GC-adjacent changes with real correctness risk (cache invalidation
+on redefinition; aliasing safety for in-place mutation) — outside a single
+session's `let*`-only DSL patch budget, exactly as already concluded above.
+
+POSIX-untouched statement
+
+No POSIX/Linux/macOS build path files were touched. All edits (subsequently
+reverted) were confined to the Windows dynamic-arena GC-enable literal in
+`scripts/nelisp-standalone-build.el` (diagnostic only, reverted) and
+`lisp/nelisp-stdlib-hash.el` (reverted, unapplied). `git diff` against
+`main` on this branch is empty; no runtime source changes are being
+proposed or shipped from this session.
+
+Regression battery run against the rebuilt (unmodified-source) standalone
+reader before closing out
+
+- `spike.nelc` (one-defun `.el`, `(defun spike-answer () 42)`) round-trips:
+  `eval-elisp-artifact spike.nelc '(spike-answer)'` → `42`, exit 0.
+- `getenv` at top level and inside `let`: both return the process
+  environment value correctly via `eval-elisp-source`.
+- `(error "boom")` → exit code 1 with an `nelisp: uncaught error: ...` stderr
+  line (pre-existing message detail — prints the error symbol and a nil
+  payload rather than echoing "boom" verbatim — unrelated to this
+  investigation and unchanged by it).
+- `call-process` (top-level, `let`-scoped, and `:file` destination): all
+  three currently fail with `void-function: (string-match-p)` inside the
+  standalone `call-process`/`executable-find` polyfill
+  (`scripts/nelisp-stdlib-prelude.el` around line 3641) — a pre-existing gap
+  unrelated to hash tables/GC/binding (confirmed by inspection: the call
+  site has no connection to any file touched this session); flagging for
+  whoever owns that command surface, out of scope here.
+- `eval-elisp-source` works (exercised throughout the above).
+- Two consecutive `nelisp-standalone-build-reader` rebuilds from the
+  identical (reverted-to-`main`) source produced byte-identical
+  `target/nelisp.exe` (`sha256sum` match) — build determinism holds.
+
+No runtime-code commits accompany this entry; this is a diagnosis-only
+session per the task's "if the culprit is the open upstream defect itself,
+park it" guidance, applied here to the sibling defect (unconditional
+per-bind clone cost + absent macroexpansion cache) rather than the GC
+mark/sweep corruption defect the earlier entries in this file track.
