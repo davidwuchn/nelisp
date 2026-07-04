@@ -37,11 +37,14 @@
 # substring "target/nelisp"; `pkill -f` matches full command lines, so a
 # naive `pkill -f '.../target/nelisp'` run from a shell whose own argv
 # contains that same literal text will match (and kill) ITSELF.  The
-# `[w]t-coldload/...' bracket idiom below avoids that self-match while still
-# matching the real reader process's argv.  It is ALSO deliberately scoped to
-# this worktree's own binary path (`wt-coldload/target/nelisp') rather than a
-# bare `target/nelisp', so it never touches a reader running from a sibling
-# worktree or from nelisp-emacs-lib's vendor/nelisp/target/nelisp mirror.
+# bracket idiom below (`[/]path/...', built from $NELISP_BIN at runtime)
+# avoids that self-match while still matching the real reader process's
+# argv.  It is ALSO deliberately scoped to THIS checkout's own binary path
+# rather than a bare `target/nelisp', so it never touches a reader running
+# from a sibling worktree or from nelisp-emacs-lib's
+# vendor/nelisp/target/nelisp mirror.  (An earlier revision hardcoded the
+# `wt-coldload' worktree path here, which silently matched nothing once the
+# branch merged to main and the script ran from other checkouts.)
 
 set -uo pipefail
 
@@ -71,10 +74,15 @@ if [ ! -x "$NELISP_BIN" ]; then
   exit 1
 fi
 
+# Self-match-safe pkill pattern for THIS checkout's reader binary: bracket
+# the first character so this script's own argv never matches (see NOTE
+# above).  $NELISP_BIN is an absolute path starting with "/".
+NELISP_BIN_PAT="[${NELISP_BIN:0:1}]${NELISP_BIN:1}"
+
 WORKDIR="$(mktemp -d /tmp/cold-image-org-e2e.XXXXXX)"
 cleanup() {
-  pkill -9 -f '[w]t-coldload/target/nelisp --repl' 2>/dev/null
-  pkill -9 -f '[w]t-coldload/target/nelisp --cold-load-from' 2>/dev/null
+  pkill -9 -f "$NELISP_BIN_PAT --repl" 2>/dev/null
+  pkill -9 -f "$NELISP_BIN_PAT --cold-load-from" 2>/dev/null
   if [ "${NELISP_E2E_KEEP:-0}" != "1" ]; then
     rm -rf "$WORKDIR"
   else
@@ -126,11 +134,19 @@ fi
 head -n "$((TAIL_LINE - 1))" "$WORKDIR/raw.repl" > "$WORKDIR/load-only.repl"
 
 # --- faithfulness conjuncts, shared verbatim between the replay probe and
-# the cold-boot probe so the two columns are directly comparable.  Each
-# conjunct is wrapped in `ignore-errors' because `commandp' is void-function
-# in this standalone reader independent of the org-mode question (see the
-# doc update); a bare void-function signal must not abort the probe.
-CONJUNCTS='(ignore-errors (featurep (quote org))) (ignore-errors (featurep (quote org-element))) (ignore-errors (fboundp (quote org-mode))) (ignore-errors (fboundp (quote org-element-parse-buffer))) (ignore-errors (commandp (quote org-mode))) (fboundp (quote commandp))'
+# the cold-boot probe so the two columns are directly comparable.
+#
+# IMPORTANT: the conjuncts are evaluated BARE, never wrapped in
+# `ignore-errors'.  This standalone reader's `ignore-errors' /
+# `condition-case' returns nil instead of the protected body's VALUE, so an
+# `(ignore-errors (featurep (quote org)))' probe reports nil even when
+# `(featurep (quote org))' is t -- that wrapper is what made the 2026-07-04
+# Increment-3 columns show featurep org/org-element as nil despite the
+# replay having loaded the full chain (60/60 files ok).  `featurep' and
+# `fboundp' are native builtins and cannot signal here; the only conjunct
+# that could signal void-function, `commandp' (a shim defined by one of the
+# 60 vendor files), is guarded with `(and (fboundp ...) ...)' instead.
+CONJUNCTS='(featurep (quote org)) (featurep (quote org-element)) (fboundp (quote org-mode)) (fboundp (quote org-element-parse-buffer)) (and (fboundp (quote commandp)) (commandp (quote org-mode))) (fboundp (quote commandp))'
 
 declare -a LOAD_US DUMP_US COLDBOOT_US COLDBOOT_RSS_KB
 REPLAY_PROBE=""
@@ -149,7 +165,7 @@ for i in $(seq 1 "$RUNS"); do
     echo ",quit"
   } >> "$WORKDIR/phase-run$i.repl"
 
-  pkill -9 -f '[w]t-coldload/target/nelisp --repl' 2>/dev/null
+  pkill -9 -f "$NELISP_BIN_PAT --repl" 2>/dev/null
   T_START_US=$(date +%s%6N)
   timeout 180 "$NELISP_BIN" --repl --no-prompt --no-print \
     < "$WORKDIR/phase-run$i.repl" > "$WORKDIR/run$i.out" 2> "$WORKDIR/run$i.err"
@@ -176,18 +192,18 @@ LAST_IMG="$WORKDIR/org-run${RUNS}.img"
 for i in $(seq 1 "$RUNS"); do
   echo "[cold-image-org-e2e] === run $i/$RUNS: cold boot ==="
   {
-    for c in "(ignore-errors (featurep (quote org)))" \
-             "(ignore-errors (featurep (quote org-element)))" \
-             "(ignore-errors (fboundp (quote org-mode)))" \
-             "(ignore-errors (fboundp (quote org-element-parse-buffer)))" \
-             "(ignore-errors (commandp (quote org-mode)))" \
+    for c in "(featurep (quote org))" \
+             "(featurep (quote org-element))" \
+             "(fboundp (quote org-mode))" \
+             "(fboundp (quote org-element-parse-buffer))" \
+             "(and (fboundp (quote commandp)) (commandp (quote org-mode)))" \
              "(fboundp (quote commandp))" \
              "(+ 40 3)"; do
       echo "$c"
     done
   } > "$WORKDIR/coldboot-forms.txt"
 
-  pkill -9 -f '[w]t-coldload/target/nelisp --cold-load-from' 2>/dev/null
+  pkill -9 -f "$NELISP_BIN_PAT --cold-load-from" 2>/dev/null
   T_START_US=$(date +%s%6N)
   "$NELISP_BIN" --cold-load-from "$LAST_IMG" --no-prompt \
     < "$WORKDIR/coldboot-forms.txt" > "$WORKDIR/coldboot$i.out" 2> "$WORKDIR/coldboot$i.err" &
