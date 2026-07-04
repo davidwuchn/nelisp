@@ -436,11 +436,11 @@ storage — not an arena reservation."
    ;; diagnostic block (+0 trip-count, +8/16/24 first-bad cur/bt/want, +32
    ;; poison-on-free enable, +40 poison-fill count).  Read/toggle via the
    ;; `nelisp--gc-diag' builtin.  Zero-init = disabled = zero behaviour change.
-   ;; Doc 152 §11.41 Stage 4a: nl_safepoint_ctx (3648B) after nl_gc_diag =
-   ;; depth-indexed safepoint-context stack.  64B control header (depth@+0,
+   ;; Doc 152 §11.41 Stage 4a: nl_gc_loop_ctx (3648B) after nl_gc_diag =
+   ;; depth-indexed loop-GC-context stack.  64B control header (depth@+0,
    ;; enable@+8, precise_only@+16, in_progress@+24, alloc_debt@+32,
    ;; alloc_limit@+40) + 64 frames x 56B @ +64 (env/result/out/pool/src/cursor/
-   ;; bsym).  Dormant in 4a (no caller); driver publish + collect land in 4b.
+   ;; bsym).  Dormant in 4a (no caller); driver root recording + collect land in 4b.
    ;; multi-chunk dump: +3728 = nl_fa_tbl_base (8B) -- relocation-table base override
    ;; for `nl_fa_emit'.  0 = use the default dest+span+isz+256 slot (single-chunk);
    ;; non-zero = a caller-chosen valid address (the multi-chunk dump puts the table
@@ -501,7 +501,7 @@ storage — not an arena reservation."
                              :section 'bss :bind 'global :type 'object)
          (nelisp-link-symbol "nl_gc_diag" (+ 16 1048576)
                              :section 'bss :bind 'global :type 'object)
-         (nelisp-link-symbol "nl_safepoint_ctx" (+ 80 1048576)
+         (nelisp-link-symbol "nl_gc_loop_ctx" (+ 80 1048576)
                              :section 'bss :bind 'global :type 'object)
          (nelisp-link-symbol "nl_fa_tbl_base" (+ 3728 1048576)
                              :section 'bss :bind 'global :type 'object)
@@ -1981,8 +1981,8 @@ arm64 Linux has no legacy x86 numbering)."
     ;;      survives for that loop's entire run.
     ;;   2. Mark+sweep (both the non-default top-level escape-hatch AND the
     ;;      ALWAYS-sweep-never-compact mid-form `nl_gc_collect_from_recorded_roots'
-    ;;      safepoint collector that DOES fire inside a hot loop, from
-    ;;      `nl_gc_safepoint's `while' back-edge) can free anything this
+    ;;      mid-form collector that DOES fire inside a hot loop, from
+    ;;      `nl_gc_midform_collect's `while' back-edge) can free anything this
     ;;      cache is the only reference to.  `nl_mxcache_mark_all' is
     ;;      called from both `nl_gc_mark_roots' and
     ;;      `nl_gc_collect_from_recorded_roots' and marks BOTH the key (form_ptr) and
@@ -2714,34 +2714,34 @@ arm64 Linux has no legacy x86 numbering)."
                (nl_compact_clear_fl 0)
                (nl_compact_unpin_src)
                (nl_compact_unpin_roots))))))))
-    ;; Doc 152 §11.41 Stage 4a: safepoint-context stack ops (DORMANT — no caller
-    ;; yet; the driver publish + mid-form collect_from_recorded_roots land in 4b under
+    ;; Doc 152 §11.41 Stage 4a: loop-GC-context stack ops (DORMANT — no caller
+    ;; yet; the driver root recording + mid-form collect_from_recorded_roots land in 4b under
     ;; poison validation, so these change no runtime behaviour).  The driver will
     ;; push the executing top-level form's precise root-set before eval and pop
-    ;; after the boundary collect; a mid-form safepoint reads frame[depth-1].
+    ;; after the boundary collect; a mid-form collect reads frame[depth-1].
     (defun nl_gc_ctx_store (base env result out pool src cursor bsym)
       (seq (ptr-write-u64 base 0 env) (ptr-write-u64 base 8 result)
            (ptr-write-u64 base 16 out) (ptr-write-u64 base 24 pool)
            (ptr-write-u64 base 32 src) (ptr-write-u64 base 40 cursor)
            (ptr-write-u64 base 48 bsym) 0))
     (defun nl_gc_ctx_push (env result out pool src cursor bsym)
-      (if (< (ptr-read-u64 (data-addr nl_safepoint_ctx) 0) 64)
+      (if (< (ptr-read-u64 (data-addr nl_gc_loop_ctx) 0) 64)
           (nl_seq2
            (nl_gc_ctx_store
-            (+ (data-addr nl_safepoint_ctx)
-               (+ 64 (* (ptr-read-u64 (data-addr nl_safepoint_ctx) 0) 56)))
+            (+ (data-addr nl_gc_loop_ctx)
+               (+ 64 (* (ptr-read-u64 (data-addr nl_gc_loop_ctx) 0) 56)))
             env result out pool src cursor bsym)
-           (ptr-write-u64 (data-addr nl_safepoint_ctx) 0
-                          (+ (ptr-read-u64 (data-addr nl_safepoint_ctx) 0) 1)))
+           (ptr-write-u64 (data-addr nl_gc_loop_ctx) 0
+                          (+ (ptr-read-u64 (data-addr nl_gc_loop_ctx) 0) 1)))
         0))
     (defun nl_gc_ctx_pop ()
-      (if (> (ptr-read-u64 (data-addr nl_safepoint_ctx) 0) 0)
-          (ptr-write-u64 (data-addr nl_safepoint_ctx) 0
-                         (- (ptr-read-u64 (data-addr nl_safepoint_ctx) 0) 1))
+      (if (> (ptr-read-u64 (data-addr nl_gc_loop_ctx) 0) 0)
+          (ptr-write-u64 (data-addr nl_gc_loop_ctx) 0
+                         (- (ptr-read-u64 (data-addr nl_gc_loop_ctx) 0) 1))
         0))
     ;; ===== Doc 152 §11.41 Stage 4b step 2: sound mid-form collect =====
-    ;; The driver publishes the executing top-level form's precise root-set into
-    ;; nl_safepoint_ctx (Stage 4b step 1); a mid-form safepoint reads those frames
+    ;; The driver records the executing top-level form's precise root-set into
+    ;; nl_gc_loop_ctx (Stage 4b step 1); a mid-form collect reads those frames
     ;; and runs a PRECISE-ONLY mark+sweep.  Unlike the boundary `nl_gc_collect',
     ;; the MIDFORM mode NEVER scans the C-stack conservatively: a stale stack word
     ;; that happens to mark a missed root would silently mask the very unsoundness
@@ -2788,12 +2788,12 @@ arm64 Linux has no legacy x86 numbering)."
       (if (< i depth)
           (nl_seq2
            (nl_gc_mark_recorded_frame_at
-            (+ (data-addr nl_safepoint_ctx) (+ 64 (* i 56))))
+            (+ (data-addr nl_gc_loop_ctx) (+ 64 (* i 56))))
            (nl_gc_mark_recorded_contexts_from (+ i 1) depth))
         0))
     (defun nl_gc_mark_recorded_contexts ()
       (nl_gc_mark_recorded_contexts_from
-       0 (ptr-read-u64 (data-addr nl_safepoint_ctx) 0)))
+       0 (ptr-read-u64 (data-addr nl_gc_loop_ctx) 0)))
     ;; Shared symentry symbol (268436328): mark the BLOCK + walk it as a Symbol
     ;; SLOT so its name buffer is kept alive (mirrors the `nl_gc_mark_roots' arm).
     (defun nl_gc_mark_symentry ()
@@ -2805,39 +2805,39 @@ arm64 Linux has no legacy x86 numbering)."
     ;; reentrancy guard.  Always mark+sweep (never compact): mid-form objects must
     ;; stay put, and precise-only marking has no conservatively-found blocks to pin.
     (defun nl_gc_collect_from_recorded_roots (mode)
-      (if (= (ptr-read-u64 (data-addr nl_safepoint_ctx) 24) 1) 0
-        (nl_seq2 (ptr-write-u64 (data-addr nl_safepoint_ctx) 24 1)
+      (if (= (ptr-read-u64 (data-addr nl_gc_loop_ctx) 24) 1) 0
+        (nl_seq2 (ptr-write-u64 (data-addr nl_gc_loop_ctx) 24 1)
          (nl_seq2 (nl_gc_mark_recorded_contexts)
           (nl_seq2 (nl_gc_mark_rootstack)
            (nl_seq2 (nl_gc_mark_symentry)
             (nl_seq2 (if (= mode 0) (nl_gc_conserv_maybe) 0)
-             ;; perf/macroexpansion-cache: this mid-form safepoint collector
+             ;; perf/macroexpansion-cache: this mid-form collect collector
              ;; is ALWAYS mark+sweep (never compact -- see the comment above
              ;; `nl_gc_collect_from_recorded_roots'), i.e. exactly the path a hot loop's
-             ;; `nl_gc_safepoint' back-edge can trigger.  Mark cache entries
+             ;; `nl_gc_midform_collect' back-edge can trigger.  Mark cache entries
              ;; alive here too, or a live cache value with no other root
              ;; would be freed between loop iterations.
              (nl_seq2 (nl_mxcache_mark_all)
               (nl_seq2 (nl_fvcache_mark_all)
               (nl_seq2 (nl_gc_sweep)
-                       (ptr-write-u64 (data-addr nl_safepoint_ctx) 24 0)))))))))))
-    ;; Gated mid-form safepoint (called from nl_sf_while's backedge).  enable
+                       (ptr-write-u64 (data-addr nl_gc_loop_ctx) 24 0)))))))))))
+    ;; Gated mid-form collect (called from nl_sf_while's backedge).  enable
     ;; (ctx+8) defaults OFF -> a single cheap branch + return, so non-test runs are
     ;; unchanged.  alloc-debt gate: fire when total chunk-bytes-reserved (268436184
     ;; -- the SAME monotonic counter the boundary GC trips on; the chunk-0 bump
     ;; @268435456 caps at the first chunk and is useless here) crosses the
     ;; next-trigger watermark (ctx+40), then re-arm +16 MiB and bump the
     ;; fired-count (ctx+32, diagnostic).  MIDFORM precise-only (mode 1).
-    (defun nl_gc_safepoint ()
-      (if (= (ptr-read-u64 (data-addr nl_safepoint_ctx) 8) 1)
+    (defun nl_gc_midform_collect ()
+      (if (= (ptr-read-u64 (data-addr nl_gc_loop_ctx) 8) 1)
           (if (< (ptr-read-u64 268436184 0)
-                 (ptr-read-u64 (data-addr nl_safepoint_ctx) 40))
+                 (ptr-read-u64 (data-addr nl_gc_loop_ctx) 40))
               0
             (nl_seq2 (nl_gc_collect_from_recorded_roots 1)
-             (nl_seq2 (ptr-write-u64 (data-addr nl_safepoint_ctx) 40
+             (nl_seq2 (ptr-write-u64 (data-addr nl_gc_loop_ctx) 40
                                      (+ (ptr-read-u64 268436184 0) 16777216))
-                      (ptr-write-u64 (data-addr nl_safepoint_ctx) 32
-                                     (+ (ptr-read-u64 (data-addr nl_safepoint_ctx) 32) 1)))))
+                      (ptr-write-u64 (data-addr nl_gc_loop_ctx) 32
+                                     (+ (ptr-read-u64 (data-addr nl_gc_loop_ctx) 32) 1)))))
         0))
     (defun nl_gc_collect (ctx result out pool src cursor bsym)
       (if (= (ptr-read-u64 268435616 0) 1) 0    ; DEBUG: collect = pure no-op
@@ -3340,7 +3340,7 @@ unresolved at link time."
              0)))
     ;; Env-bridge CAPTURE (Doc 17 §11.2 Bridge 1) for the heap-v0 cold-loader.
     ;; Reads the codec's env-root-manifest 5 roots from the LIVE recorded EvalCtx
-    ;; (env = nl_safepoint_ctx+64, the GC-recorded frame-0 context) and returns the
+    ;; (env = nl_gc_loop_ctx+64, the GC-recorded frame-0 context) and returns the
     ;; list (globals_record frames_record unbound_marker max_recursion use_elisp_apply),
     ;; directly consumable by `nelisp-heap-image-encode-roots'.  This is the "symmetric
     ;; getter to read the current globals_record" that Doc 17 §11.2 says standalone
@@ -3350,7 +3350,7 @@ unresolved at link time."
     ;; scalar @env+112.  Records/Symbol roots are returned as their Sexp value (slot
     ;; copy); the two scalars as Int Sexps.  Returns nil if no frame is recorded.
     (defun bf_env_capture_roots (out)
-      (let* ((env (ptr-read-u64 (+ (data-addr nl_safepoint_ctx) 64) 0))
+      (let* ((env (ptr-read-u64 (+ (data-addr nl_gc_loop_ctx) 64) 0))
              (g (alloc-bytes 32 8)) (f (alloc-bytes 32 8)) (u (alloc-bytes 32 8))
              (nilp (alloc-bytes 32 8))
              (c4 (alloc-bytes 32 8)) (c3 (alloc-bytes 32 8))
@@ -3441,8 +3441,8 @@ unresolved at link time."
          (+ acc (bf_arena_chunk_used chunk)))))
     ;; Doc 152 §11.39 Stage 3a: GC-diag read/toggle builtin.  ARG0:
     ;; 0=read-only, 1=enable poison-on-free, 2=disable poison,
-    ;; 3/4=push/pop empty safepoint context, 5/6=arm/disarm mid-form
-    ;; safepoint, 7/8=disable/enable collections, 9/10=disable/enable
+    ;; 3/4=push/pop empty loop-GC context, 5/6=arm/disarm mid-form
+    ;; collect, 7/8=disable/enable collections, 9/10=disable/enable
     ;; free-list reuse, 11/12=enable/disable compaction, 13/14=disable/
     ;; enable macroexpansion-cache lookup, 15/16=force/allow legacy
     ;; bind-path deep cloning, 17/18=disable/enable closure free-variable
@@ -3457,15 +3457,15 @@ unresolved at link time."
             (if (= (wf_argval args 0) 3) (nl_gc_ctx_push 0 0 0 0 0 0 0)
               (if (= (wf_argval args 0) 4) (nl_gc_ctx_pop)
                 ;; Doc 152 §11.41 Stage 4b step 2: arm / disarm the mid-form
-                ;; safepoint.  5 = arm (enable=1, next-trigger = total + 16 MiB,
+                ;; collect.  5 = arm (enable=1, next-trigger = total + 16 MiB,
                 ;; reset fired-count); 6 = disarm (enable=0).  Default OFF.
                 (if (= (wf_argval args 0) 5)
-                    (seq (ptr-write-u64 (data-addr nl_safepoint_ctx) 8 1)
-                         (ptr-write-u64 (data-addr nl_safepoint_ctx) 40
+                    (seq (ptr-write-u64 (data-addr nl_gc_loop_ctx) 8 1)
+                         (ptr-write-u64 (data-addr nl_gc_loop_ctx) 40
                                         (+ (ptr-read-u64 268436184 0) 16777216))
-                         (ptr-write-u64 (data-addr nl_safepoint_ctx) 32 0))
+                         (ptr-write-u64 (data-addr nl_gc_loop_ctx) 32 0))
                   (if (= (wf_argval args 0) 6)
-                      (ptr-write-u64 (data-addr nl_safepoint_ctx) 8 0)
+                      (ptr-write-u64 (data-addr nl_gc_loop_ctx) 8 0)
                     (if (= (wf_argval args 0) 7)
                         (ptr-write-u64 268435616 0 1)
                       (if (= (wf_argval args 0) 8)
@@ -3503,8 +3503,8 @@ unresolved at link time."
             (wf_write_nil nils)
             ;; 9th element (tail): bind-path legacy force flag.
             (wf_cons_int (ptr-read-u64 (data-addr nl_bind_clone_force) 0) nils s8)
-            (wf_cons_int (ptr-read-u64 (data-addr nl_safepoint_ctx) 32) s8 s7)
-            (wf_cons_int (ptr-read-u64 (data-addr nl_safepoint_ctx) 0) s7 s6)
+            (wf_cons_int (ptr-read-u64 (data-addr nl_gc_loop_ctx) 32) s8 s7)
+            (wf_cons_int (ptr-read-u64 (data-addr nl_gc_loop_ctx) 0) s7 s6)
             (wf_cons_int (ptr-read-u64 (data-addr nl_gc_diag) 32) s6 s5)
             (wf_cons_int (ptr-read-u64 (data-addr nl_gc_diag) 40) s5 s4)
             (wf_cons_int (ptr-read-u64 (data-addr nl_gc_diag) 24) s4 s3)
@@ -3675,11 +3675,11 @@ unresolved at link time."
         (seq
          (ptr-write-u64 reach 0 0)
          (ptr-write-u64 total 0 0)
-         (ptr-write-u64 (data-addr nl_safepoint_ctx) 24 1)
+         (ptr-write-u64 (data-addr nl_gc_loop_ctx) 24 1)
          (nl_gc_mark_recorded_contexts)
          (nl_gc_mark_rootstack)
          (nl_gc_mark_symentry)
-         (ptr-write-u64 (data-addr nl_safepoint_ctx) 24 0)
+         (ptr-write-u64 (data-addr nl_gc_loop_ctx) 24 0)
          (bf_arena_mr_chunks (ptr-read-u64 268436160 0) reach total)
          (wf_write_nil nil-slot)
          (wf_cons_int (ptr-read-u64 total 0) nil-slot s1)
@@ -3906,13 +3906,13 @@ unresolved at link time."
     (defun nl_fa_frames_from (i depth ds span dest cin cout dir)
       (if (< i depth)
           (nl_seq2
-           (nl_fa_frame_at (+ (data-addr nl_safepoint_ctx) (+ 64 (* i 56)))
+           (nl_fa_frame_at (+ (data-addr nl_gc_loop_ctx) (+ 64 (* i 56)))
                            ds span dest cin cout dir)
            (nl_fa_frames_from (+ i 1) depth ds span dest cin cout dir))
         0))
     (defun nl_fa_roots (ds span dest cin cout dir)
       (nl_seq2
-       (nl_fa_frames_from 0 (ptr-read-u64 (data-addr nl_safepoint_ctx) 0)
+       (nl_fa_frames_from 0 (ptr-read-u64 (data-addr nl_gc_loop_ctx) 0)
                           ds span dest cin cout dir)
        (if (= (ptr-read-u64 268436328 0) 0) 0
          (nl_fa_slot (ptr-read-u64 268436328 0) ds span dest cin cout dir))))
@@ -3928,9 +3928,9 @@ unresolved at link time."
              (dest (alloc-bytes (+ slen 256) 8))
              (cin (+ dest slen)) (cout (+ dest slen 8)) (cmis (+ dest slen 16))
              (ctr (+ dest slen 24))
-             (depth (ptr-read-u64 (data-addr nl_safepoint_ctx) 0))
+             (depth (ptr-read-u64 (data-addr nl_gc_loop_ctx) 0))
              (env (if (= depth 0) 0
-                    (ptr-read-u64 (+ (data-addr nl_safepoint_ctx) 64) 0)))
+                    (ptr-read-u64 (+ (data-addr nl_gc_loop_ctx) 64) 0)))
              (i 0)
              (nil-slot (alloc-bytes 32 8)) (s2 (alloc-bytes 32 8)) (s1 (alloc-bytes 32 8)))
         (seq
@@ -3943,14 +3943,14 @@ unresolved at link time."
          (if (= env 0) 0
            (seq
             ;; 2. swizzle pass (abs -> offset) from ALL roots
-            (ptr-write-u64 (data-addr nl_safepoint_ctx) 24 1)
+            (ptr-write-u64 (data-addr nl_gc_loop_ctx) 24 1)
             (nl_fa_roots sstart slen dest cin cout 0)
-            (ptr-write-u64 (data-addr nl_safepoint_ctx) 24 0)
+            (ptr-write-u64 (data-addr nl_gc_loop_ctx) 24 0)
             (bf_arena_mr_chunks (ptr-read-u64 268436160 0) ctr ctr)   ; clear marks
             ;; 3. unswizzle pass (offset -> abs)
-            (ptr-write-u64 (data-addr nl_safepoint_ctx) 24 1)
+            (ptr-write-u64 (data-addr nl_gc_loop_ctx) 24 1)
             (nl_fa_roots sstart slen dest cin cout 1)
-            (ptr-write-u64 (data-addr nl_safepoint_ctx) 24 0)
+            (ptr-write-u64 (data-addr nl_gc_loop_ctx) 24 0)
             (bf_arena_mr_chunks (ptr-read-u64 268436160 0) ctr ctr)
             ;; 4. round-trip identity: copy must equal source again
             (setq i 0)
@@ -3992,9 +3992,9 @@ unresolved at link time."
              (dest (alloc-bytes (+ (+ slen isz) 256) 8))
              (crel (+ dest slen isz)) (cwf (+ dest slen isz 8))
              (cnblk (+ dest slen isz 16)) (ctr (+ dest slen isz 24))
-             (depth (ptr-read-u64 (data-addr nl_safepoint_ctx) 0))
+             (depth (ptr-read-u64 (data-addr nl_gc_loop_ctx) 0))
              (env (if (= depth 0) 0
-                    (ptr-read-u64 (+ (data-addr nl_safepoint_ctx) 64) 0)))
+                    (ptr-read-u64 (+ (data-addr nl_gc_loop_ctx) 64) 0)))
              (i 0) (j 0) (hdr 0)
              (nil-slot (alloc-bytes 32 8)) (s2 (alloc-bytes 32 8)) (s1 (alloc-bytes 32 8)))
         (seq
@@ -4011,9 +4011,9 @@ unresolved at link time."
            (seq
             ;; 2. relocate DEST's in-region pointers to base = dest (dir 2),
             ;; from ALL roots
-            (ptr-write-u64 (data-addr nl_safepoint_ctx) 24 1)
+            (ptr-write-u64 (data-addr nl_gc_loop_ctx) 24 1)
             (nl_fa_roots sstart slen dest crel ctr 2)
-            (ptr-write-u64 (data-addr nl_safepoint_ctx) 24 0)
+            (ptr-write-u64 (data-addr nl_gc_loop_ctx) 24 0)
             (bf_arena_mr_chunks (ptr-read-u64 268436160 0) ctr ctr)
             ;; 3. verify the LOADED image: linear [hdr][obj] walk of DEST must
             ;; reach the end exactly (block headers untouched by relocate).
@@ -4060,9 +4060,9 @@ unresolved at link time."
              (base (- sstart 1024))
              (ib (ptr-read-u64 (+ base 832) 0))
              (ie (ptr-read-u64 (+ base 840) 0))
-             (depth (ptr-read-u64 (data-addr nl_safepoint_ctx) 0))
+             (depth (ptr-read-u64 (data-addr nl_gc_loop_ctx) 0))
              (env (if (= depth 0) 0
-                    (ptr-read-u64 (+ (data-addr nl_safepoint_ctx) 64) 0)))
+                    (ptr-read-u64 (+ (data-addr nl_gc_loop_ctx) 64) 0)))
              (gbox (if (= env 0) 0 (ptr-read-u64 (+ env 8) 0)))
              (fbox (if (= env 0) 0 (ptr-read-u64 (+ env 40) 0)))
              (ubox (if (= env 0) 0 (ptr-read-u64 (+ env 72) 0)))
@@ -4112,9 +4112,9 @@ unresolved at link time."
            (seq (ptr-write-u64 (+ dest (+ slen j)) 0 (ptr-read-u64 (+ ib j) 0))
                 (setq j (+ j 8))))
          ;; 2. swizzle DEST + emit the relocation table (dir 3)
-         (ptr-write-u64 (data-addr nl_safepoint_ctx) 24 1)
+         (ptr-write-u64 (data-addr nl_gc_loop_ctx) 24 1)
          (nl_fa_roots sstart slen dest cin cout 3)
-         (ptr-write-u64 (data-addr nl_safepoint_ctx) 24 0)
+         (ptr-write-u64 (data-addr nl_gc_loop_ctx) 24 0)
          (bf_arena_mr_chunks (ptr-read-u64 268436160 0) cnblk cnblk)
          (ptr-write-u64 cnblk 0 0)
          ;; 3. LOAD as the boot would: per table entry F, DEST[F] += DEST
@@ -4168,9 +4168,9 @@ unresolved at link time."
              (ib (ptr-read-u64 (+ abase 832) 0))
              (ie (ptr-read-u64 (+ abase 840) 0))
              (isz (nl_align_up (if (< ie ib) 0 (- ie ib)) 8))
-             (depth (ptr-read-u64 (data-addr nl_safepoint_ctx) 0))
+             (depth (ptr-read-u64 (data-addr nl_gc_loop_ctx) 0))
              (env (if (= depth 0) 0
-                    (ptr-read-u64 (+ (data-addr nl_safepoint_ctx) 64) 0)))
+                    (ptr-read-u64 (+ (data-addr nl_gc_loop_ctx) 64) 0)))
              (gbox (if (= env 0) 0 (ptr-read-u64 (+ env 8) 0)))
              (fbox (if (= env 0) 0 (ptr-read-u64 (+ env 40) 0)))
              (ubox (if (= env 0) 0 (ptr-read-u64 (+ env 72) 0)))
@@ -4186,9 +4186,9 @@ unresolved at link time."
            (seq (ptr-write-u64 (+ dest i) 0 (ptr-read-u64 (+ sstart i) 0)) (setq i (+ i 8))))
          (while (< j isz)
            (seq (ptr-write-u64 (+ dest (+ slen j)) 0 (ptr-read-u64 (+ ib j) 0)) (setq j (+ j 8))))
-         (ptr-write-u64 (data-addr nl_safepoint_ctx) 24 1)
+         (ptr-write-u64 (data-addr nl_gc_loop_ctx) 24 1)
          (nl_fa_roots sstart slen dest cin cout 3)
-         (ptr-write-u64 (data-addr nl_safepoint_ctx) 24 0)
+         (ptr-write-u64 (data-addr nl_gc_loop_ctx) 24 0)
          (bf_arena_mr_chunks (ptr-read-u64 268436160 0) cout cout)
          (ptr-write-u64 cout 0 0)
          (setq tlen (ptr-read-u64 cin 0))
@@ -4278,9 +4278,9 @@ unresolved at link time."
              (tblcap (+ total 1048576))
              (tblbase (nl_os_alloc_chunk tblcap))
              (cin tblbase) (cout (+ tblbase 8)) (tbl (+ tblbase 16))
-             (depth (ptr-read-u64 (data-addr nl_safepoint_ctx) 0))
+             (depth (ptr-read-u64 (data-addr nl_gc_loop_ctx) 0))
              (env (if (= depth 0) 0
-                    (ptr-read-u64 (+ (data-addr nl_safepoint_ctx) 64) 0)))
+                    (ptr-read-u64 (+ (data-addr nl_gc_loop_ctx) 64) 0)))
              (gbox (if (= env 0) 0 (ptr-read-u64 (+ env 8) 0)))
              (fbox (if (= env 0) 0 (ptr-read-u64 (+ env 40) 0)))
              (ubox (if (= env 0) 0 (ptr-read-u64 (+ env 72) 0)))
@@ -4304,11 +4304,11 @@ unresolved at link time."
               (ptr-write-u64 (data-addr nl_fa_tbl_base) 0 tbl)
               ;; ---- from here to the restore: NO alloc / GC / eval (arena is swizzled) ----
               (ptr-write-u64 cin 0 0) (ptr-write-u64 cout 0 0)
-              (ptr-write-u64 (data-addr nl_safepoint_ctx) 24 1)
+              (ptr-write-u64 (data-addr nl_gc_loop_ctx) 24 1)
               ;; span=total: cross-chunk pointers swizzle to coalesced logical offsets;
               ;; dest=ds=sstart: loc=dest+(waddr-ds)=waddr => in-place over ANY chunk.
               (nl_fa_roots sstart total sstart cin cout 3)
-              (ptr-write-u64 (data-addr nl_safepoint_ctx) 24 0)
+              (ptr-write-u64 (data-addr nl_gc_loop_ctx) 24 0)
               (ptr-write-u64 (data-addr nl_fa_tbl_base) 0 0)   ; reset override
               (setq tlen (ptr-read-u64 cin 0))
               (ptr-write-u64 hdr 8 total) (ptr-write-u64 hdr 24 tlen)
@@ -6460,9 +6460,9 @@ unresolved at link time."
     ;; read FILE into a Sexp::Str, parse each top-level form with the same pure
     ;; reader, and evaluate it in the caller's ENV.  This intentionally mirrors
     ;; the driver's multi-form loop instead of relying on host-side embedding.
-    ;; Doc 152 §11.41 Stage 4b: publish the executing top-level form's precise
-    ;; root-set to nl_safepoint_ctx for the duration of its eval, so a mid-form
-    ;; safepoint (in nl_sf_while) can invoke a sound collect.  push BEFORE eval /
+    ;; Doc 152 §11.41 Stage 4b: record the executing top-level form's precise
+    ;; root-set to nl_gc_loop_ctx for the duration of its eval, so a mid-form
+    ;; collect (in nl_sf_while) can invoke a sound collect.  push BEFORE eval /
     ;; pop AFTER (the boundary collect stays the direct nl_gc_collect and reads
     ;; the driver locals, not the ctx, so popping here is fine).  Returns rc.
     (defun nl_driver_eval_with_recorded_roots (result env out pool src cursor bsym)
