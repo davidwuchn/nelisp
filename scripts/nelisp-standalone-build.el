@@ -1086,6 +1086,16 @@ not linked."
 This matches the Linux standalone trampoline's 1 GiB native stack, but remains a
 virtual reservation in the PE header; committed stack pages grow on demand.")
 
+(defconst nelisp-standalone--windows-stack-commit #x100000
+  "Windows standalone PE initial stack commit size (feat/windows-spawn).
+`nelisp-pe-write.el' defaults SizeOfStackCommit to a bare 0x1000 (4 KiB) when
+unset.  Deep synchronous call chains (e.g. the CreateProcessW spawn path:
+several nested nl_win_* helpers plus whatever stack kernel32/ntdll itself uses
+inside CreateProcessW) can require more headroom than the automatic
+guard-page growth reliably supplies in a single step for a minimal,
+CRT-less PE.  1 MiB committed up front is cheap relative to the 1 GiB
+reservation above and removes guard-page-growth timing as a variable.")
+
 (defun nelisp-standalone--arena-init-metadata-forms (base size)
   "Return bootstrap arena metadata writes for fixed first chunk BASE/SIZE."
   (let* ((data-start nelisp-standalone--arena-data-start-offset)
@@ -6739,8 +6749,8 @@ extern arms in dynamic builds."
 ;; A Sexp::Str (tag 5) has ptr@16/len@24; a Sexp::MutStr (tag 6) wraps an
 ;; NlStr* @8 whose ptr@8/len@16.  Both are handled for robustness.
 ;; ===================================================================
-(defconst nelisp-standalone--fileio-source
-  '(seq
+(defconst nelisp-standalone--fileio-forms-part1
+  '(
     (defun nl_bi_strptr (sx)
       (if (= (ptr-read-u64 sx 0) 6)
           (ptr-read-u64 (ptr-read-u64 sx 8) 8)
@@ -7099,34 +7109,57 @@ extern arms in dynamic builds."
       (let* ((tag (ptr-read-u64 sx 0)))
         (if (= tag 5)
             1
-          (if (= tag 6) 1 0))))
-    (defun nl_bi_process_redirect_input (infile_sx)
-      (if (= (nl_bi_process_string_sx_p infile_sx) 1)
-          (let* ((fd (nl_os_open_read (nl_bi_make_cpath infile_sx))))
-            (if (< fd 0)
-                1
-              (seq
-               (nl_os_process_dup2 fd 0)
-               (nl_os_close_handle fd)
-               0)))
-        0))
-    (defun nl_bi_process_redirect_output (destination_sx)
-      (if (= (nl_bi_process_string_sx_p destination_sx) 1)
-          (let* ((fd (nl_os_open_write_truncate
-                      (nl_bi_make_cpath destination_sx))))
-            (if (< fd 0)
-                1
-              (seq
-               (nl_os_process_dup2 fd 1)
-               (nl_os_process_dup2 fd 2)
-               (nl_os_close_handle fd)
-               0)))
-        0))
-    (defun nl_bi_process_setup_child_fds (infile_sx destination_sx)
-      (let* ((in_rc (nl_bi_process_redirect_input infile_sx)))
-        (if (= in_rc 0)
-            (nl_bi_process_redirect_output destination_sx)
-          in_rc)))
+          (if (= tag 6) 1 0))))))
+
+;; nelisp-standalone--fileio-forms-part1 ends right after
+;; `nl_bi_process_string_sx_p'; the POSIX-only child-fd redirect/setup
+;; helpers below (region A) used to sit here unconditionally.  They are now
+;; produced per-target by `nelisp-standalone--fileio-process-setup-forms' so
+;; the feat/windows-spawn CreateProcessW path (which has no dup2-based
+;; redirect step) does not need to define dead fork-only helpers.  POSIX
+;; content is byte-for-byte the original.
+(defun nelisp-standalone--fileio-process-setup-forms ()
+  "Return the child-fd redirect/setup helpers for `nl_bi_process_call_process'.
+POSIX targets return the original dup2-based `nl_bi_process_redirect_input' /
+`nl_bi_process_redirect_output' / `nl_bi_process_setup_child_fds' trio
+unchanged.  Windows targets return nil: the CreateProcessW spawn model
+redirects stdout/stderr via STARTUPINFOW handles instead, so there is no
+POSIX-style child-fd setup step (see
+`nelisp-standalone--fileio-process-call-forms')."
+  (pcase nelisp-standalone--target
+    ((or 'windows-x86_64 'windows-aarch64) nil)
+    (_
+     '(
+       (defun nl_bi_process_redirect_input (infile_sx)
+         (if (= (nl_bi_process_string_sx_p infile_sx) 1)
+             (let* ((fd (nl_os_open_read (nl_bi_make_cpath infile_sx))))
+               (if (< fd 0)
+                   1
+                 (seq
+                  (nl_os_process_dup2 fd 0)
+                  (nl_os_close_handle fd)
+                  0)))
+           0))
+       (defun nl_bi_process_redirect_output (destination_sx)
+         (if (= (nl_bi_process_string_sx_p destination_sx) 1)
+             (let* ((fd (nl_os_open_write_truncate
+                         (nl_bi_make_cpath destination_sx))))
+               (if (< fd 0)
+                   1
+                 (seq
+                  (nl_os_process_dup2 fd 1)
+                  (nl_os_process_dup2 fd 2)
+                  (nl_os_close_handle fd)
+                  0)))
+           0))
+       (defun nl_bi_process_setup_child_fds (infile_sx destination_sx)
+         (let* ((in_rc (nl_bi_process_redirect_input infile_sx)))
+           (if (= in_rc 0)
+               (nl_bi_process_redirect_output destination_sx)
+             in_rc)))))))
+
+(defconst nelisp-standalone--fileio-forms-part2
+  '(
 	    (defun nl_bi_process_wait_exit_code (pid)
 	      (let* ((statusp (alloc-bytes 8 8)))
 	        (seq
@@ -7272,32 +7305,220 @@ extern arms in dynamic builds."
 	                  (seq
 	                   (nl_os_close_handle writefd)
 	                   (nl_os_process_set_nonblock readfd)
-	                   (nl_bi_process_make_object pid readfd out))))))))))
-	    (defun nl_bi_process_call_process (args out)
-	      (let* ((program_sx (wf_arg_ptr args 0))
-             (infile_sx (wf_arg_ptr args 1))
-             (destination_sx (wf_arg_ptr args 2))
-             (arglst (nl_bi_process_drop args 4))
-             (path (nl_bi_make_cpath program_sx))
-             (argv (nl_bi_process_make_argv program_sx arglst))
-             (envp (alloc-bytes 8 8))
-             (pid 0))
-        (seq
-         (ptr-write-u64 envp 0 0)
-         ;; M11 env inherit: prefer the driver-stashed initial-stack envp.
-         (if (= (ptr-read-u64 268435600 0) 0)
-             0
-           (setq envp (ptr-read-u64 268435600 0)))
-         (setq pid (nl_os_process_fork))
-         (if (= pid 0)
+	                   (nl_bi_process_make_object pid readfd out))))))))))))
+
+;; nelisp-standalone--fileio-forms-part2 ends right after
+;; `nl_bi_process_start_process'.  `nl_bi_process_call_process' (region B)
+;; used to sit here unconditionally; it is now produced per-target by
+;; `nelisp-standalone--fileio-process-call-forms' -- see feat/windows-spawn.
+;; The POSIX arm below is byte-for-byte the original fork/execve/wait4 body.
+(defun nelisp-standalone--fileio-process-call-forms ()
+  "Return the `nl_bi_process_call_process' builtin (dispatched from
+`(:lit \"nelisp-process-call-process\")').  POSIX targets return the original
+fork -> setup_child_fds -> execve -> wait4 body unchanged.  Windows targets
+(feat/windows-spawn) return a CreateProcessW -> WaitForSingleObject ->
+GetExitCodeProcess -> CloseHandle spawn-model implementation instead, since
+Windows has no fork().  Both variants support the synchronous call shape
+`(call-process PROGRAM nil DESTINATION nil ARG...)' with DESTINATION = nil
+(discard), a plain string path, or `(:file LOGFILE)'; async start-process and
+stdin feeding stay POSIX-only / out of scope on Windows, matching the
+pre-existing `nl_os_process_fork' stub there."
+  (pcase nelisp-standalone--target
+    ((or 'windows-x86_64 'windows-aarch64)
+     '(
+       ;; --- Windows command-line quoting (CommandLineToArgvW-compatible) ---
+       ;; Standard "ArgvQuote" algorithm: an argument that has no space, tab,
+       ;; or double-quote is emitted bare; otherwise it is wrapped in quotes
+       ;; with backslash runs doubled immediately before a literal quote (and
+       ;; before the closing quote), so CommandLineToArgvW round-trips it.
+       (defun nl_win_arg_needs_quote (ptr len)
+         (if (= len 0)
+             1
+           (let* ((i 0) (found 0))
              (seq
-              (if (= (nl_bi_process_setup_child_fds infile_sx destination_sx) 0)
-                  (nl_os_process_execve path argv envp)
-                1)
-              (nl_os_process_exit127))
-           (if (< pid 0)
-	               (wf_write_int out 1)
-	             (wf_write_int out (nl_bi_process_wait_exit_code pid)))))))
+              (while (< i len)
+                (let* ((b (ptr-read-u8 ptr i)))
+                  (seq
+                   (if (= b 32) (setq found 1)
+                     (if (= b 9) (setq found 1)
+                       (if (= b 34) (setq found 1) 0)))
+                   (setq i (+ i 1)))))
+              found))))
+       (defun nl_win_write_raw (dst pos ptr len)
+         (let* ((i 0))
+           (seq
+            (while (< i len)
+              (seq
+               (ptr-write-u8 dst (+ pos i) (ptr-read-u8 ptr i))
+               (setq i (+ i 1))))
+            (+ pos len))))
+       (defun nl_win_write_backslashes (dst pos count)
+         (let* ((k 0) (p pos))
+           (seq
+            (while (< k count)
+              (seq (ptr-write-u8 dst p 92) (setq p (+ p 1)) (setq k (+ k 1))))
+            p)))
+       (defun nl_win_quote_arg (dst pos ptr len)
+         (if (= (nl_win_arg_needs_quote ptr len) 0)
+             (nl_win_write_raw dst pos ptr len)
+           (let* ((p (+ pos 1)) (i 0))
+             (seq
+              (ptr-write-u8 dst pos 34)
+              (while (< i len)
+                (let* ((nbs 0))
+                  (seq
+                   (while (if (< i len) (= (ptr-read-u8 ptr i) 92) 0)
+                     (seq (setq nbs (+ nbs 1)) (setq i (+ i 1))))
+                   (if (= i len)
+                       (setq p (nl_win_write_backslashes dst p (* nbs 2)))
+                     (if (= (ptr-read-u8 ptr i) 34)
+                         (seq
+                          (setq p (nl_win_write_backslashes
+                                   dst p (+ (* nbs 2) 1)))
+                          (ptr-write-u8 dst p 34)
+                          (setq p (+ p 1))
+                          (setq i (+ i 1)))
+                       (seq
+                        (setq p (nl_win_write_backslashes dst p nbs))
+                        (ptr-write-u8 dst p (ptr-read-u8 ptr i))
+                        (setq p (+ p 1))
+                        (setq i (+ i 1))))))))
+              (ptr-write-u8 dst p 34)
+              (+ p 1)))))
+       (defun nl_win_cmdline_bound (arglst)
+         (if (= (ptr-read-u64 arglst 0) 7)
+             (+ (+ (* 2 (nl_bi_strlen (nl_cons_car_ptr arglst))) 3)
+                (nl_win_cmdline_bound (nl_cons_cdr_ptr arglst)))
+           0))
+       (defun nl_win_cmdline_write_args (dst pos lst)
+         (if (= (ptr-read-u64 lst 0) 7)
+             (let* ((car_sx (nl_cons_car_ptr lst)) (p (+ pos 1)))
+               (seq
+                (ptr-write-u8 dst pos 32)
+                (setq p (nl_win_quote_arg
+                         dst p (nl_bi_strptr car_sx) (nl_bi_strlen car_sx)))
+                (nl_win_cmdline_write_args dst p (nl_cons_cdr_ptr lst))))
+           pos))
+       (defun nl_win_build_cmdline (program_sx arglst)
+         (let* ((bound (+ (+ (* 2 (nl_bi_strlen program_sx)) 3)
+                          (+ (nl_win_cmdline_bound arglst) 2)))
+                (dst (alloc-bytes bound 1))
+                (p (nl_win_quote_arg
+                    dst 0 (nl_bi_strptr program_sx) (nl_bi_strlen program_sx))))
+           (seq
+            (setq p (nl_win_cmdline_write_args dst p arglst))
+            (ptr-write-u8 dst p 0)
+            dst)))
+       ;; --- destination parsing: nil (discard) / string path / (:file F) ---
+       (defun nl_win_dest_file_sx (destination_sx)
+         (if (= (nl_bi_process_string_sx_p destination_sx) 1)
+             destination_sx
+           (if (= (ptr-read-u64 destination_sx 0) 7)
+               (if (= (sexp-name-eq (nl_cons_car_ptr destination_sx) ":file") 1)
+                   (nl_cons_car_ptr (nl_cons_cdr_ptr destination_sx))
+                 0)
+             0)))
+       (defun nl_win_cstr3 (a b c)
+         (let* ((buf (alloc-bytes 4 1)))
+           (seq
+            (ptr-write-u8 buf 0 a) (ptr-write-u8 buf 1 b)
+            (ptr-write-u8 buf 2 c) (ptr-write-u8 buf 3 0)
+            buf)))
+       (defun nl_win_dest_cpath (destination_sx)
+         (let* ((file_sx (nl_win_dest_file_sx destination_sx)))
+           (if (= file_sx 0)
+               (nl_win_cstr3 78 85 76)   ; "NUL"
+             (nl_bi_make_cpath file_sx))))
+       ;; --- small runtime buffers: SECURITY_ATTRIBUTES / STARTUPINFOW / ---
+       ;; --- PROCESS_INFORMATION need explicit zero-fill (alloc-bytes does ---
+       ;; --- not guarantee zeroed memory for reused/freelist blocks). ---
+       (defun nl_win_zero_words (ptr nwords)
+         (let* ((i 0))
+           (seq
+            (while (< i nwords)
+              (seq (ptr-write-u64 ptr (* i 8) 0) (setq i (+ i 1))))
+            ptr)))
+       (defun nl_win_inheritable_sa ()
+         (let* ((sa (alloc-bytes 24 8)))
+           (seq
+            (nl_win_zero_words sa 3)
+            (ptr-write-u32 sa 0 24)      ; nLength
+            (ptr-write-u32 sa 16 1)      ; bInheritHandle = TRUE
+            sa)))
+       (defun nl_win_open_write_inheritable (cpath sa)
+         ;; GENERIC_WRITE, FILE_SHARE_READ|WRITE, CREATE_ALWAYS,
+         ;; FILE_ATTRIBUTE_NORMAL.
+         (extern-call CreateFileW (nl_win_utf8_wcs_dup cpath)
+                      1073741824 3 sa 2 128 0))
+       (defun nl_bi_process_call_process (args out)
+         (let* ((program_sx (wf_arg_ptr args 0))
+                (destination_sx (wf_arg_ptr args 2))
+                (arglst (nl_bi_process_drop args 4))
+                (sa (nl_win_inheritable_sa))
+                (out_handle (nl_win_open_write_inheritable
+                             (nl_win_dest_cpath destination_sx) sa))
+                (cmdline (nl_win_utf8_wcs_dup
+                          (nl_win_build_cmdline program_sx arglst)))
+                (in_handle (extern-call GetStdHandle 4294967286))
+                (si (nl_win_zero_words (alloc-bytes 104 8) 13))
+                (pi (nl_win_zero_words (alloc-bytes 24 8) 3))
+                (created 0))
+           (if (< out_handle 0)
+               (wf_write_int out 1)
+             (seq
+              (ptr-write-u32 si 0 104)          ; STARTUPINFOW.cb
+              (ptr-write-u32 si 60 256)         ; dwFlags = STARTF_USESTDHANDLES
+              (ptr-write-u64 si 80 in_handle)   ; hStdInput
+              (ptr-write-u64 si 88 out_handle)  ; hStdOutput
+              (ptr-write-u64 si 96 out_handle)  ; hStdError
+              (setq created
+                    (extern-call CreateProcessW
+                                 0 cmdline 0 0 1 0 0 0 si pi))
+              (if (= created 0)
+                  (seq
+                   (extern-call CloseHandle out_handle)
+                   (wf_write_int out 1))
+                (seq
+                 (extern-call CloseHandle (ptr-read-u64 pi 8)) ; hThread
+                 (extern-call WaitForSingleObject
+                              (ptr-read-u64 pi 0) 4294967295)  ; INFINITE
+                 (let* ((code_slot (nl_win_zero_words (alloc-bytes 8 8) 1)))
+                   (seq
+                    (extern-call GetExitCodeProcess
+                                 (ptr-read-u64 pi 0) code_slot)
+                    (extern-call CloseHandle (ptr-read-u64 pi 0))
+                    (extern-call CloseHandle out_handle)
+                    (wf_write_int out (ptr-read-u32 code_slot 0))))))))))))
+    (_
+     '(
+       (defun nl_bi_process_call_process (args out)
+         (let* ((program_sx (wf_arg_ptr args 0))
+                (infile_sx (wf_arg_ptr args 1))
+                (destination_sx (wf_arg_ptr args 2))
+                (arglst (nl_bi_process_drop args 4))
+                (path (nl_bi_make_cpath program_sx))
+                (argv (nl_bi_process_make_argv program_sx arglst))
+                (envp (alloc-bytes 8 8))
+                (pid 0))
+           (seq
+            (ptr-write-u64 envp 0 0)
+            ;; M11 env inherit: prefer the driver-stashed initial-stack envp.
+            (if (= (ptr-read-u64 268435600 0) 0)
+                0
+              (setq envp (ptr-read-u64 268435600 0)))
+            (setq pid (nl_os_process_fork))
+            (if (= pid 0)
+                (seq
+                 (if (= (nl_bi_process_setup_child_fds infile_sx destination_sx) 0)
+                     (nl_os_process_execve path argv envp)
+                   1)
+                 (nl_os_process_exit127))
+              (if (< pid 0)
+                  (wf_write_int out 1)
+                (wf_write_int out (nl_bi_process_wait_exit_code pid)))))))))))
+
+(defconst nelisp-standalone--fileio-forms-part3
+  '(
 	    (defun nl_bi_name_ptr (sx)
 	      (if (= (ptr-read-u64 sx 0) 4)
 	          (ptr-read-u64 sx 16)
@@ -7581,8 +7802,29 @@ extern arms in dynamic builds."
             (seq
              (nl_os_close_handle fd)
              (if (< wr 0) (wf_write_nil out) (wf_write_t out))))))))
-  "M7 file-I/O builtin impls (wrf/rdf/slen).  Uses `nl_seq2' (arena unit),
+  "M7 file-I/O builtin impls (wrf/rdf/slen), part 3 of 3 -- `nl_bi_name_ptr'
+onward.  See `nelisp-standalone--fileio-source' for how the three parts plus
+the per-target process forms are assembled.  Uses `nl_seq2' (arena unit),
 `wf_arg_ptr'/`wf_write_int' (applyfn unit) and `nl_alloc_str' (alloc-str.o).")
+
+(defun nelisp-standalone--fileio-source ()
+  "Return the M7 file-I/O + process-builtin source (compiled as the
+\"reader-fileio.o\" unit).  This used to be a single `defconst'; it is now
+assembled from three fixed common parts
+(`nelisp-standalone--fileio-forms-part1' / `-part2' / `-part3', unchanged in
+content and order) plus two per-target splices --
+`nelisp-standalone--fileio-process-setup-forms' (child-fd redirect helpers)
+and `nelisp-standalone--fileio-process-call-forms' (`nl_bi_process_call_process'
+itself) -- inserted at the exact positions region A and region B used to
+occupy.  POSIX targets therefore compile to the identical form sequence as
+before feat/windows-spawn; Windows targets get a CreateProcessW spawn-model
+`nl_bi_process_call_process' instead of the POSIX fork/execve/wait4 body."
+  (append (list 'seq)
+          nelisp-standalone--fileio-forms-part1
+          (nelisp-standalone--fileio-process-setup-forms)
+          nelisp-standalone--fileio-forms-part2
+          (nelisp-standalone--fileio-process-call-forms)
+          nelisp-standalone--fileio-forms-part3))
 
 ;; ===================================================================
 ;; M6 catch/throw glue unit (nl_sf_catch + nl_sf_throw + helpers).
@@ -9446,7 +9688,11 @@ dispatch arm in `nelisp-standalone--applyfn-dispatch-table'.")
               (list "ExitProcess" "VirtualAlloc" "VirtualFree" "GetCommandLineW"
                     "GetStdHandle" "CreateFileW" "ReadFile" "WriteFile"
                     "CloseHandle" "WideCharToMultiByte"
-                    "MultiByteToWideChar"))
+                    "MultiByteToWideChar"
+                    ;; feat/windows-spawn (Doc 138 follow-on): call-process via
+                    ;; the W32 spawn model -- see
+                    ;; `nelisp-standalone--fileio-process-call-forms'.
+                    "CreateProcessW" "WaitForSingleObject" "GetExitCodeProcess"))
         (cons "SHELL32.dll" (list "CommandLineToArgvW")))
   "PE imports needed by the Windows-native standalone reader.")
 
@@ -13515,7 +13761,7 @@ genuine general interpreter for the 11 special forms + installed builtins."
                    nelisp-standalone--this-file))
          ;; M7: file-I/O builtin impls (wrf/rdf/slen) referenced by applyfn.o.
          (fileio (nelisp-standalone--cached-unit
-                  "reader-fileio.o" nelisp-standalone--fileio-source
+                  "reader-fileio.o" (nelisp-standalone--fileio-source)
                   nelisp-standalone--this-file))
          ;; M6: catch/throw glue (nl_sf_catch/nl_sf_throw) referenced by the
          ;; patched combiner-cons.
@@ -13790,13 +14036,17 @@ loader when it is absent."
        (nelisp-link-units-pe32 out units "_start"
                                (nelisp-standalone--reader-pe-imports)
                                (list :stack-reserve
-                                     nelisp-standalone--windows-stack-reserve)))
+                                     nelisp-standalone--windows-stack-reserve
+                                     :stack-commit
+                                     nelisp-standalone--windows-stack-commit)))
       ('windows-aarch64
        (nelisp-link-units-pe32 out units "_start"
                                (nelisp-standalone--reader-pe-imports)
                                (list :machine 'aarch64
                                      :stack-reserve
-                                     nelisp-standalone--windows-stack-reserve)))
+                                     nelisp-standalone--windows-stack-reserve
+                                     :stack-commit
+                                     nelisp-standalone--windows-stack-commit)))
       ('macos-aarch64
        (nelisp-link-units-macho-exec out units "_main" 'aarch64)
        (set-file-modes out #o755)
