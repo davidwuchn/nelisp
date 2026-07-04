@@ -2498,3 +2498,355 @@ session end. No repo source files were modified this session; only this
 32.66 GiB/129s before being noticed and killed — noted here as a
 methodology lapse for this session (the RSS-guarded runner script was used
 for all *other* probes in the table above) and folded into item 3 above.
+
+---
+
+## 2026-07-05 exact-form bisect: the culprit is `org-macro--find-keyword-value` executed from inside `define-derived-mode`'s own `unwind-protect` cleanup arm — not any `with-temp-buffer` body form in isolation
+
+Investigation-only, branch `profwork`, HEAD `cde5422b` ("docs(FINDINGS):
+with-temp-buffer org-mode blowup vs top-level asymmetry bisect", 9 commits
+ahead of `origin/main`). Binary `target/nelisp` confirmed matching this
+HEAD's source content (no `.el`/`.rs` changes since the last build; the
+one intervening commit was docs-only). Task: pin the exact form, the
+final step before the fix. This session finds it, and finds that the
+previous session's leading hypothesis (a per-`setq-local`-call cost
+scaling with `with-temp-buffer`'s nested `unwind-protect`/
+`nelisp-ec-with-current-buffer` layer) is **not what actually fires** —
+the real mechanism is a single specific function call, reachable only
+because of a *second*, independent structural layer this session found:
+`define-derived-mode`'s own generated function body.
+
+### Setup
+
+Fresh cold image, same recipe as the previous two sessions:
+`NELISP_E2E_KEEP=1 timeout 300 bash scripts/cold-image-org-e2e.sh 1`.
+Completed in 7.3s wall (load 6.72s, dump 0.55s), cold boot 0.66s/526 MB,
+faithfulness `IDENTICAL`. Image kept at
+`/tmp/cold-image-org-e2e.ExPh8l/org-run1.img` for the whole session,
+deleted at the end (`rm -rf`, confirmed no stray `nelisp` processes left
+via `pkill -9 -f` + `ps aux` before cleanup). A small bash harness
+(`run_probe.sh`, scratch-only, not committed) fed one probe file at a
+time to `target/nelisp --cold-load-from IMG --no-prompt`, polled
+`/proc/<pid>/status` `VmHWM` every 0.3s, and hard-killed at >8 GiB RSS or
+a stated timeout — same guard discipline as the prior two sessions.
+
+**Methodological note (reader artifact, not part of the bug under
+investigation):** multi-line probe files caused the REPL to echo the
+return value of *each* individual sub-form of a single top-level
+expression, as if every parenthesized sub-form were its own top-level
+read — reproduced even with `--no-print` (which correctly suppresses
+top-level echo for genuinely single-line input; verified with `(+ 1 2)`
+one-liners). The identical content, flattened to one physical line, always
+produced exactly the one expected value/echo. Every timing probe in this
+session was therefore written as a single physical line. This reader
+quirk is flagged here for awareness but was not investigated further (out
+of scope for this task).
+
+### Bisection round 1 (flat/sequential body) — did NOT reproduce the blowup, and this is itself the key finding
+
+Transcribed `org-mode`'s full `define-derived-mode` body verbatim from
+`nelisp-emacs-lib/vendor/emacs-lisp/org/org.el:4945-5114` (55 top-level
+forms) into a Python list (`forms.py`, scratch-only) and ran increasing
+prefixes as a **plain sequential body** of `with-temp-buffer` — i.e.
+`(with-temp-buffer (outline-mode) FORM_1 ... FORM_N 'ok)`, binary-
+searching N from 1 to 55:
+
+| N (forms 1..N) | result |
+|---|---|
+| 1 (`org-load-modules-maybe` reached) | 4.57s, 706 MB |
+| 28 | 5.19s, 743 MB |
+| 42 | 5.18s, 744 MB |
+| 49 | 5.18s, 744 MB |
+| 52 | 5.19s, 744 MB |
+| 53 | 5.18s, 744 MB |
+| 54 | 5.18s, 745 MB |
+| **55 (the entire real body, verbatim)** | **4.88s, 745 MB — completes cleanly** |
+
+**The full, verbatim 55-form body of `org-mode`, run as a plain sequence
+inside `with-temp-buffer`, does not reproduce the established blowup at
+all.** This directly falsifies the previous session's leading hypothesis
+that the pathology is `with-temp-buffer`'s nested `unwind-protect`/
+`nelisp-ec-with-current-buffer` layer compounding with per-`setq-local`-
+call volume — if that were the mechanism, this exact sequence of ~25
+buffer-local writes inside `with-temp-buffer` would already show it. It
+does not. Adding an explicit `(run-mode-hooks 'org-mode-hook)` and/or
+`(setq major-mode 'org-mode)` to this reconstruction (to more closely
+match what `define-derived-mode` generates) still did not reproduce it
+(both 4.88s). Meanwhile, calling the *real* `(org-mode)` function on this
+exact image, in this exact session, was re-confirmed to still blow up:
+`(with-temp-buffer (org-mode) (prin1 major-mode))` reached 6.86 GiB RSS
+at the 25s timeout (still climbing, killed by the guard) — so the bug is
+real and current, and the delta between "plain sequence of the real body"
+and "calling the real function" had to be found elsewhere.
+
+### The second structural layer: `define-derived-mode`'s generated body runs entirely inside an `unwind-protect` *cleanup arm*
+
+`grep`ing `nelisp-emacs-lib` (read-only sibling repo) for this
+substrate's `define-derived-mode` turned up
+`packages/nelisp-emacs-core/lisp/emacs-mode-builtins.el:101-104`
+(delegates unprefixed `define-derived-mode` to
+`emacs-mode-define-derived-mode` when not host-native) and the real
+implementation, `packages/nelisp-emacs-core/lisp/emacs-mode.el:164-215`.
+Its generated function is, verbatim (`child` = `org-mode`, `parent-call`
+= `(outline-mode)`, `real-body` = the spliced 55-form body):
+
+```elisp
+(defun org-mode ()
+  DOC
+  (interactive)
+  ;; Standalone NeLisp currently loses forms that follow some
+  ;; macro-generated parent major-mode calls, notably nested
+  ;; `outline-mode' derived modes.  Running the child transition in
+  ;; `unwind-protect' cleanup preserves the observable
+  ;; define-derived-mode order: parent first, then child body/hooks.
+  (unwind-protect
+      (outline-mode)                        ; <- PROTECTED FORM
+    (emacs-mode-set-major-mode 'org-mode "Org")
+    ,@real-body                             ; <- all 55 body forms
+    (emacs-mode-run-mode-hooks 'emacs-mode-org-mode-hook 'org-mode-hook))
+  nil)
+```
+
+The code comment documents this as a **deliberate workaround for a
+different, earlier defect** ("loses forms that follow some macro-
+generated parent major-mode calls"). Its side effect, load-bearing for
+*this* investigation: **every single form in a derived mode's body
+executes inside the cleanup arm of an `unwind-protect`, not as a plain
+sequential body.** `outline-mode` (and every other mode defined via this
+macro) has this same shape, but its own body is only 2 `setq-local` forms
+— too small to have exposed the interaction this session found.
+
+Reproducing this exact shape by hand confirmed it immediately:
+
+| form | context | result |
+|---|---|---|
+| `(unwind-protect (outline-mode) (setq major-mode 'org-mode) FORMS_1..55 (run-mode-hooks 'org-mode-hook))` | inside `with-temp-buffer` | **killed at 20s, 5.32 GiB RSS, still climbing** |
+| identical form | **top-level** (no `with-temp-buffer`) | **5.18s, 744 MB — completes cleanly** |
+
+This is the first form in the session that both (a) reproduces the
+blowup and (b) is asymmetric between top-level and `with-temp-buffer`
+exactly like the real bug. Two further controls ruled out "N forms in a
+cleanup arm" as a generic volume/depth effect (i.e. re-falsified the
+per-call-volume hypothesis a second, more targeted way): 55 synthetic
+no-op forms (`(+ 1 1)` × 55) and 55 synthetic `(setq-local vN N)` forms,
+run in the identical `unwind-protect`-cleanup-arm-inside-`with-temp-
+buffer` shape, both completed in the flat 0.92s baseline. **The cleanup-
+arm placement is a necessary structural precondition, but by itself it is
+inert — it needs one specific real call inside it.**
+
+### Bisection round 2 (correctly-shaped: prefixes inside the cleanup arm) — pins form #24
+
+Re-ran the same binary search over `org-mode`'s 55 real body forms, this
+time correctly wrapped in the cleanup arm (`(with-temp-buffer (unwind-
+protect (outline-mode) (setq major-mode 'org-mode) FORMS_1..N (run-mode-
+hooks 'org-mode-hook)) 'ok)`):
+
+| N | result |
+|---|---|
+| 14 | 5.18s, 744 MB |
+| 21 | 5.18s, 745 MB |
+| 22 | 5.18s, 744 MB |
+| 23 | 5.18s, 744 MB |
+| **24** | **killed at 15s, 3.86 GiB RSS, still climbing** |
+| 28 | killed at 15s, 3.85 GiB RSS |
+| full 55 | killed at 20s, 5.32 GiB RSS |
+
+Form #24 (`org.el:4994`, `(org-macro-initialize-templates)`) is the exact
+addition that flips N=23 (fine) to N=24 (blows up). Control: substituting
+a cheap synthetic form (`(+ 1 1)`) at position 24, keeping forms 1-23
+unmodified, stayed at 5.18s/745 MB — confirming this is specific to
+`org-macro-initialize-templates`, not "reaching depth 24 inside a cleanup
+arm" in general.
+
+### Narrowing inside `org-macro-initialize-templates` to the minimal repro
+
+Testing constituents of `org-macro-initialize-templates`
+(`nelisp-emacs-lib/vendor/emacs-lisp/org/org-macro.el:157-169`)
+individually, alone, in the same `(with-temp-buffer (unwind-protect
+(outline-mode) FORM) 'ok)` shape:
+
+| form under test | source | result |
+|---|---|---|
+| `(require 'org-element)` | org-macro.el:168 | fine, 0.92s |
+| `(org-macro--counter-initialize)` | org-macro.el:169, :417 | fine, 0.92s |
+| `(org-macro--collect-macros)` | org-macro.el:140-155 | **blows up**, killed 10s/3.56 GiB |
+| — within it: `(org-collect-keywords '("MACRO"))` | org.el:4478 | fine, 0.92s |
+| — within it: `(org-macro--find-keyword-value "AUTHOR" t)` | org-macro.el:352-369 | **blows up**, killed 10s/3.53 GiB |
+
+`org-macro--collect-macros`'s first three template entries
+(`"author"`/`"email"`/`"title"`) are each produced by a call to
+`org-macro--find-keyword-value` — this is the minimal culprit call.
+
+### Final minimal reproducing form
+
+```elisp
+(with-temp-buffer
+  (unwind-protect
+      (outline-mode)
+    (org-macro--find-keyword-value "AUTHOR" t)))
+```
+
+- Inside `with-temp-buffer`: **killed at 25.77s, 8.06 GiB RSS, still
+  climbing** (hit the 8 GiB guard essentially at the same moment as the
+  timeout).
+- Identical form at **top level** (no `with-temp-buffer`): **0.92s**,
+  returns `nil` (the correct answer — an empty buffer has no `#+AUTHOR:`
+  keyword).
+- Control, same shape, `org-collect-keywords` in place of
+  `org-macro--find-keyword-value`: 0.92s, fine.
+
+`org-macro--find-keyword-value`'s only buffer-touching logic on an empty
+buffer is `(org-with-point-at 1 (let (...) (catch :exit (while (re-
+search-forward regexp nil t) ...BODY-NEVER-RUNS...) (and result ...))))`
+(org-macro.el:358-369) — since the regexp cannot match an empty buffer,
+the `while` body (which contains a second, nested `org-with-point-at`
+call) never executes, so the pathology is not in that inner body. Further
+isolation:
+
+| sub-form tested (same cleanup-arm/`with-temp-buffer` shape) | result |
+|---|---|
+| `(org-with-point-at 1 1)` | fine |
+| `(org-with-wide-buffer 1)` | fine |
+| `(org-with-point-at 1 (re-search-forward "xyz" nil t))` | fine |
+| `(org-with-wide-buffer (re-search-forward "xyz" nil t))` | fine |
+| `(save-excursion (re-search-forward "xyz" nil t))` (no org macro at all) | fine |
+| `(org-with-point-at 1 (let ((case-fold-search t)) (re-search-forward "xyz" nil t)))` | fine |
+| `(org-with-point-at 1 (catch :exit (while (re-search-forward "xyz" nil t) (throw :exit t)) nil))` | fine |
+| **`(org-macro--find-keyword-value "AUTHOR" t)` itself (the real, named function call)** | **blows up** |
+
+None of the hand-assembled sub-pieces (individually matching every
+syntactic ingredient of the real function's body: `org-with-point-at`,
+`org-with-wide-buffer`, a `let`-bound `case-fold-search`, a `catch`/
+`while`/`re-search-forward` combination) reproduce it when spliced inline
+at the call site. Only invoking the real, named function
+`org-macro--find-keyword-value` does. This points at the interpreter's
+own named-function-call/closure-application dispatch (not at anything
+syntactically special in `org-with-point-at`'s macro-expansion) as the
+layer where the cost actually lives, when that call happens from inside
+the `unwind-protect` cleanup arm described above.
+
+### gdb evidence (single snapshot — see "what this session did not have time for")
+
+Backgrounded the minimal repro, attached with `gdb -p PID -batch -ex 'bt
+40'` once RSS had reached ~4 GiB. From the leaf upward: `nl_sexp_clone_into`
+← `nl_sf_dolist` ← `nl_apply_special` ← the generic eval-dispatch
+trampoline (`nl_eval_inner_cons`/`nl_ei_cons_tail`/`nl_ei_cons_dispatch`/
+`nl_eval_inner`/`nelisp_eval_call`) ← `nl_sf_let_body*`/`nl_sf_let` ← eval
+dispatch again ← `nl_ali_body*`/`nl_ali_push_frame`/`nl_ali_after_cap`
+(closure-application-with-capture frames) ← `nl_apply_lambda_inner` ←
+`nl_apply_closure_or_lambda` ← `nl_apply_function` ←
+`nl_apply_do_funcall` ← `nl_apply_builtin` ← `nl_apply_function` ← eval
+dispatch ← `nl_sf_while_body*` (top of the 40-frame window, chain still
+ascending, true depth not reached at this sample size). This is a
+`dolist`-driven s-expression clone running inside a `let`, inside an
+*applied* lambda/closure, inside a `while` loop — the same repeating
+"`dolist`/`while` + lambda-application" shape the 2026-07-05 "post-
+corruption-fix" session in this file characterized for a *different* call
+site (font-lock/closure-capture via `nl_capture_descend_native`), now
+observed at a **third, distinct call site** reached only through
+`org-macro--find-keyword-value`'s real function-call boundary combined
+with the cleanup-arm nesting above.
+
+### What this session did NOT have time to do
+
+- **Did not get a second timed gdb sample or a `break`/`continue N` hit-
+  count table** for the minimal repro (the rate/scaling table this file's
+  other entries produced for their respective culprits). The backgrounded
+  process was reclaimed by its own `timeout` wrapper between tool-call
+  round-trips before a second attach could be made; only one qualitative
+  backtrace snapshot was captured. **This is the single most valuable
+  next probe**: `gdb -p PID -batch -ex 'break nl_sf_dolist' -ex 'continue
+  N'` (and the same for `nl_apply_closure_or_lambda` /
+  `nl_sexp_clone_into`) on a fresh run of the minimal repro above, batched
+  the way the 2026-07-05 "post-corruption-fix" session did for
+  `nl_capture_descend_native`, would both confirm which of these three
+  frames is the actual hot loop and produce the hits/sec + RSS-growth-
+  rate table needed to fully close this out.
+- Did not trace *why* `org-macro--find-keyword-value` specifically (vs.
+  `org-collect-keywords`, which shares the same buffer/regex-scanning
+  shape and stays fast) triggers the interpreter-level pathology — i.e.
+  did not get from "this one real function call is the minimal repro" to
+  "this is the exact interpreter source line that mishandles it." The
+  three-call-site recurrence (font-lock keyword compilation → previous
+  session; `org-macro--find-keyword-value`'s named-call boundary → this
+  session; the still-open third site implied by the earlier "twice in one
+  200-frame stack" observation) suggests a shared root cause in closure/
+  lambda application cost scaling with something ambient (nesting depth,
+  accumulated frame count, or similar) rather than three independent
+  bugs, but this is not yet proven.
+
+### Owner classification
+
+1. **Structural precondition (confirmed root cause of the top-level vs.
+   `with-temp-buffer` asymmetry itself)** — `nelisp-emacs-lib` (read-only
+   sibling repo): `emacs-mode-define-derived-mode`'s unwind-protect-
+   cleanup-arm body placement
+   (`packages/nelisp-emacs-core/lisp/emacs-mode.el:201-214`, itself a
+   documented workaround for a separate, earlier defect), combined with
+   `with-temp-buffer`'s own nested `unwind-protect` +
+   `nelisp-ec-with-current-buffer` current-buffer dispatch (established
+   by the previous session:
+   `packages/nelisp-emacs-buffer-core/lisp/emacs-buffer-builtins.el:686-696`,
+   `packages/nelisp-emacs-buffer-core/lisp/nelisp-emacs-compat.el:484-498`).
+   Both are read-only from this repo; flag upstream.
+2. **Triggering mechanism (why this one call blows up while dozens of
+   others in the same cleanup arm do not)** — most likely this repo's
+   own (`nelisp.clone-capture`) AOT-compiled core evaluator: the
+   `nl_sf_dolist` / `nl_apply_closure_or_lambda` / `nl_sexp_clone_into`
+   family visible in the gdb sample. The earlier "post-corruption-fix"
+   session in this file pinned the *analogous* pattern (there,
+   `nl_capture_descend_native`) to `lisp/nelisp-cc-frame-stack-find.el`
+   and `lisp/nelisp-cc-sf-lambda.el` in *this* repo (not
+   `nelisp-emacs-lib`) — this session's evidence is consistent with the
+   same ownership but was not re-confirmed to file:line for this call
+   site in the time available (see "what this session did not have time
+   to do", item 1).
+
+### Recommended fix, ranked (scoped for codex)
+
+1. **Primary — get the hit-count/scaling table.** Run the "what this
+   session did not have time to do" item 1 probe above on a fresh cold
+   image + fresh minimal-repro process: `break nl_sf_dolist` /
+   `nl_apply_closure_or_lambda` / `nl_sexp_clone_into`, `continue N`
+   batches, compare against the `org-collect-keywords` control (which
+   should show a flat, small hit count and complete in under a second).
+   This pins the exact recursive call by file:line and gives the
+   rate/scaling evidence needed to write a real fix.
+2. **Secondary — check whether the "Cache closure free-variable filters"
+   fix (`af6e9ff6`) already addresses this call site.** That commit
+   targeted `nl_capture_descend_native`'s over-approximate filter cost;
+   if the actual hot function here turns out to be the *same* underlying
+   routine reached through a different caller, the fix may already be
+   partially in place and only need its cache/dedup logic extended to
+   cover whatever code path `org-with-point-at`/`org-with-gensyms`'s
+   macro-expansion-time `let` + closure application takes that
+   `org-collect-keywords` does not.
+3. **Tertiary, independent of the interpreter bug** —
+   `emacs-mode-define-derived-mode`'s cleanup-arm body placement
+   (nelisp-emacs-lib, emacs-mode.el:201-214) is itself flagged as a
+   workaround for a *different*, undocumented-here defect ("loses forms
+   that follow some macro-generated parent major-mode calls"). Once the
+   interpreter-level bug above is fixed, it is worth re-testing whether
+   that workaround is still needed at all, since running an entire
+   derived-mode body inside an `unwind-protect` cleanup arm is unusual
+   and may itself be a latent source of other, not-yet-observed
+   interpreter edge cases.
+4. **Quaternary — harness note.** Any future probe file fed to
+   `--cold-load-from`/`--repl` must be a single physical line per
+   top-level form (see the methodological note above); multi-line input,
+   even when correctly paren-balanced, causes spurious per-sub-form
+   value echoes that make output hard to interpret (though it does not
+   affect wall-clock/RSS measurements, which is why the timing numbers in
+   this and the previous two sessions remain reliable).
+
+### Artifacts (not committed, scratch only)
+
+`forms.py` (the 55-form transcription of `org-mode`'s body plus prefix/
+cleanup-arm-shape generators), `run_probe.sh` (the RSS-guarded runner),
+and all `f_*.el` probe files under this session's scratchpad directory
+(outside the repo, not committed). Cold image workdir
+`/tmp/cold-image-org-e2e.ExPh8l/` was built with `NELISP_E2E_KEEP=1`,
+used for every probe in this session, and deleted at session end (`rm
+-rf`, after confirming via `pkill -9 -f` + `ps aux` that no `nelisp`
+process was left running). No repo source files were modified this
+session; only this `FINDINGS.md` entry (branch `profwork`).
