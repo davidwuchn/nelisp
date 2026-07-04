@@ -3898,17 +3898,18 @@ Doc 156: was `(apply #\\='vector ...)', but the reader now exposes a native
 (unless (fboundp 'recordp) (defun recordp (x) (vectorp x)))
 
 ;; Hash-table predicate + iteration for the reader's builtin hash table.
-;; The builtin `make-hash-table' returns the cons pair (MARKER . ALIST) where
-;; MARKER is the integer 0 and ALIST is ((KEY . VALUE) ...).  `make-hash-table'
+;; The builtin `make-hash-table' returns the cons pair (MARKER . DATA) where
+;; MARKER is an integer metadata slot and DATA is a bucket vector.
+;; `make-hash-table'
 ;; / `gethash' / `puthash' / `hash-table-count' ship as native builtins, but
 ;; `maphash' ships only as a no-op stub and `hash-table-p' is absent -- an
 ;; incomplete substrate, not a minimal one.  Complete it here in the core
 ;; stdlib (these are the ops over the core-owned representation): the elisp
-;; `maphash' overrides the stub, and `hash-table-p' keys off the integer-0 car
+;; `maphash' overrides the stub, and `hash-table-p' keys off the integer car
 ;; (an alist has a cons car, a plist a keyword car, so the discrimination is
 ;; clean for the shapes Elisp passes to `hash-table-p').
 (defun hash-table-p (x)
-  (and (consp x) (integerp (car x)) (eq (car x) 0)
+  (and (consp x) (integerp (car x))
        (let ((c (cdr x)))
          ;; Current core repr: cdr is the bucket VECTOR.  Tolerate the legacy
          ;; flat-alist shape (cdr a cons / nil) too.
