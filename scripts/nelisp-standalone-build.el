@@ -12803,7 +12803,6 @@ correctly."
            (nelisp_cons_construct str rest out)))))
     (defun driver (sp)
      (let* ((arena (nl_arena_init))
-            (_sptop (ptr-write-u64 268436456 0 (aot-current-sp))) ; Doc 152 §11.21: capture mmap stack-top (driver-entry rsp, AFTER arena mmap) for the conservative GC stack scan
             ;; Increment 2 (`--cold-load-from PATH'): argv parsing moved UP,
             ;; ahead of the cold-load gate below, so the gate can recognize an
             ;; explicit override path (previously this block ran AFTER the
@@ -12834,6 +12833,38 @@ correctly."
             ;; lands after the image (no clobber).  -1 = no marker / no flag.
             (cold_override (if (= (nl_cstr_eq_cold_load_from path) 1) arg2 0))
             (_cl (nl_cold_load_arena cold_override))
+            ;; Doc 152 §11.21 root-coverage fix (2026-07-04): capture
+            ;; STACK_TOP here, AFTER `nl_cold_load_arena' has run, instead of
+            ;; right after `nl_arena_init' (the original position).  When a
+            ;; cold-loaded image does not fit the initial chunk-0
+            ;; reservation, `nl_cold_load_arena' calls `nl_cold_grow_chunk0',
+            ;; which mmaps a brand-new (larger) chunk and REPOINTS
+            ;; `nl_arena_base' at it (`nl_cold_grow_chunk0' writes `newbase'
+            ;; to `(data-addr nl_arena_base)').  Every fixed control-global
+            ;; access (including 268436456 = STACK_TOP) is rebased through
+            ;; the CURRENT value of `nl_arena_base', so capturing STACK_TOP
+            ;; BEFORE this relocation writes into the OLD (now-abandoned)
+            ;; chunk-0 mapping; every later read (`nl_gc_conserv_maybe')
+            ;; instead sees byte-zero from the fresh, never-written mmap at
+            ;; the NEW base.  `nl_gc_conserv_maybe' treats STACK_TOP==0 as
+            ;; "uninitialised" and silently skips the conservative
+            ;; native-stack scan for the rest of the process, even though the
+            ;; scan-enable flag (268436464) is correctly on.  That reopens the
+            ;; eval root-coverage gap (Doc 146 §2) the scan exists to close: a
+            ;; form-boundary GC that fires from a nested runtime `(load
+            ;; ...)'/`(require ...)' call deep inside a large interpreted body
+            ;; (e.g. org-mode's `define-derived-mode' expansion) can then free
+            ;; a cons cell that is reachable only via an ancestor
+            ;; `progn'/`let' continuation sitting in native call-stack frames
+            ;; -- observed as a deterministic SIGSEGV in `nl_kw_is_keyword'
+            ;; (NULL `str-byte-at'/`sexp-tag' deref) on `--cold-load-from'
+            ;; images whose payload forced chunk-0 growth.  Capturing
+            ;; STACK_TOP here instead (after `nl_arena_base' has settled to
+            ;; its final value for this process, cold-loaded or not) makes
+            ;; the scan sound again; functionally a no-op relocation of the
+            ;; same capture for normal (non-cold, non-growing) boot, where
+            ;; `nl_arena_base' never changes after `nl_arena_init'.
+            (_sptop (ptr-write-u64 268436456 0 (aot-current-sp)))
             (globals (alloc-bytes 32 8)) (frames (alloc-bytes 32 8)) (unbound (alloc-bytes 32 8))
             (ctx (alloc-bytes 120 8))
             (builtin_buf (alloc-bytes 8 1)) (builtin_sym (alloc-bytes 32 8))
