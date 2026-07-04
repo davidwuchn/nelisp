@@ -1101,7 +1101,45 @@ clobber."
                (assign (nelisp-cc--alloc-register-of alloc vid)))
           (should (eq assign :spill)))))))
 
-;;; (42) call-crossing → spill slot allocated -----------------------
+;;; (42) primitive-call crossings always spill ----------------------
+
+(ert-deftest nelisp-cc-linear-scan-primitive-call-crossing-spills ()
+  "A value live across `ssa-call-primitive' must not stay in a register.
+
+Minimal repro for the standalone reader spill-contract bug:
+
+  param keep
+  ssa-call-primitive nl_probe()
+  extern-call-arg keep
+
+`ssa-call-primitive' lowers to a native trampoline call.  Before the
+fix, `nelisp-cc--compute-intervals' only recorded `call' and
+`call-indirect' positions, so KEEP's interval [0,2] was not marked
+call-crossing and `nelisp-cc--linear-scan' returned a caller-saved
+register.  A later extern-call argument then read a clobbered local."
+  (let* ((fn (nelisp-cc--ssa-make-function 'primitive-cross '(int)))
+         (entry (nelisp-cc--ssa-function-entry fn))
+         (keep (car (nelisp-cc--ssa-function-params fn)))
+         (status (nelisp-cc--ssa-make-value fn 'u64))
+         (intervals nil)
+         (alloc nil)
+         (keep-iv nil)
+         (keep-reg nil))
+    (nelisp-cc--ssa-add-instr fn entry 'ssa-call-primitive nil status)
+    (nelisp-cc--ssa-add-instr fn entry 'extern-call-arg (list keep) nil)
+    (setq intervals (nelisp-cc--compute-intervals fn)
+          alloc (nelisp-cc--linear-scan fn)
+          keep-iv (cl-find (nelisp-cc--ssa-value-id keep) intervals
+                           :key (lambda (iv)
+                                  (nelisp-cc--ssa-value-id
+                                   (nelisp-cc--ssa-interval-value iv))))
+          keep-reg (nelisp-cc--alloc-register-of
+                    alloc (nelisp-cc--ssa-value-id keep)))
+    (should keep-iv)
+    (should (nelisp-cc--ssa-interval-crosses-call keep-iv))
+    (should (eq keep-reg :spill))))
+
+;;; (43) call-crossing → spill slot allocated -----------------------
 
 (ert-deftest nelisp-cc-allocate-stack-slots-covers-call-crossing ()
   "T63 #3 — every `:spill' produced by call-aware allocation gets a
