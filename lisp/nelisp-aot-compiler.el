@@ -11984,6 +11984,44 @@ count."
 	    (when needs-align
 	      (nelisp-asm-x86_64-add-imm32 buf 'rsp 8))))))
 
+(defconst nelisp-aot-compiler--win64-rsp-save-symbol "nl_dynalign_rsp_save"
+  "Name of the driver-owned bss slot used by the `win64-dynamic-align-p'
+extern-call arm to spill the pre-align rsp (fix/dynalign-memory-slot).
+
+That arm aligns rsp to 16 bytes before Win64 API calls (CreateFileW,
+CreateProcessW, etc.) and must restore the exact pre-align rsp
+afterwards.  Earlier attempts stashed the pre-align rsp in a
+callee-saved GPR (RBX, then R12), but the AOT-generated
+`nl_eval_inner' interpreter loop is itself compiled code whose register
+allocator can hold LIVE interpreter state (e.g. let-frame cursors) in
+that very register across the builtin dispatch into this extern call —
+clobbering it corrupted interpreter state rather than the call itself
+(surfaced as let-bound values silently reverting to a stale copy).
+Any general-purpose register is unsafe for the same reason, so the
+pre-align rsp is spilled to MEMORY instead.
+
+The slot is an 8-byte global in the SAME driver-owned bss unit that
+already exports `nl_arena_base' (see
+`nelisp-standalone--arena-base-slot-unit' in
+scripts/nelisp-standalone-build.el, which documents the unit's full
+layout).  bss is the only correct home for it: since Doc 140 Stage 8
+the arena chunk 0 is reserved at a RUNTIME base (VirtualAlloc/mmap
+NULL), so no fixed absolute arena address is guaranteed mapped, and
+the historical low-arena \"free gap\" is not writable either (see the
+rootstack notes in that unit).  Access is RIP-relative
+\(`mov [rip+disp32], rsp' / `mov rsp, [rip+disp32]' with a pc32 reloc
+against this symbol), exactly like the `data-addr' mechanism — the
+static linker patches the displacement, so no scratch register and no
+rsp-affecting instruction is needed.
+
+One fixed slot (not a stack of them) is sound because the runtime is
+single-threaded and no NeLisp evaluation happens between the save and
+the restore — everything in between is the extern call itself (an
+external OS API) plus straight-line stack-marshaling code emitted by
+this file, never a re-entrant dispatch back into `nl_eval_inner'.
+Consecutive extern calls each do their own save immediately before
+their own restore, so the slot is never live across another save.")
+
 (defun nelisp-aot-compiler--emit-extern-call (node buf)
   "Emit a SysV AMD64 call to an extern symbol NODE.
 Doc 100 §100.A introduced the all-i64 form; Doc 122 §122.C extends
@@ -12297,21 +12335,44 @@ same branch and emit the same byte count."
       ;; File I/O WinAPI calls can be reached from expression contexts whose
       ;; transient stack depth is not statically visible here.  Align the
       ;; outgoing area from the runtime rsp, then restore the exact pre-call rsp.
-      ;; RBX is preserved by generated Win64 defun prologues and by WinAPI.
       ;;
-      ;; NOTE: a save/restore-CALLER's-RBX-via-push/pop variant was tried here
-      ;; (wrapping this scratch use in `push rbx' / `pop rbx' instead of a bare
-      ;; clobber) to protect any live-in-RBX value the enclosing defun's
-      ;; register allocator might have across this call site.  It regressed
-      ;; the basic (non-nested) call-process smoke tests -- the extra 8-byte
-      ;; push shifts `rsp' by the time the win64 stack-arg copy loop below
-      ;; computes its `source-disp'/`dest-disp' offsets, corrupting stack-arg
-      ;; marshaling for calls with `stack-args' (which CreateProcessW always
-      ;; has).  Reverted; left as a known-bad direction for whoever revisits
-      ;; the still-open "call-process inside a live `let'/`let*' frame"
-      ;; corruption (a DIFFERENT bug from the repeat-call SIGSEGV this
-      ;; allowlist entry fixes -- see the windows-spawn regression report).
-      (nelisp-asm-x86_64-emit-bytes buf (unibyte-string #x48 #x89 #xE3))
+      ;; fix/dynalign-memory-slot: the pre-align rsp is spilled to the FIXED
+      ;; MEMORY slot named by `nelisp-aot-compiler--win64-rsp-save-symbol'
+      ;; (an 8-byte bss global) instead of a register (previously RBX, then
+      ;; R12).  Both prior attempts clobbered live interpreter state:
+      ;; `nl_eval_inner' is itself AOT-compiled code whose register
+      ;; allocator can hold a let-frame cursor or similar in that same
+      ;; callee-saved GPR across the builtin dispatch into this extern
+      ;; call, so "preserved by the Win64 prologue/WinAPI" did not actually
+      ;; mean "dead here" -- see the truth table in the
+      ;; fix/dynalign-memory-slot commit message.  A memory slot has no
+      ;; such interpreter-visible identity, so it cannot alias any live
+      ;; register.  A bss slot (not a fixed absolute arena address) because
+      ;; post-Doc-140 the arena base is chosen at RUNTIME -- no fixed
+      ;; absolute address is guaranteed mapped (a first attempt at arena
+      ;; base + 848 segfaulted immediately for exactly that reason).
+      ;;
+      ;; Encoding: `mov [rip+disp32], rsp' = 48 89 25 <disp32> with a pc32
+      ;; reloc the static linker resolves against the bss symbol (same
+      ;; mechanism as `data-addr' / `--emit-data-addr').  ModRM 0x25 =
+      ;; mod 00, reg rsp(100), rm 101 (RIP-relative).
+      ;;
+      ;; NOTE: a save/restore-CALLER's-RBX-via-push/pop variant was also
+      ;; tried in an earlier session (wrapping this scratch use in `push rbx'
+      ;; / `pop rbx' instead of a bare clobber) to protect any live-in-RBX
+      ;; value. It regressed the basic (non-nested) call-process smoke tests
+      ;; -- the extra 8-byte push shifts `rsp' by the time the win64
+      ;; stack-arg copy loop below computes its `source-disp'/`dest-disp'
+      ;; offsets, corrupting stack-arg marshaling for calls with
+      ;; `stack-args' (which CreateProcessW always has).  The memory-slot
+      ;; fix here does NOT have this problem: a register-to-memory store
+      ;; never changes rsp, so the stack-arg copy loop's rsp-relative math
+      ;; below is completely unaffected -- this MUST stay true of any future
+      ;; change here (do not reintroduce a push/pop or any other rsp-moving
+      ;; instruction between this save and that copy loop).
+      (nelisp-asm-x86_64-emit-bytes buf (unibyte-string #x48 #x89 #x25))
+      (nelisp-asm-x86_64-reloc-pc32-here
+       buf nelisp-aot-compiler--win64-rsp-save-symbol -4)
       (nelisp-asm-x86_64-emit-bytes buf (unibyte-string #x48 #x83 #xE4 #xF0)))
     (let* ((shadow (if win64-p 32 0))
            (win64-stack-bytes (if win64-p (* 8 (length stack-args)) 0))
@@ -12321,17 +12382,45 @@ same branch and emit the same byte count."
         (nelisp-asm-x86_64-sub-imm32 buf 'rsp win64-outgoing))
       (when (and win64-p stack-args)
         (if general-stack-spill-p
-            (dolist (entry stack-indexed)
-              (let* ((idx (nth 0 entry))
-                     (target (nth 2 entry))
-                     (stack-slot (cadr target))
-                     (source-disp (+ win64-outgoing
-                                     (* 8 (- (1- arg-count) idx))))
-                     (dest-disp (+ shadow (* 8 stack-slot))))
-                (nelisp-asm-x86_64-mov-reg-mem-rsp-disp
-                 buf 'r10 source-disp)
-                (nelisp-asm-x86_64-mov-mem-rsp-disp-reg
-                 buf dest-disp 'r10)))
+            (progn
+              ;; fix/dynalign-memory-slot: under `win64-dynamic-align-p' the
+              ;; `and rsp,-16' above moved rsp DOWN by a runtime-variable
+              ;; 0..15 bytes between the temp-save pushes and this copy
+              ;; loop, so an rsp-relative `source-disp' no longer reaches
+              ;; the temp saves whenever the incoming rsp was not already
+              ;; 16-aligned (exactly the "expression context with dynamic
+              ;; transient stack depth" case this arm exists for; a bare
+              ;; top-level call happened to be aligned, which is why the
+              ;; bug only fired inside `let'/nested forms -- CreateProcessW
+              ;; then read shifted stack args and failed, rc=1).  Read the
+              ;; temp saves via the PRE-ALIGN rsp instead: reload it from
+              ;; the rsp-save bss slot into r11 (`mov r11, [rip+disp32]' =
+              ;; 4C 8B 1D <disp32> + pc32 reloc; r11 is volatile scratch,
+              ;; and never holds the fn-ptr here -- `extern-call-ptr' calls
+              ;; have no NAME so they are never in the dynamic-align
+              ;; allowlist).  temp[idx] lives at exactly
+              ;; pre-align-rsp + 8*(argc-1-idx) (TOS = last push), so the
+              ;; addressing is rsp-independent; the dest writes still go
+              ;; through the CURRENT rsp, which is correct (they populate
+              ;; the outgoing area just reserved below the aligned rsp).
+              (when win64-dynamic-align-p
+                (nelisp-asm-x86_64-emit-bytes buf (unibyte-string #x4C #x8B #x1D))
+                (nelisp-asm-x86_64-reloc-pc32-here
+                 buf nelisp-aot-compiler--win64-rsp-save-symbol -4))
+              (dolist (entry stack-indexed)
+                (let* ((idx (nth 0 entry))
+                       (target (nth 2 entry))
+                       (stack-slot (cadr target))
+                       (source-disp (+ (if win64-dynamic-align-p 0 win64-outgoing)
+                                       (* 8 (- (1- arg-count) idx))))
+                       (dest-disp (+ shadow (* 8 stack-slot))))
+                  (if win64-dynamic-align-p
+                      (nelisp-asm-x86_64-mov-reg-mem-disp8
+                       buf 'r10 'r11 source-disp)
+                    (nelisp-asm-x86_64-mov-reg-mem-rsp-disp
+                     buf 'r10 source-disp))
+                  (nelisp-asm-x86_64-mov-mem-rsp-disp-reg
+                   buf dest-disp 'r10))))
           (dolist (entry stack-indexed)
             (let* ((a (nth 1 entry))
                    (target (nth 2 entry))
@@ -12360,7 +12449,13 @@ same branch and emit the same byte count."
       (when (and (> win64-outgoing 0) (not win64-dynamic-align-p))
         (nelisp-asm-x86_64-add-imm32 buf 'rsp win64-outgoing)))
     (when win64-dynamic-align-p
-      (nelisp-asm-x86_64-emit-bytes buf (unibyte-string #x48 #x89 #xDC)))
+      ;; fix/dynalign-memory-slot: restore rsp from the same fixed bss slot
+      ;; saved above (see the comment there).  `mov rsp, [rip+disp32]' =
+      ;; 48 8B 25 <disp32> + pc32 reloc.  Touches neither rax nor xmm0, so
+      ;; the call's return value survives untouched.
+      (nelisp-asm-x86_64-emit-bytes buf (unibyte-string #x48 #x8B #x25))
+      (nelisp-asm-x86_64-reloc-pc32-here
+       buf nelisp-aot-compiler--win64-rsp-save-symbol -4))
     ;; Reclaim outgoing SysV stack arguments, preserving rax/xmm0.
     (when (and sysv-p stack-args)
       (nelisp-asm-x86_64-add-imm32 buf 'rsp (* 8 (length stack-args))))
