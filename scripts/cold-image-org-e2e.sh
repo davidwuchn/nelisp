@@ -28,6 +28,25 @@
 #                     development, see below)
 #   NELISP_E2E_KEEP   when "1", keep $WORKDIR (images, .repl, logs) instead
 #                     of deleting it on exit -- useful for post-mortem.
+#   E2E_BOOTSTRAP_REPL  override the bootstrap-repl input fed to host-side
+#                     .repl generation (default: this worktree's own
+#                     $NELISP_LIB_ROOT/build/nemacs-bootstrap.repl, which
+#                     already matches nelisp-emacs-lib's gate default).
+#   E2E_PRELUDE       override the stdlib prelude fed to host-side .repl
+#                     generation (default: this worktree's own
+#                     scripts/nelisp-stdlib-prelude.el).  Set to
+#                     $NELISP_LIB_ROOT/vendor/nelisp/scripts/nelisp-stdlib-prelude.el
+#                     to reproduce nelisp-emacs-lib's
+#                     `make diagnose-vendor-repl-replay' gate prelude
+#                     instead -- read-only from that checkout, never
+#                     written to.  This is the prelude under which org.el's
+#                     `define-derived-mode org-mode' has been observed to
+#                     actually install org-mode (Doc 156 §7), at the cost
+#                     of a much slower replay-load phase; see
+#                     E2E_LOAD_TIMEOUT.
+#   E2E_LOAD_TIMEOUT  seconds allotted to the replay-load phase's `timeout'
+#                     wrapper (default 180).  Raise this when using a
+#                     slower prelude/bootstrap-repl input (E2E_PRELUDE).
 #
 # Requires a host `emacs` (batch mode, GNU Emacs) able to load
 # nelisp-emacs-lib/scripts/*.el, and this worktree's ./target/nelisp already
@@ -59,9 +78,22 @@ cd "$REPO_ROOT"
 RUNS="${1:-3}"
 NELISP_LIB_ROOT="${NELISP_LIB_ROOT:-/home/madblack-21/Cowork/Notes/dev/nelisp-emacs-lib}"
 NELISP_BIN="$REPO_ROOT/target/nelisp"
-BOOTSTRAP_REPL="$NELISP_LIB_ROOT/build/nemacs-bootstrap.repl"
-PRELUDE="$REPO_ROOT/scripts/nelisp-stdlib-prelude.el"
+# Default bootstrap-repl/prelude reproduce this worktree's own environment
+# (fast replay, org-mode not installed -- see Doc 156 §7).  E2E_BOOTSTRAP_REPL
+# / E2E_PRELUDE opt in to substituting the *gate's* inputs instead (read-only
+# from the nelisp-emacs-lib checkout -- e.g.
+# "$NELISP_LIB_ROOT/vendor/nelisp/scripts/nelisp-stdlib-prelude.el", the
+# vendored prelude copy `make diagnose-vendor-repl-replay' uses by default via
+# VENDOR_REPL_PRELUDE/VENDOR_LOAD_PRELUDE), to reproduce the gate's slower but
+# org-mode-installing load.  Unset (default): behavior is unchanged.
+BOOTSTRAP_REPL="${E2E_BOOTSTRAP_REPL:-$NELISP_LIB_ROOT/build/nemacs-bootstrap.repl}"
+PRELUDE="${E2E_PRELUDE:-$REPO_ROOT/scripts/nelisp-stdlib-prelude.el}"
 FILE_LIST_REL="$REPO_ROOT/scripts/cold-image-org-e2e-files.txt"
+# Replay-load phase timeout: the default (this worktree's own prelude) loads
+# the 60-file chain in ~10s; E2E_PRELUDE=<gate prelude> above is known to take
+# ~170-250s longer (org.el's `define-derived-mode org-mode' form alone).
+# Override via E2E_LOAD_TIMEOUT when using a slower prelude/bootstrap input.
+LOAD_TIMEOUT="${E2E_LOAD_TIMEOUT:-180}"
 
 for f in "$NELISP_BIN" "$BOOTSTRAP_REPL" "$PRELUDE" "$FILE_LIST_REL"; do
   if [ ! -r "$f" ]; then
@@ -93,7 +125,9 @@ trap cleanup EXIT
 
 echo "[cold-image-org-e2e] NELISP_BIN=$NELISP_BIN"
 echo "[cold-image-org-e2e] NELISP_LIB_ROOT=$NELISP_LIB_ROOT"
-echo "[cold-image-org-e2e] file count=$(wc -l < "$FILE_LIST_REL") RUNS=$RUNS WORKDIR=$WORKDIR"
+echo "[cold-image-org-e2e] BOOTSTRAP_REPL=$BOOTSTRAP_REPL"
+echo "[cold-image-org-e2e] PRELUDE=$PRELUDE"
+echo "[cold-image-org-e2e] file count=$(wc -l < "$FILE_LIST_REL") RUNS=$RUNS WORKDIR=$WORKDIR LOAD_TIMEOUT=${LOAD_TIMEOUT}s"
 
 # --- (a) host-side .repl generation (read-only use of nelisp-emacs-lib) ---
 cat > "$WORKDIR/genrepl.el" <<EOF
@@ -167,7 +201,7 @@ for i in $(seq 1 "$RUNS"); do
 
   pkill -9 -f "$NELISP_BIN_PAT --repl" 2>/dev/null
   T_START_US=$(date +%s%6N)
-  timeout 180 "$NELISP_BIN" --repl --no-prompt --no-print \
+  timeout "$LOAD_TIMEOUT" "$NELISP_BIN" --repl --no-prompt --no-print \
     < "$WORKDIR/phase-run$i.repl" > "$WORKDIR/run$i.out" 2> "$WORKDIR/run$i.err"
   RC=$?
   T_END_US=$(date +%s%6N)
