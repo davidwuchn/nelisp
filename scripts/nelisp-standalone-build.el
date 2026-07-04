@@ -3816,59 +3816,74 @@ unresolved at link time."
                                         ; would desync hdr+8=total from the written size)
              (head (ptr-read-u64 268436160 0))
              (sstart (ptr-read-u64 (+ head 24) 0))   ; chunk-0 data-start (= ds for in-place)
-             (slen (bf_arena_chunk_used head))        ; chunk-0 used
              (abase (- sstart 1024))
              (ib (ptr-read-u64 (+ abase 832) 0))
              (ie (ptr-read-u64 (+ abase 840) 0))
              (isz (nl_align_up (if (< ie ib) 0 (- ie ib)) 8))
-             (total (nl_mc_total))                    ; coalesced size = sum of chunk used (= slen for 1 chunk)
-             (multi (if (= (ptr-read-u64 (+ head 48) 0) 0) 0 1))
+             (total (nl_mc_total))                    ; coalesced size = sum of ALL chunks' used bytes
+             ;; Reloc-table scratch -- Increment 1 fix (multi-chunk cold-load).
+             ;; The previous placement piggybacked on chunk-0's own leftover mmap
+             ;; tail (single-chunk) or the interned-region's leftover mmap tail
+             ;; (multi-chunk) -- both are bounded by whatever free space happened
+             ;; to be left over, NOT by the actual heap size, so a large heap (the
+             ;; ~602 MiB / 7-chunk org vendor-chain heap) overruns either area and
+             ;; SIGSEGVs writing table entries past the mapped region. Fix: a
+             ;; DEDICATED raw mmap via `nl_os_alloc_chunk' (the same
+             ;; platform-abstracted mmap `nl_chunk_alloc_new' uses for heap growth,
+             ;; but NOT linked into the chunk chain, so it is invisible to
+             ;; `nl_mc_write_chunks' / `nl_mc_total' and is never itself dumped as
+             ;; heap data). Sized from a mathematical upper bound: a relocation
+             ;; entry is recorded at most once per 8-byte word in the coalesced
+             ;; region (a table entry IS a distinct pointer-field word position),
+             ;; so `total' bytes of table storage always suffices; +1 MiB slack
+             ;; for the two counters. Anonymous mmap is demand-paged (see
+             ;; `nl_os_commit_range'), so over-provisioning this scratch region
+             ;; costs virtual address space only, not physical memory.
+             (tblcap (+ total 1048576))
+             (tblbase (nl_os_alloc_chunk tblcap))
+             (cin tblbase) (cout (+ tblbase 8)) (tbl (+ tblbase 16))
              (depth (ptr-read-u64 (data-addr nl_safepoint_ctx) 0))
              (env (if (= depth 0) 0
                     (ptr-read-u64 (+ (data-addr nl_safepoint_ctx) 64) 0)))
              (gbox (if (= env 0) 0 (ptr-read-u64 (+ env 8) 0)))
              (fbox (if (= env 0) 0 (ptr-read-u64 (+ env 40) 0)))
              (ubox (if (= env 0) 0 (ptr-read-u64 (+ env 72) 0)))
-             ;; scratch (counters + relocation table): single-chunk keeps the
-             ;; verified chunk-0 free-area layout (default nl_fa_emit tbl); multi-chunk
-             ;; puts it in the intern region free area (chunk-0 is full, and
-             ;; dest+total+isz would be past chunk-0's mmap) via the tbl override.
-             (cin (if (= multi 0) (+ sstart (+ slen isz)) (+ ib isz)))
-             (cout (+ cin 8))
-             (tbl (if (= multi 0) (+ sstart (+ slen (+ isz 256))) (+ ib (+ isz 256))))
              (goff (nl_mc_imgoff gbox total ib ie))
              (foff (nl_mc_imgoff fbox total ib ie))
              (uoff (nl_mc_imgoff ubox total ib ie))
              (tlen 0) (fd 0))
-        (seq
-         ;; header is fully built from pre-swizzle reads (slen=total, tlen patched after)
-         (ptr-write-u64 hdr 0 1179407692)
-         (ptr-write-u64 hdr 16 isz)
-         (ptr-write-u64 hdr 32 goff) (ptr-write-u64 hdr 40 foff) (ptr-write-u64 hdr 48 uoff)
-         (ptr-write-u64 hdr 56 ib)
-         (setq fd (nl_os_open_write_truncate cpath))
-         (if (< fd 0)
-             (wf_write_int out -1)
-           (seq
-            ;; multi-chunk: route nl_fa_emit's table to the intern free area
-            (if (= multi 0) 0 (ptr-write-u64 (data-addr nl_fa_tbl_base) 0 tbl))
-            ;; ---- from here to the restore: NO alloc / GC / eval (arena is swizzled) ----
-            (ptr-write-u64 cin 0 0) (ptr-write-u64 cout 0 0)
-            (ptr-write-u64 (data-addr nl_safepoint_ctx) 24 1)
-            ;; span=total: cross-chunk pointers swizzle to coalesced logical offsets;
-            ;; dest=ds=sstart: loc=dest+(waddr-ds)=waddr => in-place over ANY chunk.
-            (nl_fa_roots sstart total sstart cin cout 3)
-            (ptr-write-u64 (data-addr nl_safepoint_ctx) 24 0)
-            (ptr-write-u64 (data-addr nl_fa_tbl_base) 0 0)   ; reset override
-            (setq tlen (ptr-read-u64 cin 0))
-            (ptr-write-u64 hdr 8 total) (ptr-write-u64 hdr 24 tlen)
-            (nl_fa_write_all fd hdr 64 0)
-            (nl_fa_write_all fd tbl (* tlen 8) 0)
-            (nl_mc_write_chunks fd head)   ; coalesced chunk regions, logical order (single: chunk-0)
-            (nl_fa_write_all fd ib isz 0)   ; live intern (un-swizzled, fixed on load)
-            (nl_os_close_handle fd)
-            (bf_arena_inplace_restore_mc tbl tlen ib total)   ; restore the live arena
-            (wf_write_int out (+ 64 (+ (* tlen 8) (+ total isz)))))))))
+        (if (= tblbase 0)
+            (wf_write_int out -1)
+          (seq
+           ;; header is fully built from pre-swizzle reads (slen=total, tlen patched after)
+           (ptr-write-u64 hdr 0 1179407692)
+           (ptr-write-u64 hdr 16 isz)
+           (ptr-write-u64 hdr 32 goff) (ptr-write-u64 hdr 40 foff) (ptr-write-u64 hdr 48 uoff)
+           (ptr-write-u64 hdr 56 ib)
+           (setq fd (nl_os_open_write_truncate cpath))
+           (if (< fd 0)
+               (nl_seq2 (nl_os_free_chunk tblbase tblcap) (wf_write_int out -1))
+             (seq
+              ;; route nl_fa_emit's table to the dedicated scratch mmap
+              (ptr-write-u64 (data-addr nl_fa_tbl_base) 0 tbl)
+              ;; ---- from here to the restore: NO alloc / GC / eval (arena is swizzled) ----
+              (ptr-write-u64 cin 0 0) (ptr-write-u64 cout 0 0)
+              (ptr-write-u64 (data-addr nl_safepoint_ctx) 24 1)
+              ;; span=total: cross-chunk pointers swizzle to coalesced logical offsets;
+              ;; dest=ds=sstart: loc=dest+(waddr-ds)=waddr => in-place over ANY chunk.
+              (nl_fa_roots sstart total sstart cin cout 3)
+              (ptr-write-u64 (data-addr nl_safepoint_ctx) 24 0)
+              (ptr-write-u64 (data-addr nl_fa_tbl_base) 0 0)   ; reset override
+              (setq tlen (ptr-read-u64 cin 0))
+              (ptr-write-u64 hdr 8 total) (ptr-write-u64 hdr 24 tlen)
+              (nl_fa_write_all fd hdr 64 0)
+              (nl_fa_write_all fd tbl (* tlen 8) 0)
+              (nl_mc_write_chunks fd head)   ; coalesced chunk regions, logical order (single: chunk-0)
+              (nl_fa_write_all fd ib isz 0)   ; live intern (un-swizzled, fixed on load)
+              (nl_os_close_handle fd)
+              (bf_arena_inplace_restore_mc tbl tlen ib total)   ; restore the live arena
+              (nl_os_free_chunk tblbase tblcap)
+              (wf_write_int out (+ 64 (+ (* tlen 8) (+ total isz))))))))))
     (defun bf_arena_load_image_from_file (args out)
       (let* ((cpath (nl_bi_make_cpath (wf_arg_ptr args 0)))
              (hdr (alloc-bytes 64 8))
