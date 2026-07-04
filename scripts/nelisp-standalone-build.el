@@ -485,7 +485,11 @@ storage — not an arena reservation."
    ;; `nelisp-standalone--arena-data-start-offset' for why the low-address
    ;; block was tried first and reverted (a hardcoded-1024 cold-load
    ;; assumption elsewhere in this file).
-   (list (cons 'bss (+ 3808 1048576 24)))
+   ;; perf/bind-shallow-rebox: nl_bind_clone_force is an ordinary zero-fill
+   ;; BSS flag (= allow `nl_val_clone_into' to shallow-rebox safe boxes).
+   ;; `(nelisp--gc-diag 15)' sets it to 1 to force the legacy fresh-box
+   ;; clone path, and `(nelisp--gc-diag 16)' clears it for A/B checks.
+   (list (cons 'bss (+ 3808 1048576 32)))
    (list (nelisp-link-symbol "nl_arena_base" 0
                              :section 'bss :bind 'global :type 'object)
          (nelisp-link-symbol "nl_rootstack_top" 8
@@ -505,6 +509,8 @@ storage — not an arena reservation."
          (nelisp-link-symbol "nl_mxcache_table_base" (+ 3816 1048576)
                              :section 'bss :bind 'global :type 'object)
          (nelisp-link-symbol "nl_mxcache_disable_lookup" (+ 3824 1048576)
+                             :section 'bss :bind 'global :type 'object)
+         (nelisp-link-symbol "nl_bind_clone_force" (+ 3832 1048576)
                              :section 'bss :bind 'global :type 'object)
          (nelisp-link-symbol "nl_frame_push_sym1" (+ 3768 1048576)
                              :section 'bss :bind 'global :type 'object)
@@ -1126,7 +1132,9 @@ not linked."
     ;; populated ONCE by `driver' before the BOOT WATERMARK write -- see
     ;; that unit's PERF comment for the sharing-safety argument.
     (defun nl_frame_push_sym0_ptr () (data-addr nl_frame_push_sym0))
-    (defun nl_frame_push_sym1_ptr () (data-addr nl_frame_push_sym1))))
+    (defun nl_frame_push_sym1_ptr () (data-addr nl_frame_push_sym1))
+    (defun nl_bind_clone_force_flag ()
+      (ptr-read-u64 (data-addr nl_bind_clone_force) 0))))
 
 (defconst nelisp-standalone--windows-stack-reserve #x40000000
   "Windows standalone PE stack reserve size.
@@ -3355,10 +3363,12 @@ unresolved at link time."
     ;; 0=read-only, 1=enable poison-on-free, 2=disable poison,
     ;; 3/4=push/pop empty safepoint context, 5/6=arm/disarm mid-form
     ;; safepoint, 7/8=disable/enable collections, 9/10=disable/enable
-    ;; free-list reuse, 11/12=enable/disable compaction.
+    ;; free-list reuse, 11/12=enable/disable compaction, 13/14=disable/
+    ;; enable macroexpansion-cache lookup, 15/16=force/allow legacy
+    ;; bind-path deep cloning.
     ;; Returns the list
     ;; (trip-count bad-cur bad-bt bad-want poison-count poison-enable
-    ;;  context-depth mid-form-fired-count).
+    ;;  context-depth mid-form-fired-count bind-legacy-force).
     (defun bf_gc_diag (args out)
       (seq
         (if (= (wf_argval args 0) 1) (ptr-write-u64 (data-addr nl_gc_diag) 32 1)
@@ -3397,13 +3407,18 @@ unresolved at link time."
                                     (ptr-write-u64 (data-addr nl_mxcache_disable_lookup) 0 1)
                                   (if (= (wf_argval args 0) 14)
                                       (ptr-write-u64 (data-addr nl_mxcache_disable_lookup) 0 0)
-                                    0))))))))))))))
-        (let* ((nils (alloc-bytes 32 8)) (s7 (alloc-bytes 32 8)) (s6 (alloc-bytes 32 8)) (s5 (alloc-bytes 32 8)) (s4 (alloc-bytes 32 8))
+                                    (if (= (wf_argval args 0) 15)
+                                        (ptr-write-u64 (data-addr nl_bind_clone_force) 0 1)
+                                      (if (= (wf_argval args 0) 16)
+                                          (ptr-write-u64 (data-addr nl_bind_clone_force) 0 0)
+                                        0))))))))))))))))
+        (let* ((nils (alloc-bytes 32 8)) (s8 (alloc-bytes 32 8)) (s7 (alloc-bytes 32 8)) (s6 (alloc-bytes 32 8)) (s5 (alloc-bytes 32 8)) (s4 (alloc-bytes 32 8))
                (s3 (alloc-bytes 32 8)) (s2 (alloc-bytes 32 8)) (s1 (alloc-bytes 32 8)))
           (seq
             (wf_write_nil nils)
-            ;; 8th element (tail): mid-form safepoint fired-count (ctx+32).
-            (wf_cons_int (ptr-read-u64 (data-addr nl_safepoint_ctx) 32) nils s7)
+            ;; 9th element (tail): bind-path legacy force flag.
+            (wf_cons_int (ptr-read-u64 (data-addr nl_bind_clone_force) 0) nils s8)
+            (wf_cons_int (ptr-read-u64 (data-addr nl_safepoint_ctx) 32) s8 s7)
             (wf_cons_int (ptr-read-u64 (data-addr nl_safepoint_ctx) 0) s7 s6)
             (wf_cons_int (ptr-read-u64 (data-addr nl_gc_diag) 32) s6 s5)
             (wf_cons_int (ptr-read-u64 (data-addr nl_gc_diag) 40) s5 s4)

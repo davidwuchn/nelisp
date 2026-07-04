@@ -39,15 +39,25 @@
 ;;     at *DST_WORD_PTR (8 bytes), returning that word.
 ;;     - immediate SRC (low bit 1): write the 8B word straight to
 ;;       DST_WORD_PTR and return it.
-;;     - slot-pointer SRC (low bit 0): the child must OUTLIVE this call,
-;;       so we NEVER store a pointer to a transient scratch slot.  We
-;;       alloc a FRESH 32-byte box (`alloc-bytes 32 8'), deep-clone the
-;;       child into it via `nl_sexp_clone_into(src, box)' (= reads *SRC,
-;;       writes the clone into *BOX; bumps rc on boxed/string variants,
-;;       copies pod bits otherwise), and store the
-;;       8-aligned box pointer as the word at DST_WORD_PTR.  The box
-;;       pointer is naturally 8-aligned (alloc-bytes align = 8) so its
-;;       low bit is 0 (= a slot-pointer word, as required).
+;;     - post-boot arena Symbol/String SRC (low bit 0, `nl_gc_in_arena'
+;;       true, `nl_gc_is_boot' false, tag 4/5): allocate a fresh 32-byte
+;;       Sexp box, copy the four Sexp words, and store the fresh box
+;;       pointer as the destination word.  This is a shallow rebox, not a
+;;       transitive clone.  It deliberately does NOT store SRC itself:
+;;       post-boot arena slots include temporary result and scratch boxes
+;;       that may be overwritten after a bind.  The fast path is limited
+;;       to immutable inline string-layout values; mutable/refcounted
+;;       roots stay on the legacy clone path.
+;;     - non-arena slot-pointer SRC: fall back to the legacy fresh-box
+;;       clone, because stack/BSS/transient scratch slots are not safe
+;;       to store in persistent container words.  Boot/driver scratch
+;;       arena slots also fall back because they are reused across
+;;       top-level forms.
+;;
+;;     Debug escape hatch: `nl_bind_clone_force_flag' returning 1 forces
+;;     the legacy full-clone path for every non-immediate value.  The
+;;     standalone `nelisp--gc-diag' builtin toggles the BSS flag with
+;;     15/16 for A/B byte-identity checks.
 ;;
 ;; AOT `let' is FOLD-ONLY (cannot bind a runtime value); both entries
 ;; thread runtime values purely as function parameters, matching the
@@ -58,6 +68,7 @@
 ;;   nl_val_load     — public C-ABI entry (word -> 32B-slot view).
 ;;   nl_vci_box      — clone SRC into a fresh 32B box, store its pointer
 ;;                     word at DST_WORD_PTR, return that word.
+;;   nl_vci_rebox    — fresh 32B shallow rebox for arena-owned symbols/strings.
 ;;   nl_val_clone_into — public C-ABI entry (src slot -> word @ dst).
 ;;
 ;; Build wiring: `scripts/compile-elisp-objects.el' lists this feature
@@ -101,31 +112,66 @@
             (ptr-write-u64 dst_word_ptr 0 box))
        box))
 
+    (defun nl_vci_copy32 (src dst)
+      (nl_vl_prog2
+       (and (ptr-write-u64 dst 0  (ptr-read-u64 src 0))
+            (ptr-write-u64 dst 8  (ptr-read-u64 src 8))
+            (ptr-write-u64 dst 16 (ptr-read-u64 src 16))
+            (ptr-write-u64 dst 24 (ptr-read-u64 src 24)))
+       dst))
+
+    ;; Shallow rebox path for immutable Symbol/String slots.  SRC may be
+    ;; a temporary arena slot, so allocate a fresh 32B box for the word.
+    (defun nl_vci_rebox (box src dst_word_ptr)
+      (nl_vl_prog2
+       (and (nl_vci_copy32 src box)
+            (ptr-write-u64 dst_word_ptr 0 box))
+       box))
+
     ;; Public C-ABI entry: nl_val_clone_into(src_slot, dst_word_ptr) -> word.
     ;; Immediate SRC (low bit 1): write the 8B word straight to
-    ;; DST_WORD_PTR, return it.  Slot-pointer SRC (low bit 0): clone the
-    ;; child into a fresh 32B box and store the box-pointer word.
+    ;; DST_WORD_PTR, return it.  Slot-pointer SRC (low bit 0): default
+    ;; to a shallow rebox when SRC is already arena-owned; otherwise use
+    ;; the legacy fresh-box clone.  A BSS flag exposed by
+    ;; `nl_bind_clone_force_flag' forces the legacy path.
     (defun nl_val_clone_into (src_slot dst_word_ptr)
       (if (= (logand src_slot 1) 1)
           (nl_vl_prog2 (ptr-write-u64 dst_word_ptr 0 src_slot) src_slot)
-        (nl_vci_box (alloc-bytes 32 8) src_slot dst_word_ptr))))
+        (if (extern-call nl_bind_clone_force_flag)
+            (nl_vci_box (alloc-bytes 32 8) src_slot dst_word_ptr)
+          (if (extern-call nl_gc_in_arena src_slot)
+              (if (extern-call nl_gc_is_boot src_slot)
+                  (nl_vci_box (alloc-bytes 32 8) src_slot dst_word_ptr)
+                (if (= (ptr-read-u8 src_slot 0) 4)
+                    (nl_vci_rebox (alloc-bytes 32 8) src_slot dst_word_ptr)
+                  (if (= (ptr-read-u8 src_slot 0) 5)
+                      (nl_vci_rebox (alloc-bytes 32 8) src_slot dst_word_ptr)
+                    (nl_vci_box (alloc-bytes 32 8) src_slot dst_word_ptr))))
+            (nl_vci_box (alloc-bytes 32 8) src_slot dst_word_ptr))))))
   "AOT source for the Doc 147 Phase 0 word<->slot keystone helpers.
 
-Four-entry `(seq DEFUN ...)' manifest:
+Six-entry `(seq DEFUN ...)' manifest:
 - `nl_vl_prog2 (_eff val) -> val'    — effect-sequencer (eval both, 2nd).
 - `nl_val_load (word scratch32) -> *const Sexp' — public C-ABI entry;
   slot-pointer words pass through, immediates materialise into SCRATCH32
   via `nl_sci_store_imm' (from `nl_sexp_clone_into.o').
 - `nl_vci_box (box src dst_word_ptr) -> word' — clone SRC into a fresh
   32B box via `nl_sexp_clone_into', store the box-pointer word at DST.
+- `nl_vci_copy32 (src dst) -> dst' — raw four-word Sexp slot copy.
+- `nl_vci_rebox (box src dst_word_ptr) -> word' — fresh 32B shallow
+  rebox for post-boot arena-owned symbols/strings.
 - `nl_val_clone_into (src_slot dst_word_ptr) -> word' — public C-ABI
-  entry; immediate SRC stores its word directly, slot SRC clones into a
-  fresh box (never a transient scratch slot).
+  entry; immediate SRC stores its word directly, post-boot arena Symbol/
+  String SRC shallow-reboxes by default, and all other/forced-legacy slot SRC
+  clones into a fresh box (never a transient scratch slot).
 
 AOT ops consumed:
   `logand'                 — low-bit tag test on the value word.
   `extern-call nl_sci_store_imm'   — immediate WORD -> 32B Sexp at scratch.
   `extern-call nl_sexp_clone_into' — deep-clone child SRC into fresh box.
+  `extern-call nl_bind_clone_force_flag' — force legacy clone path.
+  `extern-call nl_gc_in_arena'     — restrict shallow rebox to arena boxes.
+  `extern-call nl_gc_is_boot'      — exclude reused boot/driver scratch.
   `alloc-bytes'            — `nl_alloc_bytes(32, 8)' fresh 8-aligned box.
   `ptr-write-u64'          — store the 8B value word at `dst_word_ptr+0'.")
 
