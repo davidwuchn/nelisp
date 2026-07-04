@@ -2745,6 +2745,44 @@ miss bug, returns garbage instead of signalling and corrupts the compile."
 ;; Unsupported (signal):  nested ``X, vector quasi `[A ,X B].
 ;; ---------------------------------------------------------------------------
 
+;; Doc 224-ish (2026-07-04) — accept BOTH backquote-family spellings.
+;;
+;; This reader's own char-level desugar (src/nelisp-reader.el,
+;; src/nelisp-read.el, lisp/nelisp-cc-reader-parser.el) always turns a
+;; source-level `\=`'/`,'/`,@' character into `(backquote FORM)' /
+;; `(comma X)' / `(comma-at X)', using these plain multi-character
+;; convenience names instead of real Emacs's own punctuation-named
+;; symbols (real Emacs's reader/backquote.el represent the same three
+;; things as the symbols whose print-names are literally "`", ",", and
+;; ",@", requiring backslash-escaping to reference directly, e.g.
+;; `\=`').  Forms loaded through a host-side GNU Emacs replay/.repl
+;; pipeline (as opposed to being read fresh by this reader) can arrive
+;; already `read' by a real Emacs and preserve ITS symbol spelling
+;; instead of this reader's convenience names -- observed for org.el's
+;; `org-with-wide-buffer' (org-macs.el), whose stored macro body's head
+;; symbol is `eq' to (intern "`"), not to `backquote': calling it hit
+;; `(void-function \=`)' because only the `backquote' name had a macro
+;; function bound, and the literal "`"-named symbol had none.  Rather
+;; than special-case that one macro, `nelisp--bq-expand'/
+;; `-expand-list' below recognize either spelling wherever a
+;; backquote/comma/comma-at marker is checked, and `\=`' is defmacro'd
+;; below as an alias so the outer form is itself dispatchable as a
+;; macro under whichever spelling it happens to carry.  `,'/`,@' are
+;; deliberately NOT given independent macro/function bindings here:
+;; real Emacs does not bind them either (they only have meaning nested
+;; inside a backquote template, consumed structurally by the walker),
+;; so a bare `(, X)'/`(,@ X)' outside a template still signals
+;; void-function on both this reader and real Emacs, matching real
+;; Emacs semantics.
+(defun nelisp--bq-tag-p (form tag punct)
+  "Non-nil if FORM is a cons whose car is the backquote-family marker
+TAG (this reader's own convenience symbol, e.g. `comma') or the real
+Emacs-style symbol named the literal punctuation string PUNCT (e.g.
+\",\")."
+  (and (consp form)
+       (let ((head (car form)))
+         (or (eq head tag) (eq head (intern punct))))))
+
 (defun nelisp--bq-expand (form)
   "Return the expansion of FORM under `backquote'."
   (cond
@@ -2752,10 +2790,10 @@ miss bug, returns garbage instead of signalling and corrupts the compile."
     (signal 'error (list "nelisp-bq: vector quasi not supported")))
    ((not (consp form))
     (list 'quote form))
-   ((eq (car form) 'comma) (cadr form))
-   ((eq (car form) 'comma-at)
+   ((nelisp--bq-tag-p form 'comma ",") (cadr form))
+   ((nelisp--bq-tag-p form 'comma-at ",@")
     (signal 'error (list "nelisp-bq: top-level ,@ not allowed")))
-   ((eq (car form) 'backquote)
+   ((nelisp--bq-tag-p form 'backquote "`")
     ;; Preserve nested backquote forms for the inner macro expansion
     ;; pass.  This is enough for local macros such as generator.el's
     ;; `(cl-macrolet ... `(cps-internal-yield ,value))' body.
@@ -2775,21 +2813,23 @@ unquote / (... . ,@X) dotted splice patterns."
       (let ((head (car cur)))
         (cond
          ;; cdr-position bare `comma' → source had `. ,X'.
-         ((eq head 'comma)
+         ((or (eq head 'comma) (eq head (intern ",")))
           (setq tail-expr (cadr cur))
           (setq done t))
          ;; cdr-position bare `comma-at' → source had `. ,@X'.
-         ((eq head 'comma-at)
+         ((or (eq head 'comma-at) (eq head (intern ",@")))
           (setq tail-expr (cadr cur))
           (setq has-splice t)
           (setq done t))
          (t
           (let ((elem head))
             (cond
-             ((and (consp elem) (eq (car elem) 'comma-at))
+             ((and (consp elem)
+                   (or (eq (car elem) 'comma-at) (eq (car elem) (intern ",@"))))
               (setq has-splice t)
               (push (cons 'splice (cadr elem)) parts))
-             ((and (consp elem) (eq (car elem) 'comma))
+             ((and (consp elem)
+                   (or (eq (car elem) 'comma) (eq (car elem) (intern ","))))
               (push (cons 'list (cadr elem)) parts))
              (t
               (push (cons 'list (nelisp--bq-expand elem)) parts))))
@@ -2827,6 +2867,14 @@ unquote / (... . ,@X) dotted splice patterns."
 (defmacro backquote (form)
   "Expand FORM as a quasiquoted template (NeLisp minimal subset).
 See `nelisp--bq-expand' for the supported shapes."
+  (nelisp--bq-expand form))
+
+(defmacro \` (form)
+  "Alias for `backquote', bound under real Emacs's own back-quote
+symbol name so a form headed by that literal punctuation-named symbol
+\(rather than this reader's `backquote' convenience name -- see the
+commentary above `nelisp--bq-tag-p') is itself dispatchable as a
+macro call."
   (nelisp--bq-expand form))
 
 (unless (fboundp 'zerop) (defun zerop (n) "Return t if N is zero." (= n 0)))
