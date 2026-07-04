@@ -446,7 +446,16 @@ storage — not an arena reservation."
    ;; `nl_sexp_clone_into') -- it never mutates the source Sexp, so aliasing
    ;; the source across calls is sound; (3) Symbol Sexps are immutable in
    ;; the reader (only tag-8 vectors are ever `bf_aset'-mutated).
-   (list (cons 'bss (+ 3800 1048576)))
+   ;; fix/dynalign-memory-slot: +3800+1MiB (after nl_frame_push_sym1) =
+   ;; nl_dynalign_rsp_save (8B) -- pre-align rsp spill slot for the AOT
+   ;; compiler's `win64-dynamic-align-p' extern-call arm (WinAPI calls:
+   ;; CreateFileW / CreateProcessW / ...).  Written and read ONLY by
+   ;; machine code the compiler emits around those calls (RIP-relative
+   ;; store/load via pc32 relocs); no arena-source form touches it.  See
+   ;; `nelisp-aot-compiler--win64-rsp-save-symbol' for the full rationale
+   ;; (a callee-saved register clobbered live interpreter state; a fixed
+   ;; absolute arena address is not guaranteed mapped post-Doc-140).
+   (list (cons 'bss (+ 3808 1048576)))
    (list (nelisp-link-symbol "nl_arena_base" 0
                              :section 'bss :bind 'global :type 'object)
          (nelisp-link-symbol "nl_rootstack_top" 8
@@ -462,6 +471,8 @@ storage — not an arena reservation."
          (nelisp-link-symbol "nl_frame_push_sym0" (+ 3736 1048576)
                              :section 'bss :bind 'global :type 'object)
          (nelisp-link-symbol "nl_frame_push_sym1" (+ 3768 1048576)
+                             :section 'bss :bind 'global :type 'object)
+         (nelisp-link-symbol "nl_dynalign_rsp_save" (+ 3800 1048576)
                              :section 'bss :bind 'global :type 'object))
    nil))
 
