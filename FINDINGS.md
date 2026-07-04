@@ -2850,3 +2850,264 @@ used for every probe in this session, and deleted at session end (`rm
 -rf`, after confirming via `pkill -9 -f` + `ps aux` that no `nelisp`
 process was left running). No repo source files were modified this
 session; only this `FINDINGS.md` entry (branch `profwork`).
+
+## "Line-drop after macro-generated parent major-mode calls" (Doc 33 item
+226) is not a reader/GC defect: it is a missing compat shim
+(`add-to-invisibility-spec`) plus a pre-existing, intentional REPL
+error-suppression design choice (branch `linedrop`, base `origin/main`
+5432fd1d)
+
+### Task and starting hypothesis
+
+Doc 33 item 226 (`nelisp-emacs-lib` `docs/design/33-emacs-core-substrate-
+priority-plan.org`, merge `554a975`) retired the `7b0d034`-era
+cleanup-arm workaround that ran `define-derived-mode`'s child BODY/hooks
+from an `unwind-protect` cleanup arm, because standalone NeLisp was
+believed to lose top-level forms that follow "macro-generated parent
+major-mode calls, especially nested `outline-mode` derived modes." After
+the retirement (parent call now in its own minimal
+empty-cleanup-`unwind-protect` + completion-flag wrapper;
+`src/emacs-mode.el`/`packages/nelisp-emacs-core/lisp/emacs-mode.el`,
+diff `e85577f6..dd6934ff`), the doc records that a cold image still shows
+`(with-temp-buffer (org-mode) major-mode)` exiting 0 with **blank
+stdout**, "the activation line itself is still silently dropped," and
+flags this as the still-open item 226 defect — implying the same
+evaluator/GC-class bug survived in a new shape. This session's job was
+to determine whether that's actually still true, and if so, localize the
+mechanism.
+
+It is not true. The symptom reproduces exactly as described, but it is
+two small, unrelated, already-legible things stacked together, neither
+of which is an evaluator abort, a GC defect, or specific to cold images
+or macro-generated parent calls.
+
+### Repro matrix (cold image, `scripts/cold-image-org-e2e.sh 1` with
+`NELISP_E2E_KEEP=1`, default bootstrap-repl/prelude, 60-file org vendor
+chain — faithfulness columns identical replay vs. cold-boot: `(t t t t
+(interactive) t)`)
+
+Fed one line at a time via stdin to `./target/nelisp --cold-load-from
+IMG --no-prompt`:
+
+| # | form | result |
+|---|------|--------|
+| (a) | `(with-temp-buffer (org-mode) (prin1 'M1))` | blank stdout, exit 0 — dropped |
+| (b) | `(org-mode) (prin1 'M2)` (two top-level forms) | blank stdout, exit 0 — dropped |
+| (c) | `(with-temp-buffer (outline-mode) (prin1 'M3))` | blank stdout, exit 0 — dropped |
+| (d) | `(with-temp-buffer (text-mode) (prin1 'M4))` | `M4` printed — NOT dropped |
+
+(d) rules out `with-temp-buffer` itself, the parent-call wrapper shape in
+the abstract, and the REPL harness in the abstract: only the two forms
+that reach outline/org-specific mode-body code drop.
+
+### Abort-vs-suppression verdict: ordinary signal, normal unwind,
+REPL-only suppression — not an evaluator abort
+
+Wrapping form (a) in `condition-case` immediately un-hides everything:
+
+```
+(condition-case err (with-temp-buffer (org-mode) (prin1 'M1)) (error (prin1 (list 'ERR err))))
+=> (ERR (void-function add-to-invisibility-spec))
+(condition-case err (with-temp-buffer (org-mode) (prin1 'M1)) (t (prin1 (list 'T err))))
+=> (T (void-function add-to-invisibility-spec))
+```
+
+Both the `error` and `t` handlers fire on the first try. `(catch 'x
+(with-temp-buffer (org-mode) (prin1 'M1)) 'fell-through)` prints nothing
+(as expected — `catch` only catches `throw`, not `signal`). So this is an
+ordinary, condition-case-catchable `void-function` signal, not an
+unsignaled/abort-class failure that bypasses the signal machinery.
+
+Side-effect test (task step 3), to settle whether the form actually ran
+up to the error or was never attempted at all:
+
+```
+(with-temp-buffer
+  (nl-write-file "/tmp/sidefx_before.txt" "BEFORE")
+  (org-mode)
+  (nl-write-file "/tmp/sidefx_after.txt" "AFTER")
+  (prin1 'M1))
+```
+
+`/tmp/sidefx_before.txt` = `BEFORE` (written). `/tmp/sidefx_after.txt`:
+does not exist. Execution ran normally up through `(org-mode)`, signaled
+there, and unwound the rest of the top-level form exactly as real Emacs
+would — this is a completely ordinary error abort of one top-level form,
+not "output suppressed while the form still runs" and not "the reader
+never evaluated the form."
+
+Marker-after test (task step 2): appending `(prin1 'MARKER-AFTER)` as a
+**separate** top-level form after the dropping form still prints
+`MARKER-AFTER` — the REPL loop is not stuck or dead; it silently
+swallows the failed form and moves on to the next one.
+
+The same behavior reproduces identically in the **warm**, still-running
+replay-load process (append the probes to `load-only.repl` and feed to
+`--repl` before any dump/cold-boot at all): `(fboundp
+'add-to-invisibility-spec)` → `nil`, and the org-mode probe gives the
+identical `(void-function add-to-invisibility-spec)` signal. So this has
+nothing to do with cold-image fidelity, dump/restore, or GC roots —
+warm and cold behave identically.
+
+### Mechanism, part 1: missing compat shim (`nelisp-emacs-lib`, read-only)
+
+`add-to-invisibility-spec` is a plain ~6-line pure-Elisp function in
+real Emacs's `emacs-lisp/subr.el` (no C primitive needed):
+`vendor/emacs-lisp/subr.el:6092` in the `nelisp-emacs-lib` checkout. It
+is called directly from `outline-mode`'s own body
+(`vendor/emacs-lisp/outline.el:458,592`) and from `org-mode`'s own body
+(`vendor/emacs-lisp/org/org.el:4963,4967`) — org-mode does not need to
+go through `outline-mode` to hit it. The 60-file vendor chain's
+generated `.repl` defines the `buffer-invisibility-spec` *variable*
+(`(defvar buffer-invisibility-spec nil)`, from
+`nelisp-emacs-compat.el`/`emacs-buffer-builtins.el`) and a
+read-side analog (`emacs-buffer-builtins-invisible-p`), but never
+defines or aliases `add-to-invisibility-spec` (or
+`remove-from-invisibility-spec`) itself — confirmed absent from
+`packages/nelisp-emacs-buffer-core/lisp/nelisp-emacs-compat.el` and from
+the generated `load-only.repl` (7 hits, none a `defun`). `text-mode`
+(probe d) doesn't touch invisibility specs, which is why it alone
+survives.
+
+This half is entirely in the read-only `nelisp-emacs-lib` sibling repo;
+no fix here, just localization.
+
+### Mechanism, part 2: `nl_repl_loop` intentionally suppresses ALL
+uncaught top-level error diagnostics (this repo, `scripts/nelisp-
+standalone-build.el`) — this is the part that manufactures the "silent
+drop" illusion
+
+`nl_eval_source_all` (`scripts/nelisp-standalone-build.el:10606`) takes
+a `report_errors` flag. Per its own doc comment (added for the earlier
+Doc 152 "DEFECT-2 artifact-cli-silent-noop" fix) and the call site
+comment in `nl_repl_loop`
+(`scripts/nelisp-standalone-build.el:13509-13532`, `report_errors=0`
+literal at line 13529):
+
+> "report_errors=0: REPL semantics MUST NOT change here — a form error
+> must not abort the session (the vendor replay harness depends on the
+> REPL surviving form errors exactly as it does today; QUIT_FLAG below
+> is still honored so explicit (exit N)/(kill-emacs N) from
+> REPL-evaluated code keeps working unchanged)."
+
+Inside `nl_eval_source_all`, the branch that calls
+`nl_eval_source_report_error` (which writes `"nelisp: uncaught error:
+..."` to stderr and arms `QUIT_FLAG` so the caller reports a non-zero
+exit) is *only* reached `(if (= report_errors 1) ...)`
+(`scripts/nelisp-standalone-build.el:10641-10659`); when
+`report_errors=0` the whole branch collapses to `0` and the loop just
+continues (`more` stays `1`). `--repl` and `--cold-load-from IMG <
+stdin` both go through `nl_repl_loop`, so **every** invocation this
+session used to probe org-mode/outline-mode activation on a cold image
+was, by construction, running with error reporting hard-disabled.
+`--eval`/`--load`/the artifact-and-runtime-image CLI paths pass
+`report_errors=1` and DO report:
+
+```
+$ ./target/nelisp --load probe-with-void-function-call.el
+(stdout empty, exit 1)
+stderr: nelisp: uncaught error: void-function: (some-totally-undefined-function-xyz)
+```
+
+vs. the identical error via `--repl`/`--cold-load-from ... --no-prompt`:
+completely empty stdout AND stderr, exit 0.
+
+gdb confirms this live (symbols present, binary not stripped):
+
+```
+break nl_eval_source_report_error
+run --cold-load-from IMG --no-prompt   (stdin = form (a))
+=> breakpoint never hit; "[Inferior 1 ... exited normally]"
+
+break nl_eval_source_report_error
+run --load probe-with-void-function-call.el
+=> Breakpoint 1, nl_eval_source_report_error ()
+   #0 nl_eval_source_report_error ()
+   #1 nl_eval_source_all ()
+   #2 driver ()
+   #3 _start ()
+   nelisp: uncaught error: void-function: (some-totally-undefined-function-xyz)
+```
+
+So the two paths are provably, structurally different at the call-frame
+level, not just different in observed output.
+
+### Why this looked like the historical "line-drop" class of bug
+
+Every prior investigation of item 226 (and, per its own text, the
+original `7b0d034` workaround) tested activation via a REPL-style
+invocation (interactive `--repl`, or piped forms — exactly what
+`--cold-load-from IMG < forms.txt` is under the hood) and never via
+`--load`/`--eval`. A REPL-mode uncaught error and a genuinely vanished
+form are indistinguishable from stdout/exit-code alone: both produce
+blank output and exit 0. The historical bug (forms lost after
+macro-generated parent major-mode calls, root-caused to the cleanup-arm
+body placement and fixed by the `dd6934ff` retirement itself) was real
+and is fixed — item 226's own regression coverage (nested derived-mode
+sequencing ERT, 19/19 PASS) and this session's own side-effect test both
+confirm ordinary sequential execution now happens. What's left is not a
+reader defect at all: it's a missing 6-line compat shim plus a
+deliberate, pre-existing "REPL tolerates form errors" design decision
+whose implementation also (unintentionally, as far as the comments show)
+suppresses the diagnostic that would have made the missing shim obvious
+immediately.
+
+### Recommended fix, ranked (scoped for codex)
+
+1. **Primary, small, unblocks org-mode/outline-mode entirely —
+   `nelisp-emacs-lib` (read-only from here, flag upstream):** port
+   `add-to-invisibility-spec` (and `remove-from-invisibility-spec` for
+   symmetry — both are trivial, no-C-primitive functions, `vendor/
+   emacs-lisp/subr.el:6092` and the lines immediately after) into
+   `packages/nelisp-emacs-buffer-core/lisp/nelisp-emacs-compat.el`
+   alongside the existing `buffer-invisibility-spec` defvar and
+   `emacs-buffer-builtins-invisible-p`. This alone should make
+   probes (a)/(b)/(c) run to completion (still subject to whatever the
+   *next* void-function turns out to be — this session did not attempt
+   to whack-a-mole past this first one to find a "fully clean org-mode
+   activation," since the reader-side question this session owns was
+   already answered by this first hit).
+2. **Primary, this repo — stop conflating "tolerate" with "stay
+   silent" in `nl_eval_source_all`/`nl_repl_loop`
+   (`scripts/nelisp-standalone-build.el:10606-10682`,
+   `13509-13532`).** The `report_errors=1` branch currently couples two
+   independent decisions in one flag: (i) print a diagnostic, (ii) arm
+   `QUIT_FLAG` (abort the session). `nl_repl_loop`'s own comment says it
+   wants to keep behavior (ii) = "don't abort" unchanged (real
+   constraint: the vendor replay harness relies on this). It does not
+   say it wants (i) = "print nothing, ever." Recommended shape: split
+   `nl_eval_source_report_error`'s stderr-diagnostic call out from the
+   `QUIT_FLAG`-arming, and have `nl_repl_loop` still call the
+   diagnostic-print half unconditionally on a genuine stashed
+   signal/throw (flag != 0, i.e. skip only the already-documented
+   "transient non-zero rc with nothing stashed" case at line
+   10644-10658), while continuing to pass `report_errors=0`'s "don't
+   arm QUIT_FLAG" behavior through unchanged. This is a self-contained,
+   low-risk change confined to two functions in one file, with an
+   obvious regression test: `--repl --no-prompt` fed a single
+   `(void-function-call)` line should print `nelisp: uncaught error:
+   ...` to stderr, continue to the next form (exit 0 if no more errors),
+   and NOT regress the existing `nl_repl_loop`/vendor-replay-harness
+   error-tolerance semantics (same exit-code/continuation behavior,
+   only stderr output changes from empty to non-empty).
+3. **Verification after both fixes land:** re-run this session's exact
+   repro matrix (a)-(d) plus the marker-after test on a fresh cold
+   image; (a)/(b)/(c) should now either complete and print their markers
+   or — if some other function is still missing — print a clear `nelisp:
+   uncaught error: void-function: (...)` to stderr instead of going
+   silent, which by itself finishes closing out Doc 33 item 226 as
+   "not a reader defect" rather than requiring further reader-side
+   archaeology.
+
+### Artifacts (not committed, scratch only)
+
+`/tmp/probe_*.el` single-line probe files, `/tmp/warm-test.repl` (copy
+of the e2e-generated `load-only.repl` with two probe lines appended),
+`/tmp/gdb_*.cmds`. Cold image workdir `/tmp/cold-image-org-e2e.I05Uug/`
+was built with `NELISP_E2E_KEEP=1` via `scripts/cold-image-org-e2e.sh 1`
+(default bootstrap-repl/prelude — same "regenerated `build/nemacs-
+bootstrap.repl`" input Doc 33 item 226 itself used), used for every cold
+probe and the gdb runs, and deleted at session end (`rm -rf`, after
+confirming via `pkill -9 -f` + `ps aux` that no `nelisp` process was left
+running). No repo source files were modified this session; only this
+`FINDINGS.md` entry (branch `linedrop`, base `origin/main` @ 5432fd1d).
