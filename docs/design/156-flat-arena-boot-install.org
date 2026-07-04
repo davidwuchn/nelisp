@@ -6,6 +6,15 @@
 #+STATUS:   FIXED the native-override caveat (commit f781ce31): the cold path now skips
 #+STATUS:   install-builtins, so prelude overrides of native builtins (A1 floor=3, A20 eq,
 #+STATUS:   mod/truncate) survive identically to a normal boot.  Cold-load is now fully faithful.
+#+STATUS: MULTI-CHUNK PROVEN (2026-07-04) — the single-chunk structural ceiling noted in
+#+STATUS:   §4 Item 4 ("would need a multi-chunk dump + larger interned region") is lifted.
+#+STATUS:   Increments MC-1 (streaming multi-chunk dump, commit 5eb0fd81) + MC-2 (multi-chunk
+#+STATUS:   boot-INSTALL + =--cold-load-from PATH=, commit 1f486838) cold-load a 7-chunk,
+#+STATUS:   ~602.5 MiB heap (~728 MB coalesced image) built from the 60-file Org vendor
+#+STATUS:   chain: cold boot to first eval ~0.85 s vs ~9.8 s full =.repl= replay (~11.5x).
+#+STATUS:   Increment 3 (2026-07-04) added a reproducible E2E harness
+#+STATUS:   (=scripts/cold-image-org-e2e.sh=) and verified faithfulness: a replay-loaded and a
+#+STATUS:   cold-booted process produce IDENTICAL (featurep/fboundp/commandp) conjunct columns.
 #+BRANCH: spike/flat-arena-boot-install
 
 * 0. Purpose
@@ -320,3 +329,172 @@ Doc-16 breadth work — once a package loads/runs, it joins the dump for free.
 
 Pending: increment 4c full bundle one-time dump (heavy, off-peak / high-RAM); fill
 the rx / cl-generic breadth gaps to widen the subset.
+
+* 7. Increments MC-1 / MC-2 / 3 (multi-chunk cold-load, 2026-07-04)
+
+§4 Item 4 (2026-06-23) identified the single-chunk cold-loader's structural
+ceiling: the flat-arena DUMP of anything past a single reserved chunk-0
+aborted regardless of =NELISP_LINUX_ARENA_SIZE= (tried up to 4 GiB), because
+both the relocation-table scratch (dump side) and the fixed
+single-destination load target (install side) assumed a single chunk.  That
+was "moot" for the full nemacs bundle only because
+=(load "build/nemacs-bootstrap.el")= already makes that breadth usable in
+~12 s without a cold-load image at all; it remained a real ceiling for
+cold-loading anything the standalone reader itself builds past one chunk —
+e.g. the ~60-file Org vendor chain used to drive/probe Org support, which
+coalesces past 600 MiB across 7 chunks.  Branch
+=feat/multi-chunk-cold-load= (worktree =nelisp.wt-coldload=) lifts this
+ceiling in two increments, then Increment 3 built a reproducible
+verification harness around them.
+
+** MC-1: multi-chunk streaming dump (commit 5eb0fd81)
+
+Root cause: =bf_arena_dump_image_stream= placed its relocation-table scratch
+(the per-pointer-field offset table built during the in-place swizzle pass)
+in whatever free tail happened to exist past the live bump cursor — chunk-0's
+own mmap tail for a single-chunk heap, or the 64 MiB interned-symbol region's
+unused tail for a multi-chunk heap.  Both placements are bounded by leftover
+mmap space, not by the actual heap size, so a large heap overruns them and
+writes relocation-table entries past the mapped region, causing a SIGSEGV.
+This was never exercised at chunk-count > 1 before: a 7-chunk, ~602.5 MiB
+heap (94% of a 640 MiB reservation, produced by loading the ~60-file Org
+vendor chain) crashed both the streaming path (before this fix) and the
+older =bf_arena_dump_image_to_file= (which still crashes, exit 139 — out of
+scope for this increment).
+
+Fix (=scripts/nelisp-standalone-build.el= ~3810-3886,
+=bf_arena_dump_image_stream=): allocate a DEDICATED scratch mmap via
+=nl_os_alloc_chunk= (the same platform-abstracted raw mmap
+=nl_chunk_alloc_new= already uses for heap growth) instead of reusing
+leftover space.  It is not linked into the chunk chain, so it stays
+invisible to =nl_mc_write_chunks=/=nl_mc_total= and is never itself dumped
+as heap data.  Size is a mathematical upper bound: at most one relocation
+entry per 8-byte pointer-field word across the coalesced region.
+
+** MC-2: multi-chunk boot-INSTALL (commit 1f486838)
+
+Makes the boot-time cold-load INSTALL path (=nl_cold_load_arena= /
+=nl_cold_overwrite_globals=) work with the multi-chunk coalesced images MC-1's
+streaming dump now produces.  Previously the loader always targeted a single
+fixed destination (=ds = base+1024= inside the fresh process's default
+256 MiB chunk-0), which cannot hold a multi-hundred-MiB coalesced heap.
+
+Destination strategy: read the image header first (header+8 = the coalesced
+=slen=, format unchanged since MC-1) to compute the exact bytes needed —
+1024-byte control block + =slen= + the relocation table (=tlen= * 8 bytes) +
+8 MiB slack, 64 KiB aligned.  If that exceeds the current chunk-0's
+reservation (=nl_cold_grow_chunk0=), allocate ONE new contiguous mmap via
+=nl_os_alloc_chunk= sized to fit, point the driver-owned =nl_arena_base= bss
+slot at it, and reinitialize its control block + chunk-0 descriptor via
+=nl_cold_realloc_chunk0= — reusing the existing
+=nelisp-standalone--arena-init-metadata-forms-dynamic= generator (the same
+one =nl_arena_init= uses) with the new base/size as RUNTIME symbols instead
+of a literal.  The interned-region pointer pair (+832/+840) is copied across
+the swap; the OLD default chunk-0 mmap is deliberately left un-munmap'd (a
+harmless orphaned mapping).  When the image already fits, the grow path is
+skipped and the loader is byte-for-byte the original single-destination
+code.
+
+Also adds a =--cold-load-from PATH= CLI flag so callers/tests can cold-load
+an explicit image without clobbering the fixed
+=/tmp/nelisp-cold-image.bin= marker file.  This required moving argv parsing
+earlier in =driver='s =let*=, ahead of the cold-load gate, so the gate can
+recognize the flag before deciding whether/what to cold-load.  =PATH=
+consumes the arg2 slot, so only arg3 remains free for
+=--no-prompt=/=--no-print= (one fewer slot than plain =--repl=); the branch
+otherwise runs the identical REPL-loop body.
+
+** Increment 3 (2026-07-04): reproducible E2E harness + verification
+
+Added =scripts/cold-image-org-e2e.sh= (+ its data file
+=scripts/cold-image-org-e2e-files.txt=: the same 60-file Org vendor chain,
+stored relative to =nelisp-emacs-lib='s =vendor/= root) — a single, checked-in,
+reproducible script that: (a) generates the chain's =.repl= host-side via
+=nelisp-emacs-lib='s =scripts/vendor-repl-standalone-replay.el='s
+=vendor-repl-standalone--write-input= (read-only use of that sibling repo —
+no source-normalize cache directory is configured, and all generated output
+lands under a private =mktemp -d= workdir, never inside the sibling repo);
+(b) replay-loads the =.repl= into this worktree's =./target/nelisp= and
+dumps a multi-chunk image via =nelisp--arena-dump-image-stream=; (c)
+cold-boots a FRESH process via =--cold-load-from= and evaluates the
+faithfulness conjuncts; (d) prints a timing table (median of =N=
+repetitions, default 3) and the replay-vs-cold-boot faithfulness columns
+side by side.  Usage: =scripts/cold-image-org-e2e.sh [RUNS]=.
+
+One implementation note folded into the script: this reader's REPL loop
+(=nl_repl_read_line= / =nl_repl_loop=) reads and evaluates ONE OS line at a
+time with no cross-line continuation, so every form fed to it (including the
+script's own probe/dump/timing tail) must be a complete, self-balanced
+expression on a single physical line.  The =.repl= chain =--write-input=
+itself generates already satisfies this (per-form normalization keeps every
+top-level form on one line; parenthesis-count false positives inside string
+literals like regex patterns were the only lines that ever looked
+"unbalanced" on inspection), so this only constrains the script's own
+hand-written tail forms, which are written accordingly.
+
+*** Timing (median of 3 runs, 2026-07-04)
+
+| phase                                                 |  median | raw runs (us)           |
+|--------------------------------------------------------+---------+--------------------------|
+| full =.repl= replay load                               | 9.843 s | 9837679 9842727 9866091 |
+| dump (=nelisp--arena-dump-image-stream=, in-process)    | 0.718 s | 718311 717912 720396    |
+| cold boot to first eval (=--cold-load-from=)            | 0.853 s | 848855 853759 852653    |
+
+Speedup (replay load / cold boot) = *11.5x*.  Cold-booted process peak RSS
+(=/proc/PID/status= VmHWM, polled): *~695.3 MiB* (711976-711980 KB, stable
+across all 3 runs).  Coalesced image size: ~728,000,000 bytes (728,075,872 B
+this run; varies by a few hundred bytes run-to-run within the SAME script
+invocation's 3 dump repeats it was byte-identical, but drifts slightly
+between separate script invocations — not chased further, well within the
+"~602.5 MiB heap / ~662-728 MB image" range already established by MC-1).
+
+*** Faithfulness columns (Increment-3 proof-gap check)
+
+Both a replay-loaded process and a cold-booted process (from the SAME image)
+were probed with the identical conjunct list, each wrapped in
+=ignore-errors= (=commandp= is void-function in this standalone reader
+independent of the org-mode question below — =(fboundp 'commandp)= is =nil=
+at bare boot and becomes =t= only after the Org chain loads, i.e. one of the
+60 vendor files defines a =commandp= compatibility shim):
+
+| conjunct                              | replay-loaded | cold-booted |
+|----------------------------------------+---------------+-------------|
+| =(featurep 'org)=                      | nil           | nil         |
+| =(featurep 'org-element)=              | nil           | nil         |
+| =(fboundp 'org-mode)=                  | nil           | nil         |
+| =(fboundp 'org-element-parse-buffer)=  | nil           | nil         |
+| =(commandp 'org-mode)=                 | nil           | nil         |
+| =(fboundp 'commandp)=                  | t             | t           |
+
+*Columns are IDENTICAL* — cold-load reproduces exactly what the
+=.repl=-driven replay produces, proving MC-1/MC-2 faithfulness independent
+of the org-mode question.  The columns differ from the 2026-06-23 Increment
+2 dev-time acceptance notes (which recorded =(featurep 'org)=t=,
+=(featurep 'org-element)=t=, =(fboundp 'org-element-parse-buffer)=t=, and
+only =(commandp 'org-mode)=nil=, using a reused image from that session)
+because this driver-generated =.repl= run does not fully bring up
+=org-mode='s definition — a separate, pre-existing gap the task explicitly
+scoped OUT of this increment ("the make-level Org gate passed a proof...
+but driver-generated =.repl= runs show =fboundp org-mode = nil=" — an
+already-known discrepancy between the full =nemacs= driver path and the raw
+standalone-reader =.repl= replay path).  What Increment 3 establishes is
+narrower and sufficient: cold-load is a FAITHFUL bit-for-bit continuation of
+whatever a replay produces, whatever that happens to be — it does not
+itself introduce any divergence.  Chasing the org-mode gap itself is out of
+scope here; it is unaffected by, and orthogonal to, MC-1/MC-2.
+
+*** Regression (final binary, target/nelisp @ commit 1f486838)
+
+- =/tmp/gcr1.el= (=(mg 300000)= cons/string churn + GC) and =/tmp/gcr2.el=
+  (=defun= + =garbage-collect=) via =--load=: *10/10* each.
+- 4 make smokes (=standalone-reader-load-smoke=, =-fmt-smoke=,
+  =-repl-smoke=, =-prelude-test=): *PASS*.
+- REPL error-tolerance (=(this-fn-does-not-exist)= then =(+ 40 3)= via
+  =--repl --no-prompt=): prints *43*.
+- Normal boot (no marker file, no =--cold-load-from=) is unaffected
+  throughout by any of the above.
+
+No merge-blocking issues found.  The pre-existing org-mode/=commandp= gaps
+are orthogonal to this branch's scope (the multi-chunk cold-load mechanism)
+and are unchanged by it — replay and cold-load agree with each other either
+way.
