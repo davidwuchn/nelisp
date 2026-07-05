@@ -6,7 +6,7 @@
         standalone-tarball standalone-tarball-verify \
         verify-elisp-fixtures \
         standalone-eval standalone-eval-clean standalone-eval-test standalone-eval-j \
-        standalone-reader standalone-reader-test standalone-reader-load-smoke standalone-reader-fmt-smoke standalone-reader-prelude-equal-reload-smoke standalone-reader-nested-backquote-macro-smoke standalone-reader-derived-mode-shape-smoke standalone-reader-ffi-smoke standalone-reader-tls-smoke standalone-reader-process-smoke standalone-reader-realrt-smoke standalone-reader-repl-smoke standalone-reader-prelude-test standalone-selfhost-test standalone-selfhost-mt-test standalone-parallel-compile-test standalone-chunk-growth-test \
+        standalone-reader standalone-reader-test standalone-reader-load-smoke standalone-reader-fmt-smoke standalone-reader-prelude-equal-reload-smoke standalone-reader-declare-strip-smoke standalone-reader-nested-backquote-macro-smoke standalone-reader-derived-mode-shape-smoke standalone-reader-ffi-smoke standalone-reader-tls-smoke standalone-reader-process-smoke standalone-reader-realrt-smoke standalone-reader-repl-smoke standalone-reader-prelude-test standalone-selfhost-test standalone-selfhost-mt-test standalone-parallel-compile-test standalone-chunk-growth-test \
         nelisp-performance-gate nelisp-nelix-command-gate nelisp-native-artifact-gate nelisp-nelix-native-hot-gate \
         nelisp-nelix-operational-gate \
         nelisp-runtime-image-cache-gate nelisp-source-command-substrate-gate
@@ -227,6 +227,24 @@ standalone-reader-prelude-equal-reload-smoke: standalone-reader
 	  echo "[standalone-reader-prelude-equal-reload-smoke] PASS: -> $$out"; \
 	else \
 	  echo "[standalone-reader-prelude-equal-reload-smoke] FAIL: -> $$out (expected (t nil t t))"; \
+	  exit 1; \
+	fi
+
+standalone-reader-declare-strip-smoke: standalone-reader
+	@mkdir -p target
+	@printf '%s\n' \
+	  '(defmacro ds-m1 (x) (declare (debug (form))) (list (quote quote) x))' \
+	  '(defmacro ds-m2 (x) "doc" (declare (debug (form))) (declare (indent 1)) (list (quote quote) x))' \
+	  '(defmacro ds-m3 (x) (declare (debug (form))) "doc" (list (quote quote) x))' \
+	  '(defun ds-f1 () "doc" (declare (indent 0)) (interactive) (+ 41 1))' \
+	  '(defun ds-f2 () (declare (indent 0)))' \
+	  '(let ((fn (symbol-function (quote ds-f1)))) (list (ds-m1 foo) (ds-m2 bar) (ds-m3 baz) (ds-f1) (equal (car (cdr (cdr (cdr fn)))) (quote (interactive))) (ds-f2)))' \
+	  > target/standalone-reader-declare-strip-smoke.el
+	@out="$$(./target/nelisp --repl --no-prompt < target/standalone-reader-declare-strip-smoke.el | tail -1)"; \
+	if [ "$$out" = "(foo bar baz 42 t nil)" ]; then \
+	  echo "[standalone-reader-declare-strip-smoke] PASS: -> $$out"; \
+	else \
+	  echo "[standalone-reader-declare-strip-smoke] FAIL: -> $$out (expected (foo bar baz 42 t nil))"; \
 	  exit 1; \
 	fi
 
