@@ -3111,3 +3111,302 @@ probe and the gdb runs, and deleted at session end (`rm -rf`, after
 confirming via `pkill -9 -f` + `ps aux` that no `nelisp` process was left
 running). No repo source files were modified this session; only this
 `FINDINGS.md` entry (branch `linedrop`, base `origin/main` @ 5432fd1d).
+
+## Doc 33 item 228 follow-up: in-buffer `outline-mode`/`org-mode` activation segfault (branch `segv-diag`, base `origin/main` @ 6020ca18)
+
+### Task and setup
+
+Investigated the "NEW reader segfault exposed by in-buffer mode
+activation" reported against `nelisp-emacs-lib` Doc 33 item 228 (commit
+`c77e9782`, HEAD `f19f595b` at investigation time). Built this repo's
+`./target/nelisp` fresh via `make standalone-reader` at `origin/main`
+6020ca18 (merge of `440cdfb7`, the exact reader commit the original
+report used), then built a fresh cold image via
+`NELISP_E2E_KEEP=1 scripts/cold-image-org-e2e.sh 1` against the current
+`nelisp-emacs-lib` bootstrap (`build/nemacs-bootstrap.repl`,
+`f19f595b`). Faithfulness columns matched
+(`(t t t t (interactive) t)` replay == cold-boot), replay-load 6.735s,
+dump 0.548s, cold boot 0.635s, peak RSS 525348 KB — all consistent with
+the numbers in the `nelisp-emacs-lib` doc entry, confirming this is the
+same build+image setup the original report used.
+
+### The natural/unforced symptom did NOT reproduce in this session
+
+Ran both exact probes from the symptom, `(with-temp-buffer (outline-mode)
+(prin1 major-mode))` and `(with-temp-buffer (org-mode) (prin1
+major-mode))`, against the fresh cold image via `--cold-load-from IMG
+--no-prompt`, with **no debug switches, no gdb**:
+
+- outline-mode probe: **0/60+ runs crashed** (single-shot repeats,
+  20s/15s/10s timeouts, with and without `timeout` wrapper, under gdb
+  with ASLR disabled). Every run: `rc=0`, stdout exactly
+  `outline-modeoutline-mode` (see "double print" note below), no
+  stderr.
+- org-mode probe: **0/35+ runs crashed**. Every run: `rc=0`, stdout
+  empty, stderr `nelisp: uncaught error: void-function:
+  (easy-menu-change)` after a consistent ~4.78-4.8s (org-mode's
+  activation is expensive even when it aborts on a missing symbol).
+
+(The "double print" — `prin1`'s own output followed immediately by the
+same text again with no separator — is expected `--cold-load-from
+--no-prompt`/`--repl` REPL behavior: the REPL auto-prints each
+top-level form's return value in addition to whatever the form itself
+printed, and `(prin1 X)` returns `X`. Confirmed with `(with-temp-buffer
+(kill-all-local-variables) (prin1 "ok"))` -> `"ok""ok"` and bare
+`(garbage-collect)` printing its own return tuple unprompted. Not a
+bug, and orthogonal to the segfault question.)
+
+So: this session could not force the crash the `nelisp-emacs-lib` doc
+entry describes (probe (a): exit 0 reported by the harness but shell-
+level `Segmentation fault` after `outline-modeoutline-mode` printed;
+probe (b): exit 139, completely empty stdout/stderr) using the same
+reader binary commit, the same cold-image-build procedure, and the same
+probe forms, across dozens of repeats including a gdb-attached run.
+This divergence between two investigations following an identical
+recipe is itself a data point: whatever roots the missing object
+depends on (see mechanism below) is either a native-CPU-register-vs-
+stack-spill timing detail that is fixed per compiled binary but
+apparently NOT identical between the previous investigator's process
+and this session's, or a byte-level allocation-total coincidence
+relative to the 16 MiB form-boundary GC trigger (`ptr-write-u64
+268435560 0 16777216`, `scripts/nelisp-standalone-build.el:13746`) that
+this session's exact sequence of allocations missed by a small margin.
+Nothing in `nelisp-emacs-lib` or this repo changed between when the bug
+was authored (`f19f595b`, today) and this session started (confirmed:
+`1cfb42f4`/`cf01918c`, the existing STACK_TOP/conservative-stack-scan
+root-coverage fix, both pre-date `440cdfb7`, i.e. were already present
+when the crash was first reported — so this is not a case of the bug
+having been silently fixed in between).
+
+### Minimal deterministic repro (found via the debug-switch lever the task suggested)
+
+`nelisp--debug-switch` value 5 arms a pre-existing, off-by-default
+diagnostic hook: **MIDFORM poison-validation GC**
+(`scripts/nelisp-standalone-build.el:2837-2847`
+`nl_gc_midform_collect`, wired to the real `while`-loop back-edge in
+`lisp/nelisp-cc-sf-while.el:134-161`
+`nl_sf_while_midform_collect`/`extern-call nl_gc_midform_collect`).  Per
+its own comments this collector is deliberately unsound-by-design for
+validation purposes: it marks only "recorded root frames"
+(`nl_gc_ctx_push`/`nl_gc_mark_recorded_contexts`,
+`scripts/nelisp-standalone-build.el:2723-2802`) and **never** falls back
+to the conservative native-stack scan (`nl_gc_conserv_maybe` is skipped
+whenever `mode=1`, i.e. always in MIDFORM mode — line 2819). The
+`nl_gc_ctx_push`/`pop` machinery that would populate those recorded
+frames is explicitly marked **"DORMANT — no caller yet"** in its own
+comment (line 2723-2725) — nothing in the codebase calls it, so MIDFORM
+collections currently always mark **zero** recorded frames. Arming it
+(gated OFF by default -> zero behavior change for ordinary runs, so this
+requires the explicit debug switch and does not fire in production)
+turns any `while`-loop back-edge that crosses the 16 MiB-since-arm
+watermark into a maximally unsound collection.
+
+With this armed, the crash is **100% reproducible**:
+
+```
+(nelisp--debug-switch 5)
+(with-temp-buffer (org-mode) (prin1 major-mode))
+```
+
+- 10/10 direct single-shot runs against the cold image: `rc=139`,
+  stdout only the `nelisp--debug-switch` return tuple (no `"org-mode"`
+  ever printed — crash happens **before** `org-mode` returns, matching
+  the original report's "(b) crashes earlier, empty output").
+- Also reproduces **warm** (no cold-load at all): appended the same two
+  forms to the 60-file chain's `load-only.repl` and ran it through
+  `--repl --no-prompt --no-print` (never touches
+  `nl_cold_load_arena`/`nl_cold_grow_chunk0` at all) — `rc=139`,
+  identical signature. **Not cold-load-specific.**
+- The same arming + `(with-temp-buffer (outline-mode) (prin1
+  major-mode))` did **not** crash (5/5 clean, `"outline-mode"` printed
+  both auto-print + explicit) — outline-mode's activation is light
+  enough that it apparently never loops through a `while` back-edge
+  that crosses the re-armed 16 MiB watermark within a single call, so
+  this specific lever cannot reproduce the "(a) crashes after the
+  print" half of the symptom. This session did not find a way to force
+  that half; see "Unresolved" below.
+- A precursor experiment additionally interposed a large (buggy,
+  `void-variable: (i)`-erroring) `dotimes` consing loop between the arm
+  and the mode call — same org-mode crash (5/5), same signature,
+  confirming the trigger is the arm + org-mode's own allocation, not
+  the interposed loop.
+- Explicit, ordinary `(garbage-collect)` (no debug switch) immediately
+  before `(with-temp-buffer (org-mode) ...)` does **not** crash (5/5
+  clean, same `void-function: (easy-menu-change)` outcome as baseline)
+  — ruling out "any GC right before org-mode" as sufficient; the
+  MIDFORM-specific (recorded-roots-only, no conservative fallback)
+  collection path is what is unsound, not GC-in-general.
+
+### GC verdict
+
+**Confirmed GC-caused.** Clean A/B: baseline (no debug switch) = 0
+crashes across 90+ runs (both probes, single-shot and gdb); armed
+(`nelisp--debug-switch 5`) = crash on every run that reaches org-mode's
+activation body. This is not a coincidence-of-timing artifact of the
+switch itself — an equivalent plain `(garbage-collect)` call does not
+reproduce it, so it is specifically the MIDFORM/precise-root-only
+collection mode (not "a collection happened") that is unsound.
+
+### Cold vs warm verdict
+
+**General, not cold-load-specific.** The minimal repro crashes
+identically under `--repl` (warm, chain replay-loaded in-process, never
+dumped/reloaded) and under `--cold-load-from IMG` (cold). The existing,
+already-landed cold-load-specific fix (`1cfb42f4`
+`fix(standalone-reader): re-capture STACK_TOP after cold-load arena
+growth`, `cf01918c` `Doc 152 §11.21`) — which fixes a *different*,
+already-closed gap where `nl_cold_grow_chunk0`'s arena-base relocation
+could leave `STACK_TOP` reading as 0 and silently disable the
+conservative stack scan — is irrelevant to this crash and does not
+regress it; this bug is orthogonal.
+
+### gdb backtrace (minimal repro, `--cold-load-from`)
+
+```
+$ gdb -q -batch -ex 'run --cold-load-from IMG --no-prompt < probe.el' -ex 'bt 30' ./target/nelisp
+(0 0 0 0 0 0 1 0 0)
+
+Program received signal SIGSEGV, Segmentation fault.
+0x00000000007bc18b in nl_kw_is_keyword ()
+#0  0x00000000007bc18b in nl_kw_is_keyword ()
+#1  0x00000000007bc279 in nl_eval_inner ()
+#2  0x00000000007b2e48 in nelisp_eval_call ()
+#3  0x00000000007ef960 in nl_sf_let_star_body_eval ()
+#4  0x00000000007ef9b8 in nl_sf_let_star_body_cdr ()
+#5  0x00000000007efaa0 in nl_sf_let_star_body ()
+#6  0x00000000007ef906 in nl_sf_let_star_body_step ()
+#7  0x00000000007ef973 in nl_sf_let_star_body_eval ()
+#8  0x00000000007ef9b8 in nl_sf_let_star_body_cdr ()
+#9  0x00000000007efaa0 in nl_sf_let_star_body ()
+#10 0x00000000007efb0c in nl_sf_let_star_setup_done ()
+#11 0x00000000007efb68 in nl_sf_let_star_got_bindings ()
+#12 0x00000000007efc3c in nl_sf_let_star ()
+#13 0x00000000007c2d3c in nl_apply_special ()
+#14 0x00000000007c3a6e in nl_eval_inner_cons ()
+#15 0x00000000007bc586 in nl_ei_cons_tail ()
+#16 0x00000000007bc504 in nl_ei_cons_dispatch ()
+#17 0x00000000007bc406 in nl_eval_inner ()
+#18 0x00000000007b2e48 in nelisp_eval_call ()
+#19 0x00000000007ef0df in nl_sf_if_else_eval ()
+... (repeats: nested if/let* combinator frames all the way up)
+
+rdi = 0x0   (NULL)
+=> 0x7bc18b <nl_kw_is_keyword+136>:  movzbq (%rdi),%rax   <- crash: read byte 0 of a NULL Sexp pointer
+   0x7bc18f <nl_kw_is_keyword+140>:  pop    %r10
+   0x7bc191 <nl_kw_is_keyword+142>:  cmp    %r10,%rax
+   0x7bc194 <nl_kw_is_keyword+145>:  sete   %al
+```
+
+Binary not stripped, symbols present, deterministic (5 repeat gdb/plain
+runs, identical faulting instruction and register state each time).
+
+### Mechanism
+
+`nl_kw_is_keyword` (`scripts/nelisp-standalone-build.el:14375-14381`,
+spliced in as the **first** clause of `nl_eval_inner`'s dispatch `cond`
+by `nelisp-standalone--patch-eval-inner-defun`,
+`scripts/nelisp-standalone-build.el:14383-14397`/comment at
+14370-14374) runs on **every** form/sub-form the interpreter evaluates,
+before variable lookup, to decide "is this literal a self-evaluating
+keyword symbol." It reads `(sexp-tag form)` — dereferences `form`
+unconditionally. The backtrace shows it being reached through a long
+chain of `nl_sf_let_star_*`/`nl_sf_if_*` combinators — i.e., deep
+inside nested `let*`/`if` evaluation, the kind of shape
+`define-derived-mode`'s macro-expanded body (and org-mode's own large
+activation body, keymap/menu/syntax-table setup) produces. `form` is
+NULL at the crash site, meaning some intermediate cons/value that a
+`let*` binding or continuation held **only via native C call-stack
+frames** (this interpreter's own recursive-descent evaluator has no
+separate managed frame stack for this kind of state — see the
+combinator names) was reclaimed by a GC pass that ran mid-evaluation
+without that frame chain in its root set, and the freed/zeroed slot was
+later fed back into `nl_eval_inner`.
+
+This is the exact failure class this codebase's own comments already
+document and treat as a known, only-partially-closed defect (Doc 146
+§2 "eval root-coverage gap", Doc 152 §11.18-21): "a form-boundary GC
+that fires from a nested runtime `(load ...)`/`(require ...)` call deep
+inside a large interpreted body (e.g. org-mode's `define-derived-mode`
+expansion) can then free a cons cell that is reachable only via an
+ancestor `progn`/`let` continuation sitting in native call-stack frames
+-- observed as a deterministic SIGSEGV in `nl_kw_is_keyword` (NULL
+`str-byte-at`/`sexp-tag` deref)" (`scripts/nelisp-standalone-build.el`
+comment at lines 13609-13617, written *before* this session, describing
+the identical signature this session independently hit via gdb).
+
+The **production** mitigation for this class is the always-on
+conservative native-stack scan (`nl_gc_conserv_maybe`, flag
+`268436464`, gated on in `nl_gc_collect`'s normal boundary path). The
+MIDFORM/`nelisp--debug-switch 5` path this session used to force a
+reproducible crash is explicitly designed to **bypass** that mitigation
+(mode=1 skips `nl_gc_conserv_maybe` unconditionally,
+`scripts/nelisp-standalone-build.el:2819`) so that root-coverage gaps
+can be validated deterministically — which is exactly what it did here.
+Because the precise-root side of that same validation mechanism
+(`nl_gc_ctx_push`/`nl_gc_mark_recorded_contexts`) is dormant (no
+caller), MIDFORM collections currently mark **nothing** beyond the
+global root stack and shared symtab entry, so this specific lever will
+crash on essentially any `while`-loop-driven allocation big enough to
+reach the watermark — that part is not really "testing whether
+org-mode's activation is root-safe," it is "testing an intentionally
+unfinished validation feature," and should not by itself be read as
+proof that ordinary (unarmed) production runs are unsafe. Whether the
+*unarmed* conservative-stack-scan fallback has its own residual gap for
+this same nested-let*-under-a-nested-form-boundary-collection shape
+(distinct from the already-fixed cold-load STACK_TOP case) is the
+question this session could not settle empirically (0/90+ natural
+reproductions).
+
+### Recommended fix (ranked, scoped for codex)
+
+1. **Primary, this repo, small and self-contained:** wire up
+   `nl_gc_ctx_push`/`nl_gc_ctx_pop`
+   (`scripts/nelisp-standalone-build.el:2723-2747`) at the real
+   per-form-evaluation entry/exit points (driver's top-level form eval
+   and/or `load`/`require`'s per-form loop) so
+   `nl_gc_mark_recorded_contexts` has actual frames to mark. This is
+   the concrete, self-documented gap ("DORMANT — no caller yet") that
+   makes MIDFORM collections unconditionally unsound today, independent
+   of org-mode specifically. Regression test: this session's exact
+   minimal repro (`(nelisp--debug-switch 5) (with-temp-buffer (org-mode)
+   (prin1 major-mode))`) should stop segfaulting once frames are
+   recorded and marked (it may still hit a downstream `void-function`
+   like `easy-menu-change`, same as the unarmed baseline — that is fine
+   and orthogonal).
+2. **Secondary, needs an in-situ instrumentation pass, not another
+   guess-and-check debug-switch session:** determine whether the
+   *unarmed*, production boundary-GC path (`nl_gc_collect`, conservative
+   stack scan ON) can independently hit the same `nl_kw_is_keyword(NULL)`
+   signature when a nested `require`/`load` deep inside org-mode's
+   activation body triggers its own per-form collection (the scenario
+   the pre-existing `scripts/nelisp-standalone-build.el:13609-13617`
+   comment already flags as a risk, distinct from the STACK_TOP case it
+   goes on to fix). Recommend adding a one-line diagnostic counter/log
+   at `nl_gc_collect`'s entry (object count before/after, or a debug
+   dump of `nl_gc_conserv_maybe`'s scanned-word count) gated by the
+   existing `nl_gc_diag`/switch-1 mechanism, then re-run the exact
+   `(with-temp-buffer (org-mode) (prin1 major-mode))` probe on a fresh
+   cold image repeatedly (dozens of runs, ideally on more than one
+   machine/container) until either it fires naturally with the log
+   showing which collection ran, or enough runs accumulate to conclude
+   the unarmed path is in fact sound for this shape and the original
+   report's crash needs to be re-examined for an unrelated cause (stale
+   binary, stale image, or session-local state this investigation did
+   not have visibility into).
+3. **Verification after (1):** re-run this session's full matrix (org
+   armed-crash repro, warm/cold, outline armed-no-crash, unarmed
+   baseline x2) on a fresh cold image; the armed org-mode repro should
+   no longer segfault (or, if a real live object is still unrooted
+   after recorded-frame marking too, should crash at a *different*
+   `nl_kw_is_keyword` call site / different backtrace shape, which would
+   itself be informative).
+
+### Artifacts (not committed, scratch only)
+
+Cold image workdir `/tmp/cold-image-org-e2e.vxPFH6/` (built with
+`NELISP_E2E_KEEP=1`, `scripts/cold-image-org-e2e.sh 1`); probe files,
+gdb command files, and per-run logs under this session's scratchpad
+(`/tmp/claude-1000/.../scratchpad/probe_*.el`, `gdb_*.cmds`,
+`o5_*`/`gg_*`/`org_run_*` etc.). No repo source files were modified
+this session; only this `FINDINGS.md` entry (branch `segv-diag`, base
+`origin/main` @ 6020ca18).
