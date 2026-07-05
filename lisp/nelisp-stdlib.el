@@ -260,13 +260,13 @@ forms, a nil EXPANDER marks the head as locally not-a-macro."
   "Split BODY into declarations and remaining forms.
 Return (DECLARATIONS . BODY-FORMS), matching the shape used by Emacs
 macro helpers such as `iter-defun'.  A leading docstring and any
-following `(declare ...)' forms are treated as declarations."
+leading `(declare ...)' forms are treated as declarations."
   (let ((declarations nil)
         (cur body))
-    (when (and cur (stringp (car cur)))
-      (setq declarations (cons (car cur) declarations))
-      (setq cur (cdr cur)))
-    (while (and cur (consp (car cur)) (eq (car (car cur)) 'declare))
+    (while (and cur
+                (or (stringp (car cur))
+                    (and (consp (car cur))
+                         (eq (car (car cur)) 'declare))))
       (setq declarations (cons (car cur) declarations))
       (setq cur (cdr cur)))
     (cons (nreverse declarations) cur)))

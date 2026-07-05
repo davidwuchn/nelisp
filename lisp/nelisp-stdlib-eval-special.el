@@ -28,6 +28,16 @@
 
 ;;; Code:
 
+(fset 'nelisp--strip-body-declarations
+      (lambda (body)
+        (let ((cur body))
+          (while (and cur
+                      (or (stringp (car cur))
+                          (and (consp (car cur))
+                               (eq (car (car cur)) 'declare))))
+            (setq cur (cdr cur)))
+          cur)))
+
 ;;;; --- bootstrap (Stage 7.3.d) ---------------------------------------
 
 ;; Stage 7.3.d removes the Rust `sf_defmacro' arm.  The first
@@ -49,7 +59,10 @@
 (fset 'defmacro
       (cons 'macro
             (cons (lambda (name args &rest body)
-                    (let* ((lambda-form (cons 'lambda (cons args body)))
+                    (let* ((real-body
+                            (nelisp--strip-body-declarations body))
+                           (lambda-form
+                            (cons 'lambda (cons args real-body)))
                            (qname (cons 'quote (cons name nil)))
                            (inner-cons (cons 'cons
                                              (cons lambda-form (cons nil nil))))
@@ -371,9 +384,7 @@ env captured.  For top-level defun the captured env is empty so
 semantics match Rust; defuns nested inside `let' would receive a
 non-empty captured env in elisp but the bare form in Rust — this is
 an intentional improvement, not a regression."
-  (let* ((real-body (if (and body (stringp (car body)))
-                        (cdr body)
-                      body))
+  (let* ((real-body (nelisp--strip-body-declarations body))
          (lambda-form (cons 'lambda (cons args real-body)))
          (qname (cons 'quote (cons name nil))))
     (cons 'progn
@@ -389,9 +400,7 @@ the lambda after stripping the `macro' tag.  As with `defun', the
 embedded lambda evaluates to a closure (not a raw `(lambda ARGS ...)'
 form), so `expand_macro' receives the closure and `apply_function'
 dispatches via the `closure' arm."
-  (let* ((real-body (if (and body (stringp (car body)))
-                        (cdr body)
-                      body))
+  (let* ((real-body (nelisp--strip-body-declarations body))
          (lambda-form (cons 'lambda (cons args real-body)))
          (qname (cons 'quote (cons name nil)))
          ;; Inner cons cell: builds (LAMBDA-FORM nil) at evaluation time.

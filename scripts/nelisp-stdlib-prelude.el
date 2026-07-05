@@ -20,12 +20,24 @@
 ;;   Assembled by nelisp-standalone-build.el reader-units; lisp/ stays pristine.
 ;; Regenerate with /tmp/make-prelude.el (or re-assemble those sources) -- 48 forms.
 
+(fset 'nelisp--strip-body-declarations
+      (lambda (body)
+        (let ((cur body))
+          (while (and cur
+                      (or (stringp (car cur))
+                          (and (consp (car cur))
+                               (eq (car (car cur)) 'declare))))
+            (setq cur (cdr cur)))
+          cur)))
+
 (fset 'defmacro
       (cons 'macro
 	    (cons
 	     (lambda (name args &rest body)
 	       (let*
-		   ((lambda-form (cons 'lambda (cons args body)))
+		   ((real-body
+                     (nelisp--strip-body-declarations body))
+                    (lambda-form (cons 'lambda (cons args real-body)))
 		    (qname (cons 'quote (cons name nil)))
 		    (inner-cons
 		     (cons 'cons (cons lambda-form (cons nil nil))))
@@ -179,9 +191,7 @@
   "(defun NAME ARGS BODY...) → (progn (fset 'NAME (lambda ARGS BODY...)) 'NAME).\nUnlike Rust `sf_defun' which stores the raw `(lambda ...)' form\nunmodified, the elisp expansion goes through evaluation of\n`(lambda ARGS BODY...)' = produces a closure with the current lexical\nenv captured.  For top-level defun the captured env is empty so\nsemantics match Rust; defuns nested inside `let' would receive a\nnon-empty captured env in elisp but the bare form in Rust — this is\nan intentional improvement, not a regression."
   (let*
       ((real-body
-	(if (and body (cdr body) (stringp (car body)))
-	    (cdr body)
-	  body))
+        (nelisp--strip-body-declarations body))
        (lambda-form (cons 'lambda (cons args real-body)))
        (qname (cons 'quote (cons name nil))))
     (cons 'progn
@@ -1482,13 +1492,13 @@ pass through), so the default recursion into the cdr is correct for them."
     "Split BODY into declarations and remaining forms.
 Return (DECLARATIONS . BODY-FORMS), matching the shape used by Emacs
 macro helpers such as `iter-defun'.  A leading docstring and any
-following `(declare ...)' forms are treated as declarations."
+leading `(declare ...)' forms are treated as declarations."
     (let ((declarations nil)
           (cur body))
-      (when (and cur (stringp (car cur)))
-        (setq declarations (cons (car cur) declarations))
-        (setq cur (cdr cur)))
-      (while (and cur (consp (car cur)) (eq (car (car cur)) 'declare))
+      (while (and cur
+                  (or (stringp (car cur))
+                      (and (consp (car cur))
+                           (eq (car (car cur)) 'declare))))
         (setq declarations (cons (car cur) declarations))
         (setq cur (cdr cur)))
       (cons (nreverse declarations) cur))))
