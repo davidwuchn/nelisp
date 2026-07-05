@@ -1351,10 +1351,10 @@
     ;; `build-tool/src/eval/special_forms.rs'; AOT-compiled elisp
     ;; `.o' replaces it.  8 defuns (seq form) walk `(BODYFORM CLEANUP...)'
     ;; args: eval body via `nelisp_eval_call', then eval each cleanup form
-    ;; via `nl_eval_is_truthy' (errors silently discarded — does NOT touch
-    ;; `nelisp--last-signal-data').  Final rc = body-rc; body error stash
-    ;; survives all cleanup steps.  Linux-x86_64 only — same arch gate
-    ;; as the other sf_* migrations above.
+    ;; via `nelisp_eval_call' so cleanup non-local exits stay visible and can
+    ;; override the protected body's exit.  If cleanup returns normally after a
+    ;; body exit, the saved M6 FLAG/TAG/VAL stash is restored.
+    ;; Linux-x86_64 only — same arch gate as the other sf_* migrations above.
     (nelisp-cc-sf-unwind-protect
      :source-var nelisp-cc-sf-unwind-protect--source
      :output "nl_sf_unwind_protect.o"
