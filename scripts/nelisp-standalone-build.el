@@ -10557,14 +10557,15 @@ word-packing (works for names/strings of any length, not just <=8 bytes)."
     (nreverse forms)))
 
 (defun nelisp-standalone--eval-source-report-error-form ()
-  "Return the `nl_eval_source_report_error' defun form (Doc 152
-artifact-cli-silent-noop fix, DEFECT-2): write a short diagnostic for the
-top-level M6 stash (TAG @268435480, VAL @268435512 -- see the catch/throw
-unit's comment block for the stash contract) to stderr, then arm QUIT_FLAG
-\(268435464) so the existing `(if (= (ptr-read-u64 268435464 0) 0) 0 (setq
-more 0))' check in `nl_eval_source_all' stops the top-level loop and every
-`--eval'/`--load'/artifact-CLI caller that already does
-\"(- (ptr-read-u64 268435464 0) 1)\" reports a non-zero exit code."
+  "Return error-diagnostic defun forms (Doc 152 DEFECT-2 + REPL visibility).
+`nl_eval_source_print_error' writes a short diagnostic for the top-level M6
+stash (TAG @268435480, VAL @268435512 -- see the catch/throw unit's comment
+block for the stash contract) to stderr.  `nl_eval_source_report_error' keeps
+the existing aborting --eval/--load behavior by printing that diagnostic and
+then arming QUIT_FLAG (268435464) so the `(if (= (ptr-read-u64 268435464 0)
+0) 0 (setq more 0))' check in `nl_eval_source_all' stops the top-level loop
+and every caller that already does \"(- (ptr-read-u64 268435464 0) 1)\"
+reports a non-zero exit code."
   (let ((prefix-buf (make-symbol "prefix-buf"))
         (sep-buf (make-symbol "sep-buf"))
         (nl-buf (make-symbol "nl-buf"))
@@ -10572,36 +10573,40 @@ more 0))' check in `nl_eval_source_all' stops the top-level loop and every
         (tag-repr (make-symbol "tag-repr"))
         (val-ms (make-symbol "val-ms"))
         (val-repr (make-symbol "val-repr")))
-    `(defun nl_eval_source_report_error ()
-       (let* ((,prefix-buf (alloc-bytes 32 1))
-              (,sep-buf (alloc-bytes 8 1))
-              (,nl-buf (alloc-bytes 1 1))
-              (,tag-ms (alloc-bytes 32 8))
-              (,tag-repr (alloc-bytes 32 8))
-              (,val-ms (alloc-bytes 32 8))
-              (,val-repr (alloc-bytes 32 8)))
-         (seq
-          ,@(nelisp-standalone--byte-write-forms prefix-buf "nelisp: uncaught error: ")
-          (nl_os_write_stderr ,prefix-buf
-                               ,(length (encode-coding-string
-                                         "nelisp: uncaught error: " 'utf-8 t)))
-          (mut-str-make-empty ,tag-ms 32)
-          (m5_prin1 ,tag-ms 268435480)
-          (mut-str-finalize ,tag-ms ,tag-repr)
-          (nl_os_write_stderr (nl_bi_strptr ,tag-repr) (nl_bi_strlen ,tag-repr))
-          ,@(nelisp-standalone--byte-write-forms sep-buf ": ")
-          (nl_os_write_stderr ,sep-buf
-                               ,(length (encode-coding-string ": " 'utf-8 t)))
-          (mut-str-make-empty ,val-ms 32)
-          (m5_prin1 ,val-ms 268435512)
-          (mut-str-finalize ,val-ms ,val-repr)
-          (nl_os_write_stderr (nl_bi_strptr ,val-repr) (nl_bi_strlen ,val-repr))
-          (ptr-write-u8 ,nl-buf 0 10)
-          (nl_os_write_stderr ,nl-buf 1)
-          ;; QUIT_FLAG convention (see `nl_quit_flag_ptr'/explicit `exit'):
-          ;; stored value is (exit-code + 1); 2 here -> exit code 1.
-          (ptr-write-u64 268435464 0 2)
-          0)))))
+    `((defun nl_eval_source_print_error ()
+        (let* ((,prefix-buf (alloc-bytes 32 1))
+               (,sep-buf (alloc-bytes 8 1))
+               (,nl-buf (alloc-bytes 1 1))
+               (,tag-ms (alloc-bytes 32 8))
+               (,tag-repr (alloc-bytes 32 8))
+               (,val-ms (alloc-bytes 32 8))
+               (,val-repr (alloc-bytes 32 8)))
+          (seq
+           ,@(nelisp-standalone--byte-write-forms prefix-buf "nelisp: uncaught error: ")
+           (nl_os_write_stderr ,prefix-buf
+                                ,(length (encode-coding-string
+                                          "nelisp: uncaught error: " 'utf-8 t)))
+           (mut-str-make-empty ,tag-ms 32)
+           (m5_prin1 ,tag-ms 268435480)
+           (mut-str-finalize ,tag-ms ,tag-repr)
+           (nl_os_write_stderr (nl_bi_strptr ,tag-repr) (nl_bi_strlen ,tag-repr))
+           ,@(nelisp-standalone--byte-write-forms sep-buf ": ")
+           (nl_os_write_stderr ,sep-buf
+                                ,(length (encode-coding-string ": " 'utf-8 t)))
+           (mut-str-make-empty ,val-ms 32)
+           (m5_prin1 ,val-ms 268435512)
+           (mut-str-finalize ,val-ms ,val-repr)
+           (nl_os_write_stderr (nl_bi_strptr ,val-repr) (nl_bi_strlen ,val-repr))
+           (ptr-write-u8 ,nl-buf 0 10)
+           (nl_os_write_stderr ,nl-buf 1)
+           0)))
+      (defun nl_eval_source_report_error ()
+        (seq
+         (nl_eval_source_print_error)
+         ;; QUIT_FLAG convention (see `nl_quit_flag_ptr'/explicit `exit'):
+         ;; stored value is (exit-code + 1); 2 here -> exit code 1.
+         (ptr-write-u64 268435464 0 2)
+         0)))))
 
 (defconst nelisp-standalone--reader-eval-source-source
   `(seq
@@ -10629,35 +10634,33 @@ more 0))' check in `nl_eval_source_all' stops the top-level loop and every
                        ;; ANY top-level form (e.g. `--eval '(error "boom")'')
                        ;; was silently swallowed -- the loop just moved on to
                        ;; the next form (or fell off the end) as if nothing
-                       ;; happened, always exiting 0.  When REPORT_ERRORS=1
-                       ;; (every caller except `nl_repl_loop', which passes 0
-                       ;; to keep its documented form-error tolerance exactly
-                       ;; as-is) a non-zero rc now prints a diagnostic and arms
-                       ;; QUIT_FLAG so the caller's existing
+                       ;; happened, always exiting 0.  A genuine stashed error
+                       ;; now always prints a diagnostic to stderr; when
+                       ;; REPORT_ERRORS=1 the path also arms QUIT_FLAG so the
+                       ;; caller's existing
                        ;; "(- (ptr-read-u64 268435464 0) 1)" exit-code check
                        ;; reports failure.
                        (let* ((form_rc (nl_driver_eval_with_recorded_roots
                                         result ctx out pool src cursor builtin_sym)))
-                         (if (= report_errors 1)
-                             (if (= form_rc 0)
-                                 0
-                               ;; M6 stash flag @268435472: 0 = "nothing in
-                               ;; flight" (per the catch/throw unit's own
-                               ;; comment, "shouldn't happen on rc=1" -- but it
-                               ;; does: forms from an INLINE-embedded substrate
-                               ;; load, e.g. the eval-elisp-artifact/
-                               ;; eval-elisp-source dispatch's prelude splice,
-                               ;; can return a transient non-zero rc from
-                               ;; `nelisp_eval_call' with nothing actually
-                               ;; stashed.  Only report+abort when a genuine
-                               ;; signal/throw (flag 1 or 2) is stashed; a
-                               ;; flag==0 non-zero rc is treated as before this
-                               ;; fix (silently continues) so inline substrate
-                               ;; loading is unaffected.
-                               (if (= (ptr-read-u64 268435472 0) 0)
-                                   0
-                                 (nl_eval_source_report_error)))
-                           0))
+                         (if (= form_rc 0)
+                             0
+                           ;; M6 stash flag @268435472: 0 = "nothing in
+                           ;; flight" (per the catch/throw unit's own comment,
+                           ;; "shouldn't happen on rc=1" -- but it does: forms
+                           ;; from an INLINE-embedded substrate load, e.g. the
+                           ;; eval-elisp-artifact/eval-elisp-source dispatch's
+                           ;; prelude splice, can return a transient non-zero
+                           ;; rc from `nelisp_eval_call' with nothing actually
+                           ;; stashed.  Only print/abort when a genuine
+                           ;; signal/throw (flag 1 or 2) is stashed; a flag==0
+                           ;; non-zero rc is treated as before this fix
+                           ;; (silently continues) so inline substrate loading
+                           ;; is unaffected.
+                           (if (= (ptr-read-u64 268435472 0) 0)
+                               0
+                             (if (= report_errors 1)
+                                 (nl_eval_source_report_error)
+                               (nl_eval_source_print_error)))))
                        (nl_boundary_maybe_reclaim mark_chunk mark_cursor epoch0 out)
                        ;; GC trigger on TOTAL chunk-bytes-reserved (268436184),
                        ;; not the chunk-0 bump offset.  See `bf_load_eval_loop'.
@@ -10673,13 +10676,13 @@ more 0))' check in `nl_eval_source_all' stops the top-level loop and every
                          (setq more 0)))
                 (setq more 0))))))
        0))
-    ,(nelisp-standalone--eval-source-report-error-form))
+    ,@(nelisp-standalone--eval-source-report-error-form))
   "Reader source parse/eval loop split out of the always-recompiled driver.
-REPORT_ERRORS gates the DEFECT-2 (artifact-cli-silent-noop) top-level
-diagnostic: pass 1 from --eval/--load/--embedded/the artifact-and-runtime-
-image dispatch tail, 0 from `nl_repl_loop' and from prelude-priming call
-sites (repl semantics/prelude-bootstrap tolerance stay byte-for-byte
-unchanged).")
+REPORT_ERRORS gates DEFECT-2 (artifact-cli-silent-noop) top-level aborting,
+not stderr visibility: pass 1 from --eval/--load/--embedded/the
+artifact-and-runtime-image dispatch tail, 0 from `nl_repl_loop' and from
+prelude-priming call sites (repl semantics/prelude-bootstrap tolerance stay
+byte-for-byte unchanged except for diagnostics on stderr).")
 
 (defun nelisp-standalone--runtime-image-command-src ()
   "Return embedded source implementing standalone-reader runtime-image commands."
@@ -15488,6 +15491,10 @@ guards the slot-pool floor directly without loading the full vendor file."
         (near-end-file (make-temp-file "nelisp-repl-near-end-" nil ".el"))
         (near-end-rc nil)
         (near-end-out nil)
+        (error-stderr-file (make-temp-file "nelisp-repl-error-stderr-"))
+        (error-rc nil)
+        (error-out nil)
+        (error-err nil)
         (near-end-bump (max 256
                             (- (nelisp-standalone--target-arena-size)
                                nelisp-standalone--reader-read-cap
@@ -15504,6 +15511,29 @@ guards the slot-pool floor directly without loading the full vendor file."
     (unless (and (= repl-rc 0)
                  (equal repl-out "hot\n1\nhot\n42\nhot\n99\n42\nnil\nt\n(1 2 3)\n[1 \"a\" nil t]\n"))
       (error "repl exit=%S stdout=%S" repl-rc repl-out))
+    (unwind-protect
+        (progn
+          (with-temp-buffer
+            (insert "(this-fn-does-not-exist)\n")
+            (insert "(+ 40 3)\n")
+            (setq error-rc
+                  (call-process-region (point-min) (point-max)
+                                       nelisp-standalone--reader-out
+                                       t (list t error-stderr-file) nil
+                                       "--repl" "--no-prompt"))
+            (setq error-out (buffer-string)))
+          (with-temp-buffer
+            (insert-file-contents error-stderr-file)
+            (setq error-err (buffer-string)))
+          (unless (and (= error-rc 0)
+                       (equal error-out "43\n")
+                       (string-match-p
+                        (regexp-quote
+                         "nelisp: uncaught error: void-function: (this-fn-does-not-exist)\n")
+                        error-err))
+            (error "repl error visibility exit=%S stdout=%S stderr=%S"
+                   error-rc error-out error-err)))
+      (ignore-errors (delete-file error-stderr-file)))
     (with-temp-buffer
       (insert "(defun hot () 1)\n")
       (insert "(hot)\n")
