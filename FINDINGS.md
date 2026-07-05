@@ -3749,3 +3749,227 @@ deleted at the end of this session (`rm -rf`, after confirming via
 `ps aux`/`pkill -9 -f` that no `nelisp` process was left running). No
 repo source files were modified this session; only this `FINDINGS.md`
 entry (branch `silent-abort-diag`, base `main` @ `52928050`).
+
+## Cold-image `org-mode` activation: garbage-name `void-variable` / SIGSEGV diagnosis (branch `garbage-symbol-diag`, base `main` @ `b4f4b4b5`)
+
+### Task and setup
+
+Diagnosed a reported memory-corruption-signature error during in-buffer
+`org-mode` activation on a cold-loaded (`--cold-load-from`) image:
+`nelisp: uncaught error: void-variable: (LULF\0\0\0...garbage...)`.
+
+Repos: `dev/nelisp` @ `b4f4b4b5` (this repo, this branch, no source files
+touched). `dev/nelisp.clone-capture` @ `7aa3ed8b` (branch
+`fix/uw-cleanup-errors`), reader binary sanity-checked (`(+ 40 3)` -> `43`),
+**not rebuilt**. `dev/nelisp-emacs-lib` @ `be3d139b` ("Fix easymenu
+conversion cache aliasing") -- `build/nemacs-bootstrap.{el,repl}` were stale
+(built ~4 minutes *before* `be3d139b` landed) and were regenerated fresh
+before use, per the staleness pitfall documented in
+`dev/nelisp-emacs-lib/tmp-diag/e2e-regression-bisect.md` (read-only
+reference, not modified). Gitignored generated artifacts; no repo state
+changed there.
+
+### Reproduction
+
+Built one fresh image via
+`NELISP_E2E_KEEP=1 timeout 300 bash scripts/cold-image-org-e2e.sh 1` in
+`dev/nelisp.clone-capture` against the freshly-rebuilt bootstrap. Result:
+`org-run1.img` (1,188,639,152 B, ~1.13 GiB), faithfulness `RESULT:
+IDENTICAL` on the harness's own 6-conjunct probe (`featurep org` /
+`featurep org-element` / `fboundp org-mode` / `fboundp
+org-element-parse-buffer` / `commandp org-mode` / `fboundp commandp` --
+none of which actually *call* `org-mode`). Image bloat vs. the ~979 MiB
+pre-`a6868f72` baseline is confirmed present (the easymenu aliasing fix,
+unrelated, did not eliminate the bloat).
+
+Then ran the task's real probe, `(with-temp-buffer (org-mode)
+(nl-write-file "/tmp/om.txt" (symbol-name major-mode)))`, against
+`org-run1.img`:
+
+| run | mode | result |
+|---|---|---|
+| 1 | `--cold-load-from`, plain (no debugger) | **SIGSEGV** (rc=139), zero stdout/stderr captured |
+| 2 | `--cold-load-from`, plain (rerun, same image) | **SIGSEGV** (rc=139), zero output -- consistent crash mode |
+| 3 | `--cold-load-from`, plain (3rd rerun) | **SIGSEGV** (rc=139) again |
+| -- | `--cold-load-from`, under `gdb` (default: ASLR disabled for inferior) | **no crash**, exited normally; stderr: `nelisp: uncaught error: void-function: (org-mode)` |
+| -- | `--cold-load-from`, under `gdb` with `set disable-randomization off` (ASLR preserved) | **no crash**, exited normally; gdb reported "No stack" (nothing to unwind) |
+
+**Consistency verdict: the crash is reproducible (3/3 SIGSEGV) but the
+manifestation is layout-sensitive.** The exact literal `void-variable:
+(LULF...)` text was not reproduced this session; instead a hard SIGSEGV
+(3/3, no debugger) and a *different* symbol's void-function error (once,
+under gdb -- `org-mode` itself reported unbound-as-function despite
+`(fboundp 'org-mode)` having just been confirmed `t` by the e2e harness's
+own conjunct probe on the same image). Both are consistent with the same
+underlying defect class, and this exact
+"symptom-shifts-with-the-debugger/every-rerun" behavior is independently
+already documented and named a "slippery heisenbug" in
+`docs/design/152-sound-form-boundary-gc.org` section 11.24, for an
+unrelated workload (a long count-loop) -- see Root cause below.
+
+### Decisive experiment: warm vs. cold
+
+Re-ran the *identical* probe form directly against the **warm**
+(replay-loaded, never dumped/reloaded) process, by appending it to a copy
+of the same `load-only.repl` chain and feeding it to `./target/nelisp
+--repl --no-prompt --no-print` (no dump, no cold-load):
+
+- **rc=0, no crash.** `org-mode` activation ran into ~20 *legitimate*
+  `void-variable`/`void-function`/other errors for genuinely-missing
+  nelisp-emacs-lib substrate symbols: `org-tags-overlay`, `org-date-ovl`,
+  `org-org-menu`, `regexp-unmatchable`,
+  `org-element-planning-keywords-re`, `org-element-clock-line-re`,
+  `filter-buffer-substring-function`, `try-completion`, `comma`, etc. --
+  **every single one legible and correct.** No garbage symbol names, no
+  crash, at any point.
+- The final `nl-write-file` never ran (org-mode's own activation body
+  aborts partway on the first real substrate gap it hits, a separate
+  known "silent truncation" behavior documented in
+  `nelisp-cc-eval-inner.el`'s own header comment), so `/tmp/om-warm.txt`
+  was not produced -- expected and orthogonal to this bug.
+
+**Verdict: this is a dump/reload (cold-load)-specific corruption, not a
+general in-process eval/GC defect.** The *same* deeply-nested,
+allocation-heavy `org-mode` activation body runs, on the *same* reader
+binary, against arena state at least as large (60-file replay + prelude
+already loaded) as the cold-boot case -- and produces zero corruption.
+Only after the arena is dumped to an image and reloaded at a new
+process's (necessarily different) load address does a
+`void-variable`/`void-function` reference start resolving to garbage or
+to the wrong answer.
+
+### Root cause hypothesis (file:line evidence)
+
+1. `nl_stash_void_variable` (`lisp/nelisp-cc-eval-inner.el:86-105`, wired
+   in at `:112-113`) builds the `(void-variable SYM)` signal by calling
+   `nl_sexp_clone_into name_ptr clone_slot` on the unbound
+   variable-reference Symbol. It is a faithful, field-for-field copy of
+   the already-working `nl_cons_stash_void_function`
+   (`lisp/nelisp-cc-evalport-combiner-cons.el`) -- not itself buggy, but
+   it faithfully reports whatever it is handed.
+2. `nl_sexp_clone_into` (`lisp/nelisp-cc-sexp-clone-into.el`) clones a
+   tag-4 (Symbol) or tag-5 (Str) Sexp via a **shallow buffer alias** by
+   default (`nl_sci_dispatch`, lines 107-117; flag `268435648 = 1`, set at
+   `scripts/nelisp-standalone-build.el:13899`): it bit-copies the 32-byte
+   Sexp header (including the raw `char*` at `+16`) without deep-copying
+   the underlying byte buffer. Shipped in
+   `docs/design/149-str-clone-aliasing.org` (2026-06-10, default ON) as a
+   perf fix, on the explicit soundness argument that "the tracing GC
+   keeps shared buffers alive via reachability" -- i.e. soundness is
+   entirely contingent on complete GC/reachability root coverage for
+   every occurrence of a pointer into that shared buffer.
+3. That root-coverage completeness is already a known, open gap.
+   `docs/design/152-sound-form-boundary-gc.org` documents (sections
+   11.13-11.20) a real, previously-crashing root-coverage gap in the
+   env/function "mirror" (hash-table) walk -- crash signature
+   `nelisp_mirror_walk_bucket <- nelisp_env_set_value` / `nl_kw_is_keyword
+   (NULL)` -- the *exact same signature* `dev/nelisp-emacs-lib`'s own
+   bisect independently hit and attributed to "a dev/nelisp reader/GC
+   defect, not a nelisp-emacs-lib substrate gap" (see
+   `dev/nelisp-emacs-lib/tmp-diag/e2e-regression-bisect.md`, first bad
+   commit `a6868f72`). Section 11.21 closed *one* instance of this gap
+   (conservative native-stack scan, flag `268436464=1`, for GC
+   mark/sweep) but left it open for anything the conservative scan
+   doesn't cover; section 11.25 tried extending root coverage to mid-eval
+   collection and found it **unsound** (reverted).
+4. The image dump/relocation path (`bf_arena_dump_image_stream`,
+   `scripts/nelisp-standalone-build.el:4321`) performs its own,
+   independent reachability walk (`nl_fa_roots`, called at line ~4374)
+   that records a *word-position relocation table*: every live pointer
+   *field* it finds gets one table entry, rewritten to the new base
+   address on `--cold-load-from`. This is architecturally the same kind
+   of root-enumeration problem as GC mark/sweep -- and the warm-vs-cold
+   experiment above proves the corruption is specific to *this* walk (or
+   the swizzle/restore step around it), not to ordinary in-process
+   eval/GC, which ran the identical workload cleanly.
+   `docs/design/156-flat-arena-boot-install.org` (the dump/reload format's
+   design doc) has **zero mentions of "alias", "149", "shared buffer", or
+   "dedup"** -- the multi-chunk dump/relocation design was never audited
+   against Doc 149's later invariant that many distinct Symbol/Str Sexp
+   headers can now hold independent *copies* of the same raw buffer
+   address.
+
+**Mechanism**: if `nl_fa_roots`'s walk has the same env-mirror/hash-bucket
+blind spot already documented for GC (item 3), a Symbol reachable only
+through an under-walked mirror bucket has its `ptr@16` field left
+un-rebased in the relocation table. On `--cold-load-from`, that field
+still holds the pre-dump process's absolute address -- meaningless in the
+new process's address space. Dereferencing it during
+`nl_stash_void_variable`'s clone-and-print path either faults immediately
+if the stale address is unmapped in the new process (the SIGSEGV
+reproduced 3/3 without a debugger -- a different ASLR layout makes an old
+absolute pointer almost certain to be unmapped), or happens to land inside
+the new mapping and read whatever unrelated data now occupies that
+address (a legible-but-wrong printed name, e.g. the task's
+`LULF\0\0\0...`, or the `void-function: (org-mode)` captured once under
+gdb -- gdb's ptrace attach measurably perturbs the process's memory layout
+even with `disable-randomization` toggled either way, consistent with
+producing yet a third outcome rather than reproducing the plain-run
+SIGSEGV).
+
+This "same static image, wildly different symptom depending on
+debugger/layout" behavior is independently already named a "slippery
+heisenbug" for an unrelated single-long-form workload in
+`docs/design/152-sound-form-boundary-gc.org` section 11.24; this report's
+evidence points at the *dump/relocation-specific* instance of the same
+root family, discriminated from that unrelated in-process case by the
+warm-vs-cold experiment above: the in-process/single-long-form gap does
+**not** reproduce here (warm run was clean), but the dump/reload path
+does.
+
+### What this is *not*
+
+- Not the easymenu conversion cache aliasing bug (already fixed at
+  `be3d139b`; e2e faithfulness conjuncts are clean on this image).
+- Not the unrelated, already-bisected full-vendor-load (319-file) SEGV
+  from `docs/design/149-str-clone-aliasing.org` section P3 (bisects to
+  `7e6b0dcc`, confirmed independent of the aliasing flag via A/B test) --
+  different workload, different trigger.
+- Not a nelisp-emacs-lib substrate gap. The warm-process run surfaced
+  plenty of *real* missing-substrate symbols with perfectly legible names
+  -- legitimate, separate substrate-completeness items, not this bug.
+
+### Image bloat (secondary, noted per task instructions)
+
+979 MiB (pre-`a6868f72` baseline) -> 1.19-1.22 GiB now. Given item 4
+above, a plausible contributor is that shared/aliased buffers (Doc 149)
+may be written into the dumped image more than once, or their
+live/reachable status double-counted, if `nl_fa_roots` doesn't dedupe
+against the same mirror-walk gap -- consistent with, but not proven by,
+this investigation. Not chased further per task scope (budget).
+
+### Recommended fix (for follow-up implementation)
+
+1. Audit `nl_fa_roots` (`scripts/nelisp-standalone-build.el`, called from
+   `bf_arena_dump_image_stream` ~line 4321) against the same env-mirror
+   hash-bucket coverage gap already fixed for ordinary GC mark/sweep in
+   section 11.21 (conservative native-stack scan, flag `268436464`).
+   Determine whether the dump path shares that root-enumeration code or
+   has its own, staler copy; if staler, bring it up to the same coverage.
+2. Cheap A/B to confirm scope before implementing: rebuild with flag
+   `268435648` (Doc 149 aliasing) forced to `0` (legacy per-Symbol/Str
+   deep copy) and re-run this exact cold-image + probe. If the corruption
+   disappears with aliasing off, that pins the fix squarely on "make Doc
+   149's aliasing survive dump/relocate" (either fix root coverage per
+   (1), or have the dumper explicitly dedupe-and-relocate shared buffers
+   instead of relying on generic per-field root coverage). If it still
+   reproduces with aliasing off, the gap is more general than Doc 149 and
+   (1) alone is the fix.
+3. Do not chase individual corrupted bytes/instructions further by
+   breakpoint-hunting under gdb -- section 11.24 already found that
+   unproductive for this defect family (manifestation shifts with every
+   debugger perturbation, as reconfirmed here). Fix the root-coverage
+   gap, then re-run this report's exact repro (image + probe, both
+   preserved reproducibly by this document) as the acceptance test.
+
+### Cleanup
+
+One image workdir was created (`dev/nelisp.clone-capture`'s
+`/tmp/cold-image-org-e2e.5EV2sH`, via `NELISP_E2E_KEEP=1`) and was deleted
+at the end of this session. `dev/nelisp-emacs-lib`'s
+`build/nemacs-bootstrap.{el,repl}` were regenerated (gitignored
+artifacts, not committed); working tree there remains clean/unmodified
+otherwise. `dev/nelisp.clone-capture`'s `target/nelisp` was never
+rebuilt (read/run only). No source files were modified in any of the
+three repos this session; only this `FINDINGS.md` entry (branch
+`garbage-symbol-diag`, base `main` @ `b4f4b4b5`).
