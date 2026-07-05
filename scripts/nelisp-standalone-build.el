@@ -2995,10 +2995,27 @@ argument (reachability + in-arena bounds checks).")
         (defun nelisp_eval_call_recorded_done (rc form_ptr env out rec_cur rec_cur_addr)
           (seq (nl_gc_ctx_pop)
                (nl_seq2 (ptr-write-u64 rec_cur_addr 0 rec_cur) rc)))
+        (defun nelisp_eval_call_stash_excessive_lisp_nesting (_env rec_max)
+          (let* ((tag_buf (alloc-bytes 24 1)))
+            (seq
+             ;; "excessive-lisp-nesting"; Emacs raises this condition family
+             ;; for native eval/binding recursion exhaustion.
+             (ptr-write-u64 tag_buf 0 8532477908489566309)
+             (ptr-write-u64 (+ tag_buf 8) 0 7939125359116299621)
+             (ptr-write-u64 (+ tag_buf 16) 0 113723913302885)
+             (nl_alloc_symbol tag_buf 22 268435480)
+             (ptr-write-u64 268435512 0 2)
+             (ptr-write-u64 (+ 268435512 8) 0 rec_max)
+             (ptr-write-u64 (+ 268435512 16) 0 0)
+             (ptr-write-u64 (+ 268435512 24) 0 0)
+             (ptr-write-u64 268435472 0 1)
+             (atomic-fetch-add 268435544 1)
+             1)))
         (defun nelisp_eval_call (form_ptr env out)
           (let* ((rec_cur_addr (+ env 96)) (rec_max_addr (+ env 104)))
             (let* ((rec_cur (ptr-read-u64 rec_cur_addr 0)) (rec_max (ptr-read-u64 rec_max_addr 0)))
-              (if (>= rec_cur rec_max) 1
+              (if (>= rec_cur rec_max)
+                  (nelisp_eval_call_stash_excessive_lisp_nesting env rec_max)
                 (nl_seq2 (ptr-write-u64 rec_cur_addr 0 (+ rec_cur 1))
                   (if (= (ptr-read-u64 (data-addr nl_gc_loop_ctx) 8) 1)
                       (seq
@@ -10748,8 +10765,16 @@ the existing aborting --eval/--load behavior by printing that diagnostic and
 then arming QUIT_FLAG (268435464) so the `(if (= (ptr-read-u64 268435464 0)
 0) 0 (setq more 0))' check in `nl_eval_source_all' stops the top-level loop
 and every caller that already does \"(- (ptr-read-u64 268435464 0) 1)\"
-reports a non-zero exit code."
+reports a non-zero exit code.
+
+`nl_eval_source_print_bare_abort' is the defensive diagnostic for the remaining
+form_rc!=0 / M6 flag==0 class.  Mode 0 stays silent only for documented
+internal inline-substrate/embedded transient rc paths; mode 2 prints but
+continues for REPL parity; mode 1 prints and exits nonzero for --eval/--load
+parity with other uncaught top-level aborts; mode 3 reports stashed errors but
+keeps flagless aborts silent for artifact/runtime inline-substrate replays."
   (let ((prefix-buf (make-symbol "prefix-buf"))
+        (bare-prefix-buf (make-symbol "bare-prefix-buf"))
         (sep-buf (make-symbol "sep-buf"))
         (nocatch-buf (make-symbol "nocatch-buf"))
         (space-buf (make-symbol "space-buf"))
@@ -10758,7 +10783,10 @@ reports a non-zero exit code."
         (tag-ms (make-symbol "tag-ms"))
         (tag-repr (make-symbol "tag-repr"))
         (val-ms (make-symbol "val-ms"))
-        (val-repr (make-symbol "val-repr")))
+        (val-repr (make-symbol "val-repr"))
+        (rc-slot (make-symbol "rc-slot"))
+        (rc-ms (make-symbol "rc-ms"))
+        (rc-repr (make-symbol "rc-repr")))
     `((defun nl_eval_source_print_error ()
         (let* ((,prefix-buf (alloc-bytes 32 1))
                (,sep-buf (alloc-bytes 8 1))
@@ -10813,6 +10841,41 @@ reports a non-zero exit code."
          ;; QUIT_FLAG convention (see `nl_quit_flag_ptr'/explicit `exit'):
          ;; stored value is (exit-code + 1); 2 here -> exit code 1.
          (ptr-write-u64 268435464 0 2)
+         0))
+      (defun nl_eval_source_print_bare_abort (form_rc)
+        (let* ((,bare-prefix-buf (alloc-bytes 40 1))
+               (,rparen-buf (alloc-bytes 1 1))
+               (,nl-buf (alloc-bytes 1 1))
+               (,rc-slot (alloc-bytes 32 8))
+               (,rc-ms (alloc-bytes 32 8))
+               (,rc-repr (alloc-bytes 32 8)))
+          (seq
+           ,@(nelisp-standalone--byte-write-forms
+              bare-prefix-buf "nelisp: form aborted without signal (rc=")
+           (nl_os_write_stderr
+            ,bare-prefix-buf
+            ,(length (encode-coding-string
+                      "nelisp: form aborted without signal (rc=" 'utf-8 t)))
+           (ptr-write-u64 ,rc-slot 0 2)
+           (ptr-write-u64 (+ ,rc-slot 8) 0 form_rc)
+           (ptr-write-u64 (+ ,rc-slot 16) 0 0)
+           (ptr-write-u64 (+ ,rc-slot 24) 0 0)
+           (mut-str-make-empty ,rc-ms 32)
+           (m5_prin1 ,rc-ms ,rc-slot)
+           (mut-str-finalize ,rc-ms ,rc-repr)
+           (nl_os_write_stderr
+            (nl_bi_strptr ,rc-repr) (nl_bi_strlen ,rc-repr))
+           (ptr-write-u8 ,rparen-buf 0 41)
+           (nl_os_write_stderr ,rparen-buf 1)
+           (ptr-write-u8 ,nl-buf 0 10)
+           (nl_os_write_stderr ,nl-buf 1)
+           0)))
+      (defun nl_eval_source_report_bare_abort (form_rc)
+        (seq
+         (nl_eval_source_print_bare_abort form_rc)
+         ;; Bare aborts in --eval/--load are top-level evaluation failures,
+         ;; so match the normal uncaught-error path and exit with status 1.
+         (ptr-write-u64 268435464 0 2)
          0)))))
 
 (defconst nelisp-standalone--reader-eval-source-source
@@ -10853,21 +10916,27 @@ reports a non-zero exit code."
                              0
                            ;; M6 stash flag @268435472: 0 = "nothing in
                            ;; flight" (per the catch/throw unit's own comment,
-                           ;; "shouldn't happen on rc=1" -- but it does: forms
-                           ;; from an INLINE-embedded substrate load, e.g. the
-                           ;; eval-elisp-artifact/eval-elisp-source dispatch's
-                           ;; prelude splice, can return a transient non-zero
-                           ;; rc from `nelisp_eval_call' with nothing actually
-                           ;; stashed.  Only print/abort when a genuine
-                           ;; signal/throw (flag 1 or 2) is stashed; a flag==0
-                           ;; non-zero rc is treated as before this fix
-                           ;; (silently continues) so inline substrate loading
-                           ;; is unaffected.
+                           ;; "shouldn't happen on rc=1" -- but it does for the
+                           ;; documented internal INLINE-embedded substrate load
+                           ;; transient).  Keep ONLY report_errors=0 silent for
+                           ;; those internal/embedded callers.  User-facing
+                           ;; modes report flag==0 aborts too: mode 1 reports
+                           ;; and exits nonzero (--eval/--load parity with
+                           ;; uncaught errors), mode 2 reports and continues
+                           ;; (REPL parity).
                            (if (= (ptr-read-u64 268435472 0) 0)
-                               0
+                               (if (= report_errors 0)
+                                   0
+                                 (if (= report_errors 3)
+                                     0
+                                   (if (= report_errors 1)
+                                       (nl_eval_source_report_bare_abort form_rc)
+                                     (nl_eval_source_print_bare_abort form_rc))))
                              (if (= report_errors 1)
                                  (nl_eval_source_report_error)
-                               (nl_eval_source_print_error)))))
+                               (if (= report_errors 3)
+                                   (nl_eval_source_report_error)
+                                 (nl_eval_source_print_error))))))
                        (nl_boundary_maybe_reclaim mark_chunk mark_cursor epoch0 out)
                        ;; GC trigger on TOTAL chunk-bytes-reserved (268436184),
                        ;; not the chunk-0 bump offset.  See `bf_load_eval_loop'.
@@ -13730,13 +13799,11 @@ correctly."
                   0
                 (seq
                  (nl_repl_make_source linebuf n fbuf src print_p)
-                 ;; report_errors=0: REPL semantics MUST NOT change here -- a
-                 ;; form error must not abort the session (the vendor replay
-                 ;; harness depends on the REPL surviving form errors exactly
-                 ;; as it does today; QUIT_FLAG below is still honored so
-                 ;; explicit (exit N)/(kill-emacs N) from REPL-evaluated code
-                 ;; keeps working unchanged).
-                 (nl_eval_source_all src cursor result pool out ctx builtin_sym 0)
+                 ;; report_errors=2: print form aborts but keep REPL session
+                 ;; semantics.  QUIT_FLAG below is still honored so explicit
+                 ;; (exit N)/(kill-emacs N) from REPL-evaluated code keeps
+                 ;; working unchanged.
+                 (nl_eval_source_all src cursor result pool out ctx builtin_sym 2)
                  (if (= (ptr-read-u64 268435464 0) 0) 0
                    (setq done 1)))))))
          0)))
@@ -14205,13 +14272,22 @@ correctly."
            ;; value.  parse_one advances the shared cursor; it returns 1 per form
            ;; and != 1 (e.g. -1 at EOF) when no more forms remain.
            (ptr-write-u64 268436216 0 0)
-           ;; report_errors=1: this tail serves compile-elisp-artifact/
-           ;; compile-elisp-artifacts/audit-elisp-artifact/inspect-elisp-artifact/
-           ;; eval-elisp-artifact/exec-elisp-artifact/runtime-image commands and
-           ;; the bare-file-path fallback -- all genuine CLI subcommand paths, so
-           ;; an uncaught error should report+exit non-zero like --eval/--load
-           ;; (DEFECT-1/DEFECT-2 fix; not the REPL).
-           (nl_eval_source_all src cursor result pool out ctx builtin_sym 1)
+           ;; report_errors=3 for artifact/runtime command replay: stashed
+           ;; errors still report+exit nonzero, but the documented
+           ;; inline-substrate flagless transient remains silent.  The bare file
+           ;; fallback is user source, so keep mode 1: flagless aborts report and
+           ;; exit nonzero just like --load.
+           (nl_eval_source_all
+            src cursor result pool out ctx builtin_sym
+            (if (= (nl_runtime_image_command_p path) 1)
+                3
+              (if (= (nl_artifact_command_p path) 1)
+                  3
+                (if (= (nl_cstr_eq_eval_elisp_artifact path) 1)
+                    3
+                  (if (= (nl_cstr_eq_exec_elisp_artifact path) 1)
+                      3
+                    1)))))
            (ptr-write-u64 268436216 0 1)
            (if (= (ptr-read-u64 268435464 0) 0)
                (ptr-read-u64 out 8)
@@ -14528,14 +14604,44 @@ signalled abort it builds err_out=(TAG . VAL) from the M6 arena stash so
         (nelisp_env_bind_local mirror_ptr frames_ptr name_ptr tail_slot out_vec_slot 0))))
   "Standalone reader fix for required-plus-&rest formal binding.")
 
+(defconst nelisp-standalone--reader-env-stash-signal-fixed
+  '(defun nl_env_stash_signal (env signal_slot)
+     (let* ((name_sym_slot (alloc-bytes 32 8))
+            (tag_ptr (nl_cons_car_ptr signal_slot))
+            (val_ptr (nl_cons_cdr_ptr signal_slot)))
+       (seq
+        (nl_env_stash_write_name_sym name_sym_slot)
+        (nl_env_set_value env name_sym_slot signal_slot)
+        ;; Formal-binding errors used to write only nelisp--last-signal-data
+        ;; in the Env.  Top-level standalone reporting reads the M6 arena
+        ;; stash, so mirror the same (TAG . VAL) signal there as well.
+        (ptr-write-u64 268435480 0 (ptr-read-u64 tag_ptr 0))
+        (ptr-write-u64 (+ 268435480 8) 0 (ptr-read-u64 (+ tag_ptr 8) 0))
+        (ptr-write-u64 (+ 268435480 16) 0 (ptr-read-u64 (+ tag_ptr 16) 0))
+        (ptr-write-u64 (+ 268435480 24) 0 (ptr-read-u64 (+ tag_ptr 24) 0))
+        (ptr-write-u64 268435512 0 (ptr-read-u64 val_ptr 0))
+        (ptr-write-u64 (+ 268435512 8) 0 (ptr-read-u64 (+ val_ptr 8) 0))
+        (ptr-write-u64 (+ 268435512 16) 0 (ptr-read-u64 (+ val_ptr 16) 0))
+        (ptr-write-u64 (+ 268435512 24) 0 (ptr-read-u64 (+ val_ptr 24) 0))
+        (ptr-write-u64 268435472 0 1)
+        (atomic-fetch-add 268435544 1)
+        1)))
+  "M6-visible replacement for env-leaves-bind `nl_env_stash_signal'.")
+
 (defun nelisp-standalone--patch-env-leaves-bind-rest (src)
-  "Return env-leaves-bind SRC with rc/lifetime-safe `nl_bf_bind_rest'."
+  "Return env-leaves-bind SRC with reader fixes.
+This swaps `nl_bf_bind_rest' for the rc/lifetime-safe version and makes
+`nl_env_stash_signal' mirror formal-binding signals into the M6 arena stash."
   (cons (car src)
         (mapcar (lambda (form)
-                  (if (and (consp form) (eq (car form) 'defun)
-                           (eq (cadr form) 'nl_bf_bind_rest))
-                      nelisp-standalone--reader-bind-rest-fixed
-                    form))
+                  (cond
+                   ((and (consp form) (eq (car form) 'defun)
+                         (eq (cadr form) 'nl_bf_bind_rest))
+                    nelisp-standalone--reader-bind-rest-fixed)
+                   ((and (consp form) (eq (car form) 'defun)
+                         (eq (cadr form) 'nl_env_stash_signal))
+                    nelisp-standalone--reader-env-stash-signal-fixed)
+                   (t form)))
                 (cdr src))))
 
 ;; rc-correct nl_apply_do_fset (Doc 137 M3).  The shipped handler in
