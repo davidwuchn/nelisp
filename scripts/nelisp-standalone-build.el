@@ -3712,12 +3712,12 @@ unresolved at link time."
     ;; object set, so a from-roots per-type walk that records pointer fields
     ;; (the actual swizzle, step 3b-ii) will cover every object the dump
     ;; bulk-copies.  REUSES the battle-tested GC mark-from-roots
-    ;; (`nl_gc_mark_recorded_contexts' / `-rootstack' / `-symentry', the same
-    ;; calls `nl_gc_collect_from_recorded_roots' makes) so no per-type walker is
-    ;; re-implemented; then linearly counts the marked (reachable) blocks and
-    ;; CLEARS the marks back to 0, leaving the heap exactly as before (NO
-    ;; sweep -> nothing freed).  The GC-in-progress flag (ctx+24) is held so a
-    ;; mid-walk safepoint cannot re-enter.  Returns (REACHABLE TOTAL):
+    ;; (`nl_gc_mark_recorded_contexts' / `-rootstack' / `-symentry',
+    ;; the same persisted-root calls the dump relocation uses) so no per-type
+    ;; walker is re-implemented; then linearly counts the marked (reachable)
+    ;; blocks and CLEARS the marks back to 0, leaving the heap exactly as before
+    ;; (NO sweep -> nothing freed).  The GC-in-progress flag (ctx+24) is held so
+    ;; a mid-walk safepoint cannot re-enter.  Returns (REACHABLE TOTAL):
     ;; REACHABLE ~= LIVE from `bf_arena_walk_verify' confirms root coverage.
     (defun bf_arena_mr_chunk (chunk reach total)
       (let* ((cbase (ptr-read-u64 chunk 0))
@@ -3963,21 +3963,62 @@ unresolved at link time."
                         (if (= tag 10)
                             (nl_fa_field (+ sp 8) (ptr-read-u64 sp 8) ds span dest cin cout dir)
                           0)))))))))))
-    ;; step 3c (all roots): walk every recorded frame's roots + the shared
-    ;; symentry, mirroring `nl_gc_mark_recorded_frame' / `-contexts_from' /
-    ;; `nl_gc_mark_symentry' so the swizzle/relocate reaches the COMPLETE live
-    ;; graph (globals + frame stack + unbound marker + the per-frame reader
-    ;; transients result/out/src/cursor/bsym), not just frame[0] globals.
+    (defun nl_fa_pool_slots (base i cap ds span dest cin cout dir)
+      (let* ((k i))
+        (while (< k cap)
+          (nl_seq2 (nl_fa_slot (+ base (* k 32)) ds span dest cin cout dir)
+                   (setq k (+ k 1))))
+        0))
+    (defun nl_fa_pool (base cap ds span dest cin cout dir)
+      (if (= base 0) 0
+        (nl_fa_pool_slots base 0 cap ds span dest cin cout dir)))
+    (defun nl_fa_mirror_buckets (mirror ds span dest cin cout dir)
+      (if (= (sexp-tag mirror) 12)
+          (let* ((mirror_box (ptr-read-u64 mirror 8))
+                 (mirror_data (if (= (nl_gc_in_arena mirror_box) 0) 0
+                                (ptr-read-u64 mirror_box 32))))
+            (if (= (nl_gc_in_arena mirror_data) 0) 0
+              (let* ((ht_word (ptr-read-u64 mirror_data 0)))
+                (if (= (logand ht_word 1) 1) 0
+                  (if (= (nl_gc_in_arena ht_word) 0) 0
+                    (if (= (sexp-tag ht_word) 12)
+                        (let* ((ht_box (ptr-read-u64 ht_word 8))
+                               (ht_data (if (= (nl_gc_in_arena ht_box) 0) 0
+                                          (ptr-read-u64 ht_box 32))))
+                          (if (= (nl_gc_in_arena ht_data) 0) 0
+                            (let* ((buckets_word (ptr-read-u64 (+ ht_data 8) 0)))
+                              (if (= (logand buckets_word 1) 1) 0
+                                (if (= (nl_gc_in_arena buckets_word) 0) 0
+                                  (nl_seq2
+                                   (nl_fa_field (+ ht_data 8) buckets_word ds span dest cin cout dir)
+                                   (if (= (nl_gc_mark_block buckets_word) 0) 0
+                                     (nl_fa_slot buckets_word ds span dest cin cout dir))))))))
+                      0))))))
+        0))
+    (defun nl_fa_recorded_slot (sp ds span dest cin cout dir)
+      (if (= sp 0) 0
+        (nl_fa_slot sp ds span dest cin cout dir)))
+    (defun nl_fa_recorded_env (env ds span dest cin cout dir)
+      (if (= env 0) 0
+        (nl_seq2 (nl_fa_recorded_slot (+ env 0) ds span dest cin cout dir)
+         (nl_seq2 (nl_fa_mirror_buckets (+ env 0) ds span dest cin cout dir)
+          (nl_seq2 (nl_fa_recorded_slot (+ env 32) ds span dest cin cout dir)
+                   (nl_fa_recorded_slot (+ env 64) ds span dest cin cout dir))))))
+    ;; step 3c (all roots): walk every recorded frame's roots + global roots,
+    ;; mirroring `nl_gc_mark_recorded_frame' / `-contexts_from' /
+    ;; `nl_gc_mark_rootstack' / `nl_gc_mark_symentry' so the persisted
+    ;; relocation reaches the same pointer-slot families as GC.  In
+    ;; particular, POOL is a raw cap*32 Sexp buffer, not a single slot; missing
+    ;; those interiors leaves aliased Symbol/String buffers unre-based.
     (defun nl_fa_frame_at (base ds span dest cin cout dir)
-      (let ((env (ptr-read-u64 base 0)))
-        (nl_seq2 (nl_fa_slot (+ env 0) ds span dest cin cout dir)
-         (nl_seq2 (nl_fa_slot (+ env 32) ds span dest cin cout dir)
-          (nl_seq2 (nl_fa_slot (+ env 64) ds span dest cin cout dir)
-           (nl_seq2 (nl_fa_slot (ptr-read-u64 base 8) ds span dest cin cout dir)
-            (nl_seq2 (nl_fa_slot (ptr-read-u64 base 16) ds span dest cin cout dir)
-             (nl_seq2 (nl_fa_slot (ptr-read-u64 base 32) ds span dest cin cout dir)
-              (nl_seq2 (nl_fa_slot (ptr-read-u64 base 40) ds span dest cin cout dir)
-                       (nl_fa_slot (ptr-read-u64 base 48) ds span dest cin cout dir))))))))))
+      (nl_seq2
+       (nl_fa_recorded_env (ptr-read-u64 base 0) ds span dest cin cout dir)
+       (nl_seq2 (nl_fa_recorded_slot (ptr-read-u64 base 8) ds span dest cin cout dir)
+        (nl_seq2 (nl_fa_recorded_slot (ptr-read-u64 base 16) ds span dest cin cout dir)
+         (nl_seq2 (nl_fa_pool (ptr-read-u64 base 24) (nl_gc_pool_cap) ds span dest cin cout dir)
+          (nl_seq2 (nl_fa_recorded_slot (ptr-read-u64 base 32) ds span dest cin cout dir)
+           (nl_seq2 (nl_fa_recorded_slot (ptr-read-u64 base 40) ds span dest cin cout dir)
+                    (nl_fa_recorded_slot (ptr-read-u64 base 48) ds span dest cin cout dir))))))))
     (defun nl_fa_frames_from (i depth ds span dest cin cout dir)
       (if (< i depth)
           (nl_seq2
@@ -3985,12 +4026,26 @@ unresolved at link time."
                            ds span dest cin cout dir)
            (nl_fa_frames_from (+ i 1) depth ds span dest cin cout dir))
         0))
+    (defun nl_fa_rootstack_walk (p end ds span dest cin cout dir)
+      (if (< p end)
+          (nl_seq2 (nl_fa_slot p ds span dest cin cout dir)
+                   (nl_fa_rootstack_walk (+ p 32) end ds span dest cin cout dir))
+        0))
+    (defun nl_fa_rootstack (ds span dest cin cout dir)
+      (if (= (ptr-read-u64 (data-addr nl_rootstack_top) 0) 0) 0
+        (nl_fa_rootstack_walk (data-addr nl_rootstack_region)
+                              (ptr-read-u64 (data-addr nl_rootstack_top) 0)
+                              ds span dest cin cout dir)))
+    (defun nl_fa_symentry (ds span dest cin cout dir)
+      (if (= (ptr-read-u64 268436328 0) 0) 0
+        (if (= (nl_gc_mark_block (ptr-read-u64 268436328 0)) 0) 0
+          (nl_fa_slot (ptr-read-u64 268436328 0) ds span dest cin cout dir))))
     (defun nl_fa_roots (ds span dest cin cout dir)
       (nl_seq2
        (nl_fa_frames_from 0 (ptr-read-u64 (data-addr nl_gc_loop_ctx) 0)
                           ds span dest cin cout dir)
-       (if (= (ptr-read-u64 268436328 0) 0) 0
-         (nl_fa_slot (ptr-read-u64 268436328 0) ds span dest cin cout dir))))
+       (nl_seq2 (nl_fa_rootstack ds span dest cin cout dir)
+                (nl_fa_symentry ds span dest cin cout dir))))
     (defun bf_arena_swizzle_verify (out)
       (let* ((head (ptr-read-u64 268436160 0))
              (sstart (ptr-read-u64 (+ head 24) 0))
