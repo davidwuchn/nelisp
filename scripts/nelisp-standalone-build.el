@@ -7150,6 +7150,9 @@ Wave-2 (C) appends bf_ash (shl/sar compose) + bf_str_lt (byte-lexicographic).")
     ((:lit "nelisp-process-status") . (wf_write_int out (nl_bi_process_status_code (wf_arg_ptr args 0))))
     ((:lit "nelisp-process-exit-status") . (wf_write_int out (nl_bi_process_exit_code (wf_arg_ptr args 0))))
     ((:lit "nelisp-process-read-output") . (nl_bi_process_read_output args out))
+    ((:lit "nelisp-process-write") . (nl_bi_process_write args out))
+    ((:lit "nelisp-process-close-stdin") . (nl_bi_process_close_stdin args out))
+    ((:lit "nelisp-process-poll") . (nl_bi_process_poll args out))
     ((:lit "nelisp-process-wait") . (wf_write_int out (nl_bi_process_wait_object (wf_arg_ptr args 0))))
     ((:lit "nelisp-process-delete") . (seq (nl_bi_process_delete_object (wf_arg_ptr args 0)) (wf_write_nil out)))
     ((:lit "nelisp-portable-syscall") . (wf_write_int out (nl_bi_portable_syscall args)))
@@ -7181,8 +7184,9 @@ ash/logand/logior/logxor/lognot + string<.")
     "nelisp-process-start-process" "nelisp-process-object-p"
     "nelisp-process-async-ready-p" "nelisp-process-pid"
     "nelisp-process-status" "nelisp-process-exit-status"
-    "nelisp-process-read-output" "nelisp-process-wait"
-    "nelisp-process-delete" "nelisp-portable-syscall"
+    "nelisp-process-read-output" "nelisp-process-write"
+    "nelisp-process-close-stdin" "nelisp-process-poll"
+    "nelisp-process-wait" "nelisp-process-delete" "nelisp-portable-syscall"
     "ptr-call" "thread-spawn" "thread-join" "fork-spawn")
   "Builtin names added by Wave-1 (B) breadth glue; appended to
 `nelisp-standalone--reader-builtins'.")
@@ -7931,15 +7935,17 @@ POSIX-style child-fd setup step (see
 	                0)
 	            0)
 	        0))
-	    (defun nl_bi_process_make_object (pid outfd out)
+	    (defun nl_bi_process_make_object (pid outfd infd out)
 	      (seq
-	       (vector-make 5 out)
+	       (vector-make 6 out)
 	       (nl_bi_process_set_int out 0 1886547811)
 	       (nl_bi_process_set_int out 1 pid)
 	       (nl_bi_process_set_int out 2 outfd)
 	       ;; status: 0 running, 1 exited, 2 failed/signalled, 3 deleted.
 	       (nl_bi_process_set_int out 3 0)
 	       (nl_bi_process_set_int out 4 -1)
+	       ;; stdin fd owned by the parent side; -1 after EOF/close.
+	       (nl_bi_process_set_int out 5 infd)
 	       0))
 	    (defun nl_bi_process_mark_exit (proc code)
 	      (seq
@@ -7989,11 +7995,51 @@ POSIX-style child-fd setup step (see
 	                  (nl_seq2 (wf_write_nil out) 0)
 	                (nl_seq2 (nl_alloc_str buf n out) 0)))
 	          (nl_seq2 (wf_write_nil out) 0))))
+	    (defun nl_bi_process_write (args out)
+	      (let* ((proc (wf_arg_ptr args 0))
+	             (str (wf_arg_ptr args 1)))
+	        (if (= (nl_bi_process_object_p_raw proc) 1)
+	            (let* ((fd (nl_bi_process_get_int proc 5))
+	                   (n (nl_os_write_file_handle
+	                       fd (nl_bi_strptr str) (nl_bi_strlen str))))
+	              (if (< n 0)
+	                  (nl_seq2 (wf_write_nil out) 0)
+	                (nl_seq2 (wf_write_int out n) 0)))
+	          (nl_seq2 (wf_write_nil out) 0))))
+	    (defun nl_bi_process_close_stdin (args out)
+	      (let* ((proc (wf_arg_ptr args 0)))
+	        (if (= (nl_bi_process_object_p_raw proc) 1)
+	            (let* ((fd (nl_bi_process_get_int proc 5)))
+	              (seq
+	               (if (>= fd 0) (nl_os_close_handle fd) 0)
+	               (nl_bi_process_set_int proc 5 -1)
+	               (wf_write_t out)))
+	          (wf_write_nil out))))
+	    (defun nl_bi_process_poll_one (proc out)
+	      (let* ((fd (nl_bi_process_get_int proc 2))
+	             (ready (if (>= fd 0) (nl_os_process_poll_readable fd) 0))
+	             (status (nl_bi_process_status_code proc))
+	             (exitcode (nl_bi_process_get_int proc 4))
+	             (v0 (alloc-bytes 32 8))
+	             (v1 (alloc-bytes 32 8))
+	             (v2 (alloc-bytes 32 8)))
+	        (seq
+	         (vector-make 3 out)
+	         (wf_write_int v0 ready)
+	         (vector-slot-set out 0 v0)
+	         (wf_write_int v1 (if (= status 0) 0 1))
+	         (vector-slot-set out 1 v1)
+	         (wf_write_int v2 exitcode)
+	         (vector-slot-set out 2 v2)
+	         0)))
+	    (defun nl_bi_process_poll (args out)
+	      (nl_bi_process_poll_one (wf_arg_ptr args 0) out))
 	    (defun nl_bi_process_delete_object (proc)
 	      (if (= (nl_bi_process_object_p_raw proc) 1)
 	          (let* ((status (nl_bi_process_get_int proc 3))
 	                 (pid (nl_bi_process_get_int proc 1))
-	                 (fd (nl_bi_process_get_int proc 2)))
+	                 (fd (nl_bi_process_get_int proc 2))
+	                 (infd (nl_bi_process_get_int proc 5)))
 	            (seq
 	             (if (= status 0)
 	                 (seq
@@ -8001,7 +8047,9 @@ POSIX-style child-fd setup step (see
 	                  (nl_bi_process_refresh proc 0))
 	               0)
 	             (if (>= fd 0) (nl_os_close_handle fd) 0)
+	             (if (>= infd 0) (nl_os_close_handle infd) 0)
 	             (nl_bi_process_set_int proc 2 -1)
+	             (nl_bi_process_set_int proc 5 -1)
 	             (nl_bi_process_set_int proc 3 3)
 	             0))
 	        0))
@@ -8009,8 +8057,10 @@ POSIX-style child-fd setup step (see
 	      (let* ((program_sx (wf_arg_ptr args 0))
 	             (arglst (nl_cons_cdr_ptr args))
 	             (pipev (alloc-bytes 8 4))
+	             (inpipev (alloc-bytes 8 4))
 	             (envp (alloc-bytes 8 8))
 	             (pipe_rc 0)
+	             (inpipe_rc 0)
 	             (pid 0))
 	        (seq
 	         (ptr-write-u64 envp 0 0)
@@ -8021,29 +8071,45 @@ POSIX-style child-fd setup step (see
 	         (setq pipe_rc (nl_os_process_pipe pipev))
 	         (if (< pipe_rc 0)
 	             (wf_write_nil out)
-	           (let* ((readfd (ptr-read-u32 pipev 0))
-	                  (writefd (ptr-read-u32 pipev 4))
-	                  (path (nl_bi_make_cpath program_sx))
-	                  (argv (nl_bi_process_make_argv program_sx arglst)))
-	             (seq
-	              (setq pid (nl_os_process_fork))
-	              (if (= pid 0)
-	                  (seq
-	                   (nl_os_close_handle readfd)
-	                   (nl_os_process_dup2 writefd 1)
-	                   (nl_os_process_dup2 writefd 2)
-	                   (nl_os_close_handle writefd)
-	                   (nl_os_process_execve path argv envp)
-	                   (nl_os_process_exit127))
-	                (if (< pid 0)
-	                    (seq
-	                     (nl_os_close_handle readfd)
-	                     (nl_os_close_handle writefd)
-	                     (wf_write_nil out))
-	                  (seq
-	                   (nl_os_close_handle writefd)
-	                   (nl_os_process_set_nonblock readfd)
-	                   (nl_bi_process_make_object pid readfd out))))))))))))
+	           (seq
+	            (setq inpipe_rc (nl_os_process_pipe inpipev))
+	            (if (< inpipe_rc 0)
+	                (seq
+	                 (nl_os_close_handle (ptr-read-u32 pipev 0))
+	                 (nl_os_close_handle (ptr-read-u32 pipev 4))
+	                 (wf_write_nil out))
+	              (let* ((readfd (ptr-read-u32 pipev 0))
+	                     (writefd (ptr-read-u32 pipev 4))
+	                     (stdin_readfd (ptr-read-u32 inpipev 0))
+	                     (stdin_writefd (ptr-read-u32 inpipev 4))
+	                     (path (nl_bi_make_cpath program_sx))
+	                     (argv (nl_bi_process_make_argv program_sx arglst)))
+	                (seq
+	                 (setq pid (nl_os_process_fork))
+	                 (if (= pid 0)
+	                     (seq
+	                      (nl_os_close_handle readfd)
+	                      (nl_os_close_handle stdin_writefd)
+	                      (nl_os_process_dup2 stdin_readfd 0)
+	                      (nl_os_process_dup2 writefd 1)
+	                      (nl_os_process_dup2 writefd 2)
+	                      (nl_os_close_handle stdin_readfd)
+	                      (nl_os_close_handle writefd)
+	                      (nl_os_process_execve path argv envp)
+	                      (nl_os_process_exit127))
+	                   (if (< pid 0)
+	                       (seq
+	                        (nl_os_close_handle readfd)
+	                        (nl_os_close_handle writefd)
+	                        (nl_os_close_handle stdin_readfd)
+	                        (nl_os_close_handle stdin_writefd)
+	                        (wf_write_nil out))
+	                     (seq
+	                      (nl_os_close_handle writefd)
+	                      (nl_os_close_handle stdin_readfd)
+	                      (nl_os_process_set_nonblock readfd)
+	                      (nl_bi_process_make_object
+	                       pid readfd stdin_writefd out))))))))))))))
 
 ;; nelisp-standalone--fileio-forms-part2 ends right after
 ;; `nl_bi_process_start_process'.  `nl_bi_process_call_process' (region B)
@@ -10623,8 +10689,9 @@ value (matches the binary's M8 read+eval-loop driver)."
     "nelisp-process-start-process" "nelisp-process-object-p"
     "nelisp-process-async-ready-p" "nelisp-process-pid"
     "nelisp-process-status" "nelisp-process-exit-status"
-    "nelisp-process-read-output" "nelisp-process-wait"
-    "nelisp-process-delete" "nelisp-portable-syscall"
+    "nelisp-process-read-output" "nelisp-process-write"
+    "nelisp-process-close-stdin" "nelisp-process-poll"
+    "nelisp-process-wait" "nelisp-process-delete" "nelisp-portable-syscall"
     "ptr-call" "thread-spawn" "thread-join" "fork-spawn")
   "Builtin names installed into the reader binary's mirror.
 Each is dispatched by the pure-elisp `nelisp_apply_function' (see
@@ -12802,6 +12869,7 @@ boundary (Doc 151 Phase B):
 	       (defun nl_os_process_dup2 (oldfd newfd) -1)
 	       (defun nl_os_process_pipe (pipev) -1)
 	       (defun nl_os_process_set_nonblock (fd) -1)
+	       (defun nl_os_process_poll_readable (fd) -1)
 	       (defun nl_os_process_kill (pid sig) -1)
 	       (defun nl_os_process_exit127 () -1)
 	       (defun nl_os_syscall_nr_getpid () -1)
@@ -12977,6 +13045,16 @@ boundary (Doc 151 Phase B):
 	         (syscall-direct 42 pipev 0 0 0 0 0))
 	       (defun nl_os_process_set_nonblock (fd)
 	         (syscall-direct 92 fd 4 4 0 0 0))
+	       (defun nl_os_process_poll_readable (fd)
+	         (let* ((pfd (alloc-bytes 8 4)))
+	           (seq
+	            (ptr-write-u32 pfd 0 fd)
+	            (ptr-write-u32 pfd 4 1)
+	            (let* ((rc (syscall-direct 230 pfd 1 0 0 0 0))
+	                   (revents (/ (ptr-read-u32 pfd 4) 65536)))
+	              (if (> rc 0)
+	                  (if (= (logand revents 25) 0) 0 1)
+	                0)))))
 	       (defun nl_os_process_kill (pid sig)
 	         (syscall-direct 37 pid sig 0 0 0 0))
 	       (defun nl_os_process_exit127 ()
@@ -13034,6 +13112,19 @@ boundary (Doc 151 Phase B):
          (syscall-direct 59 pipev 0 0 0 0 0))      ; pipe2(pipev,0)
        (defun nl_os_process_set_nonblock (fd)
          (syscall-direct 25 fd 4 2048 0 0 0))      ; fcntl(F_SETFL,O_NONBLOCK)
+       (defun nl_os_process_poll_readable (fd)
+         (let* ((pfd (alloc-bytes 8 4))
+                (ts (alloc-bytes 16 8)))
+           (seq
+            (ptr-write-u32 pfd 0 fd)
+            (ptr-write-u32 pfd 4 1)
+            (ptr-write-u64 ts 0 0)
+            (ptr-write-u64 ts 8 0)
+            (let* ((rc (syscall-direct 73 pfd 1 ts 0 0 0))
+                   (revents (/ (ptr-read-u32 pfd 4) 65536)))
+              (if (> rc 0)
+                  (if (= (logand revents 25) 0) 0 1)
+                0)))))
        (defun nl_os_process_kill (pid sig)
          (syscall-direct 129 pid sig 0 0 0 0))
        (defun nl_os_process_exit127 ()
@@ -13087,6 +13178,16 @@ boundary (Doc 151 Phase B):
 	         (syscall-direct 22 pipev 0 0 0 0 0))
 	       (defun nl_os_process_set_nonblock (fd)
 	         (syscall-direct 72 fd 4 2048 0 0 0))
+	       (defun nl_os_process_poll_readable (fd)
+	         (let* ((pfd (alloc-bytes 8 4)))
+	           (seq
+	            (ptr-write-u32 pfd 0 fd)
+	            (ptr-write-u32 pfd 4 1)
+	            (let* ((rc (syscall-direct 7 pfd 1 0 0 0 0))
+	                   (revents (/ (ptr-read-u32 pfd 4) 65536)))
+	              (if (> rc 0)
+	                  (if (= (logand revents 25) 0) 0 1)
+	                0)))))
 	       (defun nl_os_process_kill (pid sig)
 	         (syscall-direct 62 pid sig 0 0 0 0))
 	       (defun nl_os_process_exit127 ()
