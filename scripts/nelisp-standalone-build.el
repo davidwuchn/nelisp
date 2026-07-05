@@ -436,17 +436,19 @@ storage — not an arena reservation."
    ;; diagnostic block (+0 trip-count, +8/16/24 first-bad cur/bt/want, +32
    ;; poison-on-free enable, +40 poison-fill count).  Read/toggle via the
    ;; `nelisp--debug-switch' builtin.  Zero-init = disabled = zero behaviour change.
-   ;; Doc 152 §11.41 Stage 4a: nl_gc_loop_ctx (3648B) after nl_gc_diag =
-   ;; depth-indexed loop-GC-context stack.  64B control header (depth@+0,
-   ;; enable@+8, precise_only@+16, in_progress@+24, alloc_debt@+32,
-   ;; alloc_limit@+40) + 64 frames x 56B @ +64 (env/result/out/pool/src/cursor/
-   ;; bsym).  Dormant in 4a (no caller); driver root recording + collect land in 4b.
-   ;; multi-chunk dump: +3728 = nl_fa_tbl_base (8B) -- relocation-table base override
+   ;; Doc 152 §11.41 Stage 4a / Doc 33 item 228: nl_gc_loop_ctx
+   ;; after nl_gc_diag = depth-indexed GC-context stack.  64B control header
+   ;; (depth@+0, enable@+8, precise_only@+16, in_progress@+24,
+   ;; alloc_debt@+32, alloc_limit@+40) + 1024 frames x 56B @ +64
+   ;; (env/result/out/pool/src/cursor/bsym).  The stack is evaluator-wide:
+   ;; every nelisp_eval_call records its current form/env/out triple, while
+   ;; driver/load frames additionally record pool/src/cursor/bsym.
+   ;; multi-chunk dump: +57488 = nl_fa_tbl_base (8B) -- relocation-table base override
    ;; for `nl_fa_emit'.  0 = use the default dest+span+isz+256 slot (single-chunk);
    ;; non-zero = a caller-chosen valid address (the multi-chunk dump puts the table
    ;; in the intern region's free area, since chunk-0 is full and dest+total+isz is
    ;; past chunk-0's mmap).
-   ;; PERF (2026-07-03): +3736/+3768 = nl_frame_push_sym0 / nl_frame_push_sym1
+   ;; PERF (2026-07-03): +57496/+57528 = nl_frame_push_sym0 / nl_frame_push_sym1
    ;; (32B each) -- two driver-owned Symbol Sexp boxes shared by every
    ;; `nl_push_and_bind' / `nl_env_push_captured' call.  `driver' writes each
    ;; ONCE (via `nl_frame_scratch_write_lexframe_sym' / `_hashsym') before the
@@ -464,7 +466,7 @@ storage — not an arena reservation."
    ;; `nl_sexp_clone_into') -- it never mutates the source Sexp, so aliasing
    ;; the source across calls is sound; (3) Symbol Sexps are immutable in
    ;; the reader (only tag-8 vectors are ever `bf_aset'-mutated).
-   ;; fix/dynalign-memory-slot: +3800+1MiB (after nl_frame_push_sym1) =
+   ;; fix/dynalign-memory-slot: +57560+1MiB (after nl_frame_push_sym1) =
    ;; nl_dynalign_rsp_save (8B) -- pre-align rsp spill slot for the AOT
    ;; compiler's `win64-dynamic-align-p' extern-call arm (WinAPI calls:
    ;; CreateFileW / CreateProcessW / ...).  Written and read ONLY by
@@ -473,7 +475,7 @@ storage — not an arena reservation."
    ;; `nelisp-aot-compiler--win64-rsp-save-symbol' for the full rationale
    ;; (a callee-saved register clobbered live interpreter state; a fixed
    ;; absolute arena address is not guaranteed mapped post-Doc-140).
-   ;; perf/macroexpansion-cache: +3808+1MiB (after nl_dynalign_rsp_save) =
+   ;; perf/macroexpansion-cache: +57568+1MiB (after nl_dynalign_rsp_save) =
    ;; three NEW 8B control slots for the macro-expansion cache
    ;; (nl_mxcache_epoch / nl_mxcache_table_base / nl_mxcache_disable_lookup).
    ;; Deliberately placed in this ordinary, never-dumped BSS unit rather than
@@ -492,7 +494,7 @@ storage — not an arena reservation."
    ;; BSS flag (= allow `nl_val_clone_into' to shallow-rebox safe boxes).
    ;; `(nelisp--debug-switch 15)' sets it to 1 to force the legacy fresh-box
    ;; clone path, and `(nelisp--debug-switch 16)' clears it for A/B checks.
-   (list (cons 'bss (+ 3808 1048576 48)))
+   (list (cons 'bss (+ 57568 1048576 48)))
    (list (nelisp-link-symbol "nl_arena_base" 0
                              :section 'bss :bind 'global :type 'object)
          (nelisp-link-symbol "nl_rootstack_top" 8
@@ -503,25 +505,25 @@ storage — not an arena reservation."
                              :section 'bss :bind 'global :type 'object)
          (nelisp-link-symbol "nl_gc_loop_ctx" (+ 80 1048576)
                              :section 'bss :bind 'global :type 'object)
-         (nelisp-link-symbol "nl_fa_tbl_base" (+ 3728 1048576)
+         (nelisp-link-symbol "nl_fa_tbl_base" (+ 57488 1048576)
                              :section 'bss :bind 'global :type 'object)
-         (nelisp-link-symbol "nl_frame_push_sym0" (+ 3736 1048576)
+         (nelisp-link-symbol "nl_frame_push_sym0" (+ 57496 1048576)
                              :section 'bss :bind 'global :type 'object)
-         (nelisp-link-symbol "nl_mxcache_epoch" (+ 3808 1048576)
+         (nelisp-link-symbol "nl_mxcache_epoch" (+ 57568 1048576)
                              :section 'bss :bind 'global :type 'object)
-         (nelisp-link-symbol "nl_mxcache_table_base" (+ 3816 1048576)
+         (nelisp-link-symbol "nl_mxcache_table_base" (+ 57576 1048576)
                              :section 'bss :bind 'global :type 'object)
-         (nelisp-link-symbol "nl_mxcache_disable_lookup" (+ 3824 1048576)
+         (nelisp-link-symbol "nl_mxcache_disable_lookup" (+ 57584 1048576)
                              :section 'bss :bind 'global :type 'object)
-         (nelisp-link-symbol "nl_bind_clone_force" (+ 3832 1048576)
+         (nelisp-link-symbol "nl_bind_clone_force" (+ 57592 1048576)
                              :section 'bss :bind 'global :type 'object)
-         (nelisp-link-symbol "nl_fvcache_table_base" (+ 3840 1048576)
+         (nelisp-link-symbol "nl_fvcache_table_base" (+ 57600 1048576)
                              :section 'bss :bind 'global :type 'object)
-         (nelisp-link-symbol "nl_fvcache_disable_lookup" (+ 3848 1048576)
+         (nelisp-link-symbol "nl_fvcache_disable_lookup" (+ 57608 1048576)
                              :section 'bss :bind 'global :type 'object)
-         (nelisp-link-symbol "nl_frame_push_sym1" (+ 3768 1048576)
+         (nelisp-link-symbol "nl_frame_push_sym1" (+ 57528 1048576)
                              :section 'bss :bind 'global :type 'object)
-         (nelisp-link-symbol "nl_dynalign_rsp_save" (+ 3800 1048576)
+         (nelisp-link-symbol "nl_dynalign_rsp_save" (+ 57560 1048576)
                              :section 'bss :bind 'global :type 'object))
    nil))
 
@@ -2720,57 +2722,113 @@ arm64 Linux has no legacy x86 numbering)."
                (nl_compact_clear_fl 0)
                (nl_compact_unpin_src)
                (nl_compact_unpin_roots))))))))
-    ;; Doc 152 §11.41 Stage 4a: loop-GC-context stack ops (DORMANT — no caller
-    ;; yet; the driver root recording + mid-form collect_from_recorded_roots land in 4b under
-    ;; poison validation, so these change no runtime behaviour).  The driver will
-    ;; push the executing top-level form's precise root-set before eval and pop
-    ;; after the boundary collect; a mid-form collect reads frame[depth-1].
+    ;; Doc 152 §11.41 Stage 4a / Doc 33 item 228: evaluator GC-context stack
+    ;; ops.  The driver pushes full reader roots (env/result/out/pool/src/
+    ;; cursor/bsym); every nelisp_eval_call pushes the current form/env/out
+    ;; triple with the reader-only fields set to 0.  A mid-form collect marks
+    ;; all recorded frames, so native evaluator continuations no longer depend
+    ;; on the conservative stack scan.
+    (defun nl_gc_ctx_max_depth () 1024)
     (defun nl_gc_ctx_store (base env result out pool src cursor bsym)
       (seq (ptr-write-u64 base 0 env) (ptr-write-u64 base 8 result)
            (ptr-write-u64 base 16 out) (ptr-write-u64 base 24 pool)
            (ptr-write-u64 base 32 src) (ptr-write-u64 base 40 cursor)
            (ptr-write-u64 base 48 bsym) 0))
     (defun nl_gc_ctx_push (env result out pool src cursor bsym)
-      (if (< (ptr-read-u64 (data-addr nl_gc_loop_ctx) 0) 64)
+      (if (< (ptr-read-u64 (data-addr nl_gc_loop_ctx) 0) (nl_gc_ctx_max_depth))
           (nl_seq2
            (nl_gc_ctx_store
             (+ (data-addr nl_gc_loop_ctx)
                (+ 64 (* (ptr-read-u64 (data-addr nl_gc_loop_ctx) 0) 56)))
             env result out pool src cursor bsym)
-           (ptr-write-u64 (data-addr nl_gc_loop_ctx) 0
-                          (+ (ptr-read-u64 (data-addr nl_gc_loop_ctx) 0) 1)))
+           (nl_seq2
+            (ptr-write-u64 (data-addr nl_gc_loop_ctx) 0
+                           (+ (ptr-read-u64 (data-addr nl_gc_loop_ctx) 0) 1))
+            1))
+        0))
+    (defun nl_gc_eval_ctx_push (env result out _pad)
+      (if (< (ptr-read-u64 (data-addr nl_gc_loop_ctx) 0) (nl_gc_ctx_max_depth))
+          (let* ((base (+ (data-addr nl_gc_loop_ctx)
+                          (+ 64 (* (ptr-read-u64 (data-addr nl_gc_loop_ctx) 0) 56)))))
+            (seq
+             (ptr-write-u64 base 0 env)
+             (ptr-write-u64 base 8 result)
+             (ptr-write-u64 base 16 out)
+             (ptr-write-u64 base 24 0)
+             (ptr-write-u64 base 32 0)
+             (ptr-write-u64 base 40 0)
+             (ptr-write-u64 base 48 0)
+             (ptr-write-u64 (data-addr nl_gc_loop_ctx) 0
+                            (+ (ptr-read-u64 (data-addr nl_gc_loop_ctx) 0) 1))
+             1))
         0))
     (defun nl_gc_ctx_pop ()
       (if (> (ptr-read-u64 (data-addr nl_gc_loop_ctx) 0) 0)
           (ptr-write-u64 (data-addr nl_gc_loop_ctx) 0
                          (- (ptr-read-u64 (data-addr nl_gc_loop_ctx) 0) 1))
         0))
+    (defun nl_gc_ctx_pop_frame (env result out)
+      (if (> (ptr-read-u64 (data-addr nl_gc_loop_ctx) 0) 0)
+          (let* ((base (+ (data-addr nl_gc_loop_ctx)
+                          (+ 64 (* (- (ptr-read-u64 (data-addr nl_gc_loop_ctx) 0) 1) 56)))))
+            (if (= (ptr-read-u64 base 0) env)
+                (if (= (ptr-read-u64 base 8) result)
+                    (if (= (ptr-read-u64 base 16) out)
+                        (nl_gc_ctx_pop)
+                      0)
+                  0)
+              0))
+        0))
+    (defun nl_gc_eval_ctx_pop (env result out _pad)
+      (if (> (ptr-read-u64 (data-addr nl_gc_loop_ctx) 0) 0)
+          (let* ((base (+ (data-addr nl_gc_loop_ctx)
+                          (+ 64 (* (- (ptr-read-u64 (data-addr nl_gc_loop_ctx) 0) 1) 56)))))
+            (if (= (ptr-read-u64 base 0) env)
+                (if (= (ptr-read-u64 base 8) result)
+                    (if (= (ptr-read-u64 base 16) out)
+                        (nl_gc_ctx_pop)
+                      0)
+                  0)
+              0))
+        0))
     ;; ===== Doc 152 §11.41 Stage 4b step 2: sound mid-form collect =====
     ;; The driver records the executing top-level form's precise root-set into
     ;; nl_gc_loop_ctx (Stage 4b step 1); a mid-form collect reads those frames
-    ;; and runs a PRECISE-ONLY mark+sweep.  Unlike the boundary `nl_gc_collect',
-    ;; the MIDFORM mode NEVER scans the C-stack conservatively: a stale stack word
-    ;; that happens to mark a missed root would silently mask the very unsoundness
-    ;; the poison validation is built to expose (§11.41 refinement 2).  It also
-    ;; always SWEEPS (never compacts) -- mid-form objects must not move.
+    ;; and runs mark+sweep from the recorded frames.  It always SWEEPS (never
+    ;; compacts) -- mid-form objects must not move.  The mode flag below can
+    ;; still request precise-only marking for diagnostics, but the switch-5
+    ;; production validation path uses mode 0 so the conservative native-stack
+    ;; scan remains active as a safety net.
     ;;
     ;; Mark ONE recorded frame precisely: the same root arms as `nl_gc_mark_roots'
     ;; MINUS the conservative scan, the rootstack and the shared symentry (those
     ;; are global -- marked once per collection, not per frame).  `env' is the eval
     ;; ctx (mirror@+0 / frames@+32 / unbound@+64 inside the env block); `result' is
     ;; the executing form AST -- the root §11.34 missed.
+    (defun nl_gc_mark_recorded_slot (sp)
+      (if (= sp 0) 0
+        (nl_seq2
+         (nl_gc_conserv_owner sp) ; keep an owning scratch Sexp block if SP is one
+         (nl_gc_mark_slot sp))))
+    (defun nl_gc_mark_recorded_env (env)
+      (if (= env 0) 0
+        (nl_seq2 (nl_gc_mark_block env)
+         (nl_seq2 (nl_gc_mark_recorded_slot (+ env 0))     ; mirror / globals
+          (nl_seq2 (nl_gc_mark_mirror_buckets (+ env 0))
+           (nl_seq2 (nl_gc_mark_recorded_slot (+ env 32))  ; frame stack
+                    (nl_gc_mark_recorded_slot (+ env 64)))))))) ; unbound marker
+    (defun nl_gc_mark_recorded_pool (pool)
+      (if (= pool 0) 0
+        (nl_seq2 (nl_gc_mark_block pool)
+                 (nl_gc_mark_pool pool (nl_gc_pool_cap)))))
     (defun nl_gc_mark_recorded_frame (env result out pool src cursor bsym)
-      (nl_seq2 (nl_gc_mark_root_blocks env result out pool src cursor bsym)
-       (nl_seq2 (nl_gc_mark_slot (+ env 0))     ; mirror / globals
-        (nl_seq2 (nl_gc_mark_mirror_buckets (+ env 0))
-        (nl_seq2 (nl_gc_mark_slot (+ env 32))   ; frame stack
-         (nl_seq2 (nl_gc_mark_slot (+ env 64))  ; unbound marker
-          (nl_seq2 (nl_gc_mark_slot result)     ; executing form AST (§11.34 root)
-           (nl_seq2 (nl_gc_mark_slot out)       ; in-flight / last result
-            (nl_seq2 (nl_gc_mark_pool pool (nl_gc_pool_cap))
-             (nl_seq2 (nl_gc_mark_slot src)
-              (nl_seq2 (nl_gc_mark_slot cursor)
-                       (nl_gc_mark_slot bsym))))))))))))
+      (nl_seq2 (nl_gc_mark_recorded_env env)
+       (nl_seq2 (nl_gc_mark_recorded_slot result) ; executing form / subform
+        (nl_seq2 (nl_gc_mark_recorded_slot out)   ; in-flight / last result
+         (nl_seq2 (nl_gc_mark_recorded_pool pool)
+          (nl_seq2 (nl_gc_mark_recorded_slot src)
+           (nl_seq2 (nl_gc_mark_recorded_slot cursor)
+                    (nl_gc_mark_recorded_slot bsym))))))))
     ;; Read the 7-slot frame at BASE (env@+0/result@+8/out@+16/pool@+24/src@+32/
     ;; cursor@+40/bsym@+48) and mark it.  Reads are passed straight as args (no
     ;; across-call locals; mirrors `nl_gc_ctx_store').
@@ -2806,10 +2864,12 @@ arm64 Linux has no legacy x86 numbering)."
       (if (= (ptr-read-u64 268436328 0) 0) 0
         (nl_seq2 (nl_gc_mark_block (ptr-read-u64 268436328 0))
                  (nl_gc_mark_slot (ptr-read-u64 268436328 0)))))
-    ;; Mode-split mid-form collector.  mode 0 = TOPLEVEL (conservative scan
-    ;; allowed), mode 1 = MIDFORM (precise-only).  NL_GC_IN_PROGRESS (ctx+24) is a
-    ;; reentrancy guard.  Always mark+sweep (never compact): mid-form objects must
-    ;; stay put, and precise-only marking has no conservatively-found blocks to pin.
+    ;; Mode-split mid-form collector.  mode 0 = conservative scan allowed,
+    ;; mode 1 = precise-only.  NL_GC_IN_PROGRESS (ctx+24) is a reentrancy guard.
+    ;; Always mark+sweep (never compact): mid-form objects must stay put.  The
+    ;; evaluator ctx frames above provide the intended precise surface; the
+    ;; native-stack scan remains as belt-and-braces for call-adjacent temporaries
+    ;; that are not yet expressible in the 7-slot frame.
     (defun nl_gc_collect_from_recorded_roots (mode)
       (if (= (ptr-read-u64 (data-addr nl_gc_loop_ctx) 24) 1) 0
         (nl_seq2 (ptr-write-u64 (data-addr nl_gc_loop_ctx) 24 1)
@@ -2833,13 +2893,14 @@ arm64 Linux has no legacy x86 numbering)."
     ;; -- the SAME monotonic counter the boundary GC trips on; the chunk-0 bump
     ;; @268435456 caps at the first chunk and is useless here) crosses the
     ;; next-trigger watermark (ctx+40), then re-arm +16 MiB and bump the
-    ;; fired-count (ctx+32, diagnostic).  MIDFORM precise-only (mode 1).
+    ;; fired-count (ctx+32, diagnostic).  MIDFORM uses recorded frames plus the
+    ;; conservative scan (mode 0), never compaction.
     (defun nl_gc_midform_collect ()
       (if (= (ptr-read-u64 (data-addr nl_gc_loop_ctx) 8) 1)
           (if (< (ptr-read-u64 268436184 0)
                  (ptr-read-u64 (data-addr nl_gc_loop_ctx) 40))
               0
-            (nl_seq2 (nl_gc_collect_from_recorded_roots 1)
+             (nl_seq2 (nl_gc_collect_from_recorded_roots 0)
              (nl_seq2 (ptr-write-u64 (data-addr nl_gc_loop_ctx) 40
                                      (+ (ptr-read-u64 268436184 0) 16777216))
                       (ptr-write-u64 (data-addr nl_gc_loop_ctx) 32
@@ -2929,13 +2990,25 @@ argument (reachability + in-arena bounds checks).")
 ;; the report.  The `268435544' mutation-epoch slot + `wf_dirty' instrumentation
 ;; below are inert with the reset disabled.
 (defconst nelisp-standalone--shim-source
-  '(seq (defun nelisp_eval_call (form_ptr env out)
+  '(seq (defun nelisp_eval_call_done (rc rec_cur rec_cur_addr _pad)
+          (nl_seq2 (ptr-write-u64 rec_cur_addr 0 rec_cur) rc))
+        (defun nelisp_eval_call_recorded_done (rc form_ptr env out rec_cur rec_cur_addr)
+          (seq (nl_gc_ctx_pop)
+               (nl_seq2 (ptr-write-u64 rec_cur_addr 0 rec_cur) rc)))
+        (defun nelisp_eval_call (form_ptr env out)
           (let* ((rec_cur_addr (+ env 96)) (rec_max_addr (+ env 104)))
             (let* ((rec_cur (ptr-read-u64 rec_cur_addr 0)) (rec_max (ptr-read-u64 rec_max_addr 0)))
               (if (>= rec_cur rec_max) 1
                 (nl_seq2 (ptr-write-u64 rec_cur_addr 0 (+ rec_cur 1))
-                  (let* ((rc (nl_eval_inner form_ptr env out 0)))
-                    (nl_seq2 (ptr-write-u64 rec_cur_addr 0 rec_cur) rc)))))))))
+                  (if (= (ptr-read-u64 (data-addr nl_gc_loop_ctx) 8) 1)
+                      (seq
+                       (nl_gc_eval_ctx_push env form_ptr out 0)
+                       (nelisp_eval_call_recorded_done
+                        (nl_eval_inner form_ptr env out 0)
+                        form_ptr env out rec_cur rec_cur_addr))
+                    (nelisp_eval_call_done
+                     (nl_eval_inner form_ptr env out 0)
+                     rec_cur rec_cur_addr 0)))))))))
 
 (defun nelisp-standalone--name-u64 (s)
   "Pack STRING S (<=8 ASCII bytes) little-endian into a u64 for symbol-name match."
