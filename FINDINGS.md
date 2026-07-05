@@ -4304,3 +4304,353 @@ created zero new image workdirs, so there was nothing of this session's
 own to delete). No repo source files were modified this session; only
 this `FINDINGS.md` entry (branch `diag/eval-call-formrc-swallow`, base
 `main` @ `9e41de3c`, this worktree's checked-out content @ `f8238049`).
+
+================================================================================
+
+## 2026-07-05 follow-up: bisected the last unexplained `rc=1` swallow to `add-function`, and from there to an un-stripped `(declare ...)` clause in `defmacro`/`defun`'s elisp-level expansion (branch `diag/eval-call-formrc-swallow`, base `main` @ `38e76c71`)
+
+### Setup and sanity
+
+Verified per this task's own instructions before touching anything:
+
+- `nelisp.clone-capture` was already on `diag/eval-call-formrc-swallow` @
+  `6ade37fb`, matching `main` @ `38e76c71`'s content (`git log --oneline`
+  confirmed `6ade37fb` = "fix(reader): report flagless form aborts" is the
+  tip, one merge behind `main`'s own merge commit of the same work).
+  `target/nelisp` (4,361,160 bytes) was newer than the last source commit;
+  not rebuilt.
+- Cold image sanity per the task's own probe: `(with-temp-buffer
+  (outline-mode) (prin1 'AFTER-OUTLINE) (nl-write-file ...))` against
+  `/tmp/cold-image-org-e2e.qWJDyd/org-run1.img` printed `AFTER-OUTLINEt` and
+  wrote its file -- image usable, not rebuilt.
+- Reconfirmed the target symptom fresh on this binary/image, deterministic
+  across 3 repeats: `(with-temp-buffer (org-mode) (prin1 'AFTER-ORG)
+  (nl-write-file ...))` prints exactly `nelisp: form aborted without signal
+  (rc=1)` to stderr, `AFTER-ORG` never prints, the file is never written,
+  and the overall process exit is `rc=0` (the REPL loop absorbs it and
+  moves on to the next top-level form) -- this is precisely the "State"
+  this task's brief describes, now produced by the generic
+  `nl_eval_source_print_bare_abort` reporter added in `6ade37fb` rather
+  than silently.
+
+### Bisection method note: a literal copy of org-mode's body text does NOT reproduce the abort
+
+Following the task's suggested method, `org-mode`'s `define-derived-mode`
+body (vendor `org/org.el:4945-5114`, 55 top-level forms, mechanically
+split with a small paren-depth-aware Python script) was replayed as
+`(with-temp-buffer (outline-mode) FORM0 (prin1 'OK0) FORM1 (prin1 'OK1)
+... FORM54 (prin1 'OK54))` against the same cold image. This did **not**
+reproduce the target: with only `org-load-modules-maybe` (form index 2)
+replaced by a harmless stub -- needed because calling the *real*
+`org-load-modules-maybe` this early, as the literal first substantial
+form after cold-load, deterministically **segfaults** (`rc=139`, ~2s,
+reproduced 2/2) even though the *real* `(org-mode)` activation calls the
+real `org-load-modules-maybe` without crashing (confirmed by stubbing it
+inside a real `(org-mode)` call and observing the stub fire, then the
+normal `rc=1` abort later) -- all 55 markers printed and the buffer form
+completed cleanly, `rc=0`, no abort at all. This looks like a distinct,
+tangential, cold-start-order-dependent defect (a function that is safe
+once other allocator/state warm-up has occurred via preceding real
+`define-derived-mode` machinery, but crashes if it is the very first
+heavy call after `--cold-load-from`) -- flagged for awareness, not chased
+further; **not** the target of this session. The practical lesson: a bare
+textual replica of a `define-derived-mode` body, run outside the real
+macro-generated activation preamble (`kill-all-local-variables`,
+keymap/syntax-table install, `delay-mode-hooks`/`run-mode-hooks`, the real
+parent-mode chain), is not a faithful stand-in for this reader -- real
+activation must be used for bisection, with individual helper functions
+stubbed instead of the whole body replaced.
+
+### Bisection via real `(org-mode)` + selective function stubbing
+
+Real `(with-temp-buffer (org-mode) ...)` was kept intact; each body
+helper function was individually shadowed with a `(defun NAME (&rest _)
+(prin1 'MARKER) nil)` stub to localize which *real* call reintroduces the
+abort:
+
+1. Stubbing **all 18** body helper calls (`org-load-modules-maybe`,
+   `org-install-agenda-files-menu`, `org-element-cache-reset`,
+   `org-persist-load`, `org-set-regexps-and-options`,
+   `org-fold-initialize`, `org-set-font-lock-defaults`,
+   `org-set-tag-faces`, `org-fold--advice-edit-commands`,
+   `org-macro-initialize-templates`, `org-update-radio-target-regexp`,
+   `org-setup-filling`, `org-setup-comments-handling`,
+   `org-table-map-tables`, `org-table-header-line-mode`,
+   `org-find-invisible-foreground`, `org--set-faces-extend`,
+   `org-setup-yank-dnd-handlers`) made the whole probe pass cleanly:
+   `AFTER-ORG` printed, file written, `rc=0`. Confirms the culprit is one
+   of these 18 (or a function they call), not the auto-generated
+   `define-derived-mode` preamble.
+2. Binary search by leaving a shrinking prefix real and stubbing the
+   rest (in body order) isolated the culprit to **`org-fold-initialize`**:
+   real-first-9 + stub-last-9 still aborted; real-first-9 with
+   `org-fold-initialize` *also* stubbed (i.e. only the first 2:
+   `org-load-modules-maybe`, plus 6 more up to but excluding
+   `org-fold-initialize`, real) passed cleanly; real-only-`org-fold-initialize`
+   in isolation (everything else, including `org-set-font-lock-defaults`
+   and `org-fold--advice-edit-commands`, stubbed) reproduced an abort again
+   (this time a **segfault**, `rc=139`, not the graceful `rc=1` -- the
+   same "manifests differently depending on how much real prior state
+   exists" pattern noted above for `org-load-modules-maybe`; not chased,
+   `org-fold-initialize` is real either way).
+
+### Drilling into `org-fold-initialize` without org-mode at all
+
+`(with-temp-buffer (org-fold-initialize "..."))`, run completely
+standalone (no `org-mode`, no cold-image dependency beyond org.el/org-fold
+already being loaded), reproduces the exact target symptom on its own:
+`nelisp: form aborted without signal (rc=1)`, `rc=0` overall, deterministic.
+
+`org-fold-initialize` (`org/org-fold.el:241-281`) is two `setq-local`s
+plus one call to `org-fold-core-initialize` with a backquoted 3-entry
+spec list. `(org-fold-core-initialize (list (cons 'outline (list (cons
+:ellipsis "...") ...))))`, called directly with a **hand-built, backquote-free**
+single-entry spec list, reproduces the same abort -- ruling out the
+backquote/unquote machinery in `org-fold-initialize`'s call site entirely.
+
+`org-fold-core-initialize` (`org/org-fold-core.el:738-757`) does, in
+order: `org-fold-core-add-folding-spec` (in a `dolist`), two `add-hook`
+calls, one `setq-local`, then `org-fold-core--isearch-setup` (branch
+picked by `(and (boundp 'isearch-opened-regions) (eq org-fold-core-style
+'text-properties))` -- confirmed `isearch-opened-regions` is unbound and
+`org-fold-core-style` is `text-properties` in this image, so the `overlays`
+branch is taken). Testing each piece standalone:
+
+- `(org-fold-core-add-folding-spec 'outline (list (cons :ellipsis "...")
+  (cons :fragile #'ignore) (cons :isearch-open t) (cons :font-lock t)
+  (cons :front-sticky t) (cons :rear-sticky nil) (cons :alias
+  '(headline))))` -- **passes**, `AFTER-ADDSPEC` prints.
+- Both `add-hook` calls plus the `filter-buffer-substring-function`
+  `setq-local` -- **all pass**, `H1`/`H2`/`H3` all print. (A stray,
+  unrelated `nelisp: uncaught error: void-variable: (v)` was also
+  observed on stderr right after `H3` in this same run without aborting
+  anything -- see "A second, distinct swallow-adjacent class" below.)
+- `(org-fold-core--isearch-setup 'overlays)` -- **reproduces the target
+  abort** on its own: `nelisp: form aborted without signal (rc=1)`,
+  standalone, no org-mode, no org-fold-initialize.
+
+`org-fold-core--isearch-setup` (`org/org-fold-core.el:1180-1199`), for
+`type = 'overlays` with `org-fold-core-style = 'text-properties`, runs:
+
+```elisp
+(add-function :before (local 'isearch-filter-predicate)
+              #'org-fold-core--create-isearch-overlays)
+(advice-add 'isearch-clean-overlays :after
+            #'org-fold-core--clear-isearch-overlays
+            '((name . isearch-clean-overlays@org-fold-core)))
+```
+
+`(add-function :before (default-value 'SOME-VAR) #'ignore)`, tested as
+its **own bare top-level form** (no org anything, just a `defvar` first),
+reproduces the abort in complete isolation: it prints nothing itself and
+the REPL silently moves on to the next top-level form (confirming it is
+this exact single form that returns the swallowed `rc=1`, not something
+downstream). A parallel `(advice-add 'ignore :after #'ignore '((name .
+test)))` top-level form was *not* independently proven safe in this
+session -- since a silently-swallowed top-level form and a genuinely
+successful one are indistinguishable from the next form's success alone,
+this needs the same isolated-return-value check `add-function` got before
+it can be ruled in or out; flagged as an open loose end, not asserted
+either way here.
+
+### Root-cause candidate: `defmacro`/`defun` never strip a leading `(declare ...)` clause
+
+`add-function` is defined in vendor `emacs-lisp/nadvice.el:346-388` as
+exactly this shape:
+
+```elisp
+(defmacro add-function (how place function &optional props)
+  "...five-paragraph docstring..."
+  (declare (debug (form [&or symbolp ("local" form) ("var" sexp) gv-place]
+                        form &optional form)))
+  `(advice--add-function ,how (gv-ref ,(advice--normalize-place place))
+                         ,function ,props))
+```
+
+`(macroexpand-1 '(add-function :before (default-value 'v) #'ignore))`
+against the live image evaluates to plain `nil` (not the expected
+`(advice--add-function ...)` expansion, and not an error) -- so the
+*macro itself* has already been defined with a degenerate/wrong body by
+the time this session's cold image was built (the `advice--add-function`
+backquote form is never reached). Calling the macro's stored closure
+directly via `(funcall (cdr (symbol-function 'add-function)) :before
+'(default-value 'v) '(function ignore))` also just returns `nil`,
+cleanly, no abort -- confirming the *bare-funcall* path through this
+degenerate closure is not itself where the `rc=1` fires; only genuine
+`(add-function ...)` *macro-call* evaluation aborts.
+
+This repo's own elisp-level `defmacro`/`defun` (`lisp/nelisp-stdlib-eval-special.el:365-406`)
+only strips a **leading docstring** from `BODY` before splicing it into
+the produced `(lambda ARGS BODY...)`:
+
+```elisp
+(let* ((real-body (if (and body (stringp (car body))) (cdr body) body))
+       (lambda-form (cons 'lambda (cons args real-body)))
+       ...)
+```
+
+It does **not** strip a leading `(declare ...)` clause the way this same
+codebase's own reference helper already does correctly one file over,
+`macroexp-parse-body` (`lisp/nelisp-stdlib.el:259-272`, used by other
+macro-writing helpers, not by `defmacro`/`defun` themselves). The
+practical effect: any `defmacro`/`defun` whose body begins with
+`(declare ...)` -- `add-function` is exactly this shape, matching real
+Emacs's own `nadvice.el` verbatim -- gets a *live, unstripped*
+`(declare ...)` form as the literal first element of its stored
+`(lambda ...)` / macro-closure body, rather than having it discarded at
+definition time as real Emacs does.
+
+A **fully self-contained, org/nadvice-free minimal reproduction** of the
+next-level effect, run fresh with no cold image (`--repl --no-prompt` on
+an unmodified `target/nelisp`):
+
+```elisp
+(defmacro my-decl-min (x)
+  (declare (debug (form)))
+  (list 'quote x))
+```
+
+produces, on stderr, at *definition* time (before the macro is ever
+called): `nelisp: uncaught error: void-variable: (x)` immediately followed
+by `nelisp: uncaught error: void-variable: (v)` -- `x` here is the
+macro's *own parameter symbol*, referenced somewhere it should never be
+evaluated, and `v` does not appear anywhere in this 3-line repro at all,
+implicating an internal helper variable in whatever native/elisp
+machinery is walking the still-unstripped `(declare ...)` clause. After
+this, `(fboundp 'my-decl-min)` is `nil` -- the macro was never actually
+installed -- and calling it correctly (properly, per the `6ade37fb` fix)
+reports `void-function: (my-decl-min)`. The same 2-line
+`void-variable: (PARAM)` / `void-variable: (v)` pair reproduces with a
+mixed required+`&optional` parameter list too (`(a b c &optional d)`,
+matching `add-function`'s own `(how place function &optional props)`
+shape) -- while the *identical* macro shape **without** a `(declare ...)`
+clause defines and calls correctly with no errors at all (confirmed both
+with and without `&optional`). So the differentiator is unambiguously
+the presence of an un-stripped `(declare ...)` clause, not `&optional`
+handling, arity, or anything else about the parameter list.
+
+The natural suspect for *where* this stray evaluation happens is the
+lexical-capture-narrowing machinery every `lambda`/`closure`
+evaluation goes through: `nl_env_capture_lexical_filtered` (native
+extern, wired through `lisp/nelisp-cc-sf-lambda.el`), whose job is to
+scan a lambda's raw body for free-variable references so it only
+captures what is actually used. Handing it a body whose first element is
+a live, unstripped `(declare (debug ...))` form -- content that should
+never be walked as executable/referential code at all -- is a highly
+plausible way for a free-variable scanner to spuriously "find" the
+macro's own parameter names (and some internal scratch variable `v`) as
+if they were real variable references, and, if that scanner *resolves*
+rather than merely *pattern-matches* what it finds, to trip a
+`void-variable` condition during closure construction, before the macro
+is ever invoked. **This session did not get to single-step
+`nl_env_capture_lexical_filtered` (or wherever this scan actually lives)
+under gdb to name the exact bare-return/no-stash instruction** -- see
+"What remains open" below.
+
+### Important gap: the minimal `declare` repro's *symptom* is not byte-identical to the real `add-function` abort
+
+This is the honest boundary of this session's evidence. The minimal
+`my-decl-min`/`add-function`-shape repro above **reports** two
+`void-variable` errors to stderr (the properly-stashed, `6ade37fb`-fixed
+path) and does not itself print `nelisp: form aborted without signal
+(rc=1)`. The real `(add-function :before (default-value 'v) #'ignore)`
+top-level form, by contrast, prints **nothing** and silently swallows --
+the bare, unstashed `rc=1` path this task is chasing. Both symptoms are
+downstream of the same root defect (an un-stripped `(declare ...)` clause
+reaching code that was never meant to execute/resolve it), and both
+disappear once the `declare` clause is absent, but this session did not
+close the loop proving they are literally the *same* internal bare-return
+site rather than two different manifestations of "declare content leaks
+into places it shouldn't" (e.g. the definition-time free-var scan for a
+*freshly defined* macro vs. whatever repeat/replay-time path
+`add-function`'s *already-defined-with-a-degenerate-body* closure goes
+through when macro-invoked). This distinction matters for the fix and is
+this session's single biggest recommended follow-up (see below).
+
+### A second, distinct swallow-adjacent class, noted but not chased
+
+During the `org-fold-core-initialize` piecewise testing above, and again
+during the full-52-form hand-replica run earlier, this session observed
+repeated `nelisp: uncaught error: nelisp-ec-no-current-buffer: nil` /
+`wrong-type-argument: (nelisp-ec-buffer-p nil)` / `void-variable: (v)`
+lines on stderr **in the middle of otherwise-successful runs** (all
+markers still printed, `rc=0`, no data loss observed) -- i.e. errors that
+get *reported* (unlike the fully silent `rc=1` swallow) but also do not
+abort or even seem to affect the enclosing form's outcome. This looks like
+a third reporting tier, distinct from both "properly propagates as a
+catchable Elisp condition" and "silently swallowed at the top-level
+driver": some native extern-call or GC-safepoint boundary appears to
+report-and-locally-recover *below* the Lisp condition-case/throw layer.
+Not investigated further (out of this session's scope and budget); flagged
+for a future dedicated session, since it may share machinery with the
+`declare`-scan defect above (the recurring `void-variable: (v)` line is
+common to both) or may be entirely unrelated.
+
+### What remains open
+
+1. **Primary, scoped for codex, low-risk, high-confidence:** strip a
+   leading `(declare ...)` clause (in addition to the existing leading
+   docstring) from `BODY` in both `defmacro` and `defun`
+   (`lisp/nelisp-stdlib-eval-special.el:365-406`), mirroring the logic
+   this codebase already has correct in `macroexp-parse-body`
+   (`lisp/nelisp-stdlib.el:259-272`) -- e.g. loop while `(and real-body
+   (consp (car real-body)) (eq (car (car real-body)) 'declare))`, popping
+   each one, before building `lambda-form`. This should make
+   `add-function` (and any other vendor macro with a leading `declare`,
+   which is idiomatic and common in real Emacs Lisp source) expand
+   correctly, and should make the `my-decl-min`-style minimal repro define
+   and call cleanly with no stray `void-variable` reports.
+2. **Regression tests, self-contained, no org-mode/cold-image needed:**
+   - `(defmacro rt1 (x) (declare (debug (form))) (list 'quote x)) (prin1
+     (fboundp 'rt1)) (prin1 (rt1 5))` via `--load` should print `t5`
+     (currently: definition-time `void-variable` noise, `fboundp` `nil`,
+     then `void-function`).
+   - `(defun rt2 (x) (declare (indent 1)) (+ x 1)) (prin1 (rt2 41))`
+     should print `42` with no stderr noise (same class, `defun` side).
+   - The real vendor shape: load-equivalent of `add-function`'s exact
+     definition text, then `(add-function :before (default-value 'rt3)
+     #'ignore)` on a fresh `defvar rt3 nil`, should complete with no
+     abort and should actually install the advice
+     (`(functionp (default-value 'rt3))` true afterward), not just "not
+     crash."
+3. **Follow-up, not scoped for this session:** once (1) lands, re-run this
+   session's exact `(with-temp-buffer (org-mode) ...)` probe against a
+   fresh cold image; the expected, correct outcome is `AFTER-ORG` printing
+   and the file being written (this fix directly targets the mechanism
+   this session traced all the way from `org-mode`'s body down to this
+   one `declare`-handling gap, so this is the natural verification, not a
+   coincidence).
+4. **Follow-up, not scoped for this session:** finish the single-step gdb
+   trace this session did not have time for -- start from
+   `nl_env_capture_lexical_filtered` (`lisp/nelisp-cc-sf-lambda.el`) and/or
+   wherever `declare`/leading-body-form handling actually executes at the
+   C-DSL level, using the fully self-contained `my-decl-min` repro (no
+   cold image needed, sub-second cold boots), to (a) name the exact
+   bare-return-without-stash instruction definitively and confirm it is
+   the same site the real `add-function` abort hits, and (b) resolve the
+   "important gap" noted above between the reporting minimal repro and
+   the silent real-world one. Also worth a look while there: the
+   recurring, unexplained `void-variable: (v)` and the separate
+   `nelisp-ec-no-current-buffer`/report-and-continue class noted above,
+   in case they share a root cause.
+
+### Artifacts (not committed, scratch only)
+
+All under this session's scratchpad
+(`/tmp/claude-1000/.../scratchpad/`): `org-body-raw.el`, `split_forms.py`,
+`org-body-forms.tsv`, `probe_org_full.txt`, `probe_bisect_full.txt`,
+`probe_bisect_full2.txt`, `probe_org_stuball.txt`,
+`probe_org_half2stub.txt`, `probe_org_narrow1.txt`,
+`probe_org_narrow2.txt`, `probe_org_isolate_fi.txt`, `probe_fi_direct.txt`,
+`probe_fcore_direct.txt`, `probe_addspec.txt`, `probe_addhooks.txt`,
+`probe_isearch_setup.txt`, `probe_addfn.txt`, `probe_addfn_plain.txt`,
+`probe_advadd.txt`, `probe_local_alone.txt`, `probe_macroexp.txt`,
+`probe_macrofn.txt`, `probe_minimal_macro.txt`, `probe_minimal_macro2.txt`,
+`probe_declare_macro.txt`, `probe_declare_min.txt`, `probe_declare_bound.txt`,
+`probe_min_addfn.txt`, `gdb_addfn.cmds`/`gdb_addfn2.cmds`/`gdb_addfn3.cmds`
+and their `.out` files. Cold image `/tmp/cold-image-org-e2e.qWJDyd/`
+(pre-existing per this task's brief, reused read-only, not deleted -- this
+session created zero new image workdirs). No `nelisp` process left running
+(`ps aux` checked clean at end of session). No repo source files were
+modified this session; only this `FINDINGS.md` entry (branch
+`diag/eval-call-formrc-swallow`, base/tip `main` @ `38e76c71`).
