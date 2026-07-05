@@ -10740,8 +10740,10 @@ word-packing (works for names/strings of any length, not just <=8 bytes)."
 (defun nelisp-standalone--eval-source-report-error-form ()
   "Return error-diagnostic defun forms (Doc 152 DEFECT-2 + REPL visibility).
 `nl_eval_source_print_error' writes a short diagnostic for the top-level M6
-stash (TAG @268435480, VAL @268435512 -- see the catch/throw unit's comment
-block for the stash contract) to stderr.  `nl_eval_source_report_error' keeps
+stash (FLAG @268435472, TAG @268435480, VAL @268435512 -- see the catch/throw
+unit's comment block for the stash contract) to stderr.  Uncaught throws
+report the condition class `no-catch' instead of using the catch tag as the
+error class.  `nl_eval_source_report_error' keeps
 the existing aborting --eval/--load behavior by printing that diagnostic and
 then arming QUIT_FLAG (268435464) so the `(if (= (ptr-read-u64 268435464 0)
 0) 0 (setq more 0))' check in `nl_eval_source_all' stops the top-level loop
@@ -10749,6 +10751,9 @@ and every caller that already does \"(- (ptr-read-u64 268435464 0) 1)\"
 reports a non-zero exit code."
   (let ((prefix-buf (make-symbol "prefix-buf"))
         (sep-buf (make-symbol "sep-buf"))
+        (nocatch-buf (make-symbol "nocatch-buf"))
+        (space-buf (make-symbol "space-buf"))
+        (rparen-buf (make-symbol "rparen-buf"))
         (nl-buf (make-symbol "nl-buf"))
         (tag-ms (make-symbol "tag-ms"))
         (tag-repr (make-symbol "tag-repr"))
@@ -10757,6 +10762,9 @@ reports a non-zero exit code."
     `((defun nl_eval_source_print_error ()
         (let* ((,prefix-buf (alloc-bytes 32 1))
                (,sep-buf (alloc-bytes 8 1))
+               (,nocatch-buf (alloc-bytes 16 1))
+               (,space-buf (alloc-bytes 1 1))
+               (,rparen-buf (alloc-bytes 1 1))
                (,nl-buf (alloc-bytes 1 1))
                (,tag-ms (alloc-bytes 32 8))
                (,tag-repr (alloc-bytes 32 8))
@@ -10770,14 +10778,32 @@ reports a non-zero exit code."
            (mut-str-make-empty ,tag-ms 32)
            (m5_prin1 ,tag-ms 268435480)
            (mut-str-finalize ,tag-ms ,tag-repr)
-           (nl_os_write_stderr (nl_bi_strptr ,tag-repr) (nl_bi_strlen ,tag-repr))
-           ,@(nelisp-standalone--byte-write-forms sep-buf ": ")
-           (nl_os_write_stderr ,sep-buf
-                                ,(length (encode-coding-string ": " 'utf-8 t)))
            (mut-str-make-empty ,val-ms 32)
            (m5_prin1 ,val-ms 268435512)
            (mut-str-finalize ,val-ms ,val-repr)
-           (nl_os_write_stderr (nl_bi_strptr ,val-repr) (nl_bi_strlen ,val-repr))
+           (if (= (ptr-read-u64 268435472 0) 2)
+               (seq
+                ,@(nelisp-standalone--byte-write-forms nocatch-buf "no-catch: (")
+                (nl_os_write_stderr
+                 ,nocatch-buf
+                 ,(length (encode-coding-string "no-catch: (" 'utf-8 t)))
+                (nl_os_write_stderr
+                 (nl_bi_strptr ,tag-repr) (nl_bi_strlen ,tag-repr))
+                (ptr-write-u8 ,space-buf 0 32)
+                (nl_os_write_stderr ,space-buf 1)
+                (nl_os_write_stderr
+                 (nl_bi_strptr ,val-repr) (nl_bi_strlen ,val-repr))
+                (ptr-write-u8 ,rparen-buf 0 41)
+                (nl_os_write_stderr ,rparen-buf 1))
+             (seq
+              (nl_os_write_stderr
+               (nl_bi_strptr ,tag-repr) (nl_bi_strlen ,tag-repr))
+              ,@(nelisp-standalone--byte-write-forms sep-buf ": ")
+              (nl_os_write_stderr
+               ,sep-buf
+               ,(length (encode-coding-string ": " 'utf-8 t)))
+              (nl_os_write_stderr
+               (nl_bi_strptr ,val-repr) (nl_bi_strlen ,val-repr))))
            (ptr-write-u8 ,nl-buf 0 10)
            (nl_os_write_stderr ,nl-buf 1)
            0)))

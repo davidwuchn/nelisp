@@ -501,7 +501,7 @@
                    forms)))))
 
 (ert-deftest nelisp-standalone-target-unwind-cleanup-errors-propagate ()
-  "Normal-body cleanup uses stashing eval; body-error cleanup preserves body stash."
+  "Cleanup uses stashing eval; body nonlocal exits preserve the M6 kind flag."
   (cl-labels ((tree-member-p
                (needle tree)
                (cond
@@ -515,13 +515,14 @@
                   (if (= body-rc 0)
                       (let* ((scratch (alloc-bytes 32 8)))
                         (nl_sf_uw_do_cleanup_preserve scratch car cdr body-rc env out))
-                    (let* ((tag-save (alloc-bytes 32 8))
+                    (let* ((flag-save (ptr-read-u64 268435472 0))
+                           (tag-save (alloc-bytes 32 8))
                            (val-save (alloc-bytes 32 8)))
                       (seq
                        (nl_sexp_clone_into 268435480 tag-save)
                        (nl_sexp_clone_into 268435512 val-save)
-                       (nl_sf_uw_do_cleanup_discard
-                        tag-save val-save car cdr body-rc env out 0)))))
+                       (nl_sf_uw_do_cleanup_body_exit
+                        flag-save tag-save val-save car cdr body-rc env out)))))
                forms))
       (should (tree-member-p
                '(defun nl_sf_uw_do_cleanup_preserve (scratch car cdr body-rc env out)
@@ -536,15 +537,28 @@
                     cleanup-rc))
                forms))
       (should (tree-member-p
-               '(defun nl_sf_uw_restore_after_discard
-                    (truthy tag-save val-save cdr body-rc env out _pad8)
-                  (seq
-                   (nl_sexp_clone_into tag-save 268435480)
-                   (nl_sexp_clone_into val-save 268435512)
-                   (ptr-write-u64 268435472 0 1)
-                   (dealloc-bytes tag-save 32 8)
-                   (dealloc-bytes val-save 32 8)
-                   (nl_sf_uw_cleanup_done truthy cdr body-rc env out 0)))
+               '(defun nl_sf_uw_cleanup_after_body_exit
+                    (cleanup-rc flag-save tag-save val-save cdr body-rc env out)
+                  (if (= cleanup-rc 0)
+                      (seq
+                       (nl_sexp_clone_into tag-save 268435480)
+                       (nl_sexp_clone_into val-save 268435512)
+                       (ptr-write-u64 268435472 0 flag-save)
+                       (dealloc-bytes tag-save 32 8)
+                       (dealloc-bytes val-save 32 8)
+                       (nl_sf_uw_cleanup cdr body-rc env out 0 0))
+                    (seq
+                     (dealloc-bytes tag-save 32 8)
+                     (dealloc-bytes val-save 32 8)
+                     cleanup-rc)))
+               forms))
+      (should (tree-member-p
+               '(defun nl_sf_uw_do_cleanup_body_exit
+                    (flag-save tag-save val-save car cdr body-rc env out)
+                  (let* ((scratch (alloc-bytes 32 8)))
+                    (nl_sf_uw_cleanup_after_body_exit
+                     (extern-call nelisp_eval_call car env scratch)
+                     flag-save tag-save val-save cdr body-rc env out)))
                forms)))))
 
 (ert-deftest nelisp-standalone-target-reader-boundary-reclaim-is-conservative ()
