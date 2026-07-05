@@ -3410,3 +3410,342 @@ gdb command files, and per-run logs under this session's scratchpad
 `o5_*`/`gg_*`/`org_run_*` etc.). No repo source files were modified
 this session; only this `FINDINGS.md` entry (branch `segv-diag`, base
 `origin/main` @ 6020ca18).
+
+## Doc 33 item 229: classifying the silent org-mode abort that bypasses both the REPL stderr diagnostic and `catch`/`condition-case` (branch `silent-abort-diag`, base `main` @ 52928050 / `segv-diag` @ 23ab8670)
+
+### Task and setup
+
+Investigated a reported SILENT abort in the standalone reader: a prior
+session's staged probes on an image at `/tmp/cold-image-org-e2e.oar79d`
+(binary provenance stated as "unknown") showed a stark contradiction —
+`(with-temp-buffer (org-mode) (prin1 major-mode))` printed
+`nelisp: uncaught error: void-function: (easy-menu-change)` to stderr
+about an hour before the session ended, then, with no source change in
+between (the one intervening commit, `nelisp-emacs-lib`'s `6fd5f19e`, is
+doc-only), the *same* form — even wrapped in
+`(catch '--any (with-temp-buffer (org-mode) (throw '--any "COMPLETED")))`
+— produced **no** file, **no** stdout, **no** stderr, `rc=0`.
+
+Per the task's own instruction (binary state explicitly flagged
+"UNKNOWN"), this session did not trust the pre-existing
+`target/nelisp`/image and rebuilt both from scratch:
+
+1. `rm -f target/nelisp && make standalone-reader` — clean rebuild from
+   this worktree's current HEAD (`silent-abort-diag`/`segv-diag` @
+   `23ab8670`, content-identical to `main` @ `52928050`, a merge of the
+   same commit). Build succeeded (`[standalone-reader] linked 107 units`),
+   fresh binary at `target/nelisp` (4,352,240 bytes).
+2. `NELISP_E2E_KEEP=1 timeout 300 scripts/cold-image-org-e2e.sh 1` —
+   fresh cold image against this fresh binary and the standard
+   `nelisp-emacs-lib` bootstrap/prelude (60-file org vendor chain).
+   Completed cleanly: load 6.78s, dump 0.54s, cold boot 0.63s, peak RSS
+   525,352 KB, faithfulness `IDENTICAL`
+   (`(t t t t (interactive) t)` both columns). Image kept at
+   `/tmp/cold-image-org-e2e.JNyhha/org-run1.img` (536,780,096 bytes) for
+   the whole session, deleted at the end.
+
+### Q1: does the plain org-mode probe emit the diagnostic on a from-scratch rebuild? (5 runs)
+
+```
+(with-temp-buffer (org-mode) (prin1 major-mode))
+```
+
+against the fresh cold image via `--cold-load-from IMG --no-prompt`:
+
+| run | rc | stdout | stderr |
+|---|---|---|---|
+| 1-5 | 0 | (empty) | `nelisp: uncaught error: void-function: (easy-menu-change)` |
+
+**5/5 runs printed the diagnostic. The silence did not reproduce** on a
+clean rebuild of both the binary and the image.
+
+Two further cross-checks, to rule out the specific image as the
+variable:
+
+- Re-ran the *catch-wrapped* variant from the staged evidence,
+  `(nl-write-file "..." (if (catch '--any (with-temp-buffer (org-mode)
+  (throw '--any "COMPLETED"))) "CAUGHT" "NIL"))`, 3x: **3/3** printed the
+  same diagnostic, no file written (expected and correct — `org-mode`'s
+  own `void-function` signal is not a `throw`, so a bare `catch` never
+  sees it; it propagates straight past the `catch '--any` to the top
+  level, same as real Emacs `catch` semantics).
+- The prior investigator's own kept image,
+  `/tmp/cold-image-org-e2e.oar79d/org-run1.img` (built independently,
+  ~5 minutes before this session's own build, so a genuinely different
+  arena dump), against **this session's freshly-built binary**: **3/3**
+  runs, identical diagnostic. So neither "this session's own image" nor
+  "the specific old image" is sufficient to reproduce the silence when
+  paired with a binary built cleanly, just now, from unmodified HEAD.
+
+**Verdict for Q1: diagnostic visibility is intact and deterministic (8/8
+combined runs across two different images) on a from-scratch rebuild.**
+Whatever produced the staged silence is not reproducible from this
+repo's current committed source under a clean build.
+
+### Q2/Q3: minimal silent-abort repro + gdb
+
+Since the org-mode-specific silence would not reproduce, this session
+built the minimal repro requested by the task's own candidate (c) —
+"errors inside `with-temp-buffer`'s `unwind-protect` cleanup" — directly,
+without org-mode, against the plain (non-cold-loaded) `target/nelisp`:
+
+| form | rc | stdout | stderr |
+|---|---|---|---|
+| `(progn (no-such-fn))` | 1 | (empty) | `nelisp: uncaught error: void-function: (no-such-fn)` |
+| `(with-temp-buffer (no-such-fn))` | 1 | (empty) | same diagnostic |
+| `(catch 'x (no-such-fn))` | 1 | (empty) | same diagnostic |
+| `(let ((y (no-such-fn))) y)` | 1 | (empty) | same diagnostic |
+| `(unwind-protect (no-such-fn) 1)` | 1 | (empty) | same diagnostic (error is in the **protected body**) |
+| **`(unwind-protect 1 (no-such-fn))`** | **0** | **`1`** | **(empty) — SILENT** |
+| `(unwind-protect (progn 1) (no-such-fn) (no-such-fn2))` | 0 | `1` | (empty) — SILENT, both cleanup errors swallowed |
+| `(unwind-protect (progn (prin1 99) 1) (no-such-fn))` | 0 | `991` | (empty) — SILENT |
+| `(progn (unwind-protect 1 (no-such-fn)) (prin1 "after"))` | 0 | `"after""after"` | (empty) — SILENT, execution continues normally past the swallowed error |
+
+**Minimal deterministic repro (100% reproducible, no GC/timing dependence):**
+
+```elisp
+(unwind-protect 1 (no-such-fn))
+```
+
+`rc=0`, stdout `1`, stderr completely empty. This is the exact
+mechanism the task's candidate (c) named.
+
+`catch`/`condition-case` do not see it either — confirmed directly:
+
+| form | result |
+|---|---|
+| `(condition-case err (unwind-protect 1 (no-such-fn)) (error (prin1 (list 'CAUGHT err))))` | `1` printed, no `CAUGHT` — handler never runs |
+| `(catch 'x (prin1 (unwind-protect 1 (no-such-fn))))` | `1` printed, no crash, no diagnostic |
+
+One asymmetry worth flagging: when the *protected* body itself is a
+non-local `throw` (not a plain return) and the *cleanup* form errors,
+the **cleanup's** error is what surfaces, not the throw:
+`(catch 'x (unwind-protect (throw 'x 42) (no-such-fn)))` → `rc=1`,
+`nelisp: uncaught error: void-function: (no-such-fn)` (the `throw`'s
+value 42 is lost, silently replaced by the cleanup's error becoming
+visible). This is a second-order finding, not chased further this
+session — it shows the swallow behavior is asymmetric depending on
+whether the M6 stash already held something (a stashed throw) when the
+cleanup ran, not a uniform "cleanup errors are always invisible" rule.
+
+### gdb: where the diagnostic printer is (not) reached
+
+```
+$ gdb -q -batch \
+    -ex 'break nl_eval_source_print_error' \
+    -ex 'break nl_eval_source_report_error' \
+    -ex 'break nl_sf_uw_do_cleanup' \
+    -ex 'run --load /tmp/mini_uwp.el' \
+    -ex 'bt 10' -ex continue -ex 'bt 10' -ex continue \
+    ./target/nelisp
+```
+(`/tmp/mini_uwp.el` = `(unwind-protect 1 (no-such-fn))`)
+
+```
+Breakpoint 3, 0x00000000007f12a3 in nl_sf_uw_do_cleanup ()
+#0  nl_sf_uw_do_cleanup ()
+#1  nl_sf_uw_got_cdr ()
+#2  nl_sf_uw_cleanup ()
+#3  nl_sf_uw_with_cleanup ()
+#4  nl_sf_uw_after_body ()
+#5  nl_sf_uw_got_car ()
+#6  nl_sf_unwind_protect ()
+#7  nl_apply_special ()
+#8  nl_eval_inner_cons ()
+#9  nl_ei_cons_tail ()
+1
+[Inferior 1 (process 3419648) exited normally]
+```
+
+`nl_sf_uw_do_cleanup` (which evaluates the cleanup form `(no-such-fn)`
+via `extern-call nl_eval_is_truthy`) is reached exactly once, as
+expected. **Neither `nl_eval_source_print_error` nor
+`nl_eval_source_report_error` is ever hit** — the process prints `1`
+(the body's own value) and exits normally with rc=0. The error never
+reaches the diagnostic layer because it never reaches the M6 stash at
+all: it is discarded one level below, inside cleanup evaluation.
+
+### Mechanism (file:line)
+
+`lisp/nelisp-cc-sf-unwind-protect.el` (AOT swap for
+`sf_unwind_protect`), `nl_sf_uw_do_cleanup` (lines 92-100) and the
+recursive walk `nl_sf_uw_cleanup`/`nl_sf_uw_got_cdr`/
+`nl_sf_uw_cleanup_done` (lines 83-119): every cleanup form is evaluated
+via `extern-call nl_eval_is_truthy`, not `nelisp_eval_call`. Per this
+same file's own comment (lines 39-45, 53-55, 180-182):
+
+> `nl_eval_is_truthy` discards errors silently (returns -1 on error but
+> does NOT touch `nelisp--last-signal-data`). Because cleanup eval uses
+> only `nl_eval_is_truthy`, the body's stashed error ... is preserved
+> intact through all cleanup steps.
+
+This is intentional, self-documented behavior — but the file's own
+justification for it, "matching GNU Emacs `unwind-protect` semantics"
+(line 35, repeated at line 183), is **empirically false**. Checked
+directly against GNU Emacs 30.1:
+
+```
+$ emacs -Q --batch --eval '(prin1 (unwind-protect 1 (no-such-fn)))'
+Symbol's function definition is void: no-such-fn
+Error: void-function (no-such-fn)
+  ...
+```
+(exits 255, signals the cleanup's error — does not return 1 silently).
+
+Real Emacs Lisp's `unwind-protect` guarantees the cleanup forms *run*
+even across a non-local exit from the body; it does not guarantee their
+own errors are swallowed. If a cleanup form signals, that signal
+propagates normally (this is the well-known "an error while unwinding
+can mask the original condition" Lisp hazard — the *new* error becomes
+visible, it is not silently thrown away). NeLisp's implementation
+instead unconditionally discards **all** cleanup-form errors, visible or
+not, using a builtin (`nl_eval_is_truthy`) that was designed for
+boolean-conditional evaluation (`if`/`while`/`and`/`or` test positions,
+where "discard errors, treat as false" is arguably defensible) and
+repurposed here for side-effecting cleanup evaluation, where it is not.
+
+### Why this is the right classification for "bypasses both the diagnostic and catch wrappers"
+
+- **Bypasses the stderr diagnostic**: `nl_eval_source_print_error`/
+  `nl_eval_source_report_error` (the July-5 REPL-visibility fix,
+  `440cdfb7`/`6020ca18`) only fire when the M6 stash flag
+  (`268435472`) is non-zero at the top-level driver's post-form check
+  (`scripts/nelisp-standalone-build.el:10629-10658`). Cleanup-form
+  errors evaluated via `nl_eval_is_truthy` never touch that flag, so
+  they are invisible to this mechanism *by construction*, independent of
+  whether the fix itself is working correctly (it is — see Q1).
+- **Bypasses `catch`/`condition-case`**: both are implemented in terms of
+  the same non-local-exit/stash machinery (this codebase's own
+  documented "M6 stash" contract; see also the pre-existing memory item
+  on `condition-case` mis-handling `throw`). Since the cleanup error
+  never becomes a stash entry, there is nothing for an enclosing
+  `catch`/`condition-case` to intercept — from their point of view the
+  `unwind-protect` simply returned its body's value normally. This
+  matches the task's phrasing exactly: not "an error catch fails to
+  match," but "there was never anything to catch."
+
+### Relationship to the specific org-mode probe (why it does *not* explain the staged silence, and why it still matters)
+
+A prior `FINDINGS.md` entry in this same file ("2026-07-05 exact-form
+bisect...") had already found, on an *earlier* HEAD, that
+`org-mode`'s entire real body executed inside the **cleanup arm** of an
+`unwind-protect` whose protected form was `(outline-mode)` — a
+deliberate workaround in `nelisp-emacs-lib`'s
+`packages/nelisp-emacs-core/lisp/emacs-mode.el` for a *different*,
+earlier defect ("loses forms that follow some macro-generated parent
+major-mode calls"). That would have been the ideal setup to trigger
+*this* session's swallow bug for org-mode specifically. Re-reading that
+file at its current checkout (read-only, sibling repo) shows it has
+since been rewritten (comment: "Keep the body/hooks outside cleanup"):
+the generated `org-mode` function now runs its real 55-form body and
+mode hooks as a **plain sequential** tail, with only a trivial `nil`
+cleanup arm on the *parent*-call `unwind-protect`
+(`emacs-mode.el:220-231`). That upstream fix is why this session's
+org-mode probe surfaces `easy-menu-change`'s `void-function` cleanly
+(Q1) instead of hitting the swallow bug: the specific structural
+precondition (real logic inside a cleanup arm) that used to exist for
+`org-mode` no longer does, on this HEAD.
+
+The swallow bug itself, however, is independent of `org-mode` and is
+still live in this repo today (Q2/Q3, 100% reproducible). It remains a
+real, general hazard for *any* code path whose cleanup arm can run
+non-trivial logic and hit a not-yet-ported primitive or a corrupted
+value — which in ordinary Elisp is extremely common: `save-excursion`,
+`save-match-data`, `save-restriction`, and `with-current-buffer` are all
+themselves `unwind-protect`-based, with real (not `nil`) cleanup forms
+that restore buffer/point/match-data state. Org-mode's own body (not the
+`emacs-mode.el` wrapper) uses all of these throughout its activation and
+parsing paths. So while this session could not reproduce the exact
+staged silence, this bug is a fully generic, already-confirmed
+mechanism by which *some other* future (or GC-timing-dependent) error
+inside any such restore/cleanup step would vanish exactly as described
+— no stderr, no `catch`, `rc=0` — the moment one of those cleanup steps
+happens to fail.
+
+### On the staged-evidence contradiction itself (unresolved, secondary)
+
+This session could not determine *why* the earlier probes flipped from
+visible to silent with no source change, because:
+
+- The from-scratch rebuild in this session reproduces neither behavior
+  consistently silent nor inconsistent — it is consistently *visible*
+  (8/8 runs, two different images, the freshly-built binary in both
+  cases).
+- The actual binary bytes in use during the earlier "silent" runs no
+  longer exist (this session's first action per its own instructions was
+  `rm -f target/nelisp && make standalone-reader`, overwriting whatever
+  was there).
+
+The task's framing ("binary state UNKNOWN") already anticipated this.
+Given `nelisp.clone-capture` is a plain clone directory (not an isolated
+`git worktree`) potentially shared across agent sessions/tool
+invocations, the most plausible explanations, in order of likelihood,
+are: (a) a concurrent rebuild of `target/nelisp` (e.g. another session
+running `make standalone-reader` mid-probe) produced a torn/partially
+written binary for some of the "silent" runs — a non-atomic overwrite of
+a several-MB executable while another process holds it open/exec'd is a
+classic source of exactly this kind of "worked, then silently broke,
+then would presumably work again after the write finished" pattern; or
+(b) a stale `target/nelisp-artifact-runtime.el.nelc` artifact-runtime
+cache (this build's own log shows this companion file is written
+alongside `target/nelisp` and, per this codebase's own documented
+"stale .elc" hazard class, is not guaranteed to be regenerated in lock-
+step with the main binary) was paired with a binary from a different
+build. Neither could be confirmed from this session's own evidence
+(no crash, no corruption signature — just absence of output), but both
+are consistent with "no source change, yet behavior changed," which a
+genuine reader defect on unmodified, cleanly-built artifacts is not.
+
+### Recommended fix, ranked (scoped for codex)
+
+1. **Primary, this repo, small and self-contained
+   (`lisp/nelisp-cc-sf-unwind-protect.el`):** stop using
+   `nl_eval_is_truthy` for cleanup-form evaluation when the *body*
+   completed with no stashed error (rc=0, stash flag 0). In that case
+   there is nothing worth protecting by discarding — use
+   `nelisp_eval_call` (the stash-preserving entry point, same as the
+   body's own evaluation) for the *last* cleanup form only (or all of
+   them), and let a genuine error from it propagate/stash normally,
+   matching the real-Emacs behavior confirmed above. When the body
+   *did* stash an error (rc=1, flag != 0), keep something close to the
+   current discard-and-preserve behavior for now (this is the one case
+   where "the original condition should usually win over a masking
+   cleanup error" is a defensible product decision, distinct from "cleanup
+   errors are invisible unconditionally") — but note the throw-vs-error
+   asymmetry found above (`(catch 'x (unwind-protect (throw 'x 42)
+   (no-such-fn)))`) as a related follow-up: right now a stashed *throw*
+   can be silently replaced by a later cleanup error rather than
+   preserved, which deserves its own look.
+2. **Regression tests, both minimal and both self-contained (no
+   org-mode/cold-image needed):**
+   - `(unwind-protect 1 (no-such-fn))` via `--load`: should now exit
+     non-zero and print `nelisp: uncaught error: void-function:
+     (no-such-fn)`, not `rc=0`/stdout `1`.
+   - `(condition-case err (unwind-protect 1 (no-such-fn)) (error
+     (prin1 (list 'CAUGHT err))))`: should now print `(CAUGHT ...)`.
+3. **Verification after (1):** re-run this session's exact org-mode
+   probe matrix (plain + catch-wrapped, 5x/3x) on a fresh cold image;
+   behavior should be unchanged (org-mode's current body has no real
+   cleanup-arm logic left to expose this fix, per the "Relationship"
+   section above) — this is the expected, correct outcome, not a sign
+   the fix did nothing.
+4. **Follow-up, not scoped for this session:** since `save-excursion`/
+   `save-match-data`/`save-restriction`/`with-current-buffer` all wrap
+   real cleanup logic in `unwind-protect`, once (1) lands it would be
+   worth deliberately forcing a cleanup-arm error inside each of those
+   (e.g. `(save-excursion (no-such-fn))`'s cleanup restoring a killed
+   buffer's point) to check for any other latent instances of this same
+   class already masked in production code paths.
+
+### Artifacts (not committed, scratch only)
+
+`/tmp/probe_org2.el`, `/tmp/probe_catch.el`, `/tmp/mini*.el`,
+`/tmp/mini_uwp.el`, `/tmp/gdb_uwp.cmds` (all under this session's
+scratchpad, not the repo). Cold image workdir
+`/tmp/cold-image-org-e2e.JNyhha/` (built with `NELISP_E2E_KEEP=1`,
+`scripts/cold-image-org-e2e.sh 1`) and the prior session's kept workdir
+`/tmp/cold-image-org-e2e.oar79d/` were both used for cross-checks and
+deleted at the end of this session (`rm -rf`, after confirming via
+`ps aux`/`pkill -9 -f` that no `nelisp` process was left running). No
+repo source files were modified this session; only this `FINDINGS.md`
+entry (branch `silent-abort-diag`, base `main` @ `52928050`).
