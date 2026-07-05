@@ -3973,3 +3973,334 @@ otherwise. `dev/nelisp.clone-capture`'s `target/nelisp` was never
 rebuilt (read/run only). No source files were modified in any of the
 three repos this session; only this `FINDINGS.md` entry (branch
 `garbage-symbol-diag`, base `main` @ `b4f4b4b5`).
+## The last remaining silent-abort class: `nl_eval_source_all` discards any top-level form whose `form_rc != 0` while the M6 stash flag is still 0 -- confirmed live for `(with-temp-buffer (org-mode) ...)`, root cause inside `org-mode`'s body not yet pinned (branch `diag/eval-call-formrc-swallow`, base `main` @ `9e41de3c` / this worktree @ `f8238049`)
+
+### Task and setup
+
+All previously-classified abort classes (uncaught signals, uncaught
+throws, `unwind-protect` cleanup-error swallowing) now report correctly
+to stderr (`440cdfb7`/`6020ca18` REPL-visibility fix; `596cf204`
+cleanup-error fix; `f8238049` throw-preservation-through-cleanup fix).
+Despite that, this session's own fresh probe against a cold-loaded
+image still shows `(with-temp-buffer (org-mode) ...)` aborting
+mid-form with **no** diagnostic, **no** file write, `rc=0`, and the REPL
+silently continuing to the next top-level form.
+
+Binary/image sanity per this session's own instructions: `target/nelisp`
+(4,360,976 bytes, mtime prior to session start) was NOT rebuilt.
+`--eval '(prin1 (+ 40 3))'` prints `4343` (not a bare `43`) -- traced
+this to expected, unrelated behavior: this CLI's `--eval`/`--load` both
+auto-print the form's return value in addition to any explicit `prin1`
+the form itself performs (confirmed: `--eval '(+ 40 3)'` alone, no
+`prin1`, prints exactly `43`; two explicit `--eval` args each
+independently double). Not a build defect -- sanity for "binary
+executes committed HEAD's arithmetic correctly" holds, so per the
+task's own instruction ("rebuild only if sanity fails") no rebuild was
+performed. The existing cold image
+`/tmp/cold-image-org-e2e.0lsr0K/org-run1.img` (1,222,788,008 bytes,
+`t_load_done_run1`/`t_dump_done_run1` markers present) was reused as-is.
+
+### Reproducing the fresh evidence
+
+```
+$ cat probe_org3.txt
+(prin1 'S1)
+(with-temp-buffer (org-mode) (prin1 'AFTER-ORG) (nl-write-file "/tmp/.../ol2.txt" "org-mode-done"))
+(prin1 'S2)
+
+$ ./target/nelisp --cold-load-from /tmp/cold-image-org-e2e.0lsr0K/org-run1.img --no-prompt \
+    < probe_org3.txt
+stdout: "S1S1\nS2S2\n"     (S1/S2 each doubled: own prin1 + REPL's own value-echo)
+stderr: (empty)
+rc=0
+file /tmp/.../ol2.txt: never created
+```
+
+`AFTER-ORG` never prints and the file is never written -- the
+`with-temp-buffer` form aborts somewhere between `(org-mode)` starting
+and `(prin1 'AFTER-ORG)` running, with zero diagnostic and the REPL
+loop falling straight through to the next top-level form (`S2`).
+`(with-temp-buffer (outline-mode) (nl-write-file ...))` (this session's
+own quick control, not re-run here since already established as working
+in the task's own fresh-evidence notes) is unaffected -- the
+differentiator is `org-mode`'s own body, not `with-temp-buffer` or the
+probe harness.
+
+### H1-H4 verdict up front
+
+**H2 holds, in a generalized form not anticipated by the original
+phrasing.** It is not "a rc value treated as benign" in some special
+inline-substrate-loading sense -- it is the *general, permanent,
+by-design* contract of the top-level driver: `nl_eval_source_all` only
+ever reports/aborts when the M6 stash flag is non-zero; **any** nonzero
+`form_rc` returned with the flag still at 0 is unconditionally treated
+as "nothing happened, keep going," for both `--repl` (`REPORT_ERRORS=0`)
+and `--eval`/`--load`/embedded-file evaluation (`REPORT_ERRORS=1`) alike
+-- the flag check happens *before* the `REPORT_ERRORS` branch, so this
+swallow is not REPL-specific. H1 (a catch tag coincidentally matching
+the driver's own machinery) and H4 (quit-flag/keyboard-quit
+misclassification) do not apply -- no `catch` is involved anywhere in
+this call chain, and the QUIT_FLAG (268435464) is untouched throughout
+(confirmed below). H3 (an unprintable stashed value silently crashing
+the printer) does not apply either, because nothing is ever stashed in
+the first place -- there is no value for a printer to choke on.
+
+### gdb: locating the M6 region (it has moved off the historical `0x10000000`)
+
+Every `268435472`/`268435480`/`268435512`/`268435464`-style literal in
+`scripts/nelisp-standalone-build.el` source reads as an absolute address,
+but as of Doc 140 Stage 8 (`nelisp-standalone--linux-arena-init-form`,
+`scripts/nelisp-standalone-build.el:1268-1288`) **there is no fixed/
+`MAP_FIXED` arena base any more** -- the compile-time rewrite pass
+(`nelisp-standalone--chunk-arena-rewrite`) turns every one of these
+literals into a load of the runtime-computed `nl_arena_base` (a fixed
+`.bss` slot, `nm` address `0x818000` in this binary) plus the same
+offset (e.g. `268435472 - 268435456 = 16` -> flag is at
+`*(long*)0x818000 + 16`). Confirmed empirically: `x/1gx 0x10000000` (the
+literal address) is unmapped in a live process (`info proc mappings`
+shows no region anywhere near it); the real arena for a given run lands
+at a kernel-chosen high address (observed `0x7fffa7e00000` in one run,
+`0x7fff97e00000`-ish region size in another -- genuinely ASLR'd, changes
+per run). All M6 reads below go through `*(long*)0x818000` (indirected
+through `nl_arena_base`), not the raw literal.
+
+### gdb: minimal, fully deterministic non-org-mode repro of the exact swallow mechanism
+
+`nelisp_eval_call` (the universal per-eval recursion-guard entry,
+`scripts/nelisp-standalone-build.el:2992-3011`) is:
+
+```elisp
+(defun nelisp_eval_call (form_ptr env out)
+  (let* ((rec_cur_addr (+ env 96)) (rec_max_addr (+ env 104)))
+    (let* ((rec_cur (ptr-read-u64 rec_cur_addr 0)) (rec_max (ptr-read-u64 rec_max_addr 0)))
+      (if (>= rec_cur rec_max) 1          ; <-- bare 1, NO stash write
+        (nl_seq2 (ptr-write-u64 rec_cur_addr 0 (+ rec_cur 1))
+          ...(nl_eval_inner form_ptr env out 0)...)))))
+```
+
+`rec_max` is 300000 (`driver`'s `ctx+104` init,
+`scripts/nelisp-standalone-build.el:10199-10203`/`13922-13927`: "300000
+is ~74% of that ceiling, so deep recursion ... errors at the guard --
+never SIGSEGV"). When the guard trips it returns `1` with **no** call
+into `bf_signal`/`bf_error`/`nl_stash_void_variable`/
+`nl_cons_stash_void_function` -- the M6 stash is left completely
+untouched.
+
+Minimal repro (`--repl --no-prompt`, this session's own freshly-built,
+unmodified `target/nelisp`, no cold image needed):
+
+```
+(prin1 'S1)
+(defun rec-deep (n) (if (= n 0) 0 (+ 1 (rec-deep (- n 1)))))
+(prin1 (rec-deep 250000))
+(prin1 'S2)
+```
+->
+```
+stdout: S1S1\nrec-deep\nS2S2\n      (rec-deep's own prin1 line: MISSING)
+stderr: (empty)
+rc=0
+```
+
+gdb, unconditional breakpoint at the disassembled address of the
+guard's true-branch (`nelisp_eval_call+182` = `0x7b41c1`, reached only
+when `rec_cur >= rec_max`, so this hits once total instead of needing a
+conditional breakpoint evaluated on every one of ~150,000 nested calls):
+
+```
+Breakpoint 1, 0x00000000007b41c1 in nelisp_eval_call ()
+GUARD TRIPPED: rec_cur=300000 rec_max=300000
+arena base=0x7fffa7e00000
+M6 flag(base+16)=0 TAG(base+24)=0 QUIT(base+8)=0
+#0  nelisp_eval_call ()      (the guard itself)
+#1  nl_eval_arg_list_walk ()
+#2  nl_eval_arg_list ()
+#3  nl_eval_inner_cons ()
+#4  nl_ei_cons_tail ()
+#5  nl_ei_cons_dispatch ()
+#6  nl_eval_inner ()
+#7  nelisp_eval_call ()      (caller one level up)
+[continue] -> S2S2 printed, process exits normally, breakpoint never
+              fires again
+```
+
+Confirms: flag/tag are 0 at the exact moment the guard fires, the
+`rc=1` propagates cleanly up through the whole recursive call chain in
+one shot with nothing else touching the stash, and the top-level driver
+silently absorbs it.
+
+### gdb: confirming `nl_eval_source_all`'s swallow branch, and that the org-mode probe hits it identically
+
+Disassembly of `nl_eval_source_all` (`scripts/nelisp-standalone-build.el:
+10818-10886`, source lines ~10852-10870) pins the exact machine
+addresses of the two outcomes after `form_rc` is computed:
+
+- `0x8074c3` -- `form_rc != 0` **and** M6 flag == 0 -> `mov $0,%rax` ->
+  silently return 0 (this is the swallow).
+- `0x8074cf` -- `form_rc != 0` **and** M6 flag != 0 -> proceed to the
+  `report_errors` check -> `nl_eval_source_report_error`/
+  `nl_eval_source_print_error`.
+
+Both are ordinary per-top-level-form branch targets inside a single
+non-recursive loop (hit at most once per line of REPL input), so
+unconditional breakpoints on both are cheap and unambiguous -- no
+conditional-breakpoint-on-every-nested-call overhead needed (unlike a
+naive break on `nl_driver_eval_with_recorded_roots`, which is also
+called recursively from `bf_load_eval_loop`/`bf_eval_source_string_loop`
+and gives misleading `finish` results).
+
+Running the exact `probe_org3.txt` above against the cold image with
+both breakpoints armed:
+
+```
+Breakpoint 1 at 0x8074c3
+Breakpoint 2 at 0x8074cf
+S1S1
+
+Breakpoint 1, 0x00000000008074c3 in nl_eval_source_all ()
+HIT bp at pc=0x8074c3  form_rc=1
+S2S2
+[Inferior 1 exited normally]
+```
+
+Breakpoint 1 (the swallow) fires **exactly once**, immediately after the
+first form (`S1`) finishes and before `S2` -- i.e. on the org-mode
+form -- with `form_rc=1`. Breakpoint 2 (the "genuine stash present"
+branch) **never** fires. This is the same signature, at the same
+driver-level decision point, as the synthetic recursion-guard repro
+above: `nl_eval_source_all` sees `form_rc=1`, checks the M6 flag, finds
+it 0, and returns 0 -- exactly the observed symptom (no diagnostic,
+`rc=0`, loop continues to `S2`).
+
+### Ruling out the two leading candidates for org-mode's specific origin
+
+1. **The recursion-depth guard itself** -- ruled out. The unconditional
+   breakpoint at `0x7b41c1` (the guard's true-branch, confirmed above to
+   fire reliably for the synthetic 250,000-deep-recursion repro) **never
+   fires** during the org-mode probe. Whatever aborts inside
+   `with-temp-buffer`'s `(org-mode)` call is not native-recursion-depth
+   exhaustion.
+
+2. **`nl_eval_inner_cons`'s void-function-miss path** (calling an
+   undefined function symbol -- structurally the same "bare rc=1, no
+   stash" shape) -- ruled out as *already fixed* in the binary this
+   session used, via source archaeology:
+   - `lisp/nelisp-cc-evalport-combiner-cons.el`'s own `nl_eval_inner_cons`
+     (the on-disk "canonical" AOT source snapshot) *does* have this bug
+     verbatim: the `(if (= rc_lu 0) ... 1)` miss arm returns bare `1`
+     with no stash call, and `nelisp_env_lookup_function`
+     (`lisp/nelisp-cc-env-lookup-function.el:63-66`) documents its own
+     miss return as "1 = unbound-fn sentinel" with no stash either. This
+     file, in isolation, exhibits exactly this session's swallow class
+     for any `(some-undefined-fn ...)` call.
+   - But `scripts/nelisp-standalone-build.el` (the actual build driver)
+     patches this at compile time:
+     `nelisp-standalone--patch-void-function-miss` (line 9614) rewrites
+     that exact `(if (= rc_lu 0) ... 1)` arm to
+     `(nl_cons_stash_void_function env head_ptr)`, and the version
+     actually linked into `target/nelisp`,
+     `nelisp-standalone--mxcache-eval-inner-cons` (line 9722-9763, wired
+     via `nelisp-standalone--patch-combiner-cons-mxcache`), carries this
+     fix forward unchanged (line 9750:
+     `(nl_cons_stash_void_function env head_ptr)`). The docstring at line
+     9668 even names the exact prior incident this fixed: "a call to an
+     undefined function is an UNCATCHABLE process exit ... blocked the
+     anvil-pkg ERT suite." The stale, unpatched copy only still exists on
+     disk in `lisp/nelisp-cc-evalport-combiner-cons.el` because that file
+     is a source snapshot the build-time `nelisp-standalone--patch-*`
+     passes rewrite in memory before compilation, not the literal input
+     to the compiler -- it is not what is actually running.
+   - (This drift -- the *canonical* per-unit `.el` file exhibiting a bug
+     that a build-time patch pass silently corrects downstream, with no
+     comment in the canonical file itself pointing at the patch -- is
+     itself worth a follow-up naming audit, separate from this item.)
+
+### What remains open
+
+This session could **not**, within its time budget, single-step from the
+`nl_eval_source_all` swallow point (0x8074c3, C stack already unwound by
+that point) back down to the exact originating "bare non-zero return, no
+stash" instruction inside `org-mode`'s own expansion/body. Two attempts
+at doing this cheaply both failed to finish in time:
+
+- A conditional breakpoint scanning every recursive
+  `nelisp_eval_call`/`nl_eval_inner_cons` invocation for the shape "returns
+  1 without an intervening stash call" is not tractable this way -- these
+  are hit far too many times per top-level form for gdb's per-hit
+  ptrace/condition-eval overhead (the earlier synthetic-recursion
+  experiment already showed a *conditional* breakpoint over ~150,000 hits
+  timing out at 60s; org-mode's own body, while much shallower, still
+  evaluates enough sub-forms that a similar blanket conditional approach
+  did not complete in this session's remaining budget).
+- `record full` (process record, to reverse-step from the swallow point
+  back to the origin) was attempted, scoped to start only at the
+  beginning of the org-mode top-level form's evaluation (bracketed
+  between the two hits of the outer per-form call site,
+  `nl_eval_source_all+671` = `0x807422`) -- this also did not complete
+  within a 100s budget, most likely because `org-mode`'s
+  `define-derived-mode`-generated body and mode-hook running still
+  execute enough native instructions that full instruction-level
+  recording is too slow for this session's remaining time, even bounded
+  to just that one form.
+
+### Recommended fix, ranked (scoped for codex)
+
+1. **Primary, structural, closes the whole class at once (not just
+   org-mode's specific trigger) -- `scripts/nelisp-standalone-build.el`,
+   `nl_eval_source_all` (~line 10850-10870):** the comment at
+   10854-10865 already documents *why* the flag==0 fallback exists ("an
+   INLINE-embedded substrate load ... can return a transient non-zero
+   rc ... with nothing actually stashed"), but the fallback as written is
+   global and silent for *every* caller, not just that one documented
+   inline-substrate-loading case. Any current or future "bare non-zero
+   rc, no stash" return anywhere in the eval/apply/arg-list/frame chain
+   (the recursion guard demonstrated above being one live, still-present
+   instance; there may be others not yet audited) is invisible by
+   construction. Two non-exclusive options: (a) audit and fix each
+   remaining "rc!=0 without stash" call site to always stash (as was
+   already done for void-function-miss and unwind-protect-cleanup), so
+   the flag==0 fallback becomes truly unreachable outside its one
+   documented case and can be tightened to check for that case
+   specifically rather than "anything at all"; or (b), lower-effort and
+   defense-in-depth, have `nl_eval_source_all` at least print a distinct,
+   clearly-labeled diagnostic (e.g. `nelisp: internal: form aborted with
+   unrecorded error (rc=<n>)`) for the *undocumented* shape of this
+   case -- i.e. keep silently continuing (preserve current behavior for
+   the one legitimate documented transient-rc case) but only once that
+   case is narrowed to something more specific than "flag == 0", so a
+   genuine future regression like this one is loud instead of silent.
+2. **Regression test, self-contained, no org-mode/cold-image needed** (the
+   minimal repro above): `(defun rec-deep (n) (if (= n 0) 0 (+ 1
+   (rec-deep (- n 1))))) (rec-deep 250000)` via `--load`/`--eval` should
+   not exit 0 with the recursion silently truncated -- it should either
+   report a distinct "recursion guard" diagnostic (preferred; mirrors
+   real Emacs's `max-lisp-eval-depth` -> `(error "Lisp nesting exceeds
+   ...")`, which real Emacs *does* signal audibly) or at minimum the new
+   diagnostic from recommendation 1(b).
+3. **Follow-up, not scoped for this session:** finish the bisection this
+   session could not complete in time -- either budget a longer,
+   dedicated gdb/record session against just the org-mode probe (the two
+   ruled-out candidates above narrow the search meaningfully: it is
+   neither the recursion guard nor the void-function-miss path, so the
+   next places to check are `nl_eval_arg_list`/`nl_apply_function`/
+   `nl_apply_lambda_inner`'s own less-common branches -- e.g. arity
+   mismatch, a macro-expansion edge case, or a hash-table/obarray growth
+   path exercised specifically by `define-derived-mode`'s keymap/abbrev-
+   table/syntax-table setup or org-mode's hook-running -- for a similar
+   "bare non-zero return, no stash" shape), or apply recommendation 1(b)
+   first and let the now-loud diagnostic name the culprit directly on
+   the very next run.
+
+### Artifacts (not committed, scratch only)
+
+All under this session's scratchpad
+(`/tmp/claude-1000/.../scratchpad/`): `probe_org3.txt`,
+`probe_recdeep.txt`, `gdb_org_swallow.cmds`, `gdb_recguard2.cmds`, and
+related one-off `gdb_*.cmds`/`*.out`/`*.err` files. Cold image
+`/tmp/cold-image-org-e2e.0lsr0K/` (pre-existing from a concurrent/prior
+session, reused read-only, NOT deleted by this session per the task's
+own "delete image workdirs (max ONE)" instruction -- this session
+created zero new image workdirs, so there was nothing of this session's
+own to delete). No repo source files were modified this session; only
+this `FINDINGS.md` entry (branch `diag/eval-call-formrc-swallow`, base
+`main` @ `9e41de3c`, this worktree's checked-out content @ `f8238049`).
