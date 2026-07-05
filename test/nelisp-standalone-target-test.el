@@ -30,6 +30,7 @@
         (add-to-list 'load-path path)))))
 
 (require 'nelisp-standalone-build)
+(require 'nelisp-cc-sf-unwind-protect)
 
 (ert-deftest nelisp-standalone-target-defaults-to-linux-sysv ()
   "The default target remains Linux/SysV for compatibility on every host."
@@ -498,6 +499,53 @@
       (should-not (tree-member-p
                    '(nl_cli_wrap_source_at fbuf (+ off n) src)
                    forms)))))
+
+(ert-deftest nelisp-standalone-target-unwind-cleanup-errors-propagate ()
+  "Normal-body cleanup uses stashing eval; body-error cleanup preserves body stash."
+  (cl-labels ((tree-member-p
+               (needle tree)
+               (cond
+                ((equal needle tree) t)
+                ((consp tree)
+                 (or (tree-member-p needle (car tree))
+                     (tree-member-p needle (cdr tree)))))))
+    (let ((forms nelisp-cc-sf-unwind-protect--source))
+      (should (tree-member-p
+               '(defun nl_sf_uw_do_cleanup (car cdr body-rc env out _pad6)
+                  (if (= body-rc 0)
+                      (let* ((scratch (alloc-bytes 32 8)))
+                        (nl_sf_uw_do_cleanup_preserve scratch car cdr body-rc env out))
+                    (let* ((tag-save (alloc-bytes 32 8))
+                           (val-save (alloc-bytes 32 8)))
+                      (seq
+                       (nl_sexp_clone_into 268435480 tag-save)
+                       (nl_sexp_clone_into 268435512 val-save)
+                       (nl_sf_uw_do_cleanup_discard
+                        tag-save val-save car cdr body-rc env out 0)))))
+               forms))
+      (should (tree-member-p
+               '(defun nl_sf_uw_do_cleanup_preserve (scratch car cdr body-rc env out)
+                  (nl_sf_uw_cleanup_evaled
+                   (extern-call nelisp_eval_call car env scratch)
+                   cdr body-rc env out 0))
+               forms))
+      (should (tree-member-p
+               '(defun nl_sf_uw_cleanup_evaled (cleanup-rc cdr body-rc env out _pad6)
+                  (if (= cleanup-rc 0)
+                      (nl_sf_uw_cleanup cdr body-rc env out 0 0)
+                    cleanup-rc))
+               forms))
+      (should (tree-member-p
+               '(defun nl_sf_uw_restore_after_discard
+                    (truthy tag-save val-save cdr body-rc env out _pad8)
+                  (seq
+                   (nl_sexp_clone_into tag-save 268435480)
+                   (nl_sexp_clone_into val-save 268435512)
+                   (ptr-write-u64 268435472 0 1)
+                   (dealloc-bytes tag-save 32 8)
+                   (dealloc-bytes val-save 32 8)
+                   (nl_sf_uw_cleanup_done truthy cdr body-rc env out 0)))
+               forms)))))
 
 (ert-deftest nelisp-standalone-target-reader-boundary-reclaim-is-conservative ()
   "Doc 140 Stage 5 reclaims only safe immediate non-mutating boundaries."

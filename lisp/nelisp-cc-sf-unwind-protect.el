@@ -31,22 +31,24 @@
 ;;   cdr(args)  = CLEANUP list — zero or more cleanup forms.
 ;;
 ;; Semantics: BODYFORM is evaluated first.  Then every CLEANUP form
-;; is evaluated unconditionally.  Cleanup errors are silently discarded
-;; (matching GNU Emacs `unwind-protect' semantics).  The final return
-;; code is the body's rc (0=Ok or 1=Err with stash in
-;; `nelisp--last-signal-data').
+;; is evaluated unconditionally.  If BODYFORM completed normally, the
+;; first cleanup error is returned with the usual stashed signal data.
+;; If BODYFORM already stashed an error, cleanup errors are silently
+;; discarded so the body error remains the one reported.  The final
+;; return code is either the first cleanup error on a normal body, or
+;; the body's rc (0=Ok or 1=Err with stash in `nelisp--last-signal-data').
 ;;
 ;; Key: `nelisp_eval_call' stashes errors into `nelisp--last-signal-data'
-;; on rc=1.  `nl_eval_is_truthy' discards errors silently (returns -1
-;; on error but does NOT touch `nelisp--last-signal-data').  Because
-;; cleanup eval uses only `nl_eval_is_truthy', the body's stashed error
-;; in `nelisp--last-signal-data' is preserved intact through all cleanup
-;; steps.  The final `body-rc' is returned so the Rust thin shell's
-;; `consume_stashed_error' can reconstruct the body error if needed.
+;; on rc=1.  Cleanup eval after a normal body uses `nelisp_eval_call' into
+;; a scratch slot so cleanup errors are stashed and visible to condition-case
+;; / the diagnostic printer.  Cleanup eval after a body error snapshots the
+;; M6 stash TAG/VAL slots, uses `nl_eval_is_truthy' as a discard eval, and
+;; restores the body stash before continuing.
 ;;
 ;; ABI externs used:
 ;;   nl_cons_car_ptr: (*const Sexp) → i64   (= &car of cons, or 0 for non-Cons)
 ;;   nl_cons_cdr_ptr: (*const Sexp) → i64   (= &cdr of cons, or 0 for non-Cons)
+;;   nl_sexp_clone_into: (*const Sexp, *mut Sexp) → ()
 ;;   nelisp_eval_call: (*const Sexp, *mut c_void, *mut Sexp) → i64
 ;;     Standard eval entry; writes result to *out on rc=0, stashes error to
 ;;     `nelisp--last-signal-data' on rc=1.
@@ -63,9 +65,14 @@
 ;; Alignment: every defun has even arity (4 or 6) and every extern-call
 ;; appears as argument 0 at its call site so rsp ≡ 0 mod 16 at the call.
 ;;
-;; Structure (8 defuns, seq form):
-;;   Cleanup walk (discards cleanup errors, preserves body stash):
+;; Structure (12 defuns, seq form):
+;;   Cleanup walk (normal body: propagates cleanup error;
+;;                 body error: discards cleanup errors, preserves body stash):
 ;;   nl_sf_uw_cleanup_done  (truthy cdr body-rc env out _pad6)  — arity 6
+;;   nl_sf_uw_cleanup_evaled (cleanup-rc cdr body-rc env out _pad6) — arity 6
+;;   nl_sf_uw_do_cleanup_preserve (scratch car cdr body-rc env out) — arity 6
+;;   nl_sf_uw_restore_after_discard (truthy tag-save val-save cdr body-rc env out _pad8) — arity 8
+;;   nl_sf_uw_do_cleanup_discard (tag-save val-save car cdr body-rc env out _pad8) — arity 8
 ;;   nl_sf_uw_do_cleanup    (car cdr body-rc env out _pad6)     — arity 6
 ;;   nl_sf_uw_got_cdr       (cdr cleanup body-rc env out _pad6) — arity 6
 ;;   nl_sf_uw_cleanup       (cleanup body-rc env out _pad5 _pad6) — arity 6
@@ -89,15 +96,62 @@
     (defun nl_sf_uw_cleanup_done (truthy cdr body-rc env out _pad6)
       (nl_sf_uw_cleanup cdr body-rc env out 0 0))
 
+    ;; After nelisp_eval_call on a cleanup form for a normal body:
+    ;; rc=0 continues to the next cleanup, rc=1 propagates the stashed
+    ;; cleanup error and leaves *out holding the protected body's value.
+    ;; Arity 6 (even): cleanup-rc, cdr, body-rc, env, out, _pad6.
+    (defun nl_sf_uw_cleanup_evaled (cleanup-rc cdr body-rc env out _pad6)
+      (if (= cleanup-rc 0)
+          (nl_sf_uw_cleanup cdr body-rc env out 0 0)
+        cleanup-rc))
+
+    ;; scratch = temporary result slot.  Eval this cleanup form via
+    ;; nelisp_eval_call so cleanup errors are stashed normally.
+    ;; Arity 6 (even): scratch, car, cdr, body-rc, env, out.
+    (defun nl_sf_uw_do_cleanup_preserve (scratch car cdr body-rc env out)
+      (nl_sf_uw_cleanup_evaled
+       (extern-call nelisp_eval_call car env scratch)
+       cdr body-rc env out 0))
+
+    ;; After discard-evaluating a cleanup while the body already errored,
+    ;; restore the saved M6 signal stash and continue the cleanup walk.
+    ;; Arity 8 (even): truthy, tag-save, val-save, cdr, body-rc, env, out, _pad8.
+    (defun nl_sf_uw_restore_after_discard
+        (truthy tag-save val-save cdr body-rc env out _pad8)
+      (seq
+       (nl_sexp_clone_into tag-save 268435480)
+       (nl_sexp_clone_into val-save 268435512)
+       (ptr-write-u64 268435472 0 1)
+       (dealloc-bytes tag-save 32 8)
+       (dealloc-bytes val-save 32 8)
+       (nl_sf_uw_cleanup_done truthy cdr body-rc env out 0)))
+
+    ;; Discard-evaluate cleanup for an already failing body.  The caller
+    ;; saved the body stash before this call; restore_after_discard puts it
+    ;; back even if nl_eval_is_truthy stashed the cleanup error internally.
+    ;; Arity 8 (even): tag-save, val-save, car, cdr, body-rc, env, out, _pad8.
+    (defun nl_sf_uw_do_cleanup_discard
+        (tag-save val-save car cdr body-rc env out _pad8)
+      (nl_sf_uw_restore_after_discard
+       (extern-call nl_eval_is_truthy car env)
+       tag-save val-save cdr body-rc env out 0))
+
     ;; car = nl_cons_car_ptr(cleanup) already fetched as first arg.
-    ;; Eval this cleanup form via nl_eval_is_truthy (extern-call FIRST ✓).
-    ;; nl_eval_is_truthy discards errors silently — nelisp--last-signal-data
-    ;; is untouched, so the body's stashed error remains intact.
+    ;; If body was normal, evaluate cleanup through nelisp_eval_call so
+    ;; cleanup errors propagate.  If body already errored, use the discard
+    ;; path so the body stash remains intact.
     ;; Arity 6 (even): car, cdr, body-rc, env, out, _pad6.
     (defun nl_sf_uw_do_cleanup (car cdr body-rc env out _pad6)
-      (nl_sf_uw_cleanup_done
-       (extern-call nl_eval_is_truthy car env)
-       cdr body-rc env out 0))
+      (if (= body-rc 0)
+          (let* ((scratch (alloc-bytes 32 8)))
+            (nl_sf_uw_do_cleanup_preserve scratch car cdr body-rc env out))
+        (let* ((tag-save (alloc-bytes 32 8))
+               (val-save (alloc-bytes 32 8)))
+          (seq
+           (nl_sexp_clone_into 268435480 tag-save)
+           (nl_sexp_clone_into 268435512 val-save)
+           (nl_sf_uw_do_cleanup_discard
+            tag-save val-save car cdr body-rc env out 0)))))
 
     ;; cdr = nl_cons_cdr_ptr(cleanup) already fetched as first arg.
     ;; Get car(cleanup) (extern-call FIRST ✓) and delegate to do_cleanup.
@@ -161,9 +215,11 @@
 
   "AOT source for `nl_sf_unwind_protect'.
 
-8 defuns (seq form) — CPS chain implementing protected body eval,
-unconditional cleanup walk (errors silently discarded via nl_eval_is_truthy
-which does NOT touch nelisp--last-signal-data), and final body-rc return.
+12 defuns (seq form) — CPS chain implementing protected body eval,
+unconditional cleanup walk, and final rc selection.  Cleanup errors after a
+normal body are propagated via nelisp_eval_call; cleanup errors after a body
+error are discarded via nl_eval_is_truthy with explicit M6 stash restore so
+the body stash survives.
 
 Entry chain (success path):
   nl_sf_unwind_protect
@@ -174,13 +230,18 @@ Entry chain (success path):
     Nil: return body-rc
     Cons: → (cdr(cleanup) FIRST) → nl_sf_uw_got_cdr
       → (car(cleanup) FIRST) → nl_sf_uw_do_cleanup
-      → (nl_eval_is_truthy car FIRST) → nl_sf_uw_cleanup_done
-      → nl_sf_uw_cleanup (recurse on cdr)
+        body-rc=0:
+          → (nelisp_eval_call cleanup FIRST) → nl_sf_uw_cleanup_evaled
+          → rc=0 recurse, rc=1 return cleanup rc
+        body-rc=1:
+          → save body stash TAG/VAL
+          → (nl_eval_is_truthy cleanup FIRST) → nl_sf_uw_restore_after_discard
+          → restore body stash TAG/VAL → nl_sf_uw_cleanup_done
+          → nl_sf_uw_cleanup (recurse on cdr)
 
-Semantics: cleanup errors are discarded (nl_eval_is_truthy returns -1 for
-errors without touching nelisp--last-signal-data).  Body error survives in
-nelisp--last-signal-data through all cleanup steps.  Final rc = body-rc.
-GNU Emacs unwind-protect semantics: cleanup forms run for side effects only.
+Semantics: cleanup errors after a normal body propagate normally.  Body error
+survives in nelisp--last-signal-data through all cleanup steps.  Final rc =
+cleanup rc on normal-body cleanup failure, otherwise body-rc.
 
 All defuns have even arity; every extern-call is argument 0 at its
 call site → body-entry rsp ≡ 0 mod 16 ✓.
