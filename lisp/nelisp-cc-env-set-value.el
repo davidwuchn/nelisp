@@ -110,16 +110,47 @@
     ;; In all paths the extern-calls are arg 0 of `=' resp. of the
     ;; let-binding value-form, consuming each result before the next
     ;; extern-call executes ✓.
+    ;; Cold-load hardening (segfault fix, 2026-07): reproduced crash is
+    ;; `nl_sf_setq' evaluating a `setq' deep inside a cold-loaded
+    ;; `org-mode' activation body, passing a NAME-PTR whose 32-byte view
+    ;; reads tag 7 (Cons) instead of 4/5 (Symbol/Str) into this function.
+    ;; `nelisp_mirror_is_constant' / `nelisp_frame_stack_find' each guard
+    ;; their own NAME-PTR argument now (`lisp/nelisp-cc-mirror-lookup-
+    ;; entry.el', `lisp/nelisp-cc-frame-stack-find.el'), so both calls
+    ;; below already return a sound "not found" instead of crashing --
+    ;; but the fall-through miss path still writes to the mirror via
+    ;; `nelisp_env_setv_mirror' -> `nelisp_mirror_set_value_or_insert' ->
+    ;; (on miss) `nelisp_mirror_bucket_prepend', which does its OWN
+    ;; independent `str-bytes-ptr'/`nelisp_fnv1a' read of NAME-PTR's
+    ;; payload to build the new bucket key -- an equally-crashing
+    ;; dereference this guard has not otherwise reached.  Check NAME-PTR
+    ;; once, here, before any of that: an in-arena Sexp::Symbol /
+    ;; Sexp::Str is required for `setq' to mean anything, so a malformed
+    ;; NAME-PTR can only be memory corruption, never a legitimate
+    ;; program.  Route it through the existing "setting-constant" error
+    ;; sentinel (return 1) rather than attempting the write -- a signalled
+    ;; error is the correct, already-handled outcome for an operation that
+    ;; cannot soundly proceed, same spirit as the `wf_key_eq_depth' bounded-
+    ;; miss precedent (commit 7aa3ed8b): never dereference a value that is
+    ;; not provably what it claims to be.
+    (defun nelisp_env_set_value_name_ok (name-ptr)
+      (if (= (extern-call nl_gc_in_arena name-ptr) 0)
+          0
+        (if (= (sexp-tag name-ptr) 4)
+            1
+          (if (= (sexp-tag name-ptr) 5) 1 0))))
     (defun nelisp_env_set_value
         (mirror-ptr frames-ptr name-ptr val-ptr scratch-ptr _pad)
-      (if (= (extern-call nelisp_mirror_is_constant mirror-ptr name-ptr) 1)
+      (if (= (nelisp_env_set_value_name_ok name-ptr) 0)
           1
-        (let ((cell-ptr (extern-call nelisp_frame_stack_find frames-ptr name-ptr)))
-          (if (= cell-ptr 0)
-              ;; Frame miss: write to mirror.
-              (nelisp_env_setv_mirror mirror-ptr name-ptr scratch-ptr 0)
-            ;; Frame hit: overwrite lexical cell (refcount-safe).
-            (nelisp_env_setv_cell_hit cell-ptr val-ptr))))))
+        (if (= (extern-call nelisp_mirror_is_constant mirror-ptr name-ptr) 1)
+            1
+          (let ((cell-ptr (extern-call nelisp_frame_stack_find frames-ptr name-ptr)))
+            (if (= cell-ptr 0)
+                ;; Frame miss: write to mirror.
+                (nelisp_env_setv_mirror mirror-ptr name-ptr scratch-ptr 0)
+              ;; Frame hit: overwrite lexical cell (refcount-safe).
+              (nelisp_env_setv_cell_hit cell-ptr val-ptr)))))))
   "AOT source for Wave a-2 `Env::set_value' body.
 
 R11a (Doc 49 Wave 9): `let-rt' CSE hoist on the `frame_stack_find'
