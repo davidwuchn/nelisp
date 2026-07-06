@@ -7,6 +7,7 @@
         verify-elisp-fixtures \
         standalone-eval standalone-eval-clean standalone-eval-test standalone-eval-j \
         standalone-reader standalone-reader-test standalone-reader-load-smoke standalone-reader-fmt-smoke standalone-reader-prelude-equal-reload-smoke standalone-reader-declare-strip-smoke standalone-reader-nested-backquote-macro-smoke standalone-reader-derived-mode-shape-smoke standalone-reader-pcase-quote-literal-smoke standalone-reader-catch-throw-tag-smoke standalone-reader-cond-let-shape-smoke standalone-reader-ffi-smoke standalone-reader-tls-smoke standalone-reader-process-smoke standalone-reader-realrt-smoke standalone-reader-repl-smoke standalone-reader-prelude-test standalone-reader-intern-soft-smoke standalone-reader-intern-soft-loop-smoke standalone-selfhost-test standalone-selfhost-mt-test standalone-parallel-compile-test standalone-chunk-growth-test \
+        standalone-reader-mod-float-smoke standalone-reader-match-data-smoke standalone-reader-current-time-smoke \
         nelisp-performance-gate nelisp-nelix-command-gate nelisp-native-artifact-gate nelisp-nelix-native-hot-gate \
         nelisp-nelix-operational-gate \
         nelisp-runtime-image-cache-gate nelisp-source-command-substrate-gate
@@ -473,6 +474,75 @@ standalone-reader-cond-let-shape-smoke: standalone-reader
 	  echo "[standalone-reader-cond-let-shape-smoke] PASS: -> $$out"; \
 	else \
 	  echo "[standalone-reader-cond-let-shape-smoke] FAIL: -> $$out (expected 2)"; \
+	  exit 1; \
+	fi
+
+# fix/small-primitives-parity: `mod' silently returned 0 for any float
+# operand pair (e.g. `(mod 5.5 2)' => 0.0 instead of 1.5) because the
+# quotient it computed the remainder from (`scripts/nelisp-stdlib-prelude.el')
+# used this reader's TRUE (non-truncating) float `/', so `b * (a/b)'
+# collapsed back to exactly `a'.  Covers all 4 sign combinations for
+# float/float and mixed int/float, the pre-existing (and intentionally
+# unchanged) all-integer floor-mod path, and zero-divisor semantics: NaN
+# (via `floatp') when a float operand is involved vs. a caught `error' when
+# both operands are integers -- matching host Emacs on both counts.
+#
+# Each check reduces to a boolean rather than returning the raw `mod'
+# result directly: the `--load' value printer mis-renders a Float nested
+# inside a list as `#<object>' (a separate, pre-existing printer quirk,
+# unrelated to this fix -- `--eval' on the same expressions prints the
+# floats correctly), so comparing with `=' and collecting `t'/`nil' side-
+# steps that entirely.
+standalone-reader-mod-float-smoke: standalone-reader
+	@mkdir -p target
+	@printf '%s\n' \
+	  '(list (= (mod 5.5 2) 1.5) (= (mod -5.5 2) 0.5) (= (mod 5.5 -2) -0.5) (= (mod -5.5 -2) -1.5) (= (mod 5 2.0) 1.0) (= (mod -5 2.0) 1.0) (= (mod 5 -2.0) -1.0) (= (mod -5 -2.0) -1.0) (= (mod 5.5 2.5) 0.5) (= (mod -5.5 2.5) 2.0) (= (mod 5.5 -2.5) -2.0) (= (mod -5.5 -2.5) -0.5) (= (mod 7 -3) -2) (= (mod -7 3) 2) (= (mod 7 3) 1) (= (mod -7 -3) -1) (= (mod 10 3) 1) (floatp (mod 5.5 0.0)) (floatp (mod 5.0 0)) (eq (condition-case nil (progn (mod 5 0) (quote no-error)) (error (quote caught-error))) (quote caught-error)))' \
+	  > target/standalone-reader-mod-float-smoke.el
+	@out="$$(./target/nelisp --load target/standalone-reader-mod-float-smoke.el)"; \
+	if [ "$$out" = "(t t t t t t t t t t t t t t t t t t t t)" ]; then \
+	  echo "[standalone-reader-mod-float-smoke] PASS: -> $$out"; \
+	else \
+	  echo "[standalone-reader-mod-float-smoke] FAIL: -> $$out"; \
+	  exit 1; \
+	fi
+
+# fix/small-primitives-parity: `match-data' / `save-match-data' were
+# entirely unimplemented (`fboundp' nil) even though `match-beginning' /
+# `match-end' / `match-string' already worked off the same `nlre--last-caps'
+# vector (Doc 143's pure-elisp regexp matcher).  Covers: `match-data'
+# flattening to the host (BEG0 END0 BEG1 END1 ...) shape with `nil nil' for
+# a non-participating group, and `save-match-data' isolating a nested
+# `string-match' from the caller's match state -- including when the body
+# signals an error, via `unwind-protect'.
+standalone-reader-match-data-smoke: standalone-reader
+	@mkdir -p target
+	@printf '%s\n' \
+	  '(list (progn (string-match "\\(a\\)\\(b\\)" "xabZ") (match-data)) (progn (string-match "a" "xaZ") (save-match-data (string-match "Z" "xaZ")) (match-beginning 0)) (progn (string-match "a" "xaZ") (condition-case nil (save-match-data (string-match "Z" "xaZ") (error "boom")) (error nil)) (match-beginning 0)))' \
+	  > target/standalone-reader-match-data-smoke.el
+	@out="$$(./target/nelisp --load target/standalone-reader-match-data-smoke.el)"; \
+	if [ "$$out" = "((1 3 1 2 2 3) 1 1)" ]; then \
+	  echo "[standalone-reader-match-data-smoke] PASS: -> $$out"; \
+	else \
+	  echo "[standalone-reader-match-data-smoke] FAIL: -> $$out"; \
+	  exit 1; \
+	fi
+
+# fix/small-primitives-parity: `current-time' was void-function.  Minimal
+# polyfill derived from the already-working `float-time': decomposes the
+# epoch-seconds double into host Emacs's (HIGH LOW USEC PSEC) shape (PSEC
+# always 0, see the defun's comment for why).  Asserts HIGH*65536+LOW
+# reconstructs the same whole-second count `(floor (float-time))' gives,
+# and that USEC/PSEC are in-range.
+standalone-reader-current-time-smoke: standalone-reader
+	@mkdir -p target
+	@printf '%s\n' \
+	  '(let* ((tm (current-time)) (hi (nth 0 tm)) (lo (nth 1 tm)) (us (nth 2 tm)) (ps (nth 3 tm))) (list (= (length tm) 4) (= (+ (* hi 65536) lo) (floor (float-time))) (and (>= us 0) (< us 1000000)) (= ps 0)))' \
+	  > target/standalone-reader-current-time-smoke.el
+	@out="$$(./target/nelisp --load target/standalone-reader-current-time-smoke.el)"; \
+	if [ "$$out" = "(t t t t)" ]; then \
+	  echo "[standalone-reader-current-time-smoke] PASS: -> $$out"; \
+	else \
+	  echo "[standalone-reader-current-time-smoke] FAIL: -> $$out"; \
 	  exit 1; \
 	fi
 

@@ -288,12 +288,37 @@ leading `(declare ...)' forms are treated as declarations."
 ;; not host Emacs's pure floor-mod — the two differ only when
 ;; sign(a) != sign(b), and a codebase grep confirmed no extant
 ;; caller passes a negative divisor.
+;;
+;; fix/small-primitives-parity (2026-07-06): the all-integer branch
+;; above is left EXACTLY as-is (including its documented divergence
+;; from host Emacs on a negative divisor) -- nothing here changes
+;; for two integer operands.  The bug was in reusing that same
+;; int-shaped formula when either operand is a float: `/' on floats
+;; is a true (non-truncating) division, so `n * (/ a n)' collapses
+;; back to exactly `a' and every float `mod' silently returned 0
+;; (e.g. `(mod 5.5 2)' => 0.0 instead of 1.5).  Floats now take the
+;; standard host-Emacs floor-mod formula `a - b * (floor a b)'
+;; instead, which:
+;;   - matches host Emacs whenever a float operand is involved,
+;;     including mixed int/float args and negative operands (see
+;;     `test/nelisp-mod-float-test.el' for the value table this was
+;;     checked against), and
+;;   - naturally produces a NaN result for a zero float-involving
+;;     divisor with NO explicit special case: `(floor (/ a 0.0))' is
+;;     +-inf, and `b * +-inf' with `b' = 0 is NaN per IEEE 754, so
+;;     `a - NaN' is NaN -- exactly host Emacs's `(mod 5.5 0.0)' =>
+;;     0.0e+NaN (as opposed to the all-integer branch, which still
+;;     signals `arith-error' on a zero divisor, also matching host
+;;     Emacs).
 (defun mod (a b)
-  (when (= b 0) (error "Arithmetic error"))
-  (let* ((n (if (< b 0) (- b) b))
-         (r (- a (* n (/ a n)))))
-    (when (< r 0) (setq r (+ r n)))
-    (if (< b 0) (- r) r)))
+  (if (or (floatp a) (floatp b))
+      (- a (* b (floor (/ a b))))
+    (progn
+      (when (= b 0) (error "Arithmetic error"))
+      (let* ((n (if (< b 0) (- b) b))
+             (r (- a (* n (/ a n)))))
+        (when (< r 0) (setq r (+ r n)))
+        (if (< b 0) (- r) r)))))
 
 ;; Rust-min batch 6j (2026-05-06): variadic bitwise fold via 2-arg
 ;; primitives `nelisp--logior2' / -logand2 / -logxor2.  Elisp
