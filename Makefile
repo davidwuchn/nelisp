@@ -6,7 +6,7 @@
         standalone-tarball standalone-tarball-verify \
         verify-elisp-fixtures \
         standalone-eval standalone-eval-clean standalone-eval-test standalone-eval-j \
-        standalone-reader standalone-reader-test standalone-reader-load-smoke standalone-reader-fmt-smoke standalone-reader-prelude-equal-reload-smoke standalone-reader-declare-strip-smoke standalone-reader-nested-backquote-macro-smoke standalone-reader-derived-mode-shape-smoke standalone-reader-ffi-smoke standalone-reader-tls-smoke standalone-reader-process-smoke standalone-reader-realrt-smoke standalone-reader-repl-smoke standalone-reader-prelude-test standalone-reader-intern-soft-smoke standalone-reader-intern-soft-loop-smoke standalone-selfhost-test standalone-selfhost-mt-test standalone-parallel-compile-test standalone-chunk-growth-test \
+        standalone-reader standalone-reader-test standalone-reader-load-smoke standalone-reader-fmt-smoke standalone-reader-prelude-equal-reload-smoke standalone-reader-declare-strip-smoke standalone-reader-nested-backquote-macro-smoke standalone-reader-derived-mode-shape-smoke standalone-reader-pcase-quote-literal-smoke standalone-reader-cond-let-shape-smoke standalone-reader-ffi-smoke standalone-reader-tls-smoke standalone-reader-process-smoke standalone-reader-realrt-smoke standalone-reader-repl-smoke standalone-reader-prelude-test standalone-reader-intern-soft-smoke standalone-reader-intern-soft-loop-smoke standalone-selfhost-test standalone-selfhost-mt-test standalone-parallel-compile-test standalone-chunk-growth-test \
         nelisp-performance-gate nelisp-nelix-command-gate nelisp-native-artifact-gate nelisp-nelix-native-hot-gate \
         nelisp-nelix-operational-gate \
         nelisp-runtime-image-cache-gate nelisp-source-command-substrate-gate
@@ -379,6 +379,74 @@ standalone-reader-derived-mode-shape-smoke: standalone-reader
 	  echo "[standalone-reader-derived-mode-shape-smoke] PASS: -> $$out"; \
 	else \
 	  echo "[standalone-reader-derived-mode-shape-smoke] FAIL: -> $$out (expected (t t))"; \
+	  exit 1; \
+	fi
+
+# Regression for the `pcase' root cause behind the fix/reader-backquote-macro
+# investigation (magit #17 M2 blocker, nelisp-emacs-lib Doc 33 item 239): a
+# `(quote DATUM)' pcase pattern holding a COMPOUND datum (here a 2-element
+# list) must match by `equal' (structural), not `eq' (identity).  `eq' only
+# happens to work for quoted symbols/keywords (interned, so `eq'-comparable);
+# a freshly-consed runtime list is never `eq' to an equal-shaped quoted
+# literal, so a clause like `('(t t) ...)' silently never wins and pcase
+# falls through to the next, less-specific clause instead -- exactly the
+# defect vendor cond-let.el's `cond-let--prepare-clauses' hits when its
+# `(pcase (list ...) ('(t t) 'cond-let--when-let*) (`(t ,_) 'cond-let--when-let)
+# ...)' dispatch picks the wrong helper macro and produces `void-variable: x'
+# (see the fuller end-to-end shape in
+# standalone-reader-cond-let-shape-smoke below).
+standalone-reader-pcase-quote-literal-smoke: standalone-reader
+	@mkdir -p target
+	@printf '%s\n' \
+	  '(list (pcase (list t t) ((quote (t t)) (quote AA)) (`(t ,_) (quote AB)) (`(nil ,_) (quote BB))) (pcase (list nil t) ((quote (nil t)) (quote BA)) (`(t ,_) (quote AB)) (`(nil ,_) (quote BB))))' \
+	  > target/standalone-reader-pcase-quote-literal-smoke.el
+	@out="$$(./target/nelisp --load target/standalone-reader-pcase-quote-literal-smoke.el)"; \
+	if [ "$$out" = "(AA BA)" ]; then \
+	  echo "[standalone-reader-pcase-quote-literal-smoke] PASS: -> $$out"; \
+	else \
+	  echo "[standalone-reader-pcase-quote-literal-smoke] FAIL: -> $$out (expected (AA BA))"; \
+	  exit 1; \
+	fi
+
+# End-to-end regression for the same root cause, shaped exactly like vendor
+# cond-let.el's `cond-let--prepare-clauses' / `cond-let--when-let*' /
+# `cond-let--when-let' (magit #17 M2 blocker; nelisp-emacs-lib Doc 33 item
+# 239's minimal repro `(cond-let* ([x 1] [x (+ x 1)] x) (t 99))' raised
+# `void-variable: x' against the pre-fix reader).  Self-contained (does NOT
+# load vendor/cond-let.el or anything from nelisp-emacs-lib): re-derives just
+# enough of the same two-part mechanism using only what this reader's own
+# baked-in prelude already provides (`pcase' / `pcase-let' / backquote /
+# `catch'+`throw') --
+#   (1) a clause-preparation helper that builds its expansion via nested
+#       backquote/`,@'-splicing and dispatches between two sibling
+#       backquote-bodied macros through a `pcase' whose patterns mix a
+#       quoted-list literal (`'(t 2)') with backquote patterns (`` `(t ,_)'');
+#   (2) `my-when-let*' (sequential, `let*'-based -- correct for chained
+#       bindings that reference an earlier binding of the SAME name) versus
+#       `my-when-let' (parallel, `let'-based -- wrong for that shape, and
+#       will itself raise `void-variable' if ever mis-selected again).
+# Before the fix, the quote-literal clause never matched (silently, `eq'
+# instead of `equal'), so the dispatch always picked `my-when-let' and the
+# second binding's `(+ x 1)' referenced `x' before it was bound ->
+# `void-variable: x'.  After the fix, `my-when-let*' is correctly selected
+# and the whole thing evaluates to 2 (1, then (and 1 (+ 1 1)) = 2), matching
+# real Emacs's actual `cond-let*' semantics for the same shape.
+standalone-reader-cond-let-shape-smoke: standalone-reader
+	@mkdir -p target
+	@printf '%s\n' \
+	  '(defun my-macroexp-progn (forms) (if (cdr forms) (cons (quote progn) forms) (car forms)))' \
+	  '(defun my-prepare-varlist (varlist) (let (prevvar) (list (mapcar (lambda (binding) (pcase-let ((`(,var ,form) binding)) (prog1 (if prevvar `(,var (and ,prevvar ,form)) (list var form)) (setq prevvar var)))) varlist) prevvar)))' \
+	  '(defmacro my-when-let* (varlist bodyform) (let* ((res (my-prepare-varlist varlist)) (newvarlist (nth 0 res)) (lastvar (nth 1 res))) `(let* ,newvarlist (when ,lastvar ,bodyform))))' \
+	  '(defmacro my-when-let (varlist bodyform) `(let ,varlist (when ,(car (car (last varlist))) ,bodyform)))' \
+	  '(defun my-prepare-clauses (sequential clauses) (let (body) (dolist (clause (reverse clauses)) (let (varlist) (while (vectorp (car clause)) (push (append (pop clause) nil) varlist)) (push (if varlist (let ((macro-sym (pcase (list (and body t) (and sequential (length (reverse varlist)))) ((quote (t 2)) (quote my-when-let*)) (`(t ,_) (quote my-when-let)) ((quote (nil 2)) (quote my-when-let*)) (`(nil ,_) (quote my-when-let))))) `(,macro-sym ,(reverse varlist) ,(if body `(throw (quote my-cond-let-tag) ,(my-macroexp-progn clause)) (my-macroexp-progn clause)))) (my-macroexp-progn clause)) body))) body))' \
+	  '(defmacro my-cond-let* (&rest clauses) `(catch (quote my-cond-let-tag) ,@(my-prepare-clauses t clauses)))' \
+	  '(my-cond-let* ([x 1] [x (+ x 1)] x) (t 99))' \
+	  > target/standalone-reader-cond-let-shape-smoke.el
+	@out="$$(./target/nelisp --load target/standalone-reader-cond-let-shape-smoke.el)"; \
+	if [ "$$out" = "2" ]; then \
+	  echo "[standalone-reader-cond-let-shape-smoke] PASS: -> $$out"; \
+	else \
+	  echo "[standalone-reader-cond-let-shape-smoke] FAIL: -> $$out (expected 2)"; \
 	  exit 1; \
 	fi
 
