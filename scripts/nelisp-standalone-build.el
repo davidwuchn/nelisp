@@ -14887,8 +14887,37 @@ This swaps `nl_bf_bind_rest' for the rc/lifetime-safe version and makes
                         (nelisp_mirror_set_function_or_insert mirror_ptr sym_ptr scratch_slot 0)
                         (nl_sexp_clone_into def_ptr out)
                         0))
-                   resolve_rc))))))))
+                   ;; FINDINGS.md recommendation 1(a): resolve_rc != 0 here only
+                   ;; when DEF_PTR is a Symbol whose `nelisp_env_lookup_function'
+                   ;; lookup missed (the non-symbol arm above always forces 0) --
+                   ;; i.e. `(fset 'alias 'undefined-target)'.  The shipped/M3
+                   ;; handler returned this bare rc with nothing in the M6 stash,
+                   ;; the same flagless-abort class `nl_apply_do_funcall'/
+                   ;; `nl_apply_do_apply' had.  Stash `void-function' naming the
+                   ;; unresolved target instead.
+                   (nl_cons_stash_void_function env def_ptr)))))))))
   "Rc-correct, `not'-free replacement for the shipped nl_apply_do_fset.")
+
+;; `(symbol-function SYM)' (FINDINGS.md recommendation 1(a), same class as
+;; `nl_apply_do_funcall'/`nl_apply_do_apply'/`nl_apply_do_fset' above): the
+;; shipped `nl_apply_do_symbol_function' passes `nelisp_env_lookup_function''s
+;; raw rc straight through as its own return value with nothing in the M6
+;; stash on a miss (`(= entry 0)' -> `1', per
+;; `nelisp-cc-env-lookup-function.el' -- stashing is the CALLER's documented
+;; responsibility, same as every other lookup-function call site), so
+;; `(symbol-function 'no-such-fn)' aborted the whole top-level form flagless.
+(defconst nelisp-standalone--reader-do-symbol-function-fixed
+  '(defun nl_apply_do_symbol_function (args_list_ptr env out)
+     (let* ((arg0_ptr (nl_apply_list_nth args_list_ptr 0)))
+       (if (= arg0_ptr 0)
+           (nl_apply_stash_wta env args_list_ptr)
+         (let* ((mirror_ptr (+ env 0)) (unbound_ptr (+ env 64)))
+           (let* ((rc (nelisp_env_lookup_function mirror_ptr unbound_ptr arg0_ptr out)))
+             (if (= rc 0)
+                 0
+               (nl_cons_stash_void_function env arg0_ptr)))))))
+  "Rc-correct `(symbol-function SYM)' handler: stashes `void-function' on an
+unbound-symbol miss instead of passing a bare, unstashed rc=1 through.")
 
 ;; M4 keyword self-eval.  Without this, evaluating a keyword symbol (e.g. the
 ;; `:test' in `(make-hash-table :test 'equal)') routes through nl_env_lookup_val
@@ -15069,32 +15098,99 @@ always return 0, so `signal' flows to the builtin applyfn (bf_signal) instead of
                  1)))))))
   "Rc-correct `apply' handler (non-symbol resolve arm forces rc 0).")
 
+;; FINDINGS.md recommendation 1(a) (audit remaining rc!=0-without-stash call
+;; sites, the same class already fixed for void-function-miss in
+;; `nl_eval_inner_cons' and for unwind-protect-cleanup): `nl_apply_do_funcall'
+;; and `nl_apply_do_apply' (this unit) resolve a Symbol function argument via
+;; `nelisp_env_lookup_function' and, on a miss (`rc_lu' / `resolve_rc' != 0),
+;; return a bare `1' with nothing written to the M6 error stash -- exactly the
+;; gap `nelisp-standalone--patch-void-function-miss' closed for the direct
+;; `(f ...)' call-site dispatch in `nl_eval_inner_cons', just never mirrored
+;; here.  `(funcall 'no-such-fn)' / `(apply 'no-such-fn nil)' therefore abort
+;; their whole top-level form flagless: uncatchable by `condition-case', and
+;; -- since cl-defstruct-generated `setf' places for structs whose
+;; `cl-struct-setter' property is unset fall back to
+;; `(funcall 'ACCESSOR--setter ...)' -- this is also the mechanism behind the
+;; magit-bridge M2 `defclass' abort (`eieio-defclass-internal' setting an
+;; inherited `cl--class' slot such as `parents' via a `funcall'ed
+;; `eieio--class-parents--setter' that was never actually defined).  Route
+;; both misses through `nl_cons_stash_void_function' (defined in the
+;; combiner-cons unit; combiner-apply already calls other cross-unit
+;; `nl_*'/`nelisp_*' helpers such as `nelisp_eval_call' and
+;; `nelisp_apply_function' as plain calls resolved at static-link time, so no
+;; `extern-call' wrapper is needed here either) with the unresolved symbol
+;; (`arg0_ptr' in both handlers), matching the payload shape
+;; `nl_eval_inner_cons' already produces.
+(defun nelisp-standalone--patch-apply-void-function-miss-1 (form miss-var offender-var)
+  "Rewrite the single `(if (= MISS-VAR 0) X 1)' arm in FORM (a defun body,
+already-quoted sexp) so the `1' branch calls `nl_cons_stash_void_function'
+with OFFENDER-VAR instead of returning a bare rc=1."
+  (cl-labels
+      ((rw (node)
+         (cond
+          ((and (consp node)
+                (eq (car node) 'if)
+                (equal (cadr node) (list '= miss-var 0))
+                (equal (cadddr node) 1))
+           (list 'if
+                 (list '= miss-var 0)
+                 (rw (nth 2 node))
+                 (list 'nl_cons_stash_void_function 'env offender-var)))
+          ((consp node) (cons (rw (car node)) (rw (cdr node))))
+          (t node))))
+    (rw form)))
+
+(defun nelisp-standalone--patch-combiner-apply-void-function-miss (src)
+  "Return combiner-apply SRC with `nl_apply_do_funcall'/`nl_apply_do_apply''s
+unbound-function-symbol miss arm stashing `void-function' (see the comment
+above) instead of returning a bare rc=1.  Applied AFTER the do-apply-fixed
+swap below, so it rewrites the resulting (rc-correct) `nl_apply_do_apply'."
+  (cons (car src)
+        (mapcar
+         (lambda (form)
+           (cond
+            ((and (consp form) (eq (car form) 'defun)
+                  (eq (cadr form) 'nl_apply_do_funcall))
+             (nelisp-standalone--patch-apply-void-function-miss-1
+              form 'rc_lu 'arg0_ptr))
+            ((and (consp form) (eq (car form) 'defun)
+                  (eq (cadr form) 'nl_apply_do_apply))
+             (nelisp-standalone--patch-apply-void-function-miss-1
+              form 'resolve_rc 'arg0_ptr))
+            (t form)))
+         (cdr src))))
+
 (defun nelisp-standalone--patch-combiner-apply (src)
   "Return patched combiner-apply SRC.
 SRC is a `(seq (defun ...) ...)'.  This swaps nl_apply_do_fset for
 `nelisp-standalone--reader-do-fset-fixed' (M3), swaps the `apply'
-splice helpers for their rc-correct variants, and neutralises
-`nl_apply_deferred_signal' (WAVE-2 PATCH 3), so condition-case can trap
-`signal'.  All patches operate on the same combiner-apply source.  Keeps
-lisp/ pristine."
-  (nelisp-standalone--patch-combiner-apply-deferred-signal
-   (cons (car src)
-         (mapcar (lambda (form)
-                   (cond
-                    ((and (consp form) (eq (car form) 'defun)
-                          (eq (cadr form) 'nl_apply_do_fset))
-                     nelisp-standalone--reader-do-fset-fixed)
-                    ((and (consp form) (eq (car form) 'defun)
-                          (eq (cadr form) 'nl_apply_list_init))
-                     nelisp-standalone--reader-list-init-fixed)
-                    ((and (consp form) (eq (car form) 'defun)
-                          (eq (cadr form) 'nl_apply_list_append))
-                     nelisp-standalone--reader-list-append-fixed)
-                    ((and (consp form) (eq (car form) 'defun)
-                          (eq (cadr form) 'nl_apply_do_apply))
-                     nelisp-standalone--reader-do-apply-fixed)
-                    (t form)))
-                 (cdr src)))))
+splice helpers for their rc-correct variants, neutralises
+`nl_apply_deferred_signal' (WAVE-2 PATCH 3) so condition-case can trap
+`signal', and stashes `void-function' on `funcall'/`apply''s unbound-symbol
+miss arm (FINDINGS.md recommendation 1(a)) instead of a bare rc=1.  All
+patches operate on the same combiner-apply source.  Keeps lisp/ pristine."
+  (nelisp-standalone--patch-combiner-apply-void-function-miss
+   (nelisp-standalone--patch-combiner-apply-deferred-signal
+    (cons (car src)
+          (mapcar (lambda (form)
+                    (cond
+                     ((and (consp form) (eq (car form) 'defun)
+                           (eq (cadr form) 'nl_apply_do_fset))
+                      nelisp-standalone--reader-do-fset-fixed)
+                     ((and (consp form) (eq (car form) 'defun)
+                           (eq (cadr form) 'nl_apply_list_init))
+                      nelisp-standalone--reader-list-init-fixed)
+                     ((and (consp form) (eq (car form) 'defun)
+                           (eq (cadr form) 'nl_apply_list_append))
+                      nelisp-standalone--reader-list-append-fixed)
+                     ((and (consp form) (eq (car form) 'defun)
+                           (eq (cadr form) 'nl_apply_do_apply))
+                      nelisp-standalone--reader-do-apply-fixed)
+                     ((and (consp form) (eq (car form) 'defun)
+                           (eq (cadr form) 'nl_apply_do_symbol_function))
+                      nelisp-standalone--reader-do-symbol-function-fixed)
+                     (t form)))
+                  (cdr src))))))
 
 ;; WAVE-2 (PATCH 4): condition-case clears the M6 arena signal flag on a clause
 ;; MATCH.  Pairs with PATCH 1 (the errstub no longer clears flag@268435472), so a
