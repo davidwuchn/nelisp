@@ -9,7 +9,10 @@
 ;;   :keyword           keyword 自己評価リテラル (eq 比較)
 ;;   integer / string   数値・文字列リテラル (equal 比較)
 ;;   symbol             変数 binding (常に match)
-;;   (quote SYM)        symbol 等価
+;;   (quote DATUM)      literal 等価 (`equal' 比較 -- symbol/number/string/
+;;                      list/vector 問わず構造比較。`eq' だと quoted list
+;;                      等の compound datum が freshly-consed な runtime
+;;                      値と一致しない)
 ;;   (cons P1 P2)       cons cell 分解
 ;;   (or P1 P2 ...)     どれか match
 ;;   (and P1 P2 ...)    全部 match
@@ -39,7 +42,25 @@
           (rest (cdr pattern)))
       (cond
        ((eq head 'quote)
-        (cons (list 'eq value-form (list 'quote (car rest))) nil))
+        ;; `equal', not `eq': a `(quote DATUM)' pattern (e.g. the
+        ;; literal-list clause selector `'(t t)' in vendor cond-let.el's
+        ;; `cond-let--prepare-clauses') must match any value that is
+        ;; STRUCTURALLY the same, not merely the same object.  `eq'
+        ;; happens to work for the common case of a quoted symbol
+        ;; (interned, so `eq'-comparable) but silently never matches a
+        ;; quoted compound datum (list/vector/string) compared against a
+        ;; freshly-consed runtime value of the same shape -- `(eq (list
+        ;; t t) '(t t))' is nil in both this reader and real Emacs.  That
+        ;; silent non-match let a later, structurally-overlapping
+        ;; backquote-pattern clause (e.g. `` `(t ,_) '') win instead,
+        ;; selecting the wrong helper macro out of a `pcase' dispatch
+        ;; that assumed exact-match precedence -- root cause of the
+        ;; nelisp-emacs-lib Doc 33 item 239 `cond-let*' repro
+        ;; `(cond-let* ([x 1] [x (+ x 1)] x) (t 99))' => `void-variable:
+        ;; x' (the wrongly-selected non-sequential `cond-let--when-let'
+        ;; expands a `(+ x 1)' binding form that runs before `x' is
+        ;; bound; the correctly-selected `cond-let--when-let*' does not).
+        (cons (list 'equal value-form (list 'quote (car rest))) nil))
        ((eq head 'pred)
         (let ((fn (car rest)))
           (cons (list 'funcall (list 'function fn) value-form) nil)))
