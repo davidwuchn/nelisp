@@ -1,6 +1,6 @@
 #+TITLE: Doc 163 - Magit-bundle load hang at message.el: intern-soft never soft-fails (NOT a GC retention edge)
 #+DATE: 2026-07-06
-#+STATUS: DIAGNOSED (Phase B of the gc-retention-edge campaign) — root cause pinned to lisp/nelisp-stdlib-misc.el `intern-soft'; fix pending (Phase C)
+#+STATUS: Phase C SHIPPED on feat/gc-retention-edge-magit — `intern-soft' now has a real native soft-fail primitive (`nelisp--intern-lookup'); verified fixed at the nelisp level. The full nelisp-emacs-lib Magit-bundle repro still hangs rc=88 — traced to an INDEPENDENT, identically-buggy `intern-soft' polyfill in that OTHER repository (out of this doc's scope). See §8.
 
 * 1. Purpose
 
@@ -169,4 +169,160 @@ into an immediate, data-carrying signal.  Both copies of the function
 carry the guard (scripts/nelisp-stdlib-prelude.el and
 lisp/nelisp-stdlib-list.el — the latter shadows the former in
 full-library boots, so both are required for coverage of every boot
-path).
+path).  Reviewed for Phase C: the 200000 bound applies PER non-final
+=append= argument (the step counter is a fresh `let'-local inside
+=nelisp--append-collect=, not cumulative across calls), and is far above
+any realistic single list literal/backquote-splice length in real-world
+elisp (the largest example surveyed, =eucjp-ms.el='s generated alist, is
+~2069 entries) while remaining far below the millions of iterations a
+runaway allocator would need to exhaust `ulimit -v'.  No change made;
+kept as-is.
+
+* 8. Phase C: the fix
+
+** 8.1 Primitive: probe without insert
+
+=nl_alloc_symbol= (lisp/nelisp-cc-nlstr-direct-ops.el) interns via an
+open-addressing table: =nl_intern_probe= walks the table from a hash
+bucket and returns the address of either the first empty slot or a
+matching slot, and =nl_intern_finish= then unconditionally treats an
+empty slot as "insert here".  There was no entry point that stops after
+the probe and reports a miss without writing.
+
+Phase C adds three new functions to the SAME =(seq DEFUN ...)= manifest
+(so they share =nl_intern_probe=/=nl_intern_hash=/=nl_intern_write_sexp=
+at link time, same "alloc-str.o" unit — no new unit, no Rust, matches
+the design's candidate shape #1):
+
+- =nl_intern_lookup_finish(slot n result-slot)= — mirrors
+  =nl_intern_finish= but returns 0 on a miss (slot's length-word still 0)
+  INSTEAD of calling =nl_intern_insert=; on a hit it is byte-identical to
+  =nl_intern_finish='s hit arm (writes the existing interned Sexp via
+  =nl_intern_write_sexp= and returns RESULT-SLOT, a non-zero address).
+- =nl_intern_lookup_pos(bytes-ptr n result-slot)= — probe-only
+  counterpart of =nl_alloc_symbol_pos=; when the intern region is not
+  mapped (+832 == 0) reports a miss (0) instead of =nl_alloc_symbol_pos='s
+  region-disabled fallback (which intentionally allocates, since that
+  path backs =intern=, not a lookup).
+- =nl_intern_lookup(bytes-ptr len result-slot)= — public entry point,
+  clamps len<0 to 0 like =nl_alloc_symbol=.
+
+0 vs. a non-zero pointer is the miss/hit signal, matching the 0-sentinel
+convention already used by =nl_os_alloc_chunk=/=nl_intern_region_init=
+elsewhere in this codebase.  Neither the insert path
+(=nl_alloc_symbol=/=intern=) nor its performance/behavior changed —
+=nl_intern_lookup*= is pure addition, called from nowhere else.
+
+** 8.2 Dispatch: nelisp--intern-lookup
+
+scripts/nelisp-standalone-build.el gains: a =bf_intern_soft= helper
+(mirrors =bf_intern=, calling =nl_intern_lookup= and writing nil via
+=wf_write_nil= on a miss); a `(:lit "nelisp--intern-lookup")` dispatch
+arm; and the name =nelisp--intern-lookup= added to BOTH
+=nelisp-standalone--reader-builtins= (the list actually installed into
+the reader binary's global environment — this is what makes the name
+callable/`fboundp'-true at all) and
+=nelisp-standalone--applyfn-bf-builtins= (the documentation/audit
+list). =reader-surface-audit= (the fboundp-liar detector, Doc 11)
+confirms the name has both a claim and a dispatch arm.
+
+** 8.3 intern-soft itself
+
+=lisp/nelisp-stdlib-misc.el='s =intern-soft= now dispatches its
+string-argument case to =nelisp--intern-lookup= instead of calling
+=intern=.  The symbol-argument shortcut (return NAME unconditionally)
+and the ignored OBARRAY parameter are UNCHANGED and now carry an
+explicit comment: this MVP has no per-object obarray-membership bit (symbol
+identity is name identity here — see =bf_eq2=/=nelisp_eq_symbol=), so an
+uninterned =make-symbol=/=gensym= result passed to =intern-soft= is
+still reported as "found" rather than vendor Emacs's nil.  This is a
+pre-existing, orthogonal, explicitly-documented gap, not silently
+different from before, and out of this doc's scope (the diagnosed hang
+is exclusively the string-argument path).
+
+** 8.4 Verification results
+
+1. Unit semantics (=make standalone-reader-intern-soft-smoke= /
+   =standalone-reader-intern-soft-loop-smoke=, both new Makefile
+   targets): a never-interned name misses (nil); interning it then makes
+   =intern-soft= hit and return the symbol; a different, still-untouched
+   name misses on two CONSECUTIVE =intern-soft= calls (proving
+   =intern-soft= itself does not intern).  The EXACT message.el loop
+   shape, run after pre-interning levels 1-4, now terminates with
+   =maxlevel= = 5 — byte-for-byte the vendor Emacs behavior described in
+   §3 item 5.  PASS.
+2. Truncated-bundle repro (5501 vs. 5502 lines of
+   nelisp-emacs-lib's build/nelisp-emacs-magit-bridge-bundle.el,
+   via =extend-runtime-image=/=exec-runtime-image= on this branch's
+   target/nelisp, =ulimit -v 4G= + =timeout=): 5501 lines exec rc=0 in
+   ~33s (unchanged from Phase A/B).  5502 lines — the line that used to
+   hang — **still exec rc=88 at ~42s.**  See §8.5: this is NOT a
+   regression in this fix; it is a second, independent copy of the exact
+   same bug living outside this repository.
+3. Full 7759-line bundle: same rc=88 at ~42s, for the same reason (§8.5).
+4. Existing regression suite (=make standalone-reader-test=,
+   =standalone-reader-load-smoke=, =standalone-reader-repl-smoke=,
+   =standalone-chunk-growth-test=): green (see worklog / commit message
+   for exact run).
+5. =make magit-load-smoke NELISP_ROOT=<this repo>= (nelisp-emacs-lib,
+   feat/magit-tui checkout, unmodified): FAILS the same way as items 2-3
+   (rc=88 in the exec step), for the reason in §8.5.  IMPORTANT: that
+   Makefile target does NOT set =ulimit -v= itself; run it wrapped in a
+   subshell that does, or the exec step will grow unbounded (observed:
+   >27 GiB RSS before being killed manually during this investigation).
+
+** 8.5 The full-bundle/magit-load-smoke gap: a SECOND, independent copy of the same bug
+
+The Magit-bundle repro (both the 5502-line truncation and the full
+7759-line bundle) is executed by nelisp-emacs-lib's "runtime image"
+mechanism (=dump-runtime-image= / =extend-runtime-image= /
+=exec-runtime-image=), which boots its OWN foundation layer
+(=packages/nelisp-emacs-foundation=, generated from =src/=) instead of
+loading this repo's =lisp/nelisp-stdlib-misc.el=.  That foundation layer
+has its own, textually near-identical, independently-written
+=intern-soft= polyfill:
+
+#+begin_example
+;; nelisp-emacs-lib: src/emacs-symbol.el (+ its generated
+;; packages/nelisp-emacs-foundation/lisp/emacs-symbol.el scaffold copy)
+(unless (fboundp 'intern-soft)
+  (defun intern-soft (name &optional _obarray)
+    (intern (if (symbolp name) (symbol-name name) name))))
+#+end_example
+
+This is the SAME bug (unconditional =intern=, no soft-fail path), in a
+DIFFERENT file, in a DIFFERENT repository, that this doc's fix does not
+touch — and per this task's scope (dev/nelisp only; nelisp-emacs-lib is
+read-only, "branch switch prohibited") should not touch.  Confirmed, not
+merely inferred: run directly against nelisp-emacs-lib's baseline
+runtime image (no Magit), this repo's NEW native primitive is present
+and correct there too —
+
+#+begin_example
+$ nelisp exec-runtime-image nelisp-emacs-lib/build/nemacs-runtime.nlri \
+    '(nelisp--write-stdout-bytes (format "%S\n"
+       (list (nelisp--intern-lookup "never-abc")
+             (intern "never-abc")
+             (nelisp--intern-lookup "never-abc"))))'
+(nil never-abc never-abc)
+#+end_example
+
+— i.e. =nelisp--intern-lookup= is already usable, by any consumer
+running on this branch's target/nelisp, with zero changes on their
+side, as a raw native primitive.  The only thing missing is that
+nelisp-emacs-lib's OWN =intern-soft= polyfill does not call it.  The
+one-line follow-up fix, to be applied AS A SEPARATE TASK in
+nelisp-emacs-lib (src/emacs-symbol.el, not this repo):
+
+#+begin_example
+(unless (fboundp 'intern-soft)
+  (defun intern-soft (name &optional _obarray)
+    (if (symbolp name) name
+      (nelisp--intern-lookup name))))
+#+end_example
+
+After that follow-up, re-running the full-bundle =magit-load-smoke=
+should reach the SAME downstream state Phase B's counterfactual shim
+reached in §6: =exec rc=0= in ~48s, with =nelisp-emacs-magit-bridge-loaded-p=
+still reporting FAIL (the separate, further Doc 33 item 237-class silent-drop
+gap downstream of message.el, unrelated to =intern-soft=).

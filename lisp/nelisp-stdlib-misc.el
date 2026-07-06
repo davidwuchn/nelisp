@@ -67,10 +67,9 @@ trampoline is available."
 
 ;; Rust-min batch 6f (2026-05-06): leaf predicates / intern-soft
 ;; expressible without self-reference.  `booleanp' uses only `eq';
-;; `keywordp' is a `symbolp' + first-char check; `intern-soft' is a
-;; type dispatch on stringp / symbolp.  Each was a thin wrapper in
-;; Rust (`bi_predicate' + `matches!' / `bi_intern_soft') with no
-;; Sexp-internal logic.
+;; `keywordp' is a `symbolp' + first-char check.  Each was a thin
+;; wrapper in Rust (`bi_predicate' + `matches!') with no Sexp-internal
+;; logic.
 (defun booleanp (x)
   (or (eq x t) (eq x nil)))
 
@@ -158,11 +157,45 @@ call time, so it is safe for FN to mutate TABLE during the walk
       (setq cur (cdr cur))))
   nil)
 
+;; Doc 163 Phase C (2026-07-06): `intern-soft' previously routed a string
+;; NAME straight through `intern', which never soft-fails -- every probe
+;; interned a fresh symbol and returned it, so `(while (setq x (intern-soft
+;; ...))) ...)'-shaped discovery loops (e.g. Gnus message.el's
+;; `message-cited-text-N' face probe) never terminated.  A real elisp-level
+;; "is this name already interned?" check requires observing the SAME
+;; physical intern region the reader interns into while reading source (a
+;; registry populated only by explicit runtime `intern' calls would
+;; under-count and still false-negative), so the fix is a native
+;; lookup-without-insert primitive: `nelisp--intern-lookup' probes
+;; `nl_alloc_symbol''s open-addressing intern table (see
+;; `nl_intern_lookup' in lisp/nelisp-cc-nlstr-direct-ops.el) and returns
+;; nil on a miss WITHOUT inserting -- a fresh cons/name-buffer is never
+;; allocated for a not-yet-interned name, so calling `intern-soft' has no
+;; side effect (two consecutive `intern-soft' calls on the same
+;; never-interned name both return nil; a name only starts returning its
+;; symbol once something ELSE actually `intern's it).
 (defun intern-soft (name &optional _obarray)
-  ;; NeLisp MVP has no obarray, so name-as-symbol is identity and
-  ;; name-as-string is the same as `intern' (= no soft-fail path).
+  ;; SYMBOL argument: NeLisp has no first-class per-object obarray
+  ;; membership bit -- symbol identity IS name identity here (`eq' on
+  ;; symbols compares names, see `bf_eq2'/`nelisp_eq_symbol'), and every
+  ;; symbol produced by the reader or by `intern' already lives in the one
+  ;; global intern table.  Returning NAME unconditionally is therefore
+  ;; correct for interned symbols but is NOT vendor-accurate for a symbol
+  ;; built by `make-symbol'/`gensym': vendor Emacs would report such an
+  ;; uninterned symbol as absent (nil), whereas this MVP has no way to
+  ;; distinguish "uninterned Symbol Sexp with this name" from "the
+  ;; identically-named interned symbol" and returns NAME either way.  This
+  ;; gap is pre-existing (unrelated to the string-argument hang above),
+  ;; explicit, and out of Doc 163's scope; it is not silently different
+  ;; from what was here before.
+  ;;
+  ;; OBARRAY argument: always ignored.  NeLisp MVP has exactly one global
+  ;; intern table and no first-class obarray object to select among, so a
+  ;; non-nil OBARRAY is not honored -- same pre-existing MVP limitation
+  ;; `intern'/`obarray-make' already have, stated explicitly rather than
+  ;; silently mis-scoping the lookup.
   (cond ((symbolp name) name)
-        ((stringp name) (intern name))
+        ((stringp name) (nelisp--intern-lookup name))
         (t (signal 'wrong-type-argument (list 'stringp name)))))
 
 ;; Rust-min batch 6m (2026-05-06): `error' migrated from Rust to

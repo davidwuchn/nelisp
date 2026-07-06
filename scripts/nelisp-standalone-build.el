@@ -6273,6 +6273,20 @@ unresolved at link time."
         (ptr-read-u64 sx 24)))
     (defun bf_intern (sx out)
       (nl_alloc_symbol (bf_str_ptr sx) (bf_str_len sx) out))
+    ;; Doc 163 Phase C: real soft-fail lookup backing elisp `intern-soft''s
+    ;; string-argument case (lisp/nelisp-stdlib-misc.el).  `nl_intern_lookup'
+    ;; (lisp/nelisp-cc-nlstr-direct-ops.el) probes the SAME open-addressing
+    ;; intern-region table `bf_intern'/`nl_alloc_symbol' insert into, but
+    ;; NEVER inserts: it returns 0 on a miss (OUT left untouched) or a
+    ;; non-zero pointer (== OUT, already written) on a hit.  Before this,
+    ;; `intern-soft' had no soft-fail primitive to call and fell back to
+    ;; plain `intern', which never returns nil -- the Gnus message.el
+    ;; `cited-text-face' probe loop `(while (setq x (intern-soft (format
+    ;; ...))) ...)' then never terminated (see Doc 163).
+    (defun bf_intern_soft (sx out)
+      (if (= (nl_intern_lookup (bf_str_ptr sx) (bf_str_len sx) out) 0)
+          (wf_write_nil out)
+        0))
     ;; Doc 22 A11: `make-symbol' must yield a symbol with DISTINCT identity.
     ;; This reader has no obarray -- variable lookup and `eq' compare symbols by
     ;; NAME (name == identity, see bf_eq2 tag-4 arm), so routing make-symbol
@@ -7042,6 +7056,12 @@ Wave-2 (C) appends bf_ash (shl/sar compose) + bf_str_lt (byte-lexicographic).")
     ;; intern / make-symbol: take a Str (tag 5/6), build a Symbol (tag 4).
     ((:lit "intern")      . (seq (bf_intern (wf_arg_ptr args 0) out) 0))
     ((:lit "make-symbol") . (seq (bf_make_symbol (wf_arg_ptr args 0) out) 0))
+    ;; nelisp--intern-lookup: probe-only counterpart of `intern' (Doc 163
+    ;; Phase C).  `bf_intern_soft' already returns 0 on both the hit and
+    ;; miss arms (see its definition above), so no `(seq ... 0)' wrapper is
+    ;; needed here (unlike `intern', whose `bf_intern' returns a non-zero
+    ;; slot pointer).  Backs the elisp `intern-soft' (lisp/nelisp-stdlib-misc.el).
+    ((:lit "nelisp--intern-lookup") . (bf_intern_soft (wf_arg_ptr args 0) out))
     ((:lit "unibyte-string") . (bf_unibyte_string args out))
     ;; --- vector ops ---
     ((:lit "make-vector") . (bf_make_vector args out))
@@ -7172,7 +7192,7 @@ ash/logand/logior/logxor/lognot + string<.")
 (defconst nelisp-standalone--applyfn-bf-builtins
   '("consp" "atom" "stringp" "symbolp" "integerp" "natnump" "numberp" "floatp"
     "vectorp" "listp" "zerop" "set" "symbol-value" "fboundp" "boundp" "featurep" "provide" "require"
-    "symbol-name" "intern" "make-symbol" "unibyte-string"
+    "symbol-name" "intern" "make-symbol" "nelisp--intern-lookup" "unibyte-string"
     "make-vector" "vector" "aref" "elt" "aset" "record" "recordp" "make-record"
     "signal" "error" "equal" "setcar" "setcdr" "load"
     ;; Wave-2 (C): bitwise / shift / string<
@@ -10677,7 +10697,7 @@ value (matches the binary's M8 read+eval-loop driver)."
     ;; / signal-error (the names back the breadth arms in the reader applyfn).
     "consp" "atom" "stringp" "symbolp" "integerp" "natnump" "numberp" "floatp"
     "vectorp" "listp" "zerop" "set" "symbol-value" "fboundp" "boundp" "featurep" "provide" "require"
-    "symbol-name" "intern" "make-symbol" "unibyte-string"
+    "symbol-name" "intern" "make-symbol" "nelisp--intern-lookup" "unibyte-string"
     "make-vector" "vector" "aref" "elt" "aset" "record" "recordp" "make-record"
     "signal" "error" "equal" "setcar" "setcdr"
     ;; Wave-2 (C): bitwise / shift / string<
