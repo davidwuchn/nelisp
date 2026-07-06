@@ -11088,7 +11088,25 @@ keeps flagless aborts silent for artifact/runtime inline-substrate replays."
                                (if (= report_errors 0)
                                    0
                                  (if (= report_errors 3)
-                                     0
+                                     ;; mode 3 (runtime-image/artifact eval-exec
+                                     ;; replay) used to return a bare 0 here,
+                                     ;; identical to its own true-success
+                                     ;; branch above -- so a flagless abort
+                                     ;; anywhere inside a replayed image (base
+                                     ;; bootstrap load, an extension, OR the
+                                     ;; caller's own trailing FORM args) was
+                                     ;; indistinguishable from ordinary success
+                                     ;; from the outside: rc=0, zero bytes,
+                                     ;; nothing on stderr.  Print-only (loud),
+                                     ;; not report-and-halt: this stays a pure
+                                     ;; diagnostic addition with the exact same
+                                     ;; return value (0) and loop-continuation
+                                     ;; behavior as before, so it cannot change
+                                     ;; which currently-passing runtime-image
+                                     ;; replay reaches its trailing success
+                                     ;; marker -- it only makes the previously
+                                     ;; silent case visible on stderr.
+                                     (nl_eval_source_print_bare_abort form_rc)
                                    (if (= report_errors 1)
                                        (nl_eval_source_report_bare_abort form_rc)
                                      (nl_eval_source_print_bare_abort form_rc))))
