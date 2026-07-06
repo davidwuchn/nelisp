@@ -715,12 +715,39 @@
          ;; `#''  -> function-quote (kind 9), 2-byte token.
          ((= (str-byte-at str-ptr (+ cursor 1)) 39)
           (nelisp_reader_emit_double cursor-out-slot cursor 9))
-         ;; `##' is an ordinary symbol in Emacs Lisp arglists, notably
-         ;; in Org's declare-function hints.  Other unknown # dispatches
-         ;; remain reader errors.
+         ;; `##' is a complete 2-byte token on its own, exactly like real
+         ;; Emacs: `#' immediately followed by a second `#' reads as the
+         ;; empty-name symbol (printed back as `##'), consuming only
+         ;; those two bytes no matter what follows.  This matters for
+         ;; `vendor/llama/llama.el's `##FN' short-lambda shorthand used
+         ;; throughout the Magit/Transient/with-editor vendor chain:
+         ;; `(##string-prefix-p %2 %1)' must lex as TWO tokens -- `##'
+         ;; then `string-prefix-p' -- so `##' resolves through llama's
+         ;; `(defalias (quote \#\#) (quote llama))' alias instead of one
+         ;; bogus merged symbol literally named "##string-prefix-p" that
+         ;; is never `fboundp' (Doc 33 item 241: `void-function:
+         ;; (##string-prefix-p)').  The previous behavior here fell
+         ;; through to `nelisp_reader_lex_atom' starting at CURSOR (the
+         ;; first `#'), which greedily consumes every trailing atom-
+         ;; constituent byte and merges `##' with an immediately-
+         ;; following identifier.  Emitting a fixed 2-byte Sym token
+         ;; instead is behavior-identical for the bare `##' case this
+         ;; arm originally targeted (Org's declare-function arglist
+         ;; placeholder, always followed by whitespace or `)', where
+         ;; `lex_atom' would have stopped after exactly 2 bytes anyway)
+         ;; and additionally correct for the `##FN' case.  Pushes the
+         ;; two literal `#' bytes into SCRATCH so the parser interns a
+         ;; symbol literally named "##" -- matching `\#\#' in real
+         ;; Emacs -- which is enough for llama's own `\#\#' alias to
+         ;; resolve; true empty-string-symbol identity is not required
+         ;; since llama.el aliases both spellings to the same macro.
          ((= (str-byte-at str-ptr (+ cursor 1)) 35)
-          (nelisp_reader_lex_atom
-           str-ptr cursor n payload-slot cursor-out-slot scratch))
+          (nelisp_reader_prog2
+           (mut-str-push-byte scratch 35)
+           (nelisp_reader_prog2
+            (mut-str-push-byte scratch 35)
+            (nelisp_reader_finalize_classified
+             scratch payload-slot cursor-out-slot (+ cursor 2) 23))))
          ;; `#s(' -> sharps-paren (kind 11), 3-byte token.
          ((= (str-byte-at str-ptr (+ cursor 1)) 115)
           (if (>= (+ cursor 2) n)
