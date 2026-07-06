@@ -135,13 +135,29 @@
           (if (= found 0)
               (nelisp_frame_stack_find_descend backing-ptr (- i 1) name-ptr)
             found))))
+    (defun nelisp_frame_stack_find_valid_key (name-ptr)
+      ;; Same cold-load hardening as `nelisp_mirror_lookup_entry_valid_key'
+      ;; (`lisp/nelisp-cc-mirror-lookup-entry.el') — NAME-PTR must be a
+      ;; live Sexp::Symbol / Sexp::Str before any hash/compare touches
+      ;; it.  Reproduced crash: once the mirror lookup path is guarded, a
+      ;; malformed `nl_env_set_value' NAME-PTR (observed tag 7 / Cons)
+      ;; reaches this SEPARATE lexical-frame lookup next and crashes
+      ;; `nelisp_fnv1a_step4' the same way.  A sound "not found" here is
+      ;; safe: a genuinely malformed key was never a valid lexical
+      ;; binding to begin with.
+      (if (= (extern-call nl_gc_in_arena name-ptr) 0)
+          0
+        (if (= (sexp-tag name-ptr) 4)
+            1
+          (if (= (sexp-tag name-ptr) 5) 1 0))))
     (defun nelisp_frame_stack_find (frames-ptr name-ptr)
       ;; frames-ptr: *const Sexp pointing at Env::frames_record (=
       ;;             Sexp::Record(`nelisp-lexframe-stack')).
       ;; name-ptr:   *const Sexp pointing at Sexp::Str / Sexp::Symbol.
       ;;
       ;; Returns: i64 — the `*const Sexp' of the matching (NAME . CELL)
-      ;; pair's CDR slot (= the cell), or 0 on miss / empty stack.
+      ;; pair's CDR slot (= the cell), or 0 on miss / empty stack /
+      ;; malformed NAME-PTR.
       ;; The returned pointer borrows the bucket-pair's slot owned by
       ;; `*frames-ptr'; callers must not outlive that ownership (= same
       ;; contract as `nelisp_mirror_lookup_entry').
@@ -154,10 +170,12 @@
       ;; the dispatcher rewires, so no tag-check here.  Empty stack
       ;; (= depth 0) yields i = -1 which hits the `(< i 0)' base case
       ;; immediately and returns 0.
-      (nelisp_frame_stack_find_descend
-       (record-slot-ref-ptr frames-ptr 0)
-       (- (sexp-int-unwrap (record-slot-ref-ptr frames-ptr 1)) 1)
-       name-ptr))
+      (if (= (nelisp_frame_stack_find_valid_key name-ptr) 0)
+          0
+        (nelisp_frame_stack_find_descend
+         (record-slot-ref-ptr frames-ptr 0)
+         (- (sexp-int-unwrap (record-slot-ref-ptr frames-ptr 1)) 1)
+         name-ptr)))
 
     ;; ============================================================
     ;; Doc 49 Wave 10.1d-retry — capture-to-depth AOT native
