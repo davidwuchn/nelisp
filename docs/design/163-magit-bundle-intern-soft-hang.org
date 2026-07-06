@@ -1,0 +1,172 @@
+#+TITLE: Doc 163 - Magit-bundle load hang at message.el: intern-soft never soft-fails (NOT a GC retention edge)
+#+DATE: 2026-07-06
+#+STATUS: DIAGNOSED (Phase B of the gc-retention-edge campaign) — root cause pinned to lisp/nelisp-stdlib-misc.el `intern-soft'; fix pending (Phase C)
+
+* 1. Purpose
+
+Phase B of the GC retention-edge fix campaign (see the campaign plan and
+Doc 155 for the forensic toolkit it reuses) set out to localize the exact
+"cycle-forming sweep/free write" behind the deterministic Magit-bridge-bundle
+load failure:
+
+- Repro (Phase A, confirmed on both the vendored f1ef06e1 build and the
+  main-based feat/gc-retention-edge-magit build): truncating
+  =build/nelisp-emacs-magit-bridge-bundle.el= at 5501 lines PASSes 3/3;
+  at 5502 lines it dies rc=88 3/3 after ~40 s with RSS growing
+  367 MB -> 2.6 GB under =ulimit -v 4G=.
+- Line 5502 is Gnus message.el's =message-font-lock-keywords= defvar
+  (nconc + backquote, one 2125-char form).
+- Working hypothesis entering Phase B: a Doc 155-class retention edge —
+  sweep frees a live cons, the free-list next-link write forges a cyclic
+  cdr chain, and a guard-less list walker (=nl_apply_list_append= etc.)
+  allocates forever until =nl_os_alloc_fail= exits 88.
+
+This document records the Phase B forensics.  The outcome REFUTES the GC
+hypothesis for this repro: the hang is a stdlib semantics bug, not memory
+corruption.
+
+* 2. Verdict
+
+=intern-soft= (lisp/nelisp-stdlib-misc.el, "Rust-min batch 6f") is defined
+as a type dispatch with NO soft-fail path:
+
+#+begin_example
+(defun intern-soft (name &optional _obarray)
+  ;; NeLisp MVP has no obarray, so name-as-symbol is identity and
+  ;; name-as-string is the same as `intern' (= no soft-fail path).
+  (cond ((symbolp name) name)
+        ((stringp name) (intern name))
+        (t (signal 'wrong-type-argument (list 'stringp name)))))
+#+end_example
+
+For a string argument it behaves exactly like =intern= — it NEVER returns
+nil.  Line 5502's defvar value contains message.el's cited-text-face
+discovery loop:
+
+#+begin_example
+(let ((maxlevel 1) (level 1) cited-text-face keywords)
+  (while (setq cited-text-face
+               (intern-soft (format "message-cited-text-%d" maxlevel)))
+    (setq maxlevel (1+ maxlevel)))
+  ...)
+#+end_example
+
+On real Emacs the loop terminates at maxlevel=5 (=message-cited-text-5= was
+never interned; faces 1-4 are defined a few lines earlier in the same
+bundle).  On NeLisp =intern-soft= interns every probe name and returns it,
+so the loop never terminates.  Each iteration allocates (a fresh =format=
+string, a fresh interned symbol, plus per-iteration eval slots), so the
+arena grows without bound until the 4 GiB address-space limit, at which
+point =nl_os_alloc_chunk= mmap fails and =nl_os_alloc_fail= exits 88 —
+~40 s and 2.6 GB later.  No stderr (nelix/exec swallow it), no crash, no
+corruption: exactly the observed signature.
+
+* 3. Evidence chain
+
+All on dev/nelisp feat/gc-retention-edge-magit (d5b5713e + this campaign's
+diagnostic instrumentation), Linux x86-64, =target/nelisp= standalone.
+
+1. *Repro re-validated on the instrumented build*: 5501 lines -> extend
+   rc=0 + exec rc=0 (~33 s); 5502 lines -> exec rc=88 at ~41 s.
+   (The hang happens at exec/replay time; =extend-runtime-image= itself
+   only records the form, finishing in ~0.14 s.)
+2. *Elisp-level cdr-walk trap did NOT fire*: a bounded step-counter trap
+   (threshold 200k, then a deliberately absurd threshold of 3) compiled
+   into =nelisp--append-collect= (both the prelude copy and the
+   stdlib-list copy) never signalled during the 5502 run.  So the runaway
+   is NOT an =append=/backquote-splice cdr walk — first strike against
+   the cyclic-list hypothesis.
+3. *SIGINT backtraces under gdb* (3 snapshots, ASLR off): every snapshot
+   lands inside the SAME interpreted loop shape, rooted at
+   =nl_sf_defvar= (the line-5502 defvar) via =bf_load= of the bundle:
+   - =nl_sf_while_step2 -> nl_eval_is_truthy= evaluating a =setq=
+     condition,
+   - whose value expression is a 2-deep =nl_eval_arg_list_walk= (i.e.
+     =(intern-soft (format ...))=),
+   - dispatching into =nl_apply_closure_or_lambda= (both =intern-soft=
+     and =format= are elisp closures) with =let= + inner =while= frames
+     (=format='s own implementation), allocating in =nl_alloc_bytes=.
+   This is precisely the =(while (setq cited-text-face (intern-soft
+   (format ...))))= loop, not any list-append walker.  No GC frame
+   (=nl_gc_collect= / =nl_gc_sweep*=) appears in any snapshot.
+4. *Primitive-level confirmation*: on the plain base runtime image,
+   =(intern-soft "zzz-never-interned-symbol-qx9")= returns the SYMBOL
+   (host Emacs returns nil for the same probe).
+5. *One-liner repro without the bundle*: the exact loop
+   =(let ((maxlevel 1) (x t)) (while (setq x (intern-soft (format
+   "message-cited-text-%d" maxlevel))) (setq maxlevel (1+ maxlevel))))=
+   run on the plain base image (no Magit, no 5500-line preload, cold
+   arena) exits rc=88 under =ulimit -v 2G=.  The failure needs NO GC
+   state, NO growth-chunk layout, NO prior churn.
+6. *Counterfactual fix-shim*: injecting
+   =(defun intern-soft (name &optional _ob) (if (symbolp name) name nil))=
+   before the bridge load makes the 5502-line bundle load to completion —
+   =message-font-lock-keywords= bound, length 4, rc=0.  (Full-bundle
+   result with the same shim recorded in §6.)
+
+* 4. Why the boundary looked layout-/GC-shaped
+
+The Phase A handoff flagged "1499/1500 non-monotone but deterministic"
+line boundaries and RSS spikes, which pattern-matched Doc 155's
+growth-chunk corruption.  In hindsight the 5501/5502 boundary is purely
+syntactic — line 5502 IS the offending form; any truncation excluding it
+passes, any including it hangs.  The ~40 s / 2.6 GB signature is the time
+and space to exhaust a 4 GiB =ulimit -v= from an allocating interpreted
+loop (~tens of µs per iteration), and rc=88 is the standalone arena's
+mmap-failure exit — the same exit code a GC-corruption-driven infinite
+allocator loop would produce, which is what made the two failure modes
+indistinguishable before the backtrace.
+
+* 5. What this means for the campaign
+
+- Phase B's deliverable inverts: there is NO retention edge in this repro.
+  Doc 155's three-way classification ((a) conservative-pin poisons
+  recursion / (b) missing root push / (c) slot-offset misread) does not
+  apply; the mark-4 machinery is not implicated.
+- Phase C (fix) input: implement real =intern-soft= soft-fail semantics.
+  The standalone reader DOES maintain a physical intern region
+  (=nl_intern_region_init=, symbols deduplicated at =nl_alloc_symbol=),
+  so the primitive gap is "look up a name in the intern region WITHOUT
+  inserting".  Candidate shapes:
+  1. A native lookup-only entry point (split =nl_alloc_symbol='s probe
+     from its insert; expose as e.g. =nelisp--intern-lookup=), with the
+     elisp =intern-soft= dispatching on it.  Smallest, honest fix.
+  2. Failing that, an elisp-side interned-name registry is NOT viable on
+     its own: the reader interns symbols wholesale while parsing source,
+     so any registry populated only by runtime =intern= calls under-counts
+     and =intern-soft= would return false negatives.
+- The GC retention-edge hypothesis space for OTHER workloads (the original
+  1499-line info.el hang predating the re-vendor) remains open but now
+  unsupported by any live repro on the main-based build: the only
+  reproducible failure boundary reduces to this intern-soft loop.  Before
+  any further GC forensics, re-derive a repro that still fails WITH the
+  intern-soft shim applied.
+- Doc 155 itself stays CLOSED and correct; nothing here contradicts its
+  §8.12 mechanism.  This doc exists precisely so the next "rc=88 after
+  ~40 s with big RSS" is not auto-attributed to GC.
+
+* 6. Full-bundle status with the intern-soft shim
+
+With the counterfactual shim, the full 7759-line bundle load runs to
+completion under =ulimit -v 4G=: exec rc=0 in 48.5 s (vs. rc=88 at ~41 s
+without the shim).  The rc=88 hang is therefore FULLY explained by
+=intern-soft=.  The smoke predicate =nelisp-emacs-magit-bridge-loaded-p=
+still reports FAIL on the shimmed image — the full Magit chain has
+further, separate load gaps (Doc 33 item 237 class: silent drops /
+missing substrate downstream of message.el) that are out of scope for
+this diagnosis and were never reachable before this fix-shim because the
+load died at line 5502 first.
+
+* 7. Diagnostic instrumentation kept as hardening
+
+The bounded cdr-walk trap in =nelisp--append-collect= (threshold 200000,
+signals =nelisp-diag-runaway-append-collect= with the original SEQ, the
+tripping CUR, the partial ACC and the step count) is retained under the
+campaign plan's §4 approval (loud-abort cycle guards in walkers).  It
+converts any FUTURE genuinely-cyclic cdr chain (the real Doc 155-class
+failure mode this campaign was hunting) from a 40-second silent rc=88
+into an immediate, data-carrying signal.  Both copies of the function
+carry the guard (scripts/nelisp-stdlib-prelude.el and
+lisp/nelisp-stdlib-list.el — the latter shadows the former in
+full-library boots, so both are required for coverage of every boot
+path).
