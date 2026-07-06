@@ -12000,6 +12000,44 @@ artifact before wiring that artifact into the marker command path."
     (concat
      (nelisp-standalone--artifact-runtime-file-src
       "scripts/nelisp-stdlib-prelude.el" t)
+     ;; fix/reader-test-prelude-regression: `src/nelisp-eval.el' (loaded just
+     ;; below) ends with an unconditional top-level `(nelisp--install-
+     ;; primitives)' call that does `(puthash sym (symbol-function sym)
+     ;; nelisp--functions)' for every symbol in `nelisp--primitive-symbols',
+     ;; which includes `string-match-p'/`string-match' -- i.e. it assumes the
+     ;; HOST already has them bound as real functions before this file loads.
+     ;; This substrate never defined them (unlike
+     ;; `nelisp-standalone--reader-repl-prelude-source', which pairs the same
+     ;; `scripts/nelisp-stdlib-prelude.el' with `lisp/nelisp-stdlib-regexp.el'
+     ;; (Doc 143's pure-elisp regexp matcher) plus these wrapper defuns before
+     ;; anything can call them), so `(symbol-function 'string-match-p)' hit
+     ;; `void-function: (string-match-p)' on every `eval-elisp-artifact'/
+     ;; `exec-elisp-artifact'/`load-elisp-source'/`eval-elisp-source' call.
+     ;; Load the regexp matcher + define the wrappers here, BEFORE
+     ;; `src/nelisp-read.el'/`src/nelisp-eval.el', so `nelisp--install-
+     ;; primitives' finds them already bound.  `unless (fboundp ...)' guards
+     ;; keep this additive only: it cannot shadow anything the prelude
+     ;; already defines.
+     (nelisp-standalone--artifact-runtime-file-src
+      "lisp/nelisp-stdlib-regexp.el" t)
+     "(unless (fboundp 'string-match)\n"
+     "  (defun string-match (re s &optional start)\n"
+     "    (if (and (stringp re) (stringp s))\n"
+     "        (nlre-string-match re s start)\n"
+     "      (signal 'wrong-type-argument (list 'stringp (if (stringp re) s re))))))\n"
+     "(unless (fboundp 'string-match-p)\n"
+     "  (defun string-match-p (re s &optional start)\n"
+     "    (if (and (stringp re) (stringp s))\n"
+     "        (nlre-string-match re s start)\n"
+     "      (signal 'wrong-type-argument (list 'stringp (if (stringp re) s re))))))\n"
+     "(unless (fboundp 'match-beginning)\n"
+     "  (defun match-beginning (n) (nlre-match-beginning n)))\n"
+     "(unless (fboundp 'match-end)\n"
+     "  (defun match-end (n) (nlre-match-end n)))\n"
+     "(unless (fboundp 'match-string)\n"
+     "  (defun match-string (n &optional str)\n"
+     "    (let ((b (nlre-match-beginning n)) (e (nlre-match-end n)))\n"
+     "      (if (and str b e) (substring str b e) nil))))\n"
      (nelisp-standalone--artifact-runtime-file-src
       "src/nelisp-read.el" t)
      (nelisp-standalone--artifact-runtime-file-src
