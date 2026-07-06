@@ -10802,9 +10802,42 @@ and the `string-match' family aliases over it."
             "(defun match-string (n &optional str)\n"
             "  (let ((b (nlre-match-beginning n)) (e (nlre-match-end n)))\n"
             "    (if (and str b e) (substring str b e) nil)))\n"
+            ;; fix/small-primitives-parity: `match-data' reads the same
+            ;; `nlre--last-caps' vector `match-beginning'/`match-end' use,
+            ;; flattening it to the host-Emacs (BEG0 END0 BEG1 END1 ...)
+            ;; shape (nil nil for a group that did not participate).
+            ;; `save-match-data' is a macro (not a defun) so BODY is not
+            ;; evaluated eagerly; it snapshots/restores the same vector
+            ;; via `unwind-protect' so an error inside BODY still restores
+            ;; the caller's match state, matching host Emacs semantics.
+            "(defun match-data (&optional _integers _reuse _reseat)\n"
+            "  (if (null nlre--last-caps)\n"
+            "      nil\n"
+            "    (let ((i 0) (n (length nlre--last-caps)) (out nil))\n"
+            "      (while (< i n)\n"
+            "        (let ((c (aref nlre--last-caps i)))\n"
+            "          (setq out (cons (if c (cdr c) nil) (cons (if c (car c) nil) out))))\n"
+            "        (setq i (1+ i)))\n"
+            "      (nreverse out))))\n"
+            "(defmacro save-match-data (&rest body)\n"
+            "  `(let ((nlre--smd-saved nlre--last-caps))\n"
+            "     (unwind-protect (progn ,@body)\n"
+            "       (setq nlre--last-caps nlre--smd-saved))))\n"
             "(defun split-string (s &optional sep omit trim) (nlre-split-string s sep omit))\n"
             "(defun replace-regexp-in-string (re rep s &optional fc lit subexp start)\n"
-            "  (nlre-replace-regexp-in-string re rep s))\n")
+            "  (nlre-replace-regexp-in-string re rep s))\n"
+            ;; fix/small-primitives-parity: `current-time' derived from the
+            ;; already-working `float-time' (a plain IEEE double of epoch
+            ;; seconds).  Minimal polyfill: decomposes into the host Emacs
+            ;; (HIGH LOW USEC PSEC) shape.  PSEC is always 0 -- a double's
+            ;; ~15-17 significant digits cannot resolve sub-microsecond
+            ;; ticks once the integer part is a ~10-digit epoch value, so
+            ;; there is no reliable source for picosecond precision here.
+            ;; `time-convert'/`current-time'-with-FORM are out of scope.
+            "(defun current-time ()\n"
+            "  (let* ((ft (float-time)) (secs (floor ft))\n"
+            "         (usec (floor (* (- ft secs) 1000000))))\n"
+            "    (list (floor secs 65536) (mod secs 65536) usec 0)))\n")
     (buffer-string)))
 
 (defun nelisp-standalone--reader-repl-prelude-forms (fbuf src cursor result pool
@@ -12038,6 +12071,30 @@ artifact before wiring that artifact into the marker command path."
      "  (defun match-string (n &optional str)\n"
      "    (let ((b (nlre-match-beginning n)) (e (nlre-match-end n)))\n"
      "      (if (and str b e) (substring str b e) nil))))\n"
+     ;; fix/small-primitives-parity: mirror the `match-data'/
+     ;; `save-match-data'/`current-time' additions made to
+     ;; `nelisp-standalone--reader-repl-prelude-source' above, guarded the
+     ;; same additive `unless (fboundp ...)' way as the wrappers just above.
+     "(unless (fboundp 'match-data)\n"
+     "  (defun match-data (&optional _integers _reuse _reseat)\n"
+     "    (if (null nlre--last-caps)\n"
+     "        nil\n"
+     "      (let ((i 0) (n (length nlre--last-caps)) (out nil))\n"
+     "        (while (< i n)\n"
+     "          (let ((c (aref nlre--last-caps i)))\n"
+     "            (setq out (cons (if c (cdr c) nil) (cons (if c (car c) nil) out))))\n"
+     "          (setq i (1+ i)))\n"
+     "        (nreverse out)))))\n"
+     "(unless (fboundp 'save-match-data)\n"
+     "  (defmacro save-match-data (&rest body)\n"
+     "    `(let ((nlre--smd-saved nlre--last-caps))\n"
+     "       (unwind-protect (progn ,@body)\n"
+     "         (setq nlre--last-caps nlre--smd-saved)))))\n"
+     "(unless (fboundp 'current-time)\n"
+     "  (defun current-time ()\n"
+     "    (let* ((ft (float-time)) (secs (floor ft))\n"
+     "           (usec (floor (* (- ft secs) 1000000))))\n"
+     "      (list (floor secs 65536) (mod secs 65536) usec 0))))\n"
      (nelisp-standalone--artifact-runtime-file-src
       "src/nelisp-read.el" t)
      (nelisp-standalone--artifact-runtime-file-src

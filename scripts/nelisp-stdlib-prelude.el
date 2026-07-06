@@ -4884,14 +4884,36 @@ Doc 156: was `(apply #\\='vector ...)', but the reader now exposes a native
 
 ;; A2: `mod' used truncate-remainder semantics (sign followed the dividend).
 ;; Reinstall host floor-mod: the result carries the sign of the divisor.
+;;
+;; fix/small-primitives-parity (2026-07-06): the quotient here used to be
+;; plain `(/ a b)'.  For two integers `/' truncates toward zero, so the
+;; formula (trunc-remainder + a floor sign-adjust) was correct.  But once
+;; either operand is a float, this reader's `/' is a TRUE (non-truncating)
+;; division, so `(* (/ a b) b)' collapses back to exactly `a' and `mod'
+;; silently returned 0 for every float pair (e.g. `(mod 5.5 2)' => 0.0
+;; instead of 1.5).  Using `truncate' (defined just above, and already
+;; toward-zero for both the int/int and float-involving cases) for the
+;; quotient fixes this while leaving the all-integer path byte-identical
+;; (`(truncate A B)' with two integers is literally `(/ A B)').
+;;
+;; Zero divisor: unchanged `arith-error' when both operands are integers
+;; (matches host Emacs).  When a float is involved, host Emacs instead
+;; returns a NaN; that is produced directly via `/' float division rather
+;; than by truncating +-inf, since the hardware float->int conversion
+;; behind `truncate' has no defined NaN-producing behavior for infinite
+;; input.
 (defun mod (a b)
   "Return A modulo B with the sign of B (host floor-mod, Doc 22 A2)."
-  (if (= b 0)
-      (error "Arithmetic error")
-    (let ((r (- a (* (/ a b) b))))
+  (cond
+   ((and (= b 0) (integerp a) (integerp b))
+    (error "Arithmetic error"))
+   ((and (= b 0) (or (floatp a) (floatp b)))
+    (/ 0.0 0.0))
+   (t
+    (let ((r (- a (* (truncate a b) b))))
       (if (and (not (= r 0)) (if (< b 0) (> r 0) (< r 0)))
           (+ r b)
-        r))))
+        r)))))
 
 ;; A3: native `equal' never compared vectors element-wise.  Capture native
 ;; `equal' for the atom/string/number leaves and recurse over cons + vector.
