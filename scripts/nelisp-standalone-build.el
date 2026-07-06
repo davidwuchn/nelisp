@@ -8791,6 +8791,39 @@ before feat/windows-spawn; Windows targets get a CreateProcessW spawn-model
              args env out tag_slot val_slot))
         1))
     ;;================= CATCH =================
+    ;; Generic `eq' tag-match helper.  `nl_ct_catch_check_tag' used to reuse
+    ;; `nelisp_eq_symbol' for the tag comparison, but that primitive
+    ;; tag-checks BOTH operands as `Sexp::Symbol' (tag 4) and unconditionally
+    ;; returns "not equal" whenever either side isn't a Symbol box.  `t' and
+    ;; `nil' are NOT Symbol boxes in this runtime -- they self-evaluate to the
+    ;; dedicated `Sexp::T' (tag 1) / `Sexp::Nil' (tag 0) singletons -- so
+    ;; `(catch t (throw t ...))' / `(catch nil (throw nil ...))' always
+    ;; mismatched and fell through to the top-level `no-catch' handler.
+    ;; `nl_ct_tag_eq' mirrors the full `nl_sexp_eq' tag-dispatch (see
+    ;; `nelisp-cc-sexp-eq--source' in lisp/nelisp-cc-sexp-eq.el) inline, using
+    ;; the same `sexp-tag'/`symbol-eq'/`str-eq'/`sexp-int-unwrap'/
+    ;; `sexp-payload-ptr' grammar ops already used elsewhere in this file, so
+    ;; every catch tag type (nil/t/int/float/symbol/str/boxed) compares
+    ;; correctly.  Arity 2 (even), no `extern-call' -- matches this unit's
+    ;; calling convention.
+    (defun nl_ct_tag_eq (a b)
+      (if (= (sexp-tag a) (sexp-tag b))
+          (if (= (sexp-tag a) 2)
+              (if (= (sexp-int-unwrap a) (sexp-int-unwrap b)) 1 0)
+            (if (= (sexp-tag a) 4)
+                (symbol-eq a b)
+              (if (= (sexp-tag a) 5)
+                  (str-eq a b)
+                (if (= (sexp-tag a) 3)
+                    (if (= (sexp-int-unwrap a) (sexp-int-unwrap b)) 1 0)
+                  (if (= (sexp-tag a) 0)
+                      1
+                    (if (= (sexp-tag a) 1)
+                        1
+                      (if (= (sexp-payload-ptr a) (sexp-payload-ptr b))
+                          1
+                        0)))))))
+        0))
     (defun nl_ct_catch_on_match (eqres tag_slot env out _p4 _p5)
       (if (= eqres 1)
           (seq (nl_ct_copy32 out 268435512 0 0)
@@ -8799,8 +8832,7 @@ before feat/windows-spawn; Windows targets get a CreateProcessW spawn-model
         1))
     (defun nl_ct_catch_check_tag (tag_slot env out eqres_slot _p4 _p5)
       (nl_ct_catch_on_match
-       (seq (nelisp_eq_symbol 268435480 tag_slot eqres_slot)
-            (ptr-read-u64 eqres_slot 0))
+       (nl_ct_tag_eq 268435480 tag_slot)
        tag_slot env out 0 0))
     (defun nl_ct_catch_caught (_rc tag_slot env out eqres_slot _p5)
       ;; Flag value 2 = `throw' (1 = signal/error).  `catch' only intercepts
