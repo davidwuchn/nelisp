@@ -901,9 +901,26 @@ that end with `(provide ...)' work as-is."
   "Bind every primitive symbol in `nelisp--functions'.
 Host Emacs functions cover pure data ops; higher-order primitives
 and tables-specific queries go through NeLisp-aware wrappers so
-closures, NeLisp-only defuns, and our own hash tables stay visible."
+closures, NeLisp-only defuns, and our own hash tables stay visible.
+
+`nelisp--primitive-symbols' assumes a real-Emacs host, where every
+entry (including sqlite-/url-/process-/terminal-facing ones) is
+always `fboundp'.  On the standalone NeLisp runtime's own bootstrap
+substrates (`eval-elisp-artifact' et al., which self-host this very
+evaluator before the host has anything beyond the stdlib prelude
+installed) that assumption does not hold for every entry.  Before
+this `fboundp' guard, a single missing entry (e.g. `string-match-p'
+prior to Doc 143's regexp matcher being loaded, or a rarely-used
+entry such as `char-or-string-p') made `symbol-function' signal
+`void-function' and abort this whole call -- silently skipping every
+remaining `puthash', including `funcall'/`apply'/`mapcar' below.
+Skipping an unbound entry here defers that same `void-function' to
+the point some artifact actually calls it (now a real, catchable
+signal per FINDINGS.md recommendation 1(a)), instead of taking down
+primitive installation for entries nothing in a given run needs."
   (dolist (sym nelisp--primitive-symbols)
-    (puthash sym (symbol-function sym) nelisp--functions))
+    (when (fboundp sym)
+      (puthash sym (symbol-function sym) nelisp--functions)))
   (puthash 'funcall      #'nelisp--builtin-funcall      nelisp--functions)
   (puthash 'apply        #'nelisp--builtin-apply        nelisp--functions)
   (puthash 'mapcar       #'nelisp--builtin-mapcar       nelisp--functions)
