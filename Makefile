@@ -6,7 +6,7 @@
         standalone-tarball standalone-tarball-verify \
         verify-elisp-fixtures \
         standalone-eval standalone-eval-clean standalone-eval-test standalone-eval-j \
-        standalone-reader standalone-reader-test standalone-reader-load-smoke standalone-reader-fmt-smoke standalone-reader-prelude-equal-reload-smoke standalone-reader-declare-strip-smoke standalone-reader-nested-backquote-macro-smoke standalone-reader-derived-mode-shape-smoke standalone-reader-pcase-quote-literal-smoke standalone-reader-cond-let-shape-smoke standalone-reader-ffi-smoke standalone-reader-tls-smoke standalone-reader-process-smoke standalone-reader-realrt-smoke standalone-reader-repl-smoke standalone-reader-prelude-test standalone-reader-intern-soft-smoke standalone-reader-intern-soft-loop-smoke standalone-selfhost-test standalone-selfhost-mt-test standalone-parallel-compile-test standalone-chunk-growth-test \
+        standalone-reader standalone-reader-test standalone-reader-load-smoke standalone-reader-fmt-smoke standalone-reader-prelude-equal-reload-smoke standalone-reader-declare-strip-smoke standalone-reader-nested-backquote-macro-smoke standalone-reader-derived-mode-shape-smoke standalone-reader-pcase-quote-literal-smoke standalone-reader-catch-throw-tag-smoke standalone-reader-cond-let-shape-smoke standalone-reader-ffi-smoke standalone-reader-tls-smoke standalone-reader-process-smoke standalone-reader-realrt-smoke standalone-reader-repl-smoke standalone-reader-prelude-test standalone-reader-intern-soft-smoke standalone-reader-intern-soft-loop-smoke standalone-selfhost-test standalone-selfhost-mt-test standalone-parallel-compile-test standalone-chunk-growth-test \
         nelisp-performance-gate nelisp-nelix-command-gate nelisp-native-artifact-gate nelisp-nelix-native-hot-gate \
         nelisp-nelix-operational-gate \
         nelisp-runtime-image-cache-gate nelisp-source-command-substrate-gate
@@ -405,6 +405,32 @@ standalone-reader-pcase-quote-literal-smoke: standalone-reader
 	  echo "[standalone-reader-pcase-quote-literal-smoke] PASS: -> $$out"; \
 	else \
 	  echo "[standalone-reader-pcase-quote-literal-smoke] FAIL: -> $$out (expected (AA BA))"; \
+	  exit 1; \
+	fi
+
+# Regression for the M6 catch/throw tag-match bug (magit #17 M2 blocker):
+# `nl_ct_catch_check_tag' (scripts/nelisp-standalone-build.el) used to reuse
+# `nelisp_eq_symbol' for the catch/throw tag comparison, but that primitive
+# tag-checks BOTH operands as `Sexp::Symbol' (tag 4) and returns "not equal"
+# whenever either side isn't a Symbol box.  `t' and `nil' self-evaluate to
+# the dedicated `Sexp::T' (tag 1) / `Sexp::Nil' (tag 0) singletons, NOT
+# Symbol boxes, so `(catch t (throw t ...))' / `(catch nil (throw nil
+# ...))' always mismatched and fell through to `no-catch' -- exactly the
+# control-flow idiom vendor llama.el's `llama--collect'/`llama--fontify'
+# use internally (reached from magit/transient via the `##' macro).  Covers
+# t tag, nil tag, an ordinary symbol tag (pre-existing-working baseline),
+# throw-less catch, a same-tag nested catch, and a mismatched-tag nested
+# catch (inner `t' catch must NOT swallow an outer-bound `nil' throw).
+standalone-reader-catch-throw-tag-smoke: standalone-reader
+	@mkdir -p target
+	@printf '%s\n' \
+	  '(list (catch t (throw t (quote a))) (catch nil (throw nil (quote b))) (catch (quote tag) (throw (quote tag) (quote c))) (catch t 42) (catch nil (catch t (throw t (quote inner)))) (catch nil (catch t (throw nil (quote outer)))))' \
+	  > target/standalone-reader-catch-throw-tag-smoke.el
+	@out="$$(./target/nelisp --load target/standalone-reader-catch-throw-tag-smoke.el)"; \
+	if [ "$$out" = "(a b c 42 inner outer)" ]; then \
+	  echo "[standalone-reader-catch-throw-tag-smoke] PASS: -> $$out"; \
+	else \
+	  echo "[standalone-reader-catch-throw-tag-smoke] FAIL: -> $$out (expected (a b c 42 inner outer))"; \
 	  exit 1; \
 	fi
 
