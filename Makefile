@@ -6,7 +6,7 @@
         standalone-tarball standalone-tarball-verify \
         verify-elisp-fixtures \
         standalone-eval standalone-eval-clean standalone-eval-test standalone-eval-j \
-        standalone-reader standalone-reader-test standalone-reader-load-smoke standalone-reader-fmt-smoke standalone-reader-prelude-equal-reload-smoke standalone-reader-declare-strip-smoke standalone-reader-nested-backquote-macro-smoke standalone-reader-derived-mode-shape-smoke standalone-reader-ffi-smoke standalone-reader-tls-smoke standalone-reader-process-smoke standalone-reader-realrt-smoke standalone-reader-repl-smoke standalone-reader-prelude-test standalone-selfhost-test standalone-selfhost-mt-test standalone-parallel-compile-test standalone-chunk-growth-test \
+        standalone-reader standalone-reader-test standalone-reader-load-smoke standalone-reader-fmt-smoke standalone-reader-prelude-equal-reload-smoke standalone-reader-declare-strip-smoke standalone-reader-nested-backquote-macro-smoke standalone-reader-derived-mode-shape-smoke standalone-reader-ffi-smoke standalone-reader-tls-smoke standalone-reader-process-smoke standalone-reader-realrt-smoke standalone-reader-repl-smoke standalone-reader-prelude-test standalone-reader-intern-soft-smoke standalone-reader-intern-soft-loop-smoke standalone-selfhost-test standalone-selfhost-mt-test standalone-parallel-compile-test standalone-chunk-growth-test \
         nelisp-performance-gate nelisp-nelix-command-gate nelisp-native-artifact-gate nelisp-nelix-native-hot-gate \
         nelisp-nelix-operational-gate \
         nelisp-runtime-image-cache-gate nelisp-source-command-substrate-gate
@@ -186,6 +186,63 @@ standalone-reader-load-smoke: standalone-reader
 	  echo "[standalone-reader-load-smoke] PASS: --load -> $$out"; \
 	else \
 	  echo "[standalone-reader-load-smoke] FAIL: --load -> $$out"; \
+	  exit 1; \
+	fi
+
+# Doc 163 Phase C regression: `intern-soft' real soft-fail semantics.
+# The base reader image has no stdlib prelude auto-loaded (plain --load
+# only has the ~175 natively-dispatched builtins; `intern-soft' is a
+# regular elisp function defined in lisp/nelisp-stdlib-misc.el), so the
+# script `load's that file itself first -- same pattern
+# `standalone-reader-prelude-equal-reload-smoke' uses for the stdlib
+# prelude.  Asserts, in one --load: (1) a never-interned name misses
+# (nil) BEFORE anything interns it; (2) once `intern' actually interns
+# that same name, `intern-soft' now HITS and returns the (interned)
+# symbol; (3) a DIFFERENT, still-never-interned name misses on TWO
+# CONSECUTIVE `intern-soft' calls -- proving `intern-soft' itself has no
+# interning side effect (a bug in `nl_intern_lookup' that accidentally
+# inserted on a miss would turn the second nil into a symbol).
+standalone-reader-intern-soft-smoke: standalone-reader
+	@mkdir -p target
+	@printf '%s\n' \
+	  '(load "lisp/nelisp-stdlib-misc.el")' \
+	  '(list (intern-soft "nelisp-doc163-fresh-a") (progn (intern "nelisp-doc163-fresh-a") (intern-soft "nelisp-doc163-fresh-a")) (intern-soft "nelisp-doc163-fresh-b") (intern-soft "nelisp-doc163-fresh-b"))' \
+	  > target/standalone-reader-intern-soft-smoke.el
+	@out="$$(ulimit -v 4194304; timeout 30 ./target/nelisp --load target/standalone-reader-intern-soft-smoke.el)"; \
+	if [ "$$out" = "(nil nelisp-doc163-fresh-a nil nil)" ]; then \
+	  echo "[standalone-reader-intern-soft-smoke] PASS: -> $$out"; \
+	else \
+	  echo "[standalone-reader-intern-soft-smoke] FAIL: -> $$out (expected (nil nelisp-doc163-fresh-a nil nil))"; \
+	  exit 1; \
+	fi
+
+# Doc 163 Phase C regression: the EXACT Gnus message.el `cited-text-face'
+# discovery-loop shape that hung before this fix (see docs/design/163-
+# magit-bundle-intern-soft-hang.org).  Pre-interns levels 1-4 (mirroring
+# message.el defining `message-cited-text-1' .. `-4' a few lines above
+# `message-font-lock-keywords' in the real bundle), then runs the loop
+# unmodified.  Before the fix `intern-soft' never soft-failed, so this
+# looped forever allocating a fresh interned name every iteration until
+# `ulimit -v' was exhausted (rc=88, ~40s in the full-bundle repro).  After
+# the fix the loop terminates the moment level 5 (never interned) is
+# probed, exactly matching real Emacs (`maxlevel' ends at 5).  Bounded by
+# both `ulimit -v' (4 GiB) and `timeout' so a regression fails loudly and
+# quickly instead of hanging the test suite.
+standalone-reader-intern-soft-loop-smoke: standalone-reader
+	@mkdir -p target
+	@printf '%s\n' \
+	  '(load "lisp/nelisp-stdlib-misc.el")' \
+	  '(intern "message-cited-text-1")' \
+	  '(intern "message-cited-text-2")' \
+	  '(intern "message-cited-text-3")' \
+	  '(intern "message-cited-text-4")' \
+	  '(let ((maxlevel 1) (cited-text-face t)) (while (setq cited-text-face (intern-soft (format "message-cited-text-%d" maxlevel))) (setq maxlevel (1+ maxlevel))) maxlevel)' \
+	  > target/standalone-reader-intern-soft-loop-smoke.el
+	@out="$$(ulimit -v 4194304; timeout 30 ./target/nelisp --load target/standalone-reader-intern-soft-loop-smoke.el)"; \
+	if [ "$$out" = "5" ]; then \
+	  echo "[standalone-reader-intern-soft-loop-smoke] PASS: -> $$out"; \
+	else \
+	  echo "[standalone-reader-intern-soft-loop-smoke] FAIL: -> $$out (expected 5)"; \
 	  exit 1; \
 	fi
 

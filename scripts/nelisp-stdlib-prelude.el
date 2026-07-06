@@ -1135,9 +1135,31 @@ reseeds from its characters; nil -> a full LCG value."
   "Walk SEQ and `cons' each element onto ACC (= reverse-order\naccumulator).  SEQ may be nil / cons / vector / string.  Returns\nthe new ACC.  Signals `wrong-type-argument' for improper-list cons\nor non-sequence atom."
   (cond ((null seq) acc)
 	((consp seq)
-	 (let ((cur seq))
+	 (let ((cur seq) (nelisp--diag-steps 0))
 	   (while (consp cur)
-	     (setq acc (cons (car cur) acc)) (setq cur (cdr cur)))
+	     (setq acc (cons (car cur) acc)) (setq cur (cdr cur))
+	     ;; DIAGNOSTIC (gc-retention-edge campaign, Phase B, 2026-07-06):
+	     ;; this cdr-walk has no cycle/terminator guard beyond `consp'.  A
+	     ;; GC retention-edge bug can free a still-reachable cons and
+	     ;; overwrite its cdr with a free-list link that re-enters this
+	     ;; same chain, turning this walk into an allocating infinite
+	     ;; loop (each iteration still `cons'es onto ACC) that only ends
+	     ;; when the arena exhausts `ulimit -v' and `nl_os_alloc_fail'
+	     ;; exits 88 -- tens of seconds later, no backtrace.  This bound
+	     ;; converts that into an immediate, catchable `signal' carrying
+	     ;; the original SEQ, the CUR cons at the moment of the trip, and
+	     ;; the partial ACC, so a debugger can break on `bf_signal' and
+	     ;; inspect the exact cons whose cdr the sweeper corrupted.  The
+	     ;; bound (200000) is far above any legitimate top-level
+	     ;; `append'/backquote-splice list length and far below what it
+	     ;; would take to exhaust memory (millions of iterations), so
+	     ;; this cannot misfire on real workloads.  See Doc 155 (nelisp
+	     ;; GC lexframe-child-collection-bug) and its retention-edge
+	     ;; addendum for the campaign this instrumentation serves.
+	     (setq nelisp--diag-steps (1+ nelisp--diag-steps))
+	     (when (> nelisp--diag-steps 200000)
+	       (signal 'nelisp-diag-runaway-append-collect
+		       (list seq cur acc nelisp--diag-steps))))
 	   (when cur (signal 'wrong-type-argument (list 'listp seq)))
 	   acc))
 	((vectorp seq)
