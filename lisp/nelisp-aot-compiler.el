@@ -11586,12 +11586,25 @@ the node's class to consume the result correctly."
          (signal 'nelisp-aot-compiler-error
                  (list :unknown-value-kind kind))))))))
 
+(defun nelisp-aot-compiler--x86_64-spill-rax-slot (buf)
+  "Spill rax into a 16-byte stack slot on BUF.
+Uses fixed-width encoders so pass-1/pass-2 byte counts stay identical."
+  (nelisp-asm-x86_64-sub-imm32 buf 'rsp 16)
+  (nelisp-asm-x86_64-mov-mem-rsp-disp-reg buf 0 'rax))
+
+(defun nelisp-aot-compiler--x86_64-unspill-slot-into-reg (buf reg)
+  "Reload the top 16-byte spill slot from BUF into REG and reclaim it."
+  (nelisp-asm-x86_64-mov-reg-mem-rsp-disp buf reg 0)
+  (nelisp-asm-x86_64-add-imm32 buf 'rsp 16))
+
 (defun nelisp-aot-compiler--emit-arith (node buf)
   "Emit a runtime arithmetic op, result in rax.
-Strategy: evaluate B into rax, push, evaluate A into rax, pop into
-r10, then OP rax, r10.  Push/pop are byte-fixed so pass invariance
-holds.  r10 is caller-saved per SysV AND not in the arg-reg list so
-  the scratch never aliases a parameter register (= the bug seen in
+Strategy: evaluate B into rax, spill it in a 16-byte stack slot,
+evaluate A into rax, reload B into r10, then OP rax, r10.  The spill
+uses only fixed-width encoders so pass invariance holds while keeping
+rsp 16-aligned across nested calls.  r10 is caller-saved per SysV AND
+not in the arg-reg list so the scratch never aliases a parameter register
+(= the bug seen in
 chained calls where rcx held both `d' param and a scratch value)."
   (let ((op (nelisp-aot-compiler--ir-get node :op))
         (a (nelisp-aot-compiler--ir-get node :a))
@@ -11618,12 +11631,12 @@ chained calls where rcx held both `d' param and a scratch value)."
                     (list :unknown-arith-op op)))))
       ;; Compute B -> rax.
       (nelisp-aot-compiler--emit-value b buf)
-      ;; push rax (save B on stack).
-      (nelisp-asm-x86_64-push buf 'rax)
+      ;; Save B in a 16-byte slot so nested calls keep rsp aligned.
+      (nelisp-aot-compiler--x86_64-spill-rax-slot buf)
       ;; Compute A -> rax.
       (nelisp-aot-compiler--emit-value a buf)
-      ;; pop r10 (= recover B into r10; r10 not in arg-regs).
-      (nelisp-asm-x86_64-pop buf 'r10)
+      ;; Recover B into r10; r10 is not in the arg-reg set.
+      (nelisp-aot-compiler--x86_64-unspill-slot-into-reg buf 'r10)
       (cond
        ((eq op '+) (nelisp-asm-x86_64-add-reg-reg buf 'rax 'r10))
        ((eq op '-) (nelisp-asm-x86_64-sub-reg-reg buf 'rax 'r10))
@@ -11649,9 +11662,9 @@ diverges at the final op: x86_64 SHL / SAR by a variable count
 require the count to live in CL (= low 8 bits of RCX).  Sequence:
 
   <emit B>            -> rax           (= count)
-  push rax            (save count on stack)
+  spill rax           (save count in a 16-byte stack slot)
   <emit A>            -> rax           (= value)
-  pop r10             (count into r10)
+  reload r10          (count into r10)
   mov rcx, r10        (count into rcx so cl carries the low byte)
   shl/sar rax, cl
 
@@ -11676,12 +11689,12 @@ live parameter register in the surrounding defun."
                     (list :unknown-shift-op op)))))
       ;; Compute B -> rax.
       (nelisp-aot-compiler--emit-value b buf)
-      ;; push rax (save B on stack).
-      (nelisp-asm-x86_64-push buf 'rax)
+      ;; Save B in a 16-byte slot so nested calls keep rsp aligned.
+      (nelisp-aot-compiler--x86_64-spill-rax-slot buf)
       ;; Compute A -> rax.
       (nelisp-aot-compiler--emit-value a buf)
-      ;; pop r10 (= recover B into r10).
-      (nelisp-asm-x86_64-pop buf 'r10)
+      ;; Recover B into r10.
+      (nelisp-aot-compiler--x86_64-unspill-slot-into-reg buf 'r10)
       ;; mov rcx, r10 (= count into rcx; cl = rcx[0:8]).
       (nelisp-asm-x86_64-mov-reg-reg buf 'rcx 'r10)
       (cond
@@ -11801,11 +11814,12 @@ external data symbol."
 Strategy (ABI-agnostic), with W7.6a trivial-suffix optimization:
   1. Classify args into a *complex* prefix and a *trivial* suffix
      (trailing run of `imm' / GP-class `ref' nodes).
-  2. Complex prefix: evaluate each into rax, then push rax (stack-save
-     order).  After all complex args are pushed, pop into their target
-     ABI registers in reverse (= last pushed is first popped).  This
-     preserves the original spill semantics for args that may clobber
-     each other's regs.
+  2. Complex prefix: evaluate each into rax, then spill it into a
+     16-byte stack slot.  After all complex args are saved, reload
+     their target ABI registers in reverse (= last saved is first
+     reloaded).  This preserves the original spill semantics for args
+     that may clobber each other's regs while keeping rsp 16-aligned
+     during later arg evaluation.
   3. Trivial suffix: emit each directly into its target ABI register
      via `mov target, imm32' (= imm) or `mov target, [rbp - disp8]'
      (= ref).  No stack spill — trivial emits don't touch other regs.
@@ -11840,34 +11854,34 @@ count."
                     (list :call-stack-args-unsupported name n)))
           (let* ((stack-count (- n reg-budget))
                  (win64-p (eq nelisp-aot-compiler--abi 'win64))
-                 ;; Indirect calls occupy one extra stack slot for the stashed
-                 ;; fn-ptr; fold it into alignment parity and the final cleanup.
+                 ;; Indirect calls occupy one extra 16-byte spill slot for the
+                 ;; stashed fn-ptr; fold it into the final cleanup.
                  (fn-slots (if fn-value 1 0))
                  (needs-align
                   ;; Post-prologue rsp is 0 mod 16 on every defun path, so
-                  ;; alignment depends only on the words this call pushes
-                  ;; (NOT the enclosing arity) — same as the win64 branch.
-                  (= (logand (+ n stack-count fn-slots) 1) 1))
+                  ;; alignment depends only on the outgoing 8-byte SysV stack
+                  ;; args (NOT the balanced 16-byte spill slots, and NOT the
+                  ;; enclosing arity) — same as the win64 branch.
+                  (= (logand stack-count 1) 1))
                  (win64-outgoing
                   (if win64-p
                       (+ 32 (* 8 stack-count) (if needs-align 8 0))
                     0)))
-            ;; (0) Indirect: evaluate the fn-ptr FIRST and push it BELOW every
-            ;; saved arg, so later arg evaluation cannot clobber it.  Recovered
-            ;; into r11 right before the call.
+            ;; (0) Indirect: evaluate the fn-ptr FIRST and save it BELOW every
+            ;; later arg spill, so later arg evaluation cannot clobber it.
             (when fn-value
               (nelisp-aot-compiler--emit-value fn-value buf)
-              (nelisp-asm-x86_64-push buf 'rax))
+              (nelisp-aot-compiler--x86_64-spill-rax-slot buf))
             ;; Save every arg left-to-right so complex args cannot clobber
             ;; earlier register-bound values while later args are evaluated.
             (dolist (a args)
               (nelisp-aot-compiler--emit-value a buf)
-              (nelisp-asm-x86_64-push buf 'rax))
+              (nelisp-aot-compiler--x86_64-spill-rax-slot buf))
             ;; Load register arguments from the temporary save area.
             (cl-loop for idx below reg-budget
                      for target in cur-arg-regs
                      do (nelisp-asm-x86_64-mov-reg-mem-rsp-disp
-                         buf target (* 8 (- (1- n) idx))))
+                         buf target (* 16 (- (1- n) idx))))
             (if win64-p
                 (progn
                   ;; Win64 outgoing area: 32-byte shadow space followed by
@@ -11876,24 +11890,24 @@ count."
                   (cl-loop for idx from reg-budget below n
                            for stack-slot from 0
                            do (let ((source-disp (+ win64-outgoing
-                                                    (* 8 (- (1- n) idx))))
+                                                    (* 16 (- (1- n) idx))))
                                     (dest-disp (+ 32 (* 8 stack-slot))))
                                 (nelisp-asm-x86_64-mov-reg-mem-rsp-disp
                                  buf 'r10 source-disp)
                                 (nelisp-asm-x86_64-mov-mem-rsp-disp-reg
                                  buf dest-disp 'r10)))
                   ;; Recover the stashed fn-ptr: it sits just above the saved
-                  ;; args, at [rsp + win64-outgoing + 8*n].
+                  ;; args, at [rsp + win64-outgoing + 16*n].
                   (when fn-value
                     (nelisp-asm-x86_64-mov-reg-mem-rsp-disp
-                     buf 'r11 (+ win64-outgoing (* 8 n)))))
+                     buf 'r11 (+ win64-outgoing (* 16 n)))))
               (when needs-align
                 (nelisp-asm-x86_64-sub-imm32 buf 'rsp 8))
               ;; SysV outgoing stack args are pushed right-to-left.  The first
               ;; stack arg ends up closest to the return address in the callee.
               (let ((pushed-stack 0))
                 (cl-loop for idx downfrom (1- n) to reg-budget
-                         do (let ((disp (+ (* 8 (- (1- n) idx))
+                         do (let ((disp (+ (* 16 (- (1- n) idx))
                                            (if needs-align 8 0)
                                            (* 8 pushed-stack))))
                               (nelisp-asm-x86_64-mov-reg-mem-rsp-disp
@@ -11902,10 +11916,10 @@ count."
                               (setq pushed-stack (1+ pushed-stack)))))
               ;; Recover the stashed fn-ptr: after the align pad and the
               ;; right-to-left stack pushes it sits at
-              ;; [rsp + 8*stack-count + (align?8:0) + 8*n].
+              ;; [rsp + 8*stack-count + (align?8:0) + 16*n].
               (when fn-value
                 (nelisp-asm-x86_64-mov-reg-mem-rsp-disp
-                 buf 'r11 (+ (* 8 stack-count) (if needs-align 8 0) (* 8 n)))))
+                 buf 'r11 (+ (* 8 stack-count) (if needs-align 8 0) (* 16 n)))))
             (if fn-value
                 (nelisp-asm-x86_64-call-reg buf 'r11)
               (nelisp-asm-x86_64-call-rel32 buf name))
@@ -11915,10 +11929,10 @@ count."
                 (nelisp-asm-x86_64-add-imm32 buf 'rsp (* 8 stack-count)))
               (when needs-align
                 (nelisp-asm-x86_64-add-imm32 buf 'rsp 8)))
-            (nelisp-asm-x86_64-add-imm32 buf 'rsp (* 8 (+ n fn-slots)))))
+            (nelisp-asm-x86_64-add-imm32 buf 'rsp (* 16 (+ n fn-slots)))))
       (let* ((regs (cl-subseq cur-arg-regs 0 n))
          ;; Stack alignment: post-prologue rsp is 0 mod 16 and the
-         ;; complex-prefix push/pop (and the fn-ptr stash) are balanced,
+         ;; complex-prefix 16-byte spills (and the fn-ptr stash) are balanced,
          ;; so no pad is needed here — same as the win64 branch, which
          ;; never padded.  (Adding the enclosing arity here was the old
          ;; double-correction bug; see docs/runtime-limitations.md §E.)
@@ -11946,22 +11960,22 @@ count."
          (trivial-regs (cl-subseq regs complex-count)))
     ;; (0) Indirect call (Doc 133 P0): evaluate the fn-ptr and stash it
     ;; on the stack BELOW the args, so the arg-reg shuffle below cannot
-    ;; clobber it.  Net rsp change stays zero (popped at step 2b).
+    ;; clobber it.  Net rsp change stays zero (reloaded at step 2b).
     (when fn-value
       (nelisp-aot-compiler--emit-value fn-value buf)
-      (nelisp-asm-x86_64-push buf 'rax))
-    ;; (1) Complex prefix: evaluate -> push rax.
+      (nelisp-aot-compiler--x86_64-spill-rax-slot buf))
+    ;; (1) Complex prefix: evaluate -> save into 16-byte slots.
     (dolist (a complex-args)
       (nelisp-aot-compiler--emit-value a buf)
-      (nelisp-asm-x86_64-push buf 'rax))
-    ;; (2) Pop complex args into their target regs in reverse order.
+      (nelisp-aot-compiler--x86_64-spill-rax-slot buf))
+    ;; (2) Reload complex args into their target regs in reverse order.
     (dolist (r (reverse complex-regs))
-      (nelisp-asm-x86_64-pop buf r))
+      (nelisp-aot-compiler--x86_64-unspill-slot-into-reg buf r))
     ;; (2b) Indirect call: the fn-ptr is now back on top of the stack
     ;; -> r11 (not an ABI arg reg, so the trivial-suffix emits below
     ;; cannot clobber it; r11 is caller-saved on both SysV and Win64).
     (when fn-value
-      (nelisp-asm-x86_64-pop buf 'r11))
+      (nelisp-aot-compiler--x86_64-unspill-slot-into-reg buf 'r11))
     ;; (3) Trivial suffix: emit each directly into its target reg.
     ;; Order is free since trivial emits never clobber other arg regs;
     ;; we walk source order for deterministic byte layout.
@@ -12208,9 +12222,9 @@ same branch and emit the same byte count."
              (not (nelisp-aot-compiler--call-arg-trivial-p a)))
            stack-args))
          (spill-needs-align
-          ;; Same invariant: count only the pushed temps + outgoing stack
-          ;; args, not the enclosing arity (matches the win64 branch).
-          (= (logand (+ (length stack-args) arg-count) 1) 1))
+          ;; The temp-save path now uses balanced 16-byte spill slots, so
+          ;; only the outgoing 8-byte stack args affect SysV call alignment.
+          needs-align)
          (win64-dynamic-align-p
           (and win64-p (memq name '(CreateFileW ReadFile WriteFile CloseHandle
                                      CreateProcessW WaitForSingleObject
@@ -12246,7 +12260,7 @@ same branch and emit the same byte count."
         (progn
           (setq call-temp-save-count arg-count
                 call-needs-align spill-needs-align)
-          ;; Evaluate every arg left-to-right into temporary stack saves.
+          ;; Evaluate every arg left-to-right into temporary 16-byte stack saves.
           ;; The saves remain above the outgoing call frame until after
           ;; CALL returns; only the actual outgoing stack args are pushed
           ;; below them.
@@ -12256,12 +12270,12 @@ same branch and emit the same byte count."
               (nelisp-aot-compiler--emit-value a buf))
             (when (eq (nelisp-aot-compiler--ir-get a :cls) 'f64)
               (nelisp-asm-x86_64-movq-r64-xmm buf 'rax 'xmm0))
-            (nelisp-asm-x86_64-push buf 'rax))
+            (nelisp-aot-compiler--x86_64-spill-rax-slot buf))
           (cl-loop for target in arg-targets
                    for idx from 0
                    unless (and (consp target) (eq (car target) :stack))
                    do
-                   (let ((disp (* 8 (- (1- arg-count) idx))))
+                   (let ((disp (* 16 (- (1- arg-count) idx))))
                      (if (memq target xmm-arg-regs)
                          (progn
                            (nelisp-asm-x86_64-mov-reg-mem-rsp-disp
@@ -12276,7 +12290,7 @@ same branch and emit the same byte count."
             (let ((pushed-stack 0))
               (dolist (entry (reverse stack-indexed))
                 (let* ((idx (nth 0 entry))
-                       (source-disp (* 8 (- (1- arg-count) idx)))
+                       (source-disp (* 16 (- (1- arg-count) idx)))
                        (align-disp (if call-needs-align 8 0))
                        (disp (+ source-disp
                                 align-disp
@@ -12289,9 +12303,9 @@ same branch and emit the same byte count."
         (unless (nelisp-aot-compiler--call-arg-trivial-p a)
           (signal 'nelisp-aot-compiler-error
                   (list :extern-call-stack-arg-not-trivial name))))
-      ;; (1) Complex prefix: push each evaluated arg.  f64 args are
+      ;; (1) Complex prefix: save each evaluated arg in a 16-byte slot.  f64 args are
       ;; evaluated into xmm0 via `--emit-f64-leaf-into', then transferred
-      ;; to rax before the unified push.
+      ;; to rax before the unified spill.
       (dolist (a complex-args)
         (if (eq (nelisp-aot-compiler--ir-get a :cls) 'f64)
             (nelisp-aot-compiler--emit-f64-leaf-into a buf 'xmm0)
@@ -12299,16 +12313,16 @@ same branch and emit the same byte count."
         (when (eq (nelisp-aot-compiler--ir-get a :cls) 'f64)
           ;; xmm0 → rax (64-bit bit pattern, preserves the f64 value).
           (nelisp-asm-x86_64-movq-r64-xmm buf 'rax 'xmm0))
-        (nelisp-asm-x86_64-push buf 'rax))
-      ;; (2) Pop in reverse (= last pushed → first popped) and dispatch.
+        (nelisp-aot-compiler--x86_64-spill-rax-slot buf))
+      ;; (2) Reload in reverse (= last saved → first reloaded) and dispatch.
       (dolist (target (reverse complex-targets))
         (if (memq target xmm-arg-regs)
-            ;; f64 target — pop into rax then MOVQ → xmm.
+            ;; f64 target — reload into rax then MOVQ → xmm.
             (progn
-              (nelisp-asm-x86_64-pop buf 'rax)
+              (nelisp-aot-compiler--x86_64-unspill-slot-into-reg buf 'rax)
               (nelisp-asm-x86_64-movq-xmm-r64 buf target 'rax))
-          ;; GP target — pop directly.
-          (nelisp-asm-x86_64-pop buf target)))
+          ;; GP target — reload directly.
+          (nelisp-aot-compiler--x86_64-unspill-slot-into-reg buf target)))
       ;; (3) Trivial suffix: emit each directly into its target gp-reg.
       ;; Order is free since trivial emits never clobber other arg regs;
       ;; we walk source order for deterministic byte layout.  All targets
@@ -12407,7 +12421,7 @@ same branch and emit the same byte count."
               ;; and never holds the fn-ptr here -- `extern-call-ptr' calls
               ;; have no NAME so they are never in the dynamic-align
               ;; allowlist).  temp[idx] lives at exactly
-              ;; pre-align-rsp + 8*(argc-1-idx) (TOS = last push), so the
+              ;; pre-align-rsp + 16*(argc-1-idx) (TOS = last spill), so the
               ;; addressing is rsp-independent; the dest writes still go
               ;; through the CURRENT rsp, which is correct (they populate
               ;; the outgoing area just reserved below the aligned rsp).
@@ -12420,7 +12434,7 @@ same branch and emit the same byte count."
                        (target (nth 2 entry))
                        (stack-slot (cadr target))
                        (source-disp (+ (if win64-dynamic-align-p 0 win64-outgoing)
-                                       (* 8 (- (1- arg-count) idx))))
+                                       (* 16 (- (1- arg-count) idx))))
                        (dest-disp (+ shadow (* 8 stack-slot))))
                   (if win64-dynamic-align-p
                       (nelisp-asm-x86_64-mov-reg-mem-disp8
@@ -12473,7 +12487,7 @@ same branch and emit the same byte count."
     (when (and sysv-p call-needs-align)
       (nelisp-asm-x86_64-add-imm32 buf 'rsp 8))
     (when (> call-temp-save-count 0)
-      (nelisp-asm-x86_64-add-imm32 buf 'rsp (* 8 call-temp-save-count)))
+      (nelisp-asm-x86_64-add-imm32 buf 'rsp (* 16 call-temp-save-count)))
     ;; Caller convention: extern-call result is i64 in rax (default)
     ;; or f64 in xmm0 (when :ret-class = f64).  Both ABIs agree on the
     ;; return register convention for scalar values.
@@ -15708,11 +15722,12 @@ opcode reads the right combination.")
 
 (defun nelisp-aot-compiler--emit-cmp (node buf)
   "Emit signed comparison NODE; result (0 or 1) in rax.
-Strategy: compute B -> rax -> push, compute A -> rax, pop r10 (=
-B), cmp rax, r10 (= computes A - B flag set), then setCC al +
+Strategy: compute B -> rax -> spill, compute A -> rax, reload r10
+(= B), cmp rax, r10 (= computes A - B flag set), then setCC al +
 movzx eax, al to materialise the boolean into rax.  Uses r10 to
-  avoid arg-reg aliasing inside chained calls, mirroring the
-  Doc 97.b arith convention."
+avoid arg-reg aliasing inside chained calls while keeping rsp
+16-aligned across nested calls, mirroring the Doc 97.b arith
+convention."
   (let* ((op (nelisp-aot-compiler--ir-get node :op))
          (a (nelisp-aot-compiler--ir-get node :a))
          (b (nelisp-aot-compiler--ir-get node :b))
@@ -15735,11 +15750,11 @@ movzx eax, al to materialise the boolean into rax.  Uses r10 to
           (nelisp-asm-arm64-cset buf 'x0 arm64-cc))
       ;; Compute B -> rax, save on stack.
       (nelisp-aot-compiler--emit-value b buf)
-      (nelisp-asm-x86_64-push buf 'rax)
+      (nelisp-aot-compiler--x86_64-spill-rax-slot buf)
       ;; Compute A -> rax.
       (nelisp-aot-compiler--emit-value a buf)
       ;; Recover B into r10.
-      (nelisp-asm-x86_64-pop buf 'r10)
+      (nelisp-aot-compiler--x86_64-unspill-slot-into-reg buf 'r10)
       ;; cmp rax, r10                          (= A - B sets flags)
       (nelisp-asm-x86_64-cmp-reg-reg buf 'rax 'r10)
       ;; setCC al
