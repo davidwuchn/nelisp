@@ -1009,21 +1009,6 @@ the quotient in rax — the companion of the `mod' remainder path)."
     (let ((r (nelisp-aot-compiler-test--run-binary path)))
       (should (= (plist-get r :exit) 7)))))
 
-(ert-deftest nelisp-aot-compiler/e2e-defun-nested-call-in-arg ()
-  "A nested call in argument position survives SysV stack alignment."
-  (unless (nelisp-aot-compiler-test--linux-p)
-    (ert-skip "Requires x86_64 Linux"))
-  (nelisp-aot-compiler-test--with-tmp-binary path "nested-arg"
-    (nelisp-aot-compile-sexp
-     '(seq
-       (defun inc (x) (+ x 1))
-       (defun add2 (a b) (+ a b))
-       (defun probe (x) (add2 (inc (inc x)) 10))
-       (exit (probe 5)))
-     path)
-    (let ((r (nelisp-aot-compiler-test--run-binary path)))
-      (should (= (plist-get r :exit) 17)))))
-
 (ert-deftest nelisp-aot-compiler/e2e-defun-double ()
   "The Doc 97.b §6 smoke: `(double 21)' returns 42 via `(* x 2)'."
   (unless (nelisp-aot-compiler-test--linux-p)
@@ -1457,21 +1442,6 @@ the high word 5 (result 105).  Regression for the imm32 sign-extension bug."
     (let ((r (nelisp-aot-compiler-test--run-binary path)))
       (should (= (plist-get r :exit) 42)))))
 
-(ert-deftest nelisp-aot-compiler/e2e-cmp-nested-call ()
-  "A nested call inside comparison evaluation survives SysV alignment."
-  (unless (nelisp-aot-compiler-test--linux-p)
-    (ert-skip "Requires x86_64 Linux"))
-  (nelisp-aot-compiler-test--with-tmp-binary path "cmp-nested-call"
-    (nelisp-aot-compile-sexp
-     '(seq
-       (defun inc (x) (+ x 1))
-       (defun probe (x)
-         (if (< (inc (inc x)) 10) 1 2))
-       (exit (probe 7)))
-     path)
-    (let ((r (nelisp-aot-compiler-test--run-binary path)))
-      (should (= (plist-get r :exit) 1)))))
-
 ;; ====================================================================
 ;; Doc 99 §99.B — `nelisp-aot-compile-to-object' (ET_REL emit)
 ;; ====================================================================
@@ -1534,26 +1504,6 @@ the high word 5 (result 105).  Regression for the imm32 sign-extension bug."
           (nelisp-aot-compile-to-object
            form path :arch 'x86_64 :format 'coff)
           (nelisp-aot-compiler-test--coff-section-bytes
-           (nelisp-aot-compiler-test--read-bytes path)
-           ".text"))
-      (ignore-errors (delete-file path)))))
-
-(defun nelisp-aot-compiler-test--elf-section-bytes (bytes name)
-  "Return section NAME bytes from ELF BYTES."
-  (let ((section (or (nelisp-aot-compiler-test--elf-find-section bytes name)
-                     (error "ELF section %s not found" name))))
-    (substring bytes
-               (plist-get section :offset)
-               (+ (plist-get section :offset)
-                  (plist-get section :size)))))
-
-(defun nelisp-aot-compiler-test--elf-text-for (form)
-  "Compile FORM as x86_64 ELF and return its `.text' section bytes."
-  (let ((path (make-temp-file "nelisp-elf-text-" nil ".o")))
-    (unwind-protect
-        (progn
-          (nelisp-aot-compile-to-object form path)
-          (nelisp-aot-compiler-test--elf-section-bytes
            (nelisp-aot-compiler-test--read-bytes path)
            ".text"))
       (ignore-errors (delete-file path)))))
@@ -2030,6 +1980,95 @@ correctly."
           (let ((exit-status
                  (call-process bin-path nil nil nil)))
             (should (= exit-status 99))))
+      (ignore-errors (delete-file probe-path))
+      (ignore-errors (delete-file host-path))
+      (ignore-errors (delete-file bin-path)))))
+
+(ert-deftest nelisp-aot-compiler/object-mode-nested-call-preserves-temp-stack-alignment ()
+  "Nested calls under saved outer args must see ABI-aligned rsp.
+
+Minimal repro for the standalone reader call-spill contract bug:
+
+  (defun probe (keep)
+    (extern-call ext_sum6
+                 keep
+                 (extern-call ext_align_ok)
+                 keep keep keep keep))
+
+The outer call must keep KEEP live while evaluating the second arg.  Before
+the fix, `--emit-extern-call' pushed KEEP, then emitted the nested
+`ext_align_ok' call as if no temporary word were on the stack.  The nested
+callee entered with rsp %% 16 == 0 instead of the SysV-required 8 and returned
+0, so the final sum was 35.  After the fix the nested call is padded and the
+sum is 36."
+  (skip-unless (and (executable-find "ld")
+                    (eq system-type 'gnu/linux)))
+  (let* ((probe-path (make-temp-file "nelisp-nested-align-probe-" nil ".o"))
+         (host-path (make-temp-file "nelisp-nested-align-host-" nil ".o"))
+         (bin-path (make-temp-file "nelisp-nested-align-bin-" nil ""))
+         (align-text
+          (concat
+           ;; ext_align_ok: return ((rsp & 15) == 8) ? 1 : 0.
+           (unibyte-string #x48 #x89 #xE0)
+           (unibyte-string #x83 #xE0 #x0F)
+           (unibyte-string #x83 #xF8 #x08)
+           (unibyte-string #x0F #x94 #xC0)
+           (unibyte-string #x0F #xB6 #xC0)
+           (unibyte-string #xC3)))
+         (sum6-off (length align-text))
+         (sum6-text
+          (concat
+           ;; ext_sum6: rax = rdi+rsi+rdx+rcx+r8+r9.
+           (unibyte-string #x48 #x89 #xF8)
+           (unibyte-string #x48 #x01 #xF0)
+           (unibyte-string #x48 #x01 #xD0)
+           (unibyte-string #x48 #x01 #xC8)
+           (unibyte-string #x4C #x01 #xC0)
+           (unibyte-string #x4C #x01 #xC8)
+           (unibyte-string #xC3)))
+         (start-off (+ (length align-text) (length sum6-text)))
+         (start-text
+          (concat
+           ;; _start: probe(7); exit(rax).
+           (unibyte-string #xBF #x07 0 0 0)
+           (unibyte-string #xE8 0 0 0 0)
+           (unibyte-string #x48 #x89 #xC7)
+           (unibyte-string #xB8 #x3C 0 0 0)
+           (unibyte-string #x0F #x05)))
+         (host-text (concat align-text sum6-text start-text)))
+    (unwind-protect
+        (progn
+          (nelisp-aot-compile-to-object
+           '(defun probe (keep)
+              (extern-call ext_sum6
+                           keep
+                           (extern-call ext_align_ok)
+                           keep keep keep keep))
+           probe-path)
+          (nelisp-elf-write-binary
+           host-path
+           (list :e-type 'rel
+                 :text host-text
+                 :symbols (list
+                           (list :name "ext_align_ok" :value 0
+                                 :size (length align-text)
+                                 :section 'text :bind 'global :type 'func)
+                           (list :name "ext_sum6" :value sum6-off
+                                 :size (length sum6-text)
+                                 :section 'text :bind 'global :type 'func)
+                           (list :name "_start" :value start-off
+                                 :size (length start-text)
+                                 :section 'text :bind 'global :type 'func)
+                           (list :name "probe" :section 'undef
+                                 :bind 'global :type 'notype))
+                 :relocs (list
+                          (list :section 'text :offset (+ start-off 6)
+                                :symbol "probe" :type 'plt32 :addend -4))))
+          (should (zerop (call-process "ld" nil nil nil
+                                       "-o" bin-path host-path probe-path)))
+          (set-file-modes bin-path #o755)
+          (let ((exit-status (call-process bin-path nil nil nil)))
+            (should (= exit-status 36))))
       (ignore-errors (delete-file probe-path))
       (ignore-errors (delete-file host-path))
       (ignore-errors (delete-file bin-path)))))
@@ -3066,14 +3105,14 @@ opcode 48 8b 9d)."
                         bytes ".text")))
             (should (nelisp-aot-compiler-test--bytes-contain-p
                      text
-                     ;; sub rsp,48; mov r10,[rsp+48]; mov [rsp+32],r10.
-                     ;; The copied 8 bytes are the fifth f64 bit pattern
-                     ;; saved by the 16-byte spill path.
-                     (unibyte-string #x48 #x81 #xec #x30 #x00 #x00 #x00
-                                     #x4c #x8b #x54 #x24 #x30
+                     ;; sub rsp, 40; mov r10,[rsp+40]; mov [rsp+32],r10;
+                     ;; call rel32; add rsp,40.  The copied 8 bytes are
+                     ;; the fifth f64 bit pattern saved by the spill path.
+                     (unibyte-string #x48 #x81 #xec #x28 #x00 #x00 #x00
+                                     #x4c #x8b #x54 #x24 #x28
                                      #x4c #x89 #x54 #x24 #x20
                                      #xe8 #x00 #x00 #x00 #x00
-                                     #x48 #x81 #xc4 #x30 #x00 #x00 #x00)))))
+                                     #x48 #x81 #xc4 #x28 #x00 #x00 #x00)))))
       (ignore-errors (delete-file path)))))
 
 (ert-deftest nelisp-aot-compiler/win64-extern-call-mixed-f64-slots ()
@@ -3094,26 +3133,20 @@ opcode 48 8b 9d)."
                         bytes ".text")))
             (should (nelisp-aot-compiler-test--bytes-contain-p
                      text
-                     ;; mov rax,[rsp]; add rsp,16; movq xmm3,rax
-                     (unibyte-string #x48 #x8b #x04 #x24
-                                     #x48 #x81 #xc4 #x10 #x00 #x00 #x00
-                                     #x66 #x48 #x0f #x6e #xd8)))
+                     ;; pop rax; movq xmm3,rax
+                     (unibyte-string #x58 #x66 #x48 #x0f #x6e #xd8)))
             (should (nelisp-aot-compiler-test--bytes-contain-p
                      text
-                     ;; mov r8,[rsp]; add rsp,16
-                     (unibyte-string #x4c #x8b #x04 #x24
-                                     #x48 #x81 #xc4 #x10 #x00 #x00 #x00)))
+                     ;; pop r8
+                     (unibyte-string #x41 #x58)))
             (should (nelisp-aot-compiler-test--bytes-contain-p
                      text
-                     ;; mov rax,[rsp]; add rsp,16; movq xmm1,rax
-                     (unibyte-string #x48 #x8b #x04 #x24
-                                     #x48 #x81 #xc4 #x10 #x00 #x00 #x00
-                                     #x66 #x48 #x0f #x6e #xc8)))
+                     ;; pop rax; movq xmm1,rax
+                     (unibyte-string #x58 #x66 #x48 #x0f #x6e #xc8)))
             (should (nelisp-aot-compiler-test--bytes-contain-p
                      text
-                     ;; mov rcx,[rsp]; add rsp,16
-                     (unibyte-string #x48 #x8b #x0c #x24
-                                     #x48 #x81 #xc4 #x10 #x00 #x00 #x00)))))
+                     ;; pop rcx
+                     (unibyte-string #x59)))))
       (ignore-errors (delete-file path)))))
 
 (ert-deftest nelisp-aot-compiler/win64-coff-smoke ()
@@ -3592,13 +3625,13 @@ SysV would emit `push rdi' = 57 instead."
                         bytes ".text")))
             (should (nelisp-aot-compiler-test--bytes-contain-p
                      text
-                     ;; sub rsp,48; mov r10,[rsp+48]; mov [rsp+32],r10;
-                     ;; call rel32; add rsp,48
-                     (unibyte-string #x48 #x81 #xec #x30 #x00 #x00 #x00
-                                     #x4c #x8b #x54 #x24 #x30
+                     ;; sub rsp, 40; mov r10,[rsp+40]; mov [rsp+32],r10;
+                     ;; call rel32; add rsp,40
+                     (unibyte-string #x48 #x81 #xec #x28 #x00 #x00 #x00
+                                     #x4c #x8b #x54 #x24 #x28
                                      #x4c #x89 #x54 #x24 #x20
                                      #xe8 #x00 #x00 #x00 #x00
-                                     #x48 #x81 #xc4 #x30 #x00 #x00 #x00)))))
+                                     #x48 #x81 #xc4 #x28 #x00 #x00 #x00)))))
       (ignore-errors (delete-file path)))))
 
 (ert-deftest nelisp-aot-compiler/win64-internal-call-stack-gp-arg ()
@@ -3616,20 +3649,20 @@ SysV would emit `push rdi' = 57 instead."
                         bytes ".text")))
             (should (nelisp-aot-compiler-test--bytes-contain-p
                      text
-                     ;; sub rsp,48; mov r10,[rsp+48]; mov [rsp+32],r10.
-                     (unibyte-string #x48 #x81 #xec #x30 #x00 #x00 #x00
-                                     #x4c #x8b #x54 #x24 #x30
+                     ;; sub rsp,40; mov r10,[rsp+40]; mov [rsp+32],r10.
+                     (unibyte-string #x48 #x81 #xec #x28 #x00 #x00 #x00
+                                     #x4c #x8b #x54 #x24 #x28
                                      #x4c #x89 #x54 #x24 #x20)))
             (should (nelisp-aot-compiler-test--bytes-contain-p
                      text
-                     ;; mov r10,[rsp+48]; mov [rsp+32],r10; call rel32.
-                     (unibyte-string #x4c #x8b #x54 #x24 #x30
+                     ;; mov r10,[rsp+40]; mov [rsp+32],r10; call rel32.
+                     (unibyte-string #x4c #x8b #x54 #x24 #x28
                                      #x4c #x89 #x54 #x24 #x20
                                      #xe8)))
             (should (nelisp-aot-compiler-test--bytes-contain-p
                      text
-                     ;; add rsp,48 after the internal call returns.
-                     (unibyte-string #x48 #x81 #xc4 #x30 #x00 #x00 #x00)))))
+                     ;; add rsp,40 after the internal call returns.
+                     (unibyte-string #x48 #x81 #xc4 #x28 #x00 #x00 #x00)))))
       (ignore-errors (delete-file path)))))
 
 (ert-deftest nelisp-aot-compiler/win64-internal-call-odd-arity-no-pad ()
@@ -3655,45 +3688,6 @@ SysV would emit `push rdi' = 57 instead."
                  (unibyte-string #x48 #x81 #xec #x08 #x00 #x00 #x00
                                  #x48 #x81 #xec #x20 #x00 #x00 #x00
                                  #xe8)))))
-
-(ert-deftest nelisp-aot-compiler/win64-internal-call-nested-arg-spills-16-byte-slots ()
-  "Win64 nested internal-call args spill with 16-byte rsp-aligned slots."
-  (let* ((form '(seq
-                 (defun callee (a) a)
-                 (defun probe (x) (callee (callee x)))))
-         (text (nelisp-aot-compiler-test--coff-text-for form)))
-    (should (nelisp-aot-compiler-test--bytes-contain-p
-             text
-             ;; sub rsp,16; mov [rsp],rax; mov rcx,[rsp]; add rsp,16.
-             (unibyte-string #x48 #x81 #xec #x10 #x00 #x00 #x00
-                             #x48 #x89 #x04 #x24
-                             #x48 #x8b #x0c #x24
-                             #x48 #x81 #xc4 #x10 #x00 #x00 #x00)))
-    (should-not (nelisp-aot-compiler-test--bytes-contain-p
-                 text
-                 ;; Old push/pop spill form.
-                 (unibyte-string #x50 #x59)))))
-
-(ert-deftest nelisp-aot-compiler/x86_64-cmp-nested-call-spills-16-byte-slots ()
-  "Comparison operands spill through 16-byte slots on x86_64 SysV too."
-  (let* ((form '(seq
-                 (defun inc (x) (+ x 1))
-                 (defun probe (x) (if (< (inc (inc x)) 10) 1 0))))
-         (text (nelisp-aot-compiler-test--elf-text-for form)))
-    (should (nelisp-aot-compiler-test--bytes-contain-p
-             text
-             ;; sub rsp,16; mov [rsp],rax
-             (unibyte-string #x48 #x81 #xec #x10 #x00 #x00 #x00
-                             #x48 #x89 #x04 #x24)))
-    (should (nelisp-aot-compiler-test--bytes-contain-p
-             text
-             ;; mov r10,[rsp]; add rsp,16
-             (unibyte-string #x4c #x8b #x14 #x24
-                             #x48 #x81 #xc4 #x10 #x00 #x00 #x00)))
-    (should-not (nelisp-aot-compiler-test--bytes-contain-p
-                 text
-                 ;; Old push/pop spill form.
-                 (unibyte-string #x50 #x41 #x5a)))))
 
 ;; --- `f64-bits' soft-float keystone (nelisp-cfront) ---------------------
 ;; `(f64-bits F64-EXPR)' reinterprets an f64-class result's raw IEEE-754

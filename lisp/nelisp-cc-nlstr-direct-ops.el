@@ -33,6 +33,10 @@
 ;;   nl_alloc_mut_str  — allocate NlStr box (32b/8b) + char buf,
 ;;                       write NlStr header, write Sexp::MutStr fields.
 ;;   nl_mut_str_finalize — clone MutStr's String to a fresh Sexp::Str.
+;;   nl_intern_lookup  — Doc 163 Phase C, no Rust precursor: probe-only
+;;                       ("lookup without insert") counterpart of
+;;                       nl_alloc_symbol, backing elisp `intern-soft''s
+;;                       real soft-fail path.
 ;;
 ;; AOT `let' constraint: the `let' grammar form is COMPILE-TIME
 ;; only (= constant-folding of integer literals).  Runtime pointer
@@ -272,22 +276,97 @@ lifetime of a Sexp value.  No `let' binding needed.")
 
     ;; Public entry: nl_alloc_symbol(bytes_ptr, len, result_slot).
     (defun nl_alloc_symbol (bytes-ptr len result-slot)
-      (nl_alloc_symbol_pos bytes-ptr (if (< len 0) 0 len) result-slot)))
-  "AOT direct-symbol source for `nl_alloc_str' + `nl_alloc_symbol'.
+      (nl_alloc_symbol_pos bytes-ptr (if (< len 0) 0 len) result-slot))
 
-Single `(seq DEFUN ...)' manifest exporting seven symbols:
-- `nl_alloc_str_copy_loop'  — private tail-recursive byte copier.
-- `nl_alloc_str_write'      — Sexp::Str (tag=5) inner writer.
-- `nl_alloc_str_pos'        — normalisation + alloc bridge.
-- `nl_alloc_str'            — public entry point.
-- `nl_alloc_symbol_write'   — Sexp::Symbol (tag=4) inner writer.
-- `nl_alloc_symbol_pos'     — normalisation + alloc bridge.
-- `nl_alloc_symbol'         — public entry point.
+    ;; ---- symbol-name LOOKUP WITHOUT INSERT (Doc 163 Phase C) ----
+    ;; `nl_alloc_symbol' always inserts on a miss (= `intern' semantics: the
+    ;; probed slot is either already occupied by a matching name, or is the
+    ;; first empty slot found by `nl_intern_probe', and `nl_intern_finish'
+    ;; unconditionally fills it in via `nl_intern_insert').  There was no
+    ;; entry point that probes the SAME open-addressing table and reports a
+    ;; miss WITHOUT writing anything -- so the elisp `intern-soft' (see
+    ;; lisp/nelisp-stdlib-misc.el) had no primitive to dispatch to and fell
+    ;; back to calling `intern' itself, i.e. it could never soft-fail (Doc
+    ;; 163: this hung the Gnus message.el `cited-text-face' probe loop into
+    ;; an unbounded interned-name allocation loop, exhausting the `ulimit -v'
+    ;; address space after ~40s / ~2.6GB and exiting rc=88).
+    ;;
+    ;; `nl_intern_lookup_finish' mirrors `nl_intern_finish' but on a miss
+    ;; (slot's len-word still 0) returns the sentinel 0 INSTEAD of calling
+    ;; `nl_intern_insert' -- no buffer copy, no slot write, no bump-pointer
+    ;; advance, no Sexp written to RESULT-SLOT.  On a hit it is byte-for-byte
+    ;; the same as `nl_intern_finish''s hit arm (writes the EXISTING interned
+    ;; buffer's Sexp via `nl_intern_write_sexp' and returns RESULT-SLOT, a
+    ;; non-zero address).  0 vs. a non-zero pointer is therefore an
+    ;; unambiguous miss/hit signal for the caller, following the same
+    ;; 0-sentinel convention `nl_os_alloc_chunk' / `nl_intern_region_init'
+    ;; already use elsewhere in this codebase.
+    (defun nl_intern_lookup_finish (slot n result-slot)
+      (if (= (ptr-read-u64 slot 0) 0)
+          0
+        (nl_intern_write_sexp result-slot (ptr-read-u64 slot 8) n)))
 
-Replaces the Rust `#[no_mangle]' bodies for both `nl_alloc_str' and
-`nl_alloc_symbol' in nlstr.rs (lines 102-118, 17 LOC across both) plus
-the private `build_string' helper (lines 79-87, 9 LOC) which had no
-other callers.  Net Rust reduction: ~26 LOC.
+    ;; Probe-only counterpart of `nl_alloc_symbol_pos'.  When the intern
+    ;; region has not been mapped (+832 == 0) there is no table to probe and
+    ;; therefore nothing can ever have been recorded as "interned" through
+    ;; it -- report a miss (0) rather than falling back to an allocator (a
+    ;; lookup must never allocate or have a side effect, unlike
+    ;; `nl_alloc_symbol_pos''s region-disabled fallback, which intentionally
+    ;; allocates a fresh per-occurrence buffer for `intern').
+    (defun nl_intern_lookup_pos (bytes-ptr n result-slot)
+      (if (= (ptr-read-u64 268436288 0) 0)
+          0
+        (nl_intern_lookup_finish
+         (nl_intern_probe (ptr-read-u64 268436288 0)
+                          (logand (nl_intern_hash bytes-ptr 0 n 2166136261) 1048575)
+                          bytes-ptr n)
+         n result-slot)))
+
+    ;; Public entry: nl_intern_lookup(bytes_ptr, len, result_slot).
+    ;; Returns 0 (RESULT-SLOT left untouched) when NAME has never been
+    ;; interned; otherwise writes the existing interned Symbol Sexp into
+    ;; RESULT-SLOT and returns RESULT-SLOT.  Performs no allocation, no
+    ;; table insert, and no bump-pointer advance on either path -- a pure
+    ;; read.  This is the primitive the elisp `intern-soft' dispatches to
+    ;; for its string-argument case (see `bf_intern_soft' in
+    ;; scripts/nelisp-standalone-build.el and `intern-soft' in
+    ;; lisp/nelisp-stdlib-misc.el).
+    (defun nl_intern_lookup (bytes-ptr len result-slot)
+      (nl_intern_lookup_pos bytes-ptr (if (< len 0) 0 len) result-slot)))
+  "AOT direct-symbol source for `nl_alloc_str' + `nl_alloc_symbol' +
+`nl_intern_lookup'.
+
+Single `(seq DEFUN ...)' manifest.  Public entry points:
+- `nl_alloc_str'      — allocate + intern-independent Sexp::Str (tag=5).
+- `nl_alloc_symbol'   — allocate-or-intern Sexp::Symbol (tag=4); always
+  succeeds, inserting into the intern region's open-addressing table on
+  a miss (= `intern' semantics).
+- `nl_intern_lookup'  — PROBE-ONLY counterpart of `nl_alloc_symbol' (Doc
+  163 Phase C): returns 0 on a miss without inserting; on a hit, writes
+  the existing interned Sexp::Symbol into RESULT-SLOT and returns
+  RESULT-SLOT.  Backs `intern-soft''s real soft-fail path.
+
+Private helpers (shared within this `.o'):
+- `nl_alloc_str_copy_loop' / `nl_alloc_str_write' / `nl_alloc_str_pos'
+  — Sexp::Str allocation chain.
+- `nl_alloc_symbol_write' / `nl_alloc_symbol_pos'
+  — Sexp::Symbol allocate-or-intern chain (calls `nl_intern_finish' on
+  a set-up region).
+- `nl_intern_hash' / `nl_intern_eq' / `nl_intern_slotmatch' /
+  `nl_intern_probe' / `nl_intern_bump' / `nl_intern_write_sexp' /
+  `nl_intern_insert' / `nl_intern_finish'
+  — open-addressing intern-region table ops (Doc 08 §8.16); `nl_intern_probe'
+  returns the address of either the first empty slot or a matching slot
+  and is shared, read-only, by BOTH the insert path (`nl_intern_finish')
+  and the lookup-only path (`nl_intern_lookup_finish') below.
+- `nl_intern_lookup_finish' / `nl_intern_lookup_pos'
+  — lookup-only chain backing `nl_intern_lookup' (Doc 163 Phase C).
+
+Originally replaced the Rust `#[no_mangle]' bodies for both `nl_alloc_str'
+and `nl_alloc_symbol' in nlstr.rs (lines 102-118, 17 LOC across both) plus
+the private `build_string' helper (lines 79-87, 9 LOC) which had no other
+callers.  `nl_intern_lookup' and its helpers are new elisp-only additions
+(Doc 163) with no Rust precursor.
 
 The helper-chain pattern avoids AOT's `let' restriction (= `let'
 is compile-time constant folding only).  `alloc-bytes' returns its

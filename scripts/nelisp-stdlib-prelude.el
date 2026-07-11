@@ -20,12 +20,24 @@
 ;;   Assembled by nelisp-standalone-build.el reader-units; lisp/ stays pristine.
 ;; Regenerate with /tmp/make-prelude.el (or re-assemble those sources) -- 48 forms.
 
+(fset 'nelisp--strip-body-declarations
+      (lambda (body)
+        (let ((cur body))
+          (while (and cur
+                      (or (stringp (car cur))
+                          (and (consp (car cur))
+                               (eq (car (car cur)) 'declare))))
+            (setq cur (cdr cur)))
+          cur)))
+
 (fset 'defmacro
       (cons 'macro
 	    (cons
 	     (lambda (name args &rest body)
 	       (let*
-		   ((lambda-form (cons 'lambda (cons args body)))
+		   ((real-body
+                     (nelisp--strip-body-declarations body))
+                    (lambda-form (cons 'lambda (cons args real-body)))
 		    (qname (cons 'quote (cons name nil)))
 		    (inner-cons
 		     (cons 'cons (cons lambda-form (cons nil nil))))
@@ -179,9 +191,7 @@
   "(defun NAME ARGS BODY...) → (progn (fset 'NAME (lambda ARGS BODY...)) 'NAME).\nUnlike Rust `sf_defun' which stores the raw `(lambda ...)' form\nunmodified, the elisp expansion goes through evaluation of\n`(lambda ARGS BODY...)' = produces a closure with the current lexical\nenv captured.  For top-level defun the captured env is empty so\nsemantics match Rust; defuns nested inside `let' would receive a\nnon-empty captured env in elisp but the bare form in Rust — this is\nan intentional improvement, not a regression."
   (let*
       ((real-body
-	(if (and body (cdr body) (stringp (car body)))
-	    (cdr body)
-	  body))
+        (nelisp--strip-body-declarations body))
        (lambda-form (cons 'lambda (cons args real-body)))
        (qname (cons 'quote (cons name nil))))
     (cons 'progn
@@ -1125,9 +1135,31 @@ reseeds from its characters; nil -> a full LCG value."
   "Walk SEQ and `cons' each element onto ACC (= reverse-order\naccumulator).  SEQ may be nil / cons / vector / string.  Returns\nthe new ACC.  Signals `wrong-type-argument' for improper-list cons\nor non-sequence atom."
   (cond ((null seq) acc)
 	((consp seq)
-	 (let ((cur seq))
+	 (let ((cur seq) (nelisp--diag-steps 0))
 	   (while (consp cur)
-	     (setq acc (cons (car cur) acc)) (setq cur (cdr cur)))
+	     (setq acc (cons (car cur) acc)) (setq cur (cdr cur))
+	     ;; DIAGNOSTIC (gc-retention-edge campaign, Phase B, 2026-07-06):
+	     ;; this cdr-walk has no cycle/terminator guard beyond `consp'.  A
+	     ;; GC retention-edge bug can free a still-reachable cons and
+	     ;; overwrite its cdr with a free-list link that re-enters this
+	     ;; same chain, turning this walk into an allocating infinite
+	     ;; loop (each iteration still `cons'es onto ACC) that only ends
+	     ;; when the arena exhausts `ulimit -v' and `nl_os_alloc_fail'
+	     ;; exits 88 -- tens of seconds later, no backtrace.  This bound
+	     ;; converts that into an immediate, catchable `signal' carrying
+	     ;; the original SEQ, the CUR cons at the moment of the trip, and
+	     ;; the partial ACC, so a debugger can break on `bf_signal' and
+	     ;; inspect the exact cons whose cdr the sweeper corrupted.  The
+	     ;; bound (200000) is far above any legitimate top-level
+	     ;; `append'/backquote-splice list length and far below what it
+	     ;; would take to exhaust memory (millions of iterations), so
+	     ;; this cannot misfire on real workloads.  See Doc 155 (nelisp
+	     ;; GC lexframe-child-collection-bug) and its retention-edge
+	     ;; addendum for the campaign this instrumentation serves.
+	     (setq nelisp--diag-steps (1+ nelisp--diag-steps))
+	     (when (> nelisp--diag-steps 200000)
+	       (signal 'nelisp-diag-runaway-append-collect
+		       (list seq cur acc nelisp--diag-steps))))
 	   (when cur (signal 'wrong-type-argument (list 'listp seq)))
 	   acc))
 	((vectorp seq)
@@ -1482,13 +1514,13 @@ pass through), so the default recursion into the cdr is correct for them."
     "Split BODY into declarations and remaining forms.
 Return (DECLARATIONS . BODY-FORMS), matching the shape used by Emacs
 macro helpers such as `iter-defun'.  A leading docstring and any
-following `(declare ...)' forms are treated as declarations."
+leading `(declare ...)' forms are treated as declarations."
     (let ((declarations nil)
           (cur body))
-      (when (and cur (stringp (car cur)))
-        (setq declarations (cons (car cur) declarations))
-        (setq cur (cdr cur)))
-      (while (and cur (consp (car cur)) (eq (car (car cur)) 'declare))
+      (while (and cur
+                  (or (stringp (car cur))
+                      (and (consp (car cur))
+                           (eq (car (car cur)) 'declare))))
         (setq declarations (cons (car cur) declarations))
         (setq cur (cdr cur)))
       (cons (nreverse declarations) cur))))
@@ -3308,7 +3340,10 @@ bindings provide.  &rest is honoured."
 ;;   :keyword           keyword 自己評価リテラル (eq 比較)
 ;;   integer / string   数値・文字列リテラル (equal 比較)
 ;;   symbol             変数 binding (常に match)
-;;   (quote SYM)        symbol 等価
+;;   (quote DATUM)      literal 等価 (`equal' 比較 -- symbol/number/string/
+;;                      list/vector 問わず構造比較。`eq' だと quoted list
+;;                      等の compound datum が freshly-consed な runtime
+;;                      値と一致しない)
 ;;   (cons P1 P2)       cons cell 分解
 ;;   (or P1 P2 ...)     どれか match
 ;;   (and P1 P2 ...)    全部 match
@@ -3338,7 +3373,25 @@ bindings provide.  &rest is honoured."
           (rest (cdr pattern)))
       (cond
        ((eq head 'quote)
-        (cons (list 'eq value-form (list 'quote (car rest))) nil))
+        ;; `equal', not `eq': a `(quote DATUM)' pattern (e.g. the
+        ;; literal-list clause selector `'(t t)' in vendor cond-let.el's
+        ;; `cond-let--prepare-clauses') must match any value that is
+        ;; STRUCTURALLY the same, not merely the same object.  `eq'
+        ;; happens to work for the common case of a quoted symbol
+        ;; (interned, so `eq'-comparable) but silently never matches a
+        ;; quoted compound datum (list/vector/string) compared against a
+        ;; freshly-consed runtime value of the same shape -- `(eq (list
+        ;; t t) '(t t))' is nil in both this reader and real Emacs.  That
+        ;; silent non-match let a later, structurally-overlapping
+        ;; backquote-pattern clause (e.g. `` `(t ,_) '') win instead,
+        ;; selecting the wrong helper macro out of a `pcase' dispatch
+        ;; that assumed exact-match precedence -- root cause of the
+        ;; nelisp-emacs-lib Doc 33 item 239 `cond-let*' repro
+        ;; `(cond-let* ([x 1] [x (+ x 1)] x) (t 99))' => `void-variable:
+        ;; x' (the wrongly-selected non-sequential `cond-let--when-let'
+        ;; expands a `(+ x 1)' binding form that runs before `x' is
+        ;; bound; the correctly-selected `cond-let--when-let*' does not).
+        (cons (list 'equal value-form (list 'quote (car rest))) nil))
        ((eq head 'pred)
         (let ((fn (car rest)))
           (cons (list 'funcall (list 'function fn) value-form) nil)))
@@ -3898,17 +3951,18 @@ Doc 156: was `(apply #\\='vector ...)', but the reader now exposes a native
 (unless (fboundp 'recordp) (defun recordp (x) (vectorp x)))
 
 ;; Hash-table predicate + iteration for the reader's builtin hash table.
-;; The builtin `make-hash-table' returns the cons pair (MARKER . ALIST) where
-;; MARKER is the integer 0 and ALIST is ((KEY . VALUE) ...).  `make-hash-table'
+;; The builtin `make-hash-table' returns the cons pair (MARKER . DATA) where
+;; MARKER is an integer metadata slot and DATA is a bucket vector.
+;; `make-hash-table'
 ;; / `gethash' / `puthash' / `hash-table-count' ship as native builtins, but
 ;; `maphash' ships only as a no-op stub and `hash-table-p' is absent -- an
 ;; incomplete substrate, not a minimal one.  Complete it here in the core
 ;; stdlib (these are the ops over the core-owned representation): the elisp
-;; `maphash' overrides the stub, and `hash-table-p' keys off the integer-0 car
+;; `maphash' overrides the stub, and `hash-table-p' keys off the integer car
 ;; (an alist has a cons car, a plist a keyword car, so the discrimination is
 ;; clean for the shapes Elisp passes to `hash-table-p').
 (defun hash-table-p (x)
-  (and (consp x) (integerp (car x)) (eq (car x) 0)
+  (and (consp x) (integerp (car x))
        (let ((c (cdr x)))
          ;; Current core repr: cdr is the bucket VECTOR.  Tolerate the legacy
          ;; flat-alist shape (cdr a cons / nil) too.
@@ -4830,14 +4884,36 @@ Doc 156: was `(apply #\\='vector ...)', but the reader now exposes a native
 
 ;; A2: `mod' used truncate-remainder semantics (sign followed the dividend).
 ;; Reinstall host floor-mod: the result carries the sign of the divisor.
+;;
+;; fix/small-primitives-parity (2026-07-06): the quotient here used to be
+;; plain `(/ a b)'.  For two integers `/' truncates toward zero, so the
+;; formula (trunc-remainder + a floor sign-adjust) was correct.  But once
+;; either operand is a float, this reader's `/' is a TRUE (non-truncating)
+;; division, so `(* (/ a b) b)' collapses back to exactly `a' and `mod'
+;; silently returned 0 for every float pair (e.g. `(mod 5.5 2)' => 0.0
+;; instead of 1.5).  Using `truncate' (defined just above, and already
+;; toward-zero for both the int/int and float-involving cases) for the
+;; quotient fixes this while leaving the all-integer path byte-identical
+;; (`(truncate A B)' with two integers is literally `(/ A B)').
+;;
+;; Zero divisor: unchanged `arith-error' when both operands are integers
+;; (matches host Emacs).  When a float is involved, host Emacs instead
+;; returns a NaN; that is produced directly via `/' float division rather
+;; than by truncating +-inf, since the hardware float->int conversion
+;; behind `truncate' has no defined NaN-producing behavior for infinite
+;; input.
 (defun mod (a b)
   "Return A modulo B with the sign of B (host floor-mod, Doc 22 A2)."
-  (if (= b 0)
-      (error "Arithmetic error")
-    (let ((r (- a (* (/ a b) b))))
+  (cond
+   ((and (= b 0) (integerp a) (integerp b))
+    (error "Arithmetic error"))
+   ((and (= b 0) (or (floatp a) (floatp b)))
+    (/ 0.0 0.0))
+   (t
+    (let ((r (- a (* (truncate a b) b))))
       (if (and (not (= r 0)) (if (< b 0) (> r 0) (< r 0)))
           (+ r b)
-        r))))
+        r)))))
 
 ;; A3: native `equal' never compared vectors element-wise.  Capture native
 ;; `equal' for the atom/string/number leaves and recurse over cons + vector.

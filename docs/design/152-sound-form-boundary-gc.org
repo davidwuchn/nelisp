@@ -1841,7 +1841,7 @@ Rust 無改変）。**通常 mode 挙動不変**（poison default off、counter 
 - *poison-on-free*（nl_gc_diag+32 で gate）: free 時に payload を header/next-link を残して
   non-canonical sentinel (0xDEAD000000000000) で埋める。stale（未 root）pointer 経由の
   use-after-free read が即 fault → Stage 3b+ の missed root を pinpoint。
-- *nelisp--gc-diag builtin*: arg 0=read / 1=poison on / 2=poison off。返り値 =
+- *nelisp--debug-switch builtin*: arg 0=read / 1=poison on / 2=poison off。返り値 =
   (trip-count bad-cur bad-bt bad-want poison-count poison-enable)。
 - *検証*: 通常 mode で fib(22)=17711 / 2-form 500k=500000 / 4-form exit0 / smoke 5種全 PASS（退行ゼロ）。
   counter: =(+ 1 1)=→500k loop = trip 2（§11.38 一致、bad-want=32）/ loop 単独 = trip 0。
@@ -1853,7 +1853,7 @@ Rust 無改変）。**通常 mode 挙動不変**（poison default off、counter 
 ** Stage 3b 着手で判明: 二重リンク (A) は allocator バグ、leak (B) が真の Stage 3 — §11.38 (A)=(B) を訂正 (2026-06-17)
 3a の poison ツールを dogfood して 3b の前提を検証した結果、**(A) と (B) は別 root** と判明。§11.38 の
 「(A)=(B)=root-coverage」を訂正する。
-- *poison 診断*: =(nelisp--gc-diag 1)= → =(+ 1 1)=→500k loop → =(nelisp--gc-diag 0)= = **rc=0 / crash 無し**
+- *poison 診断*: =(nelisp--debug-switch 1)= → =(+ 1 1)=→500k loop → =(nelisp--debug-switch 0)= = **rc=0 / crash 無し**
   (104M block poison 済)。live block が freed→stale ptr で **read** されるなら poison sentinel で即 fault する
   はずだが、しない。= **read-after-free は無い**。loop の結果も正しい (500000) = live data の喪失も無い。
 - *帰結*: =(+ 1 1)=→loop の二重リンク (A) は **GC root-coverage gap でなく allocator の bucket 破損バグ**
@@ -1868,13 +1868,13 @@ Rust 無改変）。**通常 mode 挙動不変**（poison default off、counter 
 *** safepoint 配置と prerequisite (Stage 4 への接続)
 - *配置*: =nl_sf_while= の host-loop backedge = =(while (= status 0) (setq status (nl_sf_while_step ...)))=
   の step 直後。1 guest iteration 完了・per-iter scratch 死亡・loop 変数は env (mirror/frame) で root 済の点。
-- *prerequisite (= Stage 4 safepoint-context infra)*: mid-form collect は driver の root-set
+- *prerequisite (= Stage 4 loop-GC-context infra)*: mid-form collect は driver の root-set
   =(nl_gc_collect env result out pool src cursor bsym)= を要する。特に **=result= = 実行中の form AST 自体**
   (mid-loop では =nl_sf_while= の =args= が指す) を root しないと **loop 自身の AST を sweep → crash**。
   pool/src/cursor/bsym も reader/eval state。=nl_sf_while= は env/out/args しか持たない。
   → driver が collect root-set を **固定 slot (safepoint collect context)** に保存し、backedge から
-  =nl_gc_safepoint_collect= が読む機構が必須。これが無いと rooting の検証すらできない。
-- *修正後の順序*: 3a (済) → **Stage 4 safepoint-context infra** (driver root-set を固定 slot 保存) →
+  =nl_gc_midform_collect_collect= が読む機構が必須。これが無いと rooting の検証すらできない。
+- *修正後の順序*: 3a (済) → **Stage 4 loop-GC-context infra** (driver root-set を固定 slot 保存) →
   backedge safepoint 実験 (debug-gated + poison) → poison が捕えた missed root を Stage-2 root stack で park →
   soundness 達成で leak 解消・RSS bounded を実証。= 当初 scoping の「3b: eval_slot root → trip 0」は (A) が
   allocator バグと判明したので **「Stage 4 safepoint context → backedge collect → poison 駆動 rooting」に再 aim**。
@@ -1882,7 +1882,7 @@ Rust 無改変）。**通常 mode 挙動不変**（poison default off、counter 
   入る経路 (boundary sweep の mass-free + in-loop churn の相互作用) を guard-trip counter + bad-cur capture で
   追える。leak (B) の優先度が上。
 
-* §11.41 Stage 4 safepoint-context infra 設計確定（multi-model: 独立分析 + codex 収束、2026-06-17）
+* §11.41 Stage 4 loop-GC-context infra 設計確定（multi-model: 独立分析 + codex 収束、2026-06-17）
 mid-form collect の crux を multi-model で乗り越え。anvil-fusion quality panel は今回も degrade
 （claude member exit-1 失敗 / gemini timeout hang / 無 timeout）したため、codex (GPT-5.5) に直接諮問。
 **codex 設計が独立分析と完全収束 + 3 つの重要 refinement**。以下を Stage 4 の設計確定とする。
@@ -1895,7 +1895,7 @@ mid-form collect の crux を multi-model で乗り越え。anvil-fusion quality
 - **=result= = 実行中 form AST 全体を必ず root**（§11.34 が見落とした真因）。=args= は別 root 不要
   （result の内部ポインタ + non-moving mark-sweep なので result が live なら args の cons も不動）。=status= は
   immediate で root 不要。provably dead = arg-list cons / materialising-accessor box / lookup・apply scratch /
-  TEST・BODY 中間値（env/out/published roots/rootstack に格納された物のみ live）。
+  TEST・BODY 中間値（env/out/recorded roots/rootstack に格納された物のみ live）。
 
 ** codex の refinement（採用）
 1. *context は単一 slot でなく DEPTH-indexed STACK*: re-entrant eval / nested top-level（eval・load builtin）/
@@ -1907,15 +1907,15 @@ mid-form collect の crux を multi-model で乗り越え。anvil-fusion quality
    偶然 missed root を mark して poison validation を無効化**（unsound でも crash せず false confidence）。
    → TOPLEVEL GC = 従来通り conservative 可 / MIDFORM GC = precise-only（rollout 中 NL_GC_SAFEPOINT_PRECISE_ONLY=1）。
 3. *mode-split collector + reentrancy guard*:
-   =nl_gc_collect_published(mode)= = NL_GC_IN_PROGRESS guard → mark_published_contexts + mark_rootstack +
+   =nl_gc_collect_from_recorded_roots(mode)= = NL_GC_IN_PROGRESS guard → mark_published_contexts + mark_rootstack +
    (TOPLEVEL なら mark_c_stack_conservative) + sweep。alloc-debt（NL_GC_ALLOC_DEBT/LIMIT）で trigger gate。
 
-** BSS layout（nl_safepoint_ctx、arena-base.o に追記）
+** BSS layout（nl_gc_loop_ctx、arena-base.o に追記）
 NL_GC_CTX_DEPTH / NL_GC_CTX_{ENV,RESULT,OUT,POOL,SRC,CURSOR,BSYM}[N] / NL_GC_IN_PROGRESS /
 NL_GC_SAFEPOINT_ENABLE / NL_GC_SAFEPOINT_PRECISE_ONLY / NL_GC_ALLOC_DEBT / NL_GC_ALLOC_LIMIT。zero-init=無効。
 
 ** rollout（poison 駆動・各段 sound baseline 維持、PRECISE_ONLY=1）
-- *4a*: ctx-stack bss + driver の push/pop（既存 form-boundary collect を =nl_gc_collect_published(TOPLEVEL)= 経由に
+- *4a*: ctx-stack bss + driver の push/pop（既存 form-boundary collect を =nl_gc_collect_from_recorded_roots(TOPLEVEL)= 経由に
   refactor、挙動不変）+ helper 群、全 debug-gated OFF。= baseline sound 維持の infra。
 - *4b*: =nl_sf_while= backedge に safepoint（gated ON for test）。poison + precise-only で
   =(while (< i N) (setq i (1+ i)))= 実行 → 期待: 正しい結果 + RSS bounded + poison crash 無し。crash なら
@@ -1934,54 +1934,54 @@ ctx push/pop は depth による LIFO。driver の error/throw path で pop（de
 （諮問: orchestrator codex task 59fc8f38、独立分析と収束。fusion quality panel は claude/gemini member 不調で
 synthesis 不成立、codex 直諮問で代替。）
 
-** Stage 4a SHIPPED（safepoint-context stack 基盤、dormant、2026-06-17）
+** Stage 4a SHIPPED（loop-GC-context stack 基盤、dormant、2026-06-17）
 Stage 4 の publish 側データ構造 + ops を dormant additive で導入（=scripts/nelisp-standalone-build.el=、Rust
-無改変）。Stage 2 と同パターン（無 caller・挙動不変・誤りは build 時に出る）。driver 配線 + collect_published
+無改変）。Stage 2 と同パターン（無 caller・挙動不変・誤りは build 時に出る）。driver 配線 + collect_from_recorded_roots
 + safepoint は 4b で poison 検証下に行う。
-- *nl_safepoint_ctx bss*（arena-base.o に 3648B 追記）: 64B control header（depth@+0 / enable@+8 /
+- *nl_gc_loop_ctx bss*（arena-base.o に 3648B 追記）: 64B control header（depth@+0 / enable@+8 /
   precise_only@+16 / in_progress@+24 / alloc_debt@+32 / alloc_limit@+40）+ 64 frames×56B @+64
   （env/result/out/pool/src/cursor/bsym）。zero-init = 空 stack。
 - *nl_gc_ctx_store / nl_gc_ctx_push / nl_gc_ctx_pop*: depth-indexed LIFO。push は depth<64 guard 付きで
   frame[depth] へ store → depth++、pop は depth>0 で depth--。cc-unit 制約（runtime 値 let 不可）回避のため
   frame base は inline 算出 + store は helper 引数渡し。
-- *nelisp--gc-diag 拡張*: 返り list を 7 要素化（末尾に ctx-depth 追加）。arg 3 = push 1 dummy frame /
+- *nelisp--debug-switch 拡張*: 返り list を 7 要素化（末尾に ctx-depth 追加）。arg 3 = push 1 dummy frame /
   arg 4 = pop（push/pop self-test hook、4b でも debug 用）。
 - *検証*: build 107 units / fib(22)=17711 / 2-form 500k=500000 / 4-form exit0 / smoke 5種全 PASS（挙動不変）。
-  push/pop balance: depth 0→1→2→1→0 を =nelisp--gc-diag 3/4= で実測確認。dormant（driver 未配線）なので通常
+  push/pop balance: depth 0→1→2→1→0 を =nelisp--debug-switch 3/4= で実測確認。dormant（driver 未配線）なので通常
   実行では depth=0 のまま。
 - *次 = 4b*: driver（bf_load_eval_loop / bf_eval_source_string_loop）に push（eval 前）/ pop（boundary collect
-  後）を配線 + =nl_gc_collect_published(mode)=（mark_published_contexts + rootstack + TOPLEVEL のみ conservative
+  後）を配線 + =nl_gc_collect_from_recorded_roots(mode)=（mark_published_contexts + rootstack + TOPLEVEL のみ conservative
   + sweep、IN_PROGRESS guard）+ nl_sf_while backedge safepoint。各段 poison + ctx-depth で soundness 検証。
 
 ** Stage 4b step 1 SHIPPED（publish 側配線、2026-06-17）
-driver が実行中 top-level form の precise root-set を nl_safepoint_ctx に publish する配線を投入（挙動不変）。
-- =nl_driver_eval_published (result env out pool src cursor bsym)= = push（eval 前）→ nelisp_eval_call → pop
+driver が実行中 top-level form の precise root-set を nl_gc_loop_ctx に publish する配線を投入（挙動不変）。
+- =nl_driver_eval_with_recorded_roots (result env out pool src cursor bsym)= = push（eval 前）→ nelisp_eval_call → pop
   （eval 後）。boundary collect は直 nl_gc_collect のまま（ctx 不参照）なので pop が collect 前でも sound。
 - 配線箇所: 実 --load driver =nl_eval_source_all=（reader-eval-source-source）の eval call + bf_load_eval_loop /
   bf_eval_source_string_loop の eval call（後 2 者は当該経路では inert だが正配線）。
   ※当初 bf_* のみ配線して depth=0 のままだったので、実 --load 経路が nl_eval_source_all と判明し追加配線。
-- *検証*: build 107 units / =(nelisp--gc-diag 0)= の ctx-depth=**1**（eval 中に driver frame が live）/ form 跨ぎで
+- *検証*: build 107 units / =(nelisp--debug-switch 0)= の ctx-depth=**1**（eval 中に driver frame が live）/ form 跨ぎで
   balance / fib(22)=17711 / 500k=500000 / smoke 5種全 PASS（挙動不変）。
-- *次 = 4b step 2*: nl_gc_collect_published(mode)（mark_frames[0,depth) precise + rootstack + symentry +
+- *次 = 4b step 2*: nl_gc_collect_from_recorded_roots(mode)（mark_frames[0,depth) precise + rootstack + symentry +
   MIDFORM は conserv 無し + sweep + IN_PROGRESS guard）+ nl_sf_while backedge safepoint（enable + alloc-debt gate）。
   poison ON + precise-only で単純 loop 検証 → 正しい結果 + RSS bounded = leak 初解消 milestone。
 
 ** Stage 4b step 2 SHIPPED（sound mid-form collect、leak 初解消、2026-06-17）
 consumer 側を配線し、§11.25/§11.34 で 2 度失敗した crux を突破。commit 76004184（=scripts/
 nelisp-standalone-build.el の gc-source + lisp/nelisp-cc-sf-while.el、Rust 無改変）。
-- *nl_gc_mark_published_frame / _frame_at / _contexts(_from)*: published frame [0,depth) を precise mark
+- *nl_gc_mark_recorded_frame / _frame_at / _contexts(_from)*: recorded frame [0,depth) を precise mark
   （root blocks + mirror@env+0/frames@+32/unbound@+64/result/out/pool(mark_pool)/src/cursor/bsym）。
   index は ARGS で thread する bounded tail-recursion。★教訓: constant-init let-local counter
   （=(let ((i 0)) ... (setq i (+ i 1)))）は gc-source で constant-fold され、setq が DYNAMIC env store
   （nl_alloc_symbol + nelisp_env_set_value on garbage env → null deref）に miscompile する。runtime 値は
   helper ARGS で渡す（nl_gc_mark_pool_slots と同型）。gemini 諮問の「cc-unit は runtime 値を let 不可」が
   gc-source の counter にも当てはまった実例。
-- *nl_gc_collect_published(mode)*: IN_PROGRESS(ctx+24) guard → published contexts + rootstack + symentry +
+- *nl_gc_collect_from_recorded_roots(mode)*: IN_PROGRESS(ctx+24) guard → recorded contexts + rootstack + symentry +
   (mode 0=TOPLEVEL は conserv / 1=MIDFORM は precise-only) + sweep。常に mark+sweep（compact しない）。
-- *nl_gc_safepoint*: enable(ctx+8) default OFF（= cheap branch + return、非 arm 実行は byte 不変）。alloc-debt =
+- *nl_gc_midform_collect*: enable(ctx+8) default OFF（= cheap branch + return、非 arm 実行は byte 不変）。alloc-debt =
   total-chunk-bytes-reserved(268436184、boundary GC と同じ monotonic counter) が next-trigger(ctx+40) 超で
   fire → +16MiB re-arm + fired-count(ctx+32)++。
-- *bf_gc_diag*: arg 5=arm（enable + next-trigger + fired reset）/ 6=disarm。返り list を 8 要素化
+- *bf_debug_switch*: arg 5=arm（enable + next-trigger + fired reset）/ 6=disarm。返り list を 8 要素化
   （末尾に fired-count）。
 - *nl_sf_while_safepoint*（lisp/nelisp-cc-sf-while.el）: arity-4・単一 extern-call。host-loop backedge
   （step 後・status==0 継続時）で hit。args/env/out は parameter、across-call local は status のみ（§11.14 不変）。

@@ -84,6 +84,32 @@
                  (extern-call nl_cons_cdr_ptr cell-ptr)
                  sym-ptr)))
           0)))
+    (defun nelisp_mirror_lookup_entry_valid_key (sym-ptr)
+      ;; Cold-load hardening (segfault fix, 2026-07): a caller-supplied
+      ;; SYM-PTR that is not actually a live Sexp::Symbol / Sexp::Str
+      ;; must never be hashed/compared as one.  Reproduced crash:
+      ;; `nl_sf_setq' evaluating a `setq' deep inside a cold-loaded
+      ;; `org-mode' activation body passes a SYM-PTR whose 32-byte view
+      ;; reads tag 7 (Cons) instead of 4/5 (Symbol/Str) -- the pointer
+      ;; is in-arena and mapped (so a bare `nl_gc_in_arena' guard does
+      ;; NOT catch it), but `nelisp_fnv1a'/`str-eq' blindly reading its
+      ;; would-be char* field at +16 lands on an unrelated live object's
+      ;; bytes and eventually dereferences a value that is not a valid
+      ;; pointer in THIS process, causing a SIGSEGV inside
+      ;; `nelisp_fnv1a_step4'.  Root cause is upstream (almost certainly
+      ;; the dump-time relocation walk in
+      ;; `scripts/nelisp-standalone-build.el' -- `nl_fa_roots' and
+      ;; friends -- missing or mis-targeting some occurrence reachable
+      ;; only through a persisted function body); this guard does not
+      ;; fix that, it prevents the guaranteed-wrong dereference from
+      ;; crashing the process.  A sound "not found" on a malformed key
+      ;; matches the existing `wf_key_eq_depth' precedent (commit
+      ;; 7aa3ed8b): a miss is always safe, a crash is not.
+      (if (= (extern-call nl_gc_in_arena sym-ptr) 0)
+          0
+        (if (= (sexp-tag sym-ptr) 4)
+            1
+          (if (= (sexp-tag sym-ptr) 5) 1 0))))
     (defun nelisp_mirror_lookup_entry (mirror-ptr sym-ptr)
       ;; mirror-ptr: *const Sexp pointing at the env-mirror Record
       ;;             (= `globals_record', tag `nelisp-env').
@@ -92,7 +118,7 @@
       ;;
       ;; Returns: i64.  On hit, the `*const Sexp' of the symbol-entry
       ;; Record (slot 1 of the bucket's inner (KEY . ENTRY) cons).
-      ;; On miss / empty mirror, 0.
+      ;; On miss / empty mirror / malformed SYM-PTR, 0.
       ;;
       ;; Pre-conditions (= caller / dispatcher responsibility, mirrors
       ;; the Rust impl's early-`return None' arms):
@@ -105,22 +131,33 @@
       ;; Cons for a non-empty bucket, Nil for an empty one), NOT the raw
       ;; `sexp-payload-ptr' box (the walker now reads car/cdr WORDS via
       ;; the materialising accessors, so it needs the Sexp VIEW).
-      (nelisp_mirror_walk_bucket
-       (vector-ref-ptr
-        (record-slot-ref-ptr (record-slot-ref-ptr mirror-ptr 0) 1)
-        (logand
-         (extern-call nelisp_fnv1a sym-ptr)
-         (- (sexp-int-unwrap
-             (record-slot-ref-ptr (record-slot-ref-ptr mirror-ptr 0) 0))
-            1)))
-       sym-ptr)))
+      (if (= (nelisp_mirror_lookup_entry_valid_key sym-ptr) 0)
+          0
+        (nelisp_mirror_walk_bucket
+         (vector-ref-ptr
+          (record-slot-ref-ptr (record-slot-ref-ptr mirror-ptr 0) 1)
+          (logand
+           (extern-call nelisp_fnv1a sym-ptr)
+           (- (sexp-int-unwrap
+               (record-slot-ref-ptr (record-slot-ref-ptr mirror-ptr 0) 0))
+              1)))
+         sym-ptr))))
   "AOT source for Doc 111 §111.E #1 `mirror_lookup_entry'.
 
 Composes record-slot-ref-ptr (§111.B) + vector-ref-ptr (§111.C) +
 cons-walk primitives (§101.B) + str-eq (§101.C) + extern-call into
 `nelisp_fnv1a' (Doc 115 §115.7) to walk the env-mirror fast-hash-
 table without materialising any intermediate Sexp slot (= every
-hop is a raw `*const Sexp' / NlConsBox* pointer in rax).")
+hop is a raw `*const Sexp' / NlConsBox* pointer in rax).
+
+2026-07 cold-load segfault hardening: `nelisp_mirror_lookup_entry_valid_key'
+gates SYM-PTR on `nl_gc_in_arena' + `sexp-tag' (4 Symbol / 5 Str) before
+any hash/compare touches it, so a malformed key (observed: tag 7 Cons)
+reaching this single choke-point for every mirror lookup/insert path
+(`mirror_is_constant', `mirror_lookup_value', `mirror_is_bound',
+`mirror_is_fbound', `mirror_lookup_function', `mirror_install_entry*',
+`mirror_set_*_or_insert') returns a sound miss instead of dereferencing
+garbage inside `nelisp_fnv1a'/`nelisp_mirror_walk_bucket'.")
 
 (provide 'nelisp-cc-mirror-lookup-entry)
 

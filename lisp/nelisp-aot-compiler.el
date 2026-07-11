@@ -159,6 +159,27 @@ Emit helpers consult this dynvar for arg-register selection, shadow
 space allocation, and prologue/epilogue layout.  The aarch64 path
 ignores this var (= AAPCS64 only).")
 
+(defvar nelisp-aot-compiler--rsp-temp-depth 0
+  "Number of 8-byte temporary words currently pushed below rsp.
+
+x86_64 call emitters evaluate complex arguments by pushing temporary
+values, then recursively emitting later argument expressions.  Nested
+calls must include these still-live pushes in their stack-alignment
+parity; otherwise a helper call reached after one saved argument enters
+with rsp misaligned and can corrupt call-adjacent state.  The value is
+balanced by the emitters' push/pop/add-rsp sequences and is reset for
+each emitted defun/top-level pass.")
+
+(defun nelisp-aot-compiler--emit-temp-push (buf reg)
+  "Emit a scratch `push REG' and record the live temp stack word."
+  (nelisp-asm-x86_64-push buf reg)
+  (cl-incf nelisp-aot-compiler--rsp-temp-depth))
+
+(defun nelisp-aot-compiler--emit-temp-pop (buf reg)
+  "Emit a scratch `pop REG' and record that one temp stack word died."
+  (nelisp-asm-x86_64-pop buf reg)
+  (cl-decf nelisp-aot-compiler--rsp-temp-depth))
+
 (defvar nelisp-aot-compiler--os 'linux
   "Target OS bound by the public compile entry points before emit.
 Selects the raw-syscall convention for `syscall-direct' on aarch64:
@@ -10947,12 +10968,12 @@ NODE's `roots' boundary slot."
          ;; The body-entry stack is 16-byte aligned; `push rax' misaligns
          ;; it, so insert one fixed 8-byte pad before the bridge call and
          ;; remove it before restoring rax.
-         (nelisp-asm-x86_64-push buf 'rax)
+         (nelisp-aot-compiler--emit-temp-push buf 'rax)
          (nelisp-asm-x86_64--sub-imm32-inline buf 'rsp 8)
          (nelisp-aot-compiler--emit-aot-root-bridge-call
           node 'nelisp_aot_pop_roots buf)
          (nelisp-asm-x86_64-add-imm32 buf 'rsp 8)
-         (nelisp-asm-x86_64-pop buf 'rax)))
+         (nelisp-aot-compiler--emit-temp-pop buf 'rax)))
       ('stack
        ;; Keep the materialized roots in an aligned stack temporary for
        ;; the whole body.
@@ -10974,8 +10995,8 @@ NODE's `roots' boundary slot."
              (nelisp-asm-arm64-add-imm buf 'sp 'sp 16))
          ;; x86_64 SysV: two pushes preserve the body-entry call
          ;; alignment; the first copy at [rsp+8] is the roots vector.
-         (nelisp-asm-x86_64-push buf 'rax)
-         (nelisp-asm-x86_64-push buf 'rax)
+         (nelisp-aot-compiler--emit-temp-push buf 'rax)
+         (nelisp-aot-compiler--emit-temp-push buf 'rax)
          (nelisp-aot-compiler--emit-aot-root-bridge-call
           node 'nelisp_aot_push_roots buf 8)
          (nelisp-aot-compiler--emit-value
@@ -10984,12 +11005,12 @@ NODE's `roots' boundary slot."
          ;; Layout before the pop bridge after `push rax; sub rsp, 8':
          ;; [rsp+8] = saved result, [rsp+16] = alignment copy,
          ;; [rsp+24] = roots vector.
-         (nelisp-asm-x86_64-push buf 'rax)
+         (nelisp-aot-compiler--emit-temp-push buf 'rax)
          (nelisp-asm-x86_64--sub-imm32-inline buf 'rsp 8)
          (nelisp-aot-compiler--emit-aot-root-bridge-call
           node 'nelisp_aot_pop_roots buf 24)
          (nelisp-asm-x86_64-add-imm32 buf 'rsp 8)
-         (nelisp-asm-x86_64-pop buf 'rax)
+         (nelisp-aot-compiler--emit-temp-pop buf 'rax)
          (nelisp-asm-x86_64-add-imm32 buf 'rsp 16)))
       (_
        (signal 'nelisp-aot-compiler-error
@@ -11586,25 +11607,12 @@ the node's class to consume the result correctly."
          (signal 'nelisp-aot-compiler-error
                  (list :unknown-value-kind kind))))))))
 
-(defun nelisp-aot-compiler--x86_64-spill-rax-slot (buf)
-  "Spill rax into a 16-byte stack slot on BUF.
-Uses fixed-width encoders so pass-1/pass-2 byte counts stay identical."
-  (nelisp-asm-x86_64-sub-imm32 buf 'rsp 16)
-  (nelisp-asm-x86_64-mov-mem-rsp-disp-reg buf 0 'rax))
-
-(defun nelisp-aot-compiler--x86_64-unspill-slot-into-reg (buf reg)
-  "Reload the top 16-byte spill slot from BUF into REG and reclaim it."
-  (nelisp-asm-x86_64-mov-reg-mem-rsp-disp buf reg 0)
-  (nelisp-asm-x86_64-add-imm32 buf 'rsp 16))
-
 (defun nelisp-aot-compiler--emit-arith (node buf)
   "Emit a runtime arithmetic op, result in rax.
-Strategy: evaluate B into rax, spill it in a 16-byte stack slot,
-evaluate A into rax, reload B into r10, then OP rax, r10.  The spill
-uses only fixed-width encoders so pass invariance holds while keeping
-rsp 16-aligned across nested calls.  r10 is caller-saved per SysV AND
-not in the arg-reg list so the scratch never aliases a parameter register
-(= the bug seen in
+Strategy: evaluate B into rax, push, evaluate A into rax, pop into
+r10, then OP rax, r10.  Push/pop are byte-fixed so pass invariance
+holds.  r10 is caller-saved per SysV AND not in the arg-reg list so
+  the scratch never aliases a parameter register (= the bug seen in
 chained calls where rcx held both `d' param and a scratch value)."
   (let ((op (nelisp-aot-compiler--ir-get node :op))
         (a (nelisp-aot-compiler--ir-get node :a))
@@ -11631,12 +11639,12 @@ chained calls where rcx held both `d' param and a scratch value)."
                     (list :unknown-arith-op op)))))
       ;; Compute B -> rax.
       (nelisp-aot-compiler--emit-value b buf)
-      ;; Save B in a 16-byte slot so nested calls keep rsp aligned.
-      (nelisp-aot-compiler--x86_64-spill-rax-slot buf)
+      ;; push rax (save B on stack).
+      (nelisp-aot-compiler--emit-temp-push buf 'rax)
       ;; Compute A -> rax.
       (nelisp-aot-compiler--emit-value a buf)
-      ;; Recover B into r10; r10 is not in the arg-reg set.
-      (nelisp-aot-compiler--x86_64-unspill-slot-into-reg buf 'r10)
+      ;; pop r10 (= recover B into r10; r10 not in arg-regs).
+      (nelisp-aot-compiler--emit-temp-pop buf 'r10)
       (cond
        ((eq op '+) (nelisp-asm-x86_64-add-reg-reg buf 'rax 'r10))
        ((eq op '-) (nelisp-asm-x86_64-sub-reg-reg buf 'rax 'r10))
@@ -11662,9 +11670,9 @@ diverges at the final op: x86_64 SHL / SAR by a variable count
 require the count to live in CL (= low 8 bits of RCX).  Sequence:
 
   <emit B>            -> rax           (= count)
-  spill rax           (save count in a 16-byte stack slot)
+  push rax            (save count on stack)
   <emit A>            -> rax           (= value)
-  reload r10          (count into r10)
+  pop r10             (count into r10)
   mov rcx, r10        (count into rcx so cl carries the low byte)
   shl/sar rax, cl
 
@@ -11689,12 +11697,12 @@ live parameter register in the surrounding defun."
                     (list :unknown-shift-op op)))))
       ;; Compute B -> rax.
       (nelisp-aot-compiler--emit-value b buf)
-      ;; Save B in a 16-byte slot so nested calls keep rsp aligned.
-      (nelisp-aot-compiler--x86_64-spill-rax-slot buf)
+      ;; push rax (save B on stack).
+      (nelisp-aot-compiler--emit-temp-push buf 'rax)
       ;; Compute A -> rax.
       (nelisp-aot-compiler--emit-value a buf)
-      ;; Recover B into r10.
-      (nelisp-aot-compiler--x86_64-unspill-slot-into-reg buf 'r10)
+      ;; pop r10 (= recover B into r10).
+      (nelisp-aot-compiler--emit-temp-pop buf 'r10)
       ;; mov rcx, r10 (= count into rcx; cl = rcx[0:8]).
       (nelisp-asm-x86_64-mov-reg-reg buf 'rcx 'r10)
       (cond
@@ -11814,12 +11822,11 @@ external data symbol."
 Strategy (ABI-agnostic), with W7.6a trivial-suffix optimization:
   1. Classify args into a *complex* prefix and a *trivial* suffix
      (trailing run of `imm' / GP-class `ref' nodes).
-  2. Complex prefix: evaluate each into rax, then spill it into a
-     16-byte stack slot.  After all complex args are saved, reload
-     their target ABI registers in reverse (= last saved is first
-     reloaded).  This preserves the original spill semantics for args
-     that may clobber each other's regs while keeping rsp 16-aligned
-     during later arg evaluation.
+  2. Complex prefix: evaluate each into rax, then push rax (stack-save
+     order).  After all complex args are pushed, pop into their target
+     ABI registers in reverse (= last pushed is first popped).  This
+     preserves the original spill semantics for args that may clobber
+     each other's regs.
   3. Trivial suffix: emit each directly into its target ABI register
      via `mov target, imm32' (= imm) or `mov target, [rbp - disp8]'
      (= ref).  No stack spill — trivial emits don't touch other regs.
@@ -11854,34 +11861,37 @@ count."
                     (list :call-stack-args-unsupported name n)))
           (let* ((stack-count (- n reg-budget))
                  (win64-p (eq nelisp-aot-compiler--abi 'win64))
-                 ;; Indirect calls occupy one extra 16-byte spill slot for the
-                 ;; stashed fn-ptr; fold it into the final cleanup.
+                 ;; Indirect calls occupy one extra stack slot for the stashed
+                 ;; fn-ptr; fold it into alignment parity and the final cleanup.
                  (fn-slots (if fn-value 1 0))
                  (needs-align
                   ;; Post-prologue rsp is 0 mod 16 on every defun path, so
-                  ;; alignment depends only on the outgoing 8-byte SysV stack
-                  ;; args (NOT the balanced 16-byte spill slots, and NOT the
-                  ;; enclosing arity) — same as the win64 branch.
-                  (= (logand stack-count 1) 1))
+                  ;; alignment depends only on the words this call pushes
+                  ;; (NOT the enclosing arity) — same as the win64 branch.
+                  (= (logand (+ nelisp-aot-compiler--rsp-temp-depth
+                                  n stack-count fn-slots)
+                               1)
+                     1))
                  (win64-outgoing
                   (if win64-p
                       (+ 32 (* 8 stack-count) (if needs-align 8 0))
                     0)))
-            ;; (0) Indirect: evaluate the fn-ptr FIRST and save it BELOW every
-            ;; later arg spill, so later arg evaluation cannot clobber it.
+            ;; (0) Indirect: evaluate the fn-ptr FIRST and push it BELOW every
+            ;; saved arg, so later arg evaluation cannot clobber it.  Recovered
+            ;; into r11 right before the call.
             (when fn-value
               (nelisp-aot-compiler--emit-value fn-value buf)
-              (nelisp-aot-compiler--x86_64-spill-rax-slot buf))
+              (nelisp-aot-compiler--emit-temp-push buf 'rax))
             ;; Save every arg left-to-right so complex args cannot clobber
             ;; earlier register-bound values while later args are evaluated.
             (dolist (a args)
               (nelisp-aot-compiler--emit-value a buf)
-              (nelisp-aot-compiler--x86_64-spill-rax-slot buf))
+              (nelisp-aot-compiler--emit-temp-push buf 'rax))
             ;; Load register arguments from the temporary save area.
             (cl-loop for idx below reg-budget
                      for target in cur-arg-regs
                      do (nelisp-asm-x86_64-mov-reg-mem-rsp-disp
-                         buf target (* 16 (- (1- n) idx))))
+                         buf target (* 8 (- (1- n) idx))))
             (if win64-p
                 (progn
                   ;; Win64 outgoing area: 32-byte shadow space followed by
@@ -11890,53 +11900,55 @@ count."
                   (cl-loop for idx from reg-budget below n
                            for stack-slot from 0
                            do (let ((source-disp (+ win64-outgoing
-                                                    (* 16 (- (1- n) idx))))
+                                                    (* 8 (- (1- n) idx))))
                                     (dest-disp (+ 32 (* 8 stack-slot))))
                                 (nelisp-asm-x86_64-mov-reg-mem-rsp-disp
                                  buf 'r10 source-disp)
                                 (nelisp-asm-x86_64-mov-mem-rsp-disp-reg
                                  buf dest-disp 'r10)))
                   ;; Recover the stashed fn-ptr: it sits just above the saved
-                  ;; args, at [rsp + win64-outgoing + 16*n].
+                  ;; args, at [rsp + win64-outgoing + 8*n].
                   (when fn-value
                     (nelisp-asm-x86_64-mov-reg-mem-rsp-disp
-                     buf 'r11 (+ win64-outgoing (* 16 n)))))
+                     buf 'r11 (+ win64-outgoing (* 8 n)))))
               (when needs-align
                 (nelisp-asm-x86_64-sub-imm32 buf 'rsp 8))
               ;; SysV outgoing stack args are pushed right-to-left.  The first
               ;; stack arg ends up closest to the return address in the callee.
               (let ((pushed-stack 0))
                 (cl-loop for idx downfrom (1- n) to reg-budget
-                         do (let ((disp (+ (* 16 (- (1- n) idx))
+                         do (let ((disp (+ (* 8 (- (1- n) idx))
                                            (if needs-align 8 0)
                                            (* 8 pushed-stack))))
                               (nelisp-asm-x86_64-mov-reg-mem-rsp-disp
                                buf 'r10 disp)
-                              (nelisp-asm-x86_64-push buf 'r10)
+                              (nelisp-aot-compiler--emit-temp-push buf 'r10)
                               (setq pushed-stack (1+ pushed-stack)))))
               ;; Recover the stashed fn-ptr: after the align pad and the
               ;; right-to-left stack pushes it sits at
-              ;; [rsp + 8*stack-count + (align?8:0) + 16*n].
+              ;; [rsp + 8*stack-count + (align?8:0) + 8*n].
               (when fn-value
                 (nelisp-asm-x86_64-mov-reg-mem-rsp-disp
-                 buf 'r11 (+ (* 8 stack-count) (if needs-align 8 0) (* 16 n)))))
+                 buf 'r11 (+ (* 8 stack-count) (if needs-align 8 0) (* 8 n)))))
             (if fn-value
                 (nelisp-asm-x86_64-call-reg buf 'r11)
               (nelisp-asm-x86_64-call-rel32 buf name))
             (if win64-p
                 (nelisp-asm-x86_64-add-imm32 buf 'rsp win64-outgoing)
               (when (> stack-count 0)
-                (nelisp-asm-x86_64-add-imm32 buf 'rsp (* 8 stack-count)))
+                (nelisp-asm-x86_64-add-imm32 buf 'rsp (* 8 stack-count))
+                (cl-decf nelisp-aot-compiler--rsp-temp-depth stack-count))
               (when needs-align
                 (nelisp-asm-x86_64-add-imm32 buf 'rsp 8)))
-            (nelisp-asm-x86_64-add-imm32 buf 'rsp (* 16 (+ n fn-slots)))))
+            (nelisp-asm-x86_64-add-imm32 buf 'rsp (* 8 (+ n fn-slots)))
+            (cl-decf nelisp-aot-compiler--rsp-temp-depth (+ n fn-slots))))
       (let* ((regs (cl-subseq cur-arg-regs 0 n))
          ;; Stack alignment: post-prologue rsp is 0 mod 16 and the
-         ;; complex-prefix 16-byte spills (and the fn-ptr stash) are balanced,
+         ;; complex-prefix push/pop (and the fn-ptr stash) are balanced,
          ;; so no pad is needed here — same as the win64 branch, which
          ;; never padded.  (Adding the enclosing arity here was the old
          ;; double-correction bug; see docs/runtime-limitations.md §E.)
-         (needs-align nil)
+         (needs-align (= (logand nelisp-aot-compiler--rsp-temp-depth 1) 1))
          ;; Win64 shadow space: 32 bytes reserved by caller before CALL.
          (shadow (if (eq nelisp-aot-compiler--abi 'win64) 32 0))
          ;; W7.6a: split args into [complex-prefix | trivial-suffix].
@@ -11960,22 +11972,22 @@ count."
          (trivial-regs (cl-subseq regs complex-count)))
     ;; (0) Indirect call (Doc 133 P0): evaluate the fn-ptr and stash it
     ;; on the stack BELOW the args, so the arg-reg shuffle below cannot
-    ;; clobber it.  Net rsp change stays zero (reloaded at step 2b).
+    ;; clobber it.  Net rsp change stays zero (popped at step 2b).
     (when fn-value
       (nelisp-aot-compiler--emit-value fn-value buf)
-      (nelisp-aot-compiler--x86_64-spill-rax-slot buf))
-    ;; (1) Complex prefix: evaluate -> save into 16-byte slots.
+      (nelisp-aot-compiler--emit-temp-push buf 'rax))
+    ;; (1) Complex prefix: evaluate -> push rax.
     (dolist (a complex-args)
       (nelisp-aot-compiler--emit-value a buf)
-      (nelisp-aot-compiler--x86_64-spill-rax-slot buf))
-    ;; (2) Reload complex args into their target regs in reverse order.
+      (nelisp-aot-compiler--emit-temp-push buf 'rax))
+    ;; (2) Pop complex args into their target regs in reverse order.
     (dolist (r (reverse complex-regs))
-      (nelisp-aot-compiler--x86_64-unspill-slot-into-reg buf r))
+      (nelisp-aot-compiler--emit-temp-pop buf r))
     ;; (2b) Indirect call: the fn-ptr is now back on top of the stack
     ;; -> r11 (not an ABI arg reg, so the trivial-suffix emits below
     ;; cannot clobber it; r11 is caller-saved on both SysV and Win64).
     (when fn-value
-      (nelisp-aot-compiler--x86_64-unspill-slot-into-reg buf 'r11))
+      (nelisp-aot-compiler--emit-temp-pop buf 'r11))
     ;; (3) Trivial suffix: emit each directly into its target reg.
     ;; Order is free since trivial emits never clobber other arg regs;
     ;; we walk source order for deterministic byte layout.
@@ -12214,17 +12226,27 @@ same branch and emit the same byte count."
               ;; Win64 extern calls dynamically align rsp immediately before
               ;; reserving the outgoing area below, so only the outgoing stack
               ;; arguments disturb the aligned base.
-              (= (logand (length stack-args) 1) 1)
-            (= (logand (length stack-args) 1) 1)))
+              (= (logand (+ nelisp-aot-compiler--rsp-temp-depth
+                             (length stack-args))
+                          1)
+                 1)
+            (= (logand (+ nelisp-aot-compiler--rsp-temp-depth
+                          (length stack-args))
+                       1)
+               1)))
          (general-stack-spill-p
           (cl-some
            (lambda (a)
              (not (nelisp-aot-compiler--call-arg-trivial-p a)))
            stack-args))
          (spill-needs-align
-          ;; The temp-save path now uses balanced 16-byte spill slots, so
-          ;; only the outgoing 8-byte stack args affect SysV call alignment.
-          needs-align)
+          ;; Same invariant: count only the pushed temps + outgoing stack
+          ;; args, not the enclosing arity (matches the win64 branch).
+          (= (logand (+ nelisp-aot-compiler--rsp-temp-depth
+                        (length stack-args)
+                        arg-count)
+                     1)
+             1))
          (win64-dynamic-align-p
           (and win64-p (memq name '(CreateFileW ReadFile WriteFile CloseHandle
                                      CreateProcessW WaitForSingleObject
@@ -12260,7 +12282,7 @@ same branch and emit the same byte count."
         (progn
           (setq call-temp-save-count arg-count
                 call-needs-align spill-needs-align)
-          ;; Evaluate every arg left-to-right into temporary 16-byte stack saves.
+          ;; Evaluate every arg left-to-right into temporary stack saves.
           ;; The saves remain above the outgoing call frame until after
           ;; CALL returns; only the actual outgoing stack args are pushed
           ;; below them.
@@ -12270,12 +12292,12 @@ same branch and emit the same byte count."
               (nelisp-aot-compiler--emit-value a buf))
             (when (eq (nelisp-aot-compiler--ir-get a :cls) 'f64)
               (nelisp-asm-x86_64-movq-r64-xmm buf 'rax 'xmm0))
-            (nelisp-aot-compiler--x86_64-spill-rax-slot buf))
+            (nelisp-aot-compiler--emit-temp-push buf 'rax))
           (cl-loop for target in arg-targets
                    for idx from 0
                    unless (and (consp target) (eq (car target) :stack))
                    do
-                   (let ((disp (* 16 (- (1- arg-count) idx))))
+                   (let ((disp (* 8 (- (1- arg-count) idx))))
                      (if (memq target xmm-arg-regs)
                          (progn
                            (nelisp-asm-x86_64-mov-reg-mem-rsp-disp
@@ -12290,22 +12312,22 @@ same branch and emit the same byte count."
             (let ((pushed-stack 0))
               (dolist (entry (reverse stack-indexed))
                 (let* ((idx (nth 0 entry))
-                       (source-disp (* 16 (- (1- arg-count) idx)))
+                       (source-disp (* 8 (- (1- arg-count) idx)))
                        (align-disp (if call-needs-align 8 0))
                        (disp (+ source-disp
                                 align-disp
                                 (* 8 pushed-stack))))
                   (nelisp-asm-x86_64-mov-reg-mem-rsp-disp
                    buf 'r10 disp)
-                  (nelisp-asm-x86_64-push buf 'r10)
+                  (nelisp-aot-compiler--emit-temp-push buf 'r10)
                   (setq pushed-stack (1+ pushed-stack)))))))
       (dolist (a stack-args)
         (unless (nelisp-aot-compiler--call-arg-trivial-p a)
           (signal 'nelisp-aot-compiler-error
                   (list :extern-call-stack-arg-not-trivial name))))
-      ;; (1) Complex prefix: save each evaluated arg in a 16-byte slot.  f64 args are
+      ;; (1) Complex prefix: push each evaluated arg.  f64 args are
       ;; evaluated into xmm0 via `--emit-f64-leaf-into', then transferred
-      ;; to rax before the unified spill.
+      ;; to rax before the unified push.
       (dolist (a complex-args)
         (if (eq (nelisp-aot-compiler--ir-get a :cls) 'f64)
             (nelisp-aot-compiler--emit-f64-leaf-into a buf 'xmm0)
@@ -12313,16 +12335,16 @@ same branch and emit the same byte count."
         (when (eq (nelisp-aot-compiler--ir-get a :cls) 'f64)
           ;; xmm0 → rax (64-bit bit pattern, preserves the f64 value).
           (nelisp-asm-x86_64-movq-r64-xmm buf 'rax 'xmm0))
-        (nelisp-aot-compiler--x86_64-spill-rax-slot buf))
-      ;; (2) Reload in reverse (= last saved → first reloaded) and dispatch.
+        (nelisp-aot-compiler--emit-temp-push buf 'rax))
+      ;; (2) Pop in reverse (= last pushed → first popped) and dispatch.
       (dolist (target (reverse complex-targets))
         (if (memq target xmm-arg-regs)
-            ;; f64 target — reload into rax then MOVQ → xmm.
+            ;; f64 target — pop into rax then MOVQ → xmm.
             (progn
-              (nelisp-aot-compiler--x86_64-unspill-slot-into-reg buf 'rax)
+              (nelisp-aot-compiler--emit-temp-pop buf 'rax)
               (nelisp-asm-x86_64-movq-xmm-r64 buf target 'rax))
-          ;; GP target — reload directly.
-          (nelisp-aot-compiler--x86_64-unspill-slot-into-reg buf target)))
+          ;; GP target — pop directly.
+          (nelisp-aot-compiler--emit-temp-pop buf target)))
       ;; (3) Trivial suffix: emit each directly into its target gp-reg.
       ;; Order is free since trivial emits never clobber other arg regs;
       ;; we walk source order for deterministic byte layout.  All targets
@@ -12340,7 +12362,8 @@ same branch and emit the same byte count."
       (when sysv-p
         (dolist (a (reverse stack-args))
           (nelisp-aot-compiler--emit-trivial-into-reg a 'rax buf)
-          (nelisp-asm-x86_64-push buf 'rax))))
+          (nelisp-aot-compiler--emit-temp-push buf 'rax)
+          )))
     ;; Materialise AL = f64-count for variadic calls (SysV ABI §3.5.7).
     ;; `mov eax, imm32' is a 5-byte sequence (= REX-less; the imm32
     ;; zero-extends into RAX, clearing the upper 32 bits which is
@@ -12421,7 +12444,7 @@ same branch and emit the same byte count."
               ;; and never holds the fn-ptr here -- `extern-call-ptr' calls
               ;; have no NAME so they are never in the dynamic-align
               ;; allowlist).  temp[idx] lives at exactly
-              ;; pre-align-rsp + 16*(argc-1-idx) (TOS = last spill), so the
+              ;; pre-align-rsp + 8*(argc-1-idx) (TOS = last push), so the
               ;; addressing is rsp-independent; the dest writes still go
               ;; through the CURRENT rsp, which is correct (they populate
               ;; the outgoing area just reserved below the aligned rsp).
@@ -12434,7 +12457,7 @@ same branch and emit the same byte count."
                        (target (nth 2 entry))
                        (stack-slot (cadr target))
                        (source-disp (+ (if win64-dynamic-align-p 0 win64-outgoing)
-                                       (* 16 (- (1- arg-count) idx))))
+                                       (* 8 (- (1- arg-count) idx))))
                        (dest-disp (+ shadow (* 8 stack-slot))))
                   (if win64-dynamic-align-p
                       (nelisp-asm-x86_64-mov-reg-mem-disp8
@@ -12480,14 +12503,16 @@ same branch and emit the same byte count."
        buf nelisp-aot-compiler--win64-rsp-save-symbol -4))
     ;; Reclaim outgoing SysV stack arguments, preserving rax/xmm0.
     (when (and sysv-p stack-args)
-      (nelisp-asm-x86_64-add-imm32 buf 'rsp (* 8 (length stack-args))))
+      (nelisp-asm-x86_64-add-imm32 buf 'rsp (* 8 (length stack-args)))
+      (cl-decf nelisp-aot-compiler--rsp-temp-depth (length stack-args)))
     ;; Undo the alignment correction.  rax (= i64 return) or xmm0
     ;; (= f64 return) is preserved because `add rsp, 8' doesn't
     ;; touch any GPR / xmm.
     (when (and sysv-p call-needs-align)
       (nelisp-asm-x86_64-add-imm32 buf 'rsp 8))
     (when (> call-temp-save-count 0)
-      (nelisp-asm-x86_64-add-imm32 buf 'rsp (* 16 call-temp-save-count)))
+      (nelisp-asm-x86_64-add-imm32 buf 'rsp (* 8 call-temp-save-count))
+      (cl-decf nelisp-aot-compiler--rsp-temp-depth call-temp-save-count))
     ;; Caller convention: extern-call result is i64 in rax (default)
     ;; or f64 in xmm0 (when :ret-class = f64).  Both ABIs agree on the
     ;; return register convention for scalar values.
@@ -12526,16 +12551,16 @@ the compile-elisp-objects manifest."
     ;; 1. Evaluate and push each arg onto the stack (NR first = deepest).
     (dolist (arg (list nr a0 a1 a2 a3 a4 a5))
       (nelisp-aot-compiler--emit-value arg buf)
-      (nelisp-asm-x86_64-push buf 'rax))
+      (nelisp-aot-compiler--emit-temp-push buf 'rax))
     ;; 2. Pop into Linux SYSCALL ABI regs (reverse order = TOS = A5 first).
     ;;    Linux SYSCALL: rax=nr, rdi=a0, rsi=a1, rdx=a2, r10=a3, r8=a4, r9=a5.
-    (nelisp-asm-x86_64-pop buf 'r9)
-    (nelisp-asm-x86_64-pop buf 'r8)
-    (nelisp-asm-x86_64-pop buf 'r10)
-    (nelisp-asm-x86_64-pop buf 'rdx)
-    (nelisp-asm-x86_64-pop buf 'rsi)
-    (nelisp-asm-x86_64-pop buf 'rdi)
-    (nelisp-asm-x86_64-pop buf 'rax)
+    (nelisp-aot-compiler--emit-temp-pop buf 'r9)
+    (nelisp-aot-compiler--emit-temp-pop buf 'r8)
+    (nelisp-aot-compiler--emit-temp-pop buf 'r10)
+    (nelisp-aot-compiler--emit-temp-pop buf 'rdx)
+    (nelisp-aot-compiler--emit-temp-pop buf 'rsi)
+    (nelisp-aot-compiler--emit-temp-pop buf 'rdi)
+    (nelisp-aot-compiler--emit-temp-pop buf 'rax)
     (when (eq nelisp-aot-compiler--os 'darwin)
       (nelisp-asm-x86_64-add-imm32 buf 'rax #x02000000))
     ;; 3. Execute SYSCALL.
@@ -12774,13 +12799,13 @@ glue dispatches solely off the tag byte.  See `docs/arch/sexp-abi.md'
     ;; mirrors `--emit-call' / `--emit-extern-call' so future arg
     ;; expressions that themselves clobber rdi/rsi don't race.
     (nelisp-aot-compiler--emit-value slot buf)
-    (nelisp-asm-x86_64-push buf 'rax)
+    (nelisp-aot-compiler--emit-temp-push buf 'rax)
     (nelisp-aot-compiler--emit-value val buf)
-    (nelisp-asm-x86_64-push buf 'rax)
+    (nelisp-aot-compiler--emit-temp-push buf 'rax)
     ;; Pop in reverse push order: last pushed (= val) → rsi, first
     ;; pushed (= slot) → rdi.
-    (nelisp-asm-x86_64-pop buf 'rsi)
-    (nelisp-asm-x86_64-pop buf 'rdi)
+    (nelisp-aot-compiler--emit-temp-pop buf 'rsi)
+    (nelisp-aot-compiler--emit-temp-pop buf 'rdi)
     ;; Write tag byte, payload, then return the slot pointer.
     (nelisp-asm-x86_64-mov-mem-imm8 buf 'rdi nelisp-sexp--tag-int)
     (nelisp-asm-x86_64-mov-mem-reg-disp8
@@ -12837,11 +12862,11 @@ Caller must guarantee PTR points at `Sexp::Cons(_)'."
   (let ((ptr (nelisp-aot-compiler--ir-get node :ptr))
         (slot (nelisp-aot-compiler--ir-get node :slot)))
     (nelisp-aot-compiler--emit-value ptr buf)
-    (nelisp-asm-x86_64-push buf 'rax)
+    (nelisp-aot-compiler--emit-temp-push buf 'rax)
     (nelisp-aot-compiler--emit-value slot buf)
-    (nelisp-asm-x86_64-push buf 'rax)
-    (nelisp-asm-x86_64-pop buf 'rsi)        ; rsi = slot (dst)
-    (nelisp-asm-x86_64-pop buf 'rdi)        ; rdi = ptr (Sexp::Cons)
+    (nelisp-aot-compiler--emit-temp-push buf 'rax)
+    (nelisp-aot-compiler--emit-temp-pop buf 'rsi)        ; rsi = slot (dst)
+    (nelisp-aot-compiler--emit-temp-pop buf 'rdi)        ; rdi = ptr (Sexp::Cons)
     ;; r10 = NlConsBox* ; rdi = the 8-byte tagged WORD at box+field-off.
     (nelisp-asm-x86_64-mov-reg-mem-disp8
      buf 'r10 'rdi nelisp-sexp--offset-payload)
@@ -12850,7 +12875,7 @@ Caller must guarantee PTR points at `Sexp::Cons(_)'."
     ;; in place; win64 rcx=word, rdx=slot.  Preserve slot across the
     ;; call (= the return value) via push; one push keeps rsp 16-aligned
     ;; at the call site (body entry ≡ 8 mod 16 after the two pops).
-    (nelisp-asm-x86_64-push buf 'rsi)
+    (nelisp-aot-compiler--emit-temp-push buf 'rsi)
     (if (eq nelisp-aot-compiler--abi 'win64)
         (progn
           (nelisp-asm-x86_64-mov-reg-reg buf 'rcx 'rdi)
@@ -12861,7 +12886,7 @@ Caller must guarantee PTR points at `Sexp::Cons(_)'."
      buf "nl_sexp_clone_into" -4 'text)
     (when (eq nelisp-aot-compiler--abi 'win64)
       (nelisp-asm-x86_64-add-imm32 buf 'rsp 32))
-    (nelisp-asm-x86_64-pop buf 'rax)))      ; rax = slot (return)
+    (nelisp-aot-compiler--emit-temp-pop buf 'rax)))      ; rax = slot (return)
 
 (defun nelisp-aot-compiler--emit-cons-cdr-raw (node buf)
   "Emit the Doc 101 §2.1 raw cdr walker primitive.
@@ -12984,9 +13009,9 @@ tag/payload from).  Delegate to the ABI-stable `nl_record_slot_ptr
 Returns the view pointer in rax (matches the prior op's contract:
 every `record-slot-ref-ptr' consumer reads a 32B `Sexp' from it)."
   (nelisp-aot-compiler--emit-value ptr buf)
-  (nelisp-asm-x86_64-push buf 'rax)
+  (nelisp-aot-compiler--emit-temp-push buf 'rax)
   (nelisp-aot-compiler--emit-value idx buf)
-  (nelisp-asm-x86_64-push buf 'rax)
+  (nelisp-aot-compiler--emit-temp-push buf 'rax)
   ;; Pop args, marshal to the helper ABI: rdi = rec_ptr, rsi = idx.
   ;; `slot-ptr-core' is invoked from MANY contexts (record-slot-ref,
   ;; record-slot-ref-ptr, and nested inside larger value forms), so the
@@ -12996,8 +13021,8 @@ every `record-slot-ref-ptr' consumer reads a 32B `Sexp' from it)."
   ;; `and rsp, -16', then restore.  rbx is preserved by the helper.
   (if (eq nelisp-aot-compiler--abi 'win64)
       (progn
-        (nelisp-asm-x86_64-pop buf 'rdx)       ; idx (arg1)
-        (nelisp-asm-x86_64-pop buf 'rcx)       ; rec_ptr (arg0)
+        (nelisp-aot-compiler--emit-temp-pop buf 'rdx)       ; idx (arg1)
+        (nelisp-aot-compiler--emit-temp-pop buf 'rcx)       ; rec_ptr (arg0)
         ;; mov rbx, rsp; and rsp, -16  (dynamic align, rbx callee-saved)
         (nelisp-asm-x86_64-emit-bytes buf (unibyte-string #x48 #x89 #xE3))
         (nelisp-asm-x86_64-emit-bytes buf (unibyte-string #x48 #x83 #xE4 #xF0))
@@ -13007,8 +13032,8 @@ every `record-slot-ref-ptr' consumer reads a 32B `Sexp' from it)."
          buf "nl_record_slot_ptr" -4 'text)
         ;; mov rsp, rbx (restore)
         (nelisp-asm-x86_64-emit-bytes buf (unibyte-string #x48 #x89 #xDC)))
-    (nelisp-asm-x86_64-pop buf 'rsi)           ; idx (arg1)
-    (nelisp-asm-x86_64-pop buf 'rdi)           ; rec_ptr (arg0)
+    (nelisp-aot-compiler--emit-temp-pop buf 'rsi)           ; idx (arg1)
+    (nelisp-aot-compiler--emit-temp-pop buf 'rdi)           ; rec_ptr (arg0)
     ;; mov rbx, rsp; and rsp, -16  (dynamic align to 16B for the call)
     (nelisp-asm-x86_64-emit-bytes buf (unibyte-string #x48 #x89 #xE3))
     (nelisp-asm-x86_64-emit-bytes buf (unibyte-string #x48 #x83 #xE4 #xF0))
@@ -13023,11 +13048,11 @@ every `record-slot-ref-ptr' consumer reads a 32B `Sexp' from it)."
   (let ((ptr (nelisp-aot-compiler--ir-get node :ptr))
         (slot (nelisp-aot-compiler--ir-get node :slot)))
     (nelisp-aot-compiler--emit-value ptr buf)
-    (nelisp-asm-x86_64-push buf 'rax)
+    (nelisp-aot-compiler--emit-temp-push buf 'rax)
     (nelisp-aot-compiler--emit-value slot buf)
-    (nelisp-asm-x86_64-push buf 'rax)
-    (nelisp-asm-x86_64-pop buf 'rsi)
-    (nelisp-asm-x86_64-pop buf 'rdi)
+    (nelisp-aot-compiler--emit-temp-push buf 'rax)
+    (nelisp-aot-compiler--emit-temp-pop buf 'rsi)
+    (nelisp-aot-compiler--emit-temp-pop buf 'rdi)
     (nelisp-asm-x86_64-mov-reg-mem-disp8
      buf 'r10 'rdi nelisp-sexp--offset-payload)
     (nelisp-asm-x86_64-movdqu-xmm-mem-disp8
@@ -13072,28 +13097,28 @@ that result slots start as `Sexp::Nil' bit-pattern."
         (slot (nelisp-aot-compiler--ir-get node :slot)))
     ;; Compute the source `*const Sexp' pointer for record slot N.
     (nelisp-aot-compiler--emit-record-slot-ptr-core ptr idx buf)
-    (nelisp-asm-x86_64-push buf 'rax)
+    (nelisp-aot-compiler--emit-temp-push buf 'rax)
     ;; Compute the destination `*mut Sexp' pointer (= result_slot).
     (nelisp-aot-compiler--emit-value slot buf)
-    (nelisp-asm-x86_64-push buf 'rax)
+    (nelisp-aot-compiler--emit-temp-push buf 'rax)
     (if (eq nelisp-aot-compiler--abi 'win64)
         (progn
-          (nelisp-asm-x86_64-pop buf 'rdx) ; dst
-          (nelisp-asm-x86_64-pop buf 'rcx) ; src
-          (nelisp-asm-x86_64-push buf 'rdx)
-          (nelisp-asm-x86_64-push buf 'rdx)
+          (nelisp-aot-compiler--emit-temp-pop buf 'rdx) ; dst
+          (nelisp-aot-compiler--emit-temp-pop buf 'rcx) ; src
+          (nelisp-aot-compiler--emit-temp-push buf 'rdx)
+          (nelisp-aot-compiler--emit-temp-push buf 'rdx)
           (nelisp-asm-x86_64-sub-imm32 buf 'rsp 32)
           (nelisp-asm-x86_64-emit-bytes buf (unibyte-string #xE8))
           (nelisp-asm-x86_64-reloc-plt32-here
            buf "nl_sexp_clone_into" -4 'text)
           (nelisp-asm-x86_64-add-imm32 buf 'rsp 32)
-          (nelisp-asm-x86_64-pop buf 'r11)
-          (nelisp-asm-x86_64-pop buf 'rax))
+          (nelisp-aot-compiler--emit-temp-pop buf 'r11)
+          (nelisp-aot-compiler--emit-temp-pop buf 'rax))
       ;; SysV AMD64 arg order: rdi = src, rsi = dst.  Pop in reverse
       ;; push order: last pushed (= dst) -> rsi, first pushed (= src)
       ;; pointer is still on the stack — pop into rdi.
-      (nelisp-asm-x86_64-pop buf 'rsi)
-      (nelisp-asm-x86_64-pop buf 'rdi)
+      (nelisp-aot-compiler--emit-temp-pop buf 'rsi)
+      (nelisp-aot-compiler--emit-temp-pop buf 'rdi)
       ;; Stack alignment + dst preservation:
       ;; Body entry rsp ≡ 8 (mod 16) (= post-prologue, post-param-pushes
       ;; for a 3-arg GP defun).  After the two pops above we are back
@@ -13101,7 +13126,7 @@ that result slots start as `Sexp::Nil' bit-pattern."
       ;; ≡ 0 (mod 16) which is what `call' requires, AND it doubles as
       ;; the dst-preservation save (rsi is caller-saved and may be
       ;; clobbered inside `nl_sexp_clone_into').
-      (nelisp-asm-x86_64-push buf 'rsi)
+      (nelisp-aot-compiler--emit-temp-push buf 'rsi)
       ;; call nl_sexp_clone_into
       (nelisp-asm-x86_64-emit-bytes buf (unibyte-string #xE8))
       (nelisp-asm-x86_64-reloc-plt32-here
@@ -13109,7 +13134,7 @@ that result slots start as `Sexp::Nil' bit-pattern."
       ;; Restore dst into rax (= the conventional return register for
       ;; record-slot-ref ops; callers treat rax as the destination
       ;; pointer they just wrote into).
-      (nelisp-asm-x86_64-pop buf 'rax))))
+      (nelisp-aot-compiler--emit-temp-pop buf 'rax))))
 
 (defun nelisp-aot-compiler--emit-record-slot-set (node buf)
   "Call the Rust helper that refcount-safely overwrites a record slot.
@@ -13143,16 +13168,16 @@ undefined-rax behaviour."
         (idx (nelisp-aot-compiler--ir-get node :idx))
         (val-ptr (nelisp-aot-compiler--ir-get node :val-ptr)))
     (nelisp-aot-compiler--emit-value ptr buf)
-    (nelisp-asm-x86_64-push buf 'rax)
+    (nelisp-aot-compiler--emit-temp-push buf 'rax)
     (nelisp-aot-compiler--emit-value idx buf)
-    (nelisp-asm-x86_64-push buf 'rax)
+    (nelisp-aot-compiler--emit-temp-push buf 'rax)
     (nelisp-aot-compiler--emit-value val-ptr buf)
-    (nelisp-asm-x86_64-push buf 'rax)
+    (nelisp-aot-compiler--emit-temp-push buf 'rax)
     (if (eq nelisp-aot-compiler--abi 'win64)
         (progn
-          (nelisp-asm-x86_64-pop buf 'r8)
-          (nelisp-asm-x86_64-pop buf 'rdx)
-          (nelisp-asm-x86_64-pop buf 'rcx)
+          (nelisp-aot-compiler--emit-temp-pop buf 'r8)
+          (nelisp-aot-compiler--emit-temp-pop buf 'rdx)
+          (nelisp-aot-compiler--emit-temp-pop buf 'rcx)
           (nelisp-asm-x86_64-mov-reg-mem-disp8
            buf 'rcx 'rcx nelisp-sexp--offset-payload)
           (nelisp-asm-x86_64-sub-imm32 buf 'rsp 32)
@@ -13160,9 +13185,9 @@ undefined-rax behaviour."
           (nelisp-asm-x86_64-reloc-plt32-here
            buf "nl_record_set_slot" -4 'text)
           (nelisp-asm-x86_64-add-imm32 buf 'rsp 32))
-      (nelisp-asm-x86_64-pop buf 'rdx)
-      (nelisp-asm-x86_64-pop buf 'rsi)
-      (nelisp-asm-x86_64-pop buf 'rdi)
+      (nelisp-aot-compiler--emit-temp-pop buf 'rdx)
+      (nelisp-aot-compiler--emit-temp-pop buf 'rsi)
+      (nelisp-aot-compiler--emit-temp-pop buf 'rdi)
       (nelisp-asm-x86_64-mov-reg-mem-disp8
        buf 'rdi 'rdi nelisp-sexp--offset-payload)
       ;; Dynamic rsp alignment around the call.
@@ -13205,13 +13230,13 @@ unknown alignment, so save rsp / `and rsp,-16' / restore around the
 `call'.  rbx is callee-saved (preserved by the helper) and unused
 elsewhere in AOT."
   (nelisp-aot-compiler--emit-value ptr buf)
-  (nelisp-asm-x86_64-push buf 'rax)
+  (nelisp-aot-compiler--emit-temp-push buf 'rax)
   (nelisp-aot-compiler--emit-value idx buf)
-  (nelisp-asm-x86_64-push buf 'rax)
+  (nelisp-aot-compiler--emit-temp-push buf 'rax)
   (if (eq nelisp-aot-compiler--abi 'win64)
       (progn
-        (nelisp-asm-x86_64-pop buf 'rdx)       ; idx (arg1)
-        (nelisp-asm-x86_64-pop buf 'rcx)       ; vec_ptr (arg0)
+        (nelisp-aot-compiler--emit-temp-pop buf 'rdx)       ; idx (arg1)
+        (nelisp-aot-compiler--emit-temp-pop buf 'rcx)       ; vec_ptr (arg0)
         (nelisp-asm-x86_64-emit-bytes buf (unibyte-string #x48 #x89 #xE3))
         (nelisp-asm-x86_64-emit-bytes buf (unibyte-string #x48 #x83 #xE4 #xF0))
         (nelisp-asm-x86_64-sub-imm32 buf 'rsp 32)
@@ -13219,8 +13244,8 @@ elsewhere in AOT."
         (nelisp-asm-x86_64-reloc-plt32-here
          buf "nl_vector_slot_ptr" -4 'text)
         (nelisp-asm-x86_64-emit-bytes buf (unibyte-string #x48 #x89 #xDC)))
-    (nelisp-asm-x86_64-pop buf 'rsi)           ; idx (arg1)
-    (nelisp-asm-x86_64-pop buf 'rdi)           ; vec_ptr (arg0)
+    (nelisp-aot-compiler--emit-temp-pop buf 'rsi)           ; idx (arg1)
+    (nelisp-aot-compiler--emit-temp-pop buf 'rdi)           ; vec_ptr (arg0)
     (nelisp-asm-x86_64-emit-bytes buf (unibyte-string #x48 #x89 #xE3))
     (nelisp-asm-x86_64-emit-bytes buf (unibyte-string #x48 #x83 #xE4 #xF0))
     (nelisp-asm-x86_64-emit-bytes buf (unibyte-string #xE8))
@@ -13262,16 +13287,16 @@ yields a stable truthy value)."
         (idx (nelisp-aot-compiler--ir-get node :idx))
         (val-ptr (nelisp-aot-compiler--ir-get node :val-ptr)))
     (nelisp-aot-compiler--emit-value ptr buf)
-    (nelisp-asm-x86_64-push buf 'rax)
+    (nelisp-aot-compiler--emit-temp-push buf 'rax)
     (nelisp-aot-compiler--emit-value idx buf)
-    (nelisp-asm-x86_64-push buf 'rax)
+    (nelisp-aot-compiler--emit-temp-push buf 'rax)
     (nelisp-aot-compiler--emit-value val-ptr buf)
-    (nelisp-asm-x86_64-push buf 'rax)
+    (nelisp-aot-compiler--emit-temp-push buf 'rax)
     (if (eq nelisp-aot-compiler--abi 'win64)
         (progn
-          (nelisp-asm-x86_64-pop buf 'r8)
-          (nelisp-asm-x86_64-pop buf 'rdx)
-          (nelisp-asm-x86_64-pop buf 'rcx)
+          (nelisp-aot-compiler--emit-temp-pop buf 'r8)
+          (nelisp-aot-compiler--emit-temp-pop buf 'rdx)
+          (nelisp-aot-compiler--emit-temp-pop buf 'rcx)
           (nelisp-asm-x86_64-mov-reg-mem-disp8
            buf 'rcx 'rcx nelisp-sexp--offset-payload)
           (nelisp-asm-x86_64-sub-imm32 buf 'rsp 32)
@@ -13279,9 +13304,9 @@ yields a stable truthy value)."
           (nelisp-asm-x86_64-reloc-plt32-here
            buf "nl_vector_set_slot" -4 'text)
           (nelisp-asm-x86_64-add-imm32 buf 'rsp 32))
-      (nelisp-asm-x86_64-pop buf 'rdx)
-      (nelisp-asm-x86_64-pop buf 'rsi)
-      (nelisp-asm-x86_64-pop buf 'rdi)
+      (nelisp-aot-compiler--emit-temp-pop buf 'rdx)
+      (nelisp-aot-compiler--emit-temp-pop buf 'rsi)
+      (nelisp-aot-compiler--emit-temp-pop buf 'rdi)
       (nelisp-asm-x86_64-mov-reg-mem-disp8
        buf 'rdi 'rdi nelisp-sexp--offset-payload)
       (nelisp-asm-x86_64-emit-bytes buf (unibyte-string #xE8))
@@ -13309,37 +13334,37 @@ on box-tagged variants) before writing into the destination."
         (slot (nelisp-aot-compiler--ir-get node :slot)))
     ;; Compute source `*const Sexp' (vec_ptr + offset + idx*32) -> rax.
     (nelisp-aot-compiler--emit-vector-slot-ptr-core ptr idx buf)
-    (nelisp-asm-x86_64-push buf 'rax)
+    (nelisp-aot-compiler--emit-temp-push buf 'rax)
     ;; Compute destination `*mut Sexp' -> rax.
     (nelisp-aot-compiler--emit-value slot buf)
-    (nelisp-asm-x86_64-push buf 'rax)
+    (nelisp-aot-compiler--emit-temp-push buf 'rax)
     (if (eq nelisp-aot-compiler--abi 'win64)
         (progn
-          (nelisp-asm-x86_64-pop buf 'rdx)
-          (nelisp-asm-x86_64-pop buf 'rcx)
-          (nelisp-asm-x86_64-push buf 'rdx)
-          (nelisp-asm-x86_64-push buf 'rdx)
+          (nelisp-aot-compiler--emit-temp-pop buf 'rdx)
+          (nelisp-aot-compiler--emit-temp-pop buf 'rcx)
+          (nelisp-aot-compiler--emit-temp-push buf 'rdx)
+          (nelisp-aot-compiler--emit-temp-push buf 'rdx)
           (nelisp-asm-x86_64-sub-imm32 buf 'rsp 32)
           (nelisp-asm-x86_64-emit-bytes buf (unibyte-string #xE8))
           (nelisp-asm-x86_64-reloc-plt32-here
            buf "nl_sexp_clone_into" -4 'text)
           (nelisp-asm-x86_64-add-imm32 buf 'rsp 32)
-          (nelisp-asm-x86_64-pop buf 'r11)
-          (nelisp-asm-x86_64-pop buf 'rax))
+          (nelisp-aot-compiler--emit-temp-pop buf 'r11)
+          (nelisp-aot-compiler--emit-temp-pop buf 'rax))
       ;; SysV AMD64: rdi = src, rsi = dst.  Pop in reverse push order.
-      (nelisp-asm-x86_64-pop buf 'rsi)
-      (nelisp-asm-x86_64-pop buf 'rdi)
+      (nelisp-aot-compiler--emit-temp-pop buf 'rsi)
+      (nelisp-aot-compiler--emit-temp-pop buf 'rdi)
       ;; Stack alignment + dst preservation (see `--emit-record-slot-
       ;; ref' comment for the full rsp accounting): one `push rsi'
       ;; brings rsp to ≡ 0 (mod 16) for the call AND saves dst since
       ;; rsi is caller-saved across `nl_sexp_clone_into'.
-      (nelisp-asm-x86_64-push buf 'rsi)
+      (nelisp-aot-compiler--emit-temp-push buf 'rsi)
       (nelisp-asm-x86_64-emit-bytes buf (unibyte-string #xE8))
       (nelisp-asm-x86_64-reloc-plt32-here
        buf "nl_sexp_clone_into" -4 'text)
       ;; Restore dst into rax — convention for vector-ref / record-
       ;; slot-ref: rax = the destination pointer the op just wrote into.
-      (nelisp-asm-x86_64-pop buf 'rax))))
+      (nelisp-aot-compiler--emit-temp-pop buf 'rax))))
 
 ;; ---- Doc 111 §111.D Cell read+write ops emit ----
 ;;
@@ -13381,15 +13406,15 @@ Strategy mirrors `cell-set-value's extern-call shape:
   (let ((ptr (nelisp-aot-compiler--ir-get node :ptr))
         (slot (nelisp-aot-compiler--ir-get node :slot)))
     (nelisp-aot-compiler--emit-value ptr buf)
-    (nelisp-asm-x86_64-push buf 'rax)
+    (nelisp-aot-compiler--emit-temp-push buf 'rax)
     (nelisp-aot-compiler--emit-value slot buf)
-    (nelisp-asm-x86_64-push buf 'rax)
-    (nelisp-asm-x86_64-pop buf 'rsi)        ; rsi = slot
-    (nelisp-asm-x86_64-pop buf 'rdi)        ; rdi = ptr (Sexp::Cell ptr)
+    (nelisp-aot-compiler--emit-temp-push buf 'rax)
+    (nelisp-aot-compiler--emit-temp-pop buf 'rsi)        ; rsi = slot
+    (nelisp-aot-compiler--emit-temp-pop buf 'rdi)        ; rdi = ptr (Sexp::Cell ptr)
     ;; Preserve SLOT (= return value) across the helper call; two extra
     ;; pushes (= slot + a pad) keep rsp 16-byte aligned at the call site.
-    (nelisp-asm-x86_64-push buf 'rsi)
-    (nelisp-asm-x86_64-push buf 'rsi)
+    (nelisp-aot-compiler--emit-temp-push buf 'rsi)
+    (nelisp-aot-compiler--emit-temp-push buf 'rsi)
     (if (eq nelisp-aot-compiler--abi 'win64)
         (progn
           ;; win64: rcx = ptr (arg0), rdx = slot (arg1) + 32B shadow space.
@@ -13403,8 +13428,8 @@ Strategy mirrors `cell-set-value's extern-call shape:
      buf "nl_cell_get_value" -4 'text)
     (when (eq nelisp-aot-compiler--abi 'win64)
       (nelisp-asm-x86_64-add-imm32 buf 'rsp 32))
-    (nelisp-asm-x86_64-pop buf 'r11)        ; discard pad
-    (nelisp-asm-x86_64-pop buf 'rax)))      ; rax = slot (return)
+    (nelisp-aot-compiler--emit-temp-pop buf 'r11)        ; discard pad
+    (nelisp-aot-compiler--emit-temp-pop buf 'rax)))      ; rax = slot (return)
 
 (defun nelisp-aot-compiler--emit-cell-set-value (node buf)
   "Emit `cell-set-value' — delegate to `nl_cell_set_value' extern.
@@ -13416,17 +13441,17 @@ original H pointer in rax."
   (let ((ptr (nelisp-aot-compiler--ir-get node :ptr))
         (val-ptr (nelisp-aot-compiler--ir-get node :val-ptr)))
     (nelisp-aot-compiler--emit-value ptr buf)
-    (nelisp-asm-x86_64-push buf 'rax)
+    (nelisp-aot-compiler--emit-temp-push buf 'rax)
     (nelisp-aot-compiler--emit-value val-ptr buf)
-    (nelisp-asm-x86_64-push buf 'rax)
-    (nelisp-asm-x86_64-pop buf 'rsi)
-    (nelisp-asm-x86_64-pop buf 'rdi)
+    (nelisp-aot-compiler--emit-temp-push buf 'rax)
+    (nelisp-aot-compiler--emit-temp-pop buf 'rsi)
+    (nelisp-aot-compiler--emit-temp-pop buf 'rdi)
     ;; Preserve H across the helper call; caller-saved regs are not
     ;; stable, so keep it on the stack and pop it back into rax after.
     ;; Two extra pushes (= H + a scratch pad) keep rsp at a 16-byte
     ;; boundary at the call site (SysV AMD64 alignment).
-    (nelisp-asm-x86_64-push buf 'rdi)
-    (nelisp-asm-x86_64-push buf 'rsi)
+    (nelisp-aot-compiler--emit-temp-push buf 'rdi)
+    (nelisp-aot-compiler--emit-temp-push buf 'rsi)
     (if (eq nelisp-aot-compiler--abi 'win64)
         (progn
           (nelisp-asm-x86_64-mov-reg-reg buf 'rdx 'rsi)
@@ -13442,8 +13467,8 @@ original H pointer in rax."
      buf "nl_cell_set_value" -4 'text)
     (when (eq nelisp-aot-compiler--abi 'win64)
       (nelisp-asm-x86_64-add-imm32 buf 'rsp 32))
-    (nelisp-asm-x86_64-pop buf 'r11)
-    (nelisp-asm-x86_64-pop buf 'rax)))
+    (nelisp-aot-compiler--emit-temp-pop buf 'r11)
+    (nelisp-aot-compiler--emit-temp-pop buf 'rax)))
 
 (defun nelisp-aot-compiler--emit-vector-make (node buf)
   "Emit `vector-make' — allocate fresh NlVector and write Sexp::Vector into SLOT.
@@ -13468,38 +13493,38 @@ elements by `nl_alloc_vector' (= refcount-1 box, ready for
   (let ((cap (nelisp-aot-compiler--ir-get node :cap))
         (slot (nelisp-aot-compiler--ir-get node :slot)))
     (nelisp-aot-compiler--emit-value cap buf)
-    (nelisp-asm-x86_64-push buf 'rax)
+    (nelisp-aot-compiler--emit-temp-push buf 'rax)
     (nelisp-aot-compiler--emit-value slot buf)
-    (nelisp-asm-x86_64-push buf 'rax)
+    (nelisp-aot-compiler--emit-temp-push buf 'rax)
     ;; Mirror cell-make's "one extra scratch slot" alignment pad.
-    (nelisp-asm-x86_64-push buf 'rax)
-    (nelisp-asm-x86_64-pop buf 'r11)        ; r11 = pad (discard)
+    (nelisp-aot-compiler--emit-temp-push buf 'rax)
+    (nelisp-aot-compiler--emit-temp-pop buf 'r11)        ; r11 = pad (discard)
     (if (eq nelisp-aot-compiler--abi 'win64)
         (progn
-          (nelisp-asm-x86_64-pop buf 'rsi)  ; slot
-          (nelisp-asm-x86_64-pop buf 'rcx)  ; cap
-          (nelisp-asm-x86_64-push buf 'rsi)
-          (nelisp-asm-x86_64-push buf 'rsi)
+          (nelisp-aot-compiler--emit-temp-pop buf 'rsi)  ; slot
+          (nelisp-aot-compiler--emit-temp-pop buf 'rcx)  ; cap
+          (nelisp-aot-compiler--emit-temp-push buf 'rsi)
+          (nelisp-aot-compiler--emit-temp-push buf 'rsi)
           (nelisp-asm-x86_64-sub-imm32 buf 'rsp 32)
           (nelisp-asm-x86_64-emit-bytes buf (unibyte-string #xE8))
           (nelisp-asm-x86_64-reloc-plt32-here
            buf "nl_alloc_vector" -4 'text)
           (nelisp-asm-x86_64-add-imm32 buf 'rsp 32))
-      (nelisp-asm-x86_64-pop buf 'rsi)      ; rsi = slot (will save to stack)
-      (nelisp-asm-x86_64-pop buf 'rdi)      ; rdi = cap (= arg 0)
+      (nelisp-aot-compiler--emit-temp-pop buf 'rsi)      ; rsi = slot (will save to stack)
+      (nelisp-aot-compiler--emit-temp-pop buf 'rdi)      ; rdi = cap (= arg 0)
       ;; Save slot across the helper call.  Two extra pushes (= slot +
       ;; one pad) keep the call site at a 16-byte boundary, matching
       ;; cell-make's idiom.
-      (nelisp-asm-x86_64-push buf 'rsi)
-      (nelisp-asm-x86_64-push buf 'rsi)
+      (nelisp-aot-compiler--emit-temp-push buf 'rsi)
+      (nelisp-aot-compiler--emit-temp-push buf 'rsi)
       (nelisp-asm-x86_64-emit-bytes buf (unibyte-string #xE8))
       (nelisp-asm-x86_64-reloc-plt32-here
        buf "nl_alloc_vector" -4 'text))
     ;; rax = NlVector*.  Move to r10.
     (nelisp-asm-x86_64-mov-reg-reg buf 'r10 'rax)
     ;; Discard alignment pad, recover slot.
-    (nelisp-asm-x86_64-pop buf 'r11)
-    (nelisp-asm-x86_64-pop buf 'rsi)        ; rsi = slot
+    (nelisp-aot-compiler--emit-temp-pop buf 'r11)
+    (nelisp-aot-compiler--emit-temp-pop buf 'rsi)        ; rsi = slot
     ;; slot = Sexp::Vector(box).  Tag byte at offset 0, payload ptr at
     ;; offset 8 (= `Sexp::Vector' tag = 8, same shape `cell-make' uses
     ;; for `Sexp::Cell').
@@ -13535,40 +13560,40 @@ for `record-slot-set'-based init."
         (slot-count (nelisp-aot-compiler--ir-get node :slot-count))
         (slot (nelisp-aot-compiler--ir-get node :slot)))
     (nelisp-aot-compiler--emit-value tag-ptr buf)
-    (nelisp-asm-x86_64-push buf 'rax)
+    (nelisp-aot-compiler--emit-temp-push buf 'rax)
     (nelisp-aot-compiler--emit-value slot-count buf)
-    (nelisp-asm-x86_64-push buf 'rax)
+    (nelisp-aot-compiler--emit-temp-push buf 'rax)
     (nelisp-aot-compiler--emit-value slot buf)
-    (nelisp-asm-x86_64-push buf 'rax)
+    (nelisp-aot-compiler--emit-temp-push buf 'rax)
     ;; Pop in reverse push order: slot -> rax (will save), slot-count ->
     ;; rsi (= arg 1), tag-ptr -> rdi (= arg 0).
-    (nelisp-asm-x86_64-pop buf 'rax)
+    (nelisp-aot-compiler--emit-temp-pop buf 'rax)
     (if (eq nelisp-aot-compiler--abi 'win64)
         (progn
-          (nelisp-asm-x86_64-pop buf 'rdx)
-          (nelisp-asm-x86_64-pop buf 'rcx)
-          (nelisp-asm-x86_64-push buf 'rax)
-          (nelisp-asm-x86_64-push buf 'rax)
+          (nelisp-aot-compiler--emit-temp-pop buf 'rdx)
+          (nelisp-aot-compiler--emit-temp-pop buf 'rcx)
+          (nelisp-aot-compiler--emit-temp-push buf 'rax)
+          (nelisp-aot-compiler--emit-temp-push buf 'rax)
           (nelisp-asm-x86_64-sub-imm32 buf 'rsp 32)
           (nelisp-asm-x86_64-emit-bytes buf (unibyte-string #xE8))
           (nelisp-asm-x86_64-reloc-plt32-here
            buf "nl_alloc_record" -4 'text)
           (nelisp-asm-x86_64-add-imm32 buf 'rsp 32))
-      (nelisp-asm-x86_64-pop buf 'rsi)
-      (nelisp-asm-x86_64-pop buf 'rdi)
+      (nelisp-aot-compiler--emit-temp-pop buf 'rsi)
+      (nelisp-aot-compiler--emit-temp-pop buf 'rdi)
       ;; Save slot across the helper call.  Two pushes (= slot + one pad)
       ;; keep the call site at a 16-byte boundary, matching the idiom in
       ;; `vector-make' / `cons-make'.
-      (nelisp-asm-x86_64-push buf 'rax)
-      (nelisp-asm-x86_64-push buf 'rax)
+      (nelisp-aot-compiler--emit-temp-push buf 'rax)
+      (nelisp-aot-compiler--emit-temp-push buf 'rax)
       (nelisp-asm-x86_64-emit-bytes buf (unibyte-string #xE8))
       (nelisp-asm-x86_64-reloc-plt32-here
        buf "nl_alloc_record" -4 'text))
     ;; rax = *mut NlRecord.  Move to r10.
     (nelisp-asm-x86_64-mov-reg-reg buf 'r10 'rax)
     ;; Discard alignment pad, recover slot.
-    (nelisp-asm-x86_64-pop buf 'r11)
-    (nelisp-asm-x86_64-pop buf 'rsi)        ; rsi = slot
+    (nelisp-aot-compiler--emit-temp-pop buf 'r11)
+    (nelisp-aot-compiler--emit-temp-pop buf 'rsi)        ; rsi = slot
     ;; slot = Sexp::Record(box).  Tag byte at offset 0 (= 12), payload
     ;; ptr at offset 8 (= `nelisp-sexp--offset-payload', same shape
     ;; `vector-make' uses for `Sexp::Vector').
@@ -13600,26 +13625,26 @@ See `cons-make' comment for the alignment rationale."
   (let ((val-ptr (nelisp-aot-compiler--ir-get node :val-ptr))
         (slot (nelisp-aot-compiler--ir-get node :slot)))
     (nelisp-aot-compiler--emit-value val-ptr buf)
-    (nelisp-asm-x86_64-push buf 'rax)
+    (nelisp-aot-compiler--emit-temp-push buf 'rax)
     (nelisp-aot-compiler--emit-value slot buf)
-    (nelisp-asm-x86_64-push buf 'rax)
+    (nelisp-aot-compiler--emit-temp-push buf 'rax)
     ;; Mirror cons-make's "one extra scratch slot" alignment pad.  The
     ;; `nl_alloc_cell' helper only takes 1 arg, so we don't need
     ;; multiple live values on the stack across the call — but keeping
     ;; the 1-extra-pad pattern means the call site aligns the same way
     ;; cons-make's does (caller-side rsp%16 invariant).
-    (nelisp-asm-x86_64-push buf 'rax)
+    (nelisp-aot-compiler--emit-temp-push buf 'rax)
     ;; Pop the alignment pad + slot off the stack into scratch r11 /
     ;; rsi (slot survives in rsi for the post-call write since rsi is
     ;; clobberable but we save/restore it via the stack below).
-    (nelisp-asm-x86_64-pop buf 'r11)        ; r11 = pad (discard)
-    (nelisp-asm-x86_64-pop buf 'rsi)        ; rsi = slot (will save to stack)
-    (nelisp-asm-x86_64-pop buf 'rdi)        ; rdi = val-ptr (= arg 0)
+    (nelisp-aot-compiler--emit-temp-pop buf 'r11)        ; r11 = pad (discard)
+    (nelisp-aot-compiler--emit-temp-pop buf 'rsi)        ; rsi = slot (will save to stack)
+    (nelisp-aot-compiler--emit-temp-pop buf 'rdi)        ; rdi = val-ptr (= arg 0)
     ;; Save slot across the helper call.  Two extra pushes (= slot +
     ;; one pad) keep the call site at a 16-byte boundary, matching
     ;; cons-make / cons-set-slot's idiom.
-    (nelisp-asm-x86_64-push buf 'rsi)
-    (nelisp-asm-x86_64-push buf 'rsi)
+    (nelisp-aot-compiler--emit-temp-push buf 'rsi)
+    (nelisp-aot-compiler--emit-temp-push buf 'rsi)
     (when (eq nelisp-aot-compiler--abi 'win64)
       (nelisp-asm-x86_64-mov-reg-reg buf 'rcx 'rdi)
       (nelisp-asm-x86_64-sub-imm32 buf 'rsp 32))
@@ -13631,8 +13656,8 @@ See `cons-make' comment for the alignment rationale."
     ;; rax = NlCell*.  Move to r10.
     (nelisp-asm-x86_64-mov-reg-reg buf 'r10 'rax)
     ;; Discard alignment pad, recover slot.
-    (nelisp-asm-x86_64-pop buf 'r11)
-    (nelisp-asm-x86_64-pop buf 'rsi)        ; rsi = slot
+    (nelisp-aot-compiler--emit-temp-pop buf 'r11)
+    (nelisp-aot-compiler--emit-temp-pop buf 'rsi)        ; rsi = slot
     ;; slot = Sexp::Cell(box).  Tag byte at offset 0, payload ptr at
     ;; offset 8 (= `Sexp::Cell' tag = 11, same shape `cons-make' uses
     ;; for `Sexp::Cons').
@@ -13712,11 +13737,11 @@ Strategy (= 1-arg extern call, mirrors §122.D `mut-str-len' /
          (list ptr) buf "nl_str_bytes_ptr")
       (nelisp-aot-compiler--emit-value ptr buf)
       (nelisp-asm-x86_64-mov-reg-reg buf 'rdi 'rax)
-      (nelisp-asm-x86_64-push buf 'rax)
+      (nelisp-aot-compiler--emit-temp-push buf 'rax)
       (nelisp-asm-x86_64-emit-bytes buf (unibyte-string #xE8))
       (nelisp-asm-x86_64-reloc-plt32-here
        buf "nl_str_bytes_ptr" -4 'text)
-      (nelisp-asm-x86_64-pop buf 'r11))))
+      (nelisp-aot-compiler--emit-temp-pop buf 'r11))))
 
 (defun nelisp-aot-compiler--emit-str-byte-at (node buf)
   "Emit byte load from a `Sexp::Str' / `Sexp::Symbol' String buffer.
@@ -13724,11 +13749,11 @@ Result: the selected UTF-8 byte zero-extended into rax."
   (let ((ptr (nelisp-aot-compiler--ir-get node :ptr))
         (idx (nelisp-aot-compiler--ir-get node :idx)))
     (nelisp-aot-compiler--emit-value ptr buf)
-    (nelisp-asm-x86_64-push buf 'rax)
+    (nelisp-aot-compiler--emit-temp-push buf 'rax)
     (nelisp-aot-compiler--emit-value idx buf)
-    (nelisp-asm-x86_64-push buf 'rax)
-    (nelisp-asm-x86_64-pop buf 'r10)
-    (nelisp-asm-x86_64-pop buf 'rdi)
+    (nelisp-aot-compiler--emit-temp-push buf 'rax)
+    (nelisp-aot-compiler--emit-temp-pop buf 'r10)
+    (nelisp-aot-compiler--emit-temp-pop buf 'rdi)
     (nelisp-asm-x86_64-mov-reg-mem-disp8
      buf 'rax 'rdi nelisp-string--offset-ptr)
     (nelisp-asm-x86_64-add-reg-reg buf 'rax 'r10)
@@ -13781,12 +13806,12 @@ values whose payload layout matches Rust `String' (=`Sexp::Str' or
         (b (nelisp-aot-compiler--ir-get node :b))
         (id (nelisp-aot-compiler--ir-get node :id)))
     (nelisp-aot-compiler--emit-value a buf)
-    (nelisp-asm-x86_64-push buf 'rax)
+    (nelisp-aot-compiler--emit-temp-push buf 'rax)
     (nelisp-aot-compiler--emit-value b buf)
-    (nelisp-asm-x86_64-push buf 'rax)
+    (nelisp-aot-compiler--emit-temp-push buf 'rax)
     ;; last pushed (= b) → rsi, first pushed (= a) → rdi
-    (nelisp-asm-x86_64-pop buf 'rsi)
-    (nelisp-asm-x86_64-pop buf 'rdi)
+    (nelisp-aot-compiler--emit-temp-pop buf 'rsi)
+    (nelisp-aot-compiler--emit-temp-pop buf 'rdi)
     (nelisp-aot-compiler--emit-string-eq-core buf 'rdi 'rsi id)))
 
 (defun nelisp-aot-compiler--emit-symbol-name-eq (node buf)
@@ -13901,11 +13926,11 @@ differs (adds one cmp+jnz for the Str arm)."
         (tag-false-lbl (intern (format "%s-tag-false" (nelisp-aot-compiler--ir-get node :id))))
         (end-lbl (intern (format "%s-tag-end" (nelisp-aot-compiler--ir-get node :id)))))
     (nelisp-aot-compiler--emit-value a buf)
-    (nelisp-asm-x86_64-push buf 'rax)
+    (nelisp-aot-compiler--emit-temp-push buf 'rax)
     (nelisp-aot-compiler--emit-value b buf)
-    (nelisp-asm-x86_64-push buf 'rax)
-    (nelisp-asm-x86_64-pop buf 'rsi)
-    (nelisp-asm-x86_64-pop buf 'rdi)
+    (nelisp-aot-compiler--emit-temp-push buf 'rax)
+    (nelisp-aot-compiler--emit-temp-pop buf 'rsi)
+    (nelisp-aot-compiler--emit-temp-pop buf 'rdi)
     (nelisp-asm-x86_64-movzx-reg-byte-mem buf 'rax 'rdi)
     (nelisp-asm-x86_64-cmp-imm32 buf 'rax nelisp-sexp--tag-symbol)
     (nelisp-asm-x86_64-jnz-rel32 buf tag-false-lbl)
@@ -13962,29 +13987,29 @@ separately)."
         (nelisp-aot-compiler--emit-runtime-call-args
          (list bytes-ptr len slot) buf helper-name)
       (nelisp-aot-compiler--emit-value bytes-ptr buf)
-      (nelisp-asm-x86_64-push buf 'rax)
+      (nelisp-aot-compiler--emit-temp-push buf 'rax)
       (nelisp-aot-compiler--emit-value len buf)
-      (nelisp-asm-x86_64-push buf 'rax)
+      (nelisp-aot-compiler--emit-temp-push buf 'rax)
       (nelisp-aot-compiler--emit-value slot buf)
-      (nelisp-asm-x86_64-push buf 'rax)
+      (nelisp-aot-compiler--emit-temp-push buf 'rax)
       ;; Pop in reverse push order: slot -> rdx (= arg 2), len -> rsi
       ;; (= arg 1), bytes-ptr -> rdi (= arg 0).
-      (nelisp-asm-x86_64-pop buf 'rdx)
-      (nelisp-asm-x86_64-pop buf 'rsi)
-      (nelisp-asm-x86_64-pop buf 'rdi)
+      (nelisp-aot-compiler--emit-temp-pop buf 'rdx)
+      (nelisp-aot-compiler--emit-temp-pop buf 'rsi)
+      (nelisp-aot-compiler--emit-temp-pop buf 'rdi)
       ;; One alignment pad to keep rsp 16-byte aligned at the call
       ;; site.  Pre-prologue rsp is misaligned by 8 (= function entry
       ;; has 8 mod 16 due to the return address pushed by the caller);
       ;; our 3 push + 3 pop sequence is balanced, so we need exactly
       ;; one extra push to bring rsp to (8 + 8) mod 16 = 0 before the
       ;; new `call' instruction.
-      (nelisp-asm-x86_64-push buf 'rax)
+      (nelisp-aot-compiler--emit-temp-push buf 'rax)
       (nelisp-asm-x86_64-emit-bytes buf (unibyte-string #xE8))
       (nelisp-asm-x86_64-reloc-plt32-here
        buf helper-name -4 'text)
       ;; Helper returned the slot pointer in rax.  Discard the
       ;; alignment pad; rax is already the desired return value.
-      (nelisp-asm-x86_64-pop buf 'r11))))
+      (nelisp-aot-compiler--emit-temp-pop buf 'r11))))
 
 (defun nelisp-aot-compiler--bytes->u64-chunks (bytes)
   "Pack BYTES into little-endian u64 chunks for stack materialization."
@@ -14015,10 +14040,10 @@ form remains valid in ET_REL object mode."
     (nelisp-aot-compiler--emit-value slot buf)
     (nelisp-asm-x86_64-mov-reg-reg buf 'r10 'rax)
     (when pad-p
-      (nelisp-asm-x86_64-push buf 'rax))
+      (nelisp-aot-compiler--emit-temp-push buf 'rax))
     (dolist (chunk (reverse chunks))
       (nelisp-asm-x86_64-mov-imm64 buf 'rax chunk)
-      (nelisp-asm-x86_64-push buf 'rax))
+      (nelisp-aot-compiler--emit-temp-push buf 'rax))
     (nelisp-asm-x86_64-mov-reg-reg buf 'rdi 'rsp)
     (nelisp-asm-x86_64-mov-imm32 buf 'rsi (length bytes))
     (nelisp-asm-x86_64-mov-reg-reg buf 'rdx 'r10)
@@ -14106,7 +14131,7 @@ pointer via `f64::from_bits(ptr as u64)' and pass it as an f64
       ;; this op composes only at the same MVP level as `f64-call'.
       (nelisp-aot-compiler--emit-f64-leaf-into value buf 'xmm0)
       (nelisp-asm-x86_64-movq-r64-xmm buf 'rax 'xmm0)
-      (nelisp-asm-x86_64-push buf 'rax)
+      (nelisp-aot-compiler--emit-temp-push buf 'rax)
       ;; Step 3: SLOT.  If the IR node is an f64-class ref, the
       ;; emit-value path lands the bit pattern in xmm0; transfer to
       ;; rax via MOVQ.  Otherwise (= gp-class ref / imm / call), the
@@ -14115,11 +14140,11 @@ pointer via `f64::from_bits(ptr as u64)' and pass it as an f64
       (when (and (eq (nelisp-aot-compiler--ir-kind slot) 'ref)
                  (eq (nelisp-aot-compiler--ir-get slot :class) 'f64))
         (nelisp-asm-x86_64-movq-r64-xmm buf 'rax 'xmm0))
-      (nelisp-asm-x86_64-push buf 'rax)
+      (nelisp-aot-compiler--emit-temp-push buf 'rax)
       ;; Step 4: pop in reverse — slot (last pushed) → rdi, then
       ;; value (first pushed) → rax → xmm0.
-      (nelisp-asm-x86_64-pop buf 'rdi)
-      (nelisp-asm-x86_64-pop buf 'rax)
+      (nelisp-aot-compiler--emit-temp-pop buf 'rdi)
+      (nelisp-aot-compiler--emit-temp-pop buf 'rax)
       (if (eq nelisp-aot-compiler--abi 'win64)
           (progn
             (nelisp-asm-x86_64-mov-reg-reg buf 'rcx 'rdi)
@@ -14127,7 +14152,7 @@ pointer via `f64::from_bits(ptr as u64)' and pass it as an f64
             (nelisp-asm-x86_64-sub-imm32 buf 'rsp 32))
         (nelisp-asm-x86_64-movq-xmm-r64 buf 'xmm0 'rax)
         ;; Step 5: alignment pad.
-        (nelisp-asm-x86_64-push buf 'rax))
+        (nelisp-aot-compiler--emit-temp-push buf 'rax))
       ;; Step 6: CALL rel32 = 0xE8 + 4-byte placeholder + PLT32 reloc.
       (nelisp-asm-x86_64-emit-bytes buf (unibyte-string #xE8))
       (nelisp-asm-x86_64-reloc-plt32-here
@@ -14137,7 +14162,7 @@ pointer via `f64::from_bits(ptr as u64)' and pass it as an f64
       (if (eq nelisp-aot-compiler--abi 'win64)
           (progn
             (nelisp-asm-x86_64-add-imm32 buf 'rsp 32))
-        (nelisp-asm-x86_64-pop buf 'r11)))))
+        (nelisp-aot-compiler--emit-temp-pop buf 'r11)))))
 
 
 ;; ---- Doc 122 §122.B — Mutable string builder grammar emit ----
@@ -14163,18 +14188,18 @@ Strategy (= 2-arg extern call, mirrors `sexp-write-alloc' shape):
         (nelisp-aot-compiler--emit-runtime-call-args
          (list cap slot) buf "nl_alloc_mut_str")
       (nelisp-aot-compiler--emit-value cap buf)
-      (nelisp-asm-x86_64-push buf 'rax)
+      (nelisp-aot-compiler--emit-temp-push buf 'rax)
       (nelisp-aot-compiler--emit-value slot buf)
-      (nelisp-asm-x86_64-push buf 'rax)
-      (nelisp-asm-x86_64-pop buf 'rsi)
-      (nelisp-asm-x86_64-pop buf 'rdi)
+      (nelisp-aot-compiler--emit-temp-push buf 'rax)
+      (nelisp-aot-compiler--emit-temp-pop buf 'rsi)
+      (nelisp-aot-compiler--emit-temp-pop buf 'rdi)
       ;; Alignment pad: 2 push + 2 pop balanced, function entry has
       ;; rsp mod 16 = 8; one extra push aligns the call site.
-      (nelisp-asm-x86_64-push buf 'rax)
+      (nelisp-aot-compiler--emit-temp-push buf 'rax)
       (nelisp-asm-x86_64-emit-bytes buf (unibyte-string #xE8))
       (nelisp-asm-x86_64-reloc-plt32-here
        buf "nl_alloc_mut_str" -4 'text)
-      (nelisp-asm-x86_64-pop buf 'r11))))
+      (nelisp-aot-compiler--emit-temp-pop buf 'r11))))
 
 (defun nelisp-aot-compiler--emit-mut-str-push-2arg (node buf helper-name arg-key)
   "Emit a 2-arg in-place push op — `nl_mut_str_push_byte' / `_push_codepoint'.
@@ -14199,16 +14224,16 @@ Strategy (= 2-arg extern call, no return value):
         (nelisp-aot-compiler--emit-runtime-call-args
          (list ptr arg) buf helper-name)
       (nelisp-aot-compiler--emit-value ptr buf)
-      (nelisp-asm-x86_64-push buf 'rax)
+      (nelisp-aot-compiler--emit-temp-push buf 'rax)
       (nelisp-aot-compiler--emit-value arg buf)
-      (nelisp-asm-x86_64-push buf 'rax)
-      (nelisp-asm-x86_64-pop buf 'rsi)
-      (nelisp-asm-x86_64-pop buf 'rdi)
-      (nelisp-asm-x86_64-push buf 'rax)
+      (nelisp-aot-compiler--emit-temp-push buf 'rax)
+      (nelisp-aot-compiler--emit-temp-pop buf 'rsi)
+      (nelisp-aot-compiler--emit-temp-pop buf 'rdi)
+      (nelisp-aot-compiler--emit-temp-push buf 'rax)
       (nelisp-asm-x86_64-emit-bytes buf (unibyte-string #xE8))
       (nelisp-asm-x86_64-reloc-plt32-here
        buf helper-name -4 'text)
-      (nelisp-asm-x86_64-pop buf 'r11))
+      (nelisp-aot-compiler--emit-temp-pop buf 'r11))
     ;; rax = 1 sentinel (helper return is `void').
     (nelisp-asm-x86_64-mov-imm32 buf 'rax 1)))
 
@@ -14229,11 +14254,11 @@ Strategy (= 1-arg extern call with i64 return):
          (list ptr) buf "nl_mut_str_len")
       (nelisp-aot-compiler--emit-value ptr buf)
       (nelisp-asm-x86_64-mov-reg-reg buf 'rdi 'rax)
-      (nelisp-asm-x86_64-push buf 'rax)
+      (nelisp-aot-compiler--emit-temp-push buf 'rax)
       (nelisp-asm-x86_64-emit-bytes buf (unibyte-string #xE8))
       (nelisp-asm-x86_64-reloc-plt32-here
        buf "nl_mut_str_len" -4 'text)
-      (nelisp-asm-x86_64-pop buf 'r11))))
+      (nelisp-aot-compiler--emit-temp-pop buf 'r11))))
 
 (defun nelisp-aot-compiler--emit-mut-str-finalize (node buf)
   "Emit `mut-str-finalize' — call `nl_mut_str_finalize(ptr, slot)' extern.
@@ -14256,16 +14281,16 @@ Strategy (= 2-arg extern call, mirrors `mut-str-make-empty' shape):
         (nelisp-aot-compiler--emit-runtime-call-args
          (list ptr slot) buf "nl_mut_str_finalize")
       (nelisp-aot-compiler--emit-value ptr buf)
-      (nelisp-asm-x86_64-push buf 'rax)
+      (nelisp-aot-compiler--emit-temp-push buf 'rax)
       (nelisp-aot-compiler--emit-value slot buf)
-      (nelisp-asm-x86_64-push buf 'rax)
-      (nelisp-asm-x86_64-pop buf 'rsi)
-      (nelisp-asm-x86_64-pop buf 'rdi)
-      (nelisp-asm-x86_64-push buf 'rax)
+      (nelisp-aot-compiler--emit-temp-push buf 'rax)
+      (nelisp-aot-compiler--emit-temp-pop buf 'rsi)
+      (nelisp-aot-compiler--emit-temp-pop buf 'rdi)
+      (nelisp-aot-compiler--emit-temp-push buf 'rax)
       (nelisp-asm-x86_64-emit-bytes buf (unibyte-string #xE8))
       (nelisp-asm-x86_64-reloc-plt32-here
        buf "nl_mut_str_finalize" -4 'text)
-      (nelisp-asm-x86_64-pop buf 'r11))))
+      (nelisp-aot-compiler--emit-temp-pop buf 'r11))))
 
 
 ;; ---- Doc 122 §122.D — UTF-8 helper grammar emit ----
@@ -14278,11 +14303,11 @@ Strategy (= 2-arg extern call, mirrors `mut-str-make-empty' shape):
          (list ptr) buf "nl_str_char_count")
       (nelisp-aot-compiler--emit-value ptr buf)
       (nelisp-asm-x86_64-mov-reg-reg buf 'rdi 'rax)
-      (nelisp-asm-x86_64-push buf 'rax)
+      (nelisp-aot-compiler--emit-temp-push buf 'rax)
       (nelisp-asm-x86_64-emit-bytes buf (unibyte-string #xE8))
       (nelisp-asm-x86_64-reloc-plt32-here
        buf "nl_str_char_count" -4 'text)
-      (nelisp-asm-x86_64-pop buf 'r11))))
+      (nelisp-aot-compiler--emit-temp-pop buf 'r11))))
 
 (defun nelisp-aot-compiler--emit-str-codepoint-at (node buf)
   "Emit `str-codepoint-at' — 4-arg call to `nl_str_codepoint_at'."
@@ -14294,22 +14319,22 @@ Strategy (= 2-arg extern call, mirrors `mut-str-make-empty' shape):
         (nelisp-aot-compiler--emit-runtime-call-args
          (list ptr idx cp-slot width-slot) buf "nl_str_codepoint_at")
       (nelisp-aot-compiler--emit-value ptr buf)
-      (nelisp-asm-x86_64-push buf 'rax)
+      (nelisp-aot-compiler--emit-temp-push buf 'rax)
       (nelisp-aot-compiler--emit-value idx buf)
-      (nelisp-asm-x86_64-push buf 'rax)
+      (nelisp-aot-compiler--emit-temp-push buf 'rax)
       (nelisp-aot-compiler--emit-value cp-slot buf)
-      (nelisp-asm-x86_64-push buf 'rax)
+      (nelisp-aot-compiler--emit-temp-push buf 'rax)
       (nelisp-aot-compiler--emit-value width-slot buf)
-      (nelisp-asm-x86_64-push buf 'rax)
-      (nelisp-asm-x86_64-pop buf 'rcx)
-      (nelisp-asm-x86_64-pop buf 'rdx)
-      (nelisp-asm-x86_64-pop buf 'rsi)
-      (nelisp-asm-x86_64-pop buf 'rdi)
-      (nelisp-asm-x86_64-push buf 'rax)
+      (nelisp-aot-compiler--emit-temp-push buf 'rax)
+      (nelisp-aot-compiler--emit-temp-pop buf 'rcx)
+      (nelisp-aot-compiler--emit-temp-pop buf 'rdx)
+      (nelisp-aot-compiler--emit-temp-pop buf 'rsi)
+      (nelisp-aot-compiler--emit-temp-pop buf 'rdi)
+      (nelisp-aot-compiler--emit-temp-push buf 'rax)
       (nelisp-asm-x86_64-emit-bytes buf (unibyte-string #xE8))
       (nelisp-asm-x86_64-reloc-plt32-here
        buf "nl_str_codepoint_at" -4 'text)
-      (nelisp-asm-x86_64-pop buf 'r11))))
+      (nelisp-aot-compiler--emit-temp-pop buf 'r11))))
 
 (defun nelisp-aot-compiler--emit-str-is-alphanumeric-at (node buf)
   "Emit `str-is-alphanumeric-at' — 2-arg call to `nl_str_is_alphanumeric_at'."
@@ -14319,16 +14344,16 @@ Strategy (= 2-arg extern call, mirrors `mut-str-make-empty' shape):
         (nelisp-aot-compiler--emit-runtime-call-args
          (list ptr idx) buf "nl_str_is_alphanumeric_at")
       (nelisp-aot-compiler--emit-value ptr buf)
-      (nelisp-asm-x86_64-push buf 'rax)
+      (nelisp-aot-compiler--emit-temp-push buf 'rax)
       (nelisp-aot-compiler--emit-value idx buf)
-      (nelisp-asm-x86_64-push buf 'rax)
-      (nelisp-asm-x86_64-pop buf 'rsi)
-      (nelisp-asm-x86_64-pop buf 'rdi)
-      (nelisp-asm-x86_64-push buf 'rax)
+      (nelisp-aot-compiler--emit-temp-push buf 'rax)
+      (nelisp-aot-compiler--emit-temp-pop buf 'rsi)
+      (nelisp-aot-compiler--emit-temp-pop buf 'rdi)
+      (nelisp-aot-compiler--emit-temp-push buf 'rax)
       (nelisp-asm-x86_64-emit-bytes buf (unibyte-string #xE8))
       (nelisp-asm-x86_64-reloc-plt32-here
        buf "nl_str_is_alphanumeric_at" -4 'text)
-      (nelisp-asm-x86_64-pop buf 'r11))))
+      (nelisp-aot-compiler--emit-temp-pop buf 'r11))))
 
 ;; ---- Doc 122 §122.E — Atomic + raw memory primitives emit ----
 
@@ -14340,11 +14365,11 @@ On exit rax = old [rdi] (= the pre-add value), [rdi] = old+delta."
         (delta (nelisp-aot-compiler--ir-get node :delta)))
     ;; Evaluate ptr into rax, save it to rdi via push/pop.
     (nelisp-aot-compiler--emit-value ptr buf)
-    (nelisp-asm-x86_64-push buf 'rax)
+    (nelisp-aot-compiler--emit-temp-push buf 'rax)
     ;; Evaluate delta into rax (= the XADD source operand).
     (nelisp-aot-compiler--emit-value delta buf)
     ;; rdi = ptr, rax = delta (XADD src/dst).
-    (nelisp-asm-x86_64-pop buf 'rdi)
+    (nelisp-aot-compiler--emit-temp-pop buf 'rdi)
     ;; LOCK XADD [rdi], rax  →  rax = old [rdi], [rdi] = old + delta.
     (nelisp-asm-x86_64-lock-xadd-mem-rax-rdi buf)))
 
@@ -14358,15 +14383,15 @@ SETE AL + MOVZX RAX, AL: rax = 1 on success, 0 on failure."
         (new-val (nelisp-aot-compiler--ir-get node :new-val)))
     ;; Evaluate ptr → rax, stash.
     (nelisp-aot-compiler--emit-value ptr buf)
-    (nelisp-asm-x86_64-push buf 'rax)
+    (nelisp-aot-compiler--emit-temp-push buf 'rax)
     ;; Evaluate expected → rax, stash.
     (nelisp-aot-compiler--emit-value expected buf)
-    (nelisp-asm-x86_64-push buf 'rax)
+    (nelisp-aot-compiler--emit-temp-push buf 'rax)
     ;; Evaluate new-val → rax; pop into rdx (new-val), rax (expected), rdi (ptr).
     (nelisp-aot-compiler--emit-value new-val buf)
     (nelisp-asm-x86_64-mov-reg-reg buf 'rdx 'rax)   ; rdx = new-val
-    (nelisp-asm-x86_64-pop buf 'rax)                 ; rax = expected
-    (nelisp-asm-x86_64-pop buf 'rdi)                 ; rdi = ptr
+    (nelisp-aot-compiler--emit-temp-pop buf 'rax)                 ; rax = expected
+    (nelisp-aot-compiler--emit-temp-pop buf 'rdi)                 ; rdi = ptr
     ;; LOCK CMPXCHG [rdi], rdx  (ZF set on success).
     (nelisp-asm-x86_64-lock-cmpxchg-mem-rdx-rdi buf)
     ;; SETE AL; MOVZX RAX, AL  → rax = 1 (success) or 0 (failure).
@@ -14385,10 +14410,10 @@ Result is zero-extended to i64 in rax in all cases."
         (offset (nelisp-aot-compiler--ir-get node :offset)))
     ;; Evaluate ptr → rax, save; evaluate offset → rax (= rsi after pop).
     (nelisp-aot-compiler--emit-value ptr buf)
-    (nelisp-asm-x86_64-push buf 'rax)
+    (nelisp-aot-compiler--emit-temp-push buf 'rax)
     (nelisp-aot-compiler--emit-value offset buf)
     (nelisp-asm-x86_64-mov-reg-reg buf 'rsi 'rax)   ; rsi = offset
-    (nelisp-asm-x86_64-pop buf 'rdi)                 ; rdi = ptr
+    (nelisp-aot-compiler--emit-temp-pop buf 'rdi)                 ; rdi = ptr
     ;; Inline load — width determined by helper-name.
     (cond
      ((string= helper-name "nl_ptr_read_u64")
@@ -14415,13 +14440,13 @@ Returns rax = 1 sentinel for `and'-chain composition (matches the Rust void-exte
         (val (nelisp-aot-compiler--ir-get node :val)))
     ;; Evaluate ptr, offset, val; assign to rdi, rsi, rdx.
     (nelisp-aot-compiler--emit-value ptr buf)
-    (nelisp-asm-x86_64-push buf 'rax)
+    (nelisp-aot-compiler--emit-temp-push buf 'rax)
     (nelisp-aot-compiler--emit-value offset buf)
-    (nelisp-asm-x86_64-push buf 'rax)
+    (nelisp-aot-compiler--emit-temp-push buf 'rax)
     (nelisp-aot-compiler--emit-value val buf)
     (nelisp-asm-x86_64-mov-reg-reg buf 'rdx 'rax)   ; rdx = val
-    (nelisp-asm-x86_64-pop buf 'rsi)                 ; rsi = offset
-    (nelisp-asm-x86_64-pop buf 'rdi)                 ; rdi = ptr
+    (nelisp-aot-compiler--emit-temp-pop buf 'rsi)                 ; rsi = offset
+    (nelisp-aot-compiler--emit-temp-pop buf 'rdi)                 ; rdi = ptr
     ;; Inline store — width determined by helper-name.
     (cond
      ((string= helper-name "nl_ptr_write_u64")
@@ -14451,9 +14476,9 @@ shadow space, and call-site alignment must follow the current x86_64 ABI."
          (shadow (if (eq nelisp-aot-compiler--abi 'win64) 32 0)))
     (dolist (arg args)
       (nelisp-aot-compiler--emit-value arg buf)
-      (nelisp-asm-x86_64-push buf 'rax))
+      (nelisp-aot-compiler--emit-temp-push buf 'rax))
     (dolist (reg (reverse regs))
-      (nelisp-asm-x86_64-pop buf reg))
+      (nelisp-aot-compiler--emit-temp-pop buf reg))
     (when needs-align
       (nelisp-asm-x86_64-sub-imm32 buf 'rsp 8))
     (when (> shadow 0)
@@ -14499,27 +14524,27 @@ Stack alignment: 7 pushes (= 56 bytes offset); SYSCALL itself does
 not require 16-byte alignment, so no extra pad is needed."
   ;; Push NR first, then A0..A5 (will be popped in reverse).
   (nelisp-aot-compiler--emit-value (nelisp-aot-compiler--ir-get node :nr) buf)
-  (nelisp-asm-x86_64-push buf 'rax)
+  (nelisp-aot-compiler--emit-temp-push buf 'rax)
   (nelisp-aot-compiler--emit-value (nelisp-aot-compiler--ir-get node :a0) buf)
-  (nelisp-asm-x86_64-push buf 'rax)
+  (nelisp-aot-compiler--emit-temp-push buf 'rax)
   (nelisp-aot-compiler--emit-value (nelisp-aot-compiler--ir-get node :a1) buf)
-  (nelisp-asm-x86_64-push buf 'rax)
+  (nelisp-aot-compiler--emit-temp-push buf 'rax)
   (nelisp-aot-compiler--emit-value (nelisp-aot-compiler--ir-get node :a2) buf)
-  (nelisp-asm-x86_64-push buf 'rax)
+  (nelisp-aot-compiler--emit-temp-push buf 'rax)
   (nelisp-aot-compiler--emit-value (nelisp-aot-compiler--ir-get node :a3) buf)
-  (nelisp-asm-x86_64-push buf 'rax)
+  (nelisp-aot-compiler--emit-temp-push buf 'rax)
   (nelisp-aot-compiler--emit-value (nelisp-aot-compiler--ir-get node :a4) buf)
-  (nelisp-asm-x86_64-push buf 'rax)
+  (nelisp-aot-compiler--emit-temp-push buf 'rax)
   (nelisp-aot-compiler--emit-value (nelisp-aot-compiler--ir-get node :a5) buf)
-  (nelisp-asm-x86_64-push buf 'rax)
+  (nelisp-aot-compiler--emit-temp-push buf 'rax)
   ;; Pop into syscall registers (reverse of push order).
-  (nelisp-asm-x86_64-pop buf 'r9)
-  (nelisp-asm-x86_64-pop buf 'r8)
-  (nelisp-asm-x86_64-pop buf 'r10)
-  (nelisp-asm-x86_64-pop buf 'rdx)
-  (nelisp-asm-x86_64-pop buf 'rsi)
-  (nelisp-asm-x86_64-pop buf 'rdi)
-  (nelisp-asm-x86_64-pop buf 'rax)
+  (nelisp-aot-compiler--emit-temp-pop buf 'r9)
+  (nelisp-aot-compiler--emit-temp-pop buf 'r8)
+  (nelisp-aot-compiler--emit-temp-pop buf 'r10)
+  (nelisp-aot-compiler--emit-temp-pop buf 'rdx)
+  (nelisp-aot-compiler--emit-temp-pop buf 'rsi)
+  (nelisp-aot-compiler--emit-temp-pop buf 'rdi)
+  (nelisp-aot-compiler--emit-temp-pop buf 'rax)
   (when (eq nelisp-aot-compiler--os 'darwin)
     (nelisp-asm-x86_64-add-imm32 buf 'rax #x02000000))
   (nelisp-asm-x86_64-syscall buf))
@@ -15592,12 +15617,12 @@ and the fresh NlConsBox already starts at refcount = 1."
         (slot (nelisp-aot-compiler--ir-get node :slot)))
     ;; Step 1: spill the 3 input pointers + 1 alignment scratch.
     (nelisp-aot-compiler--emit-value car-ptr buf)
-    (nelisp-asm-x86_64-push buf 'rax)
+    (nelisp-aot-compiler--emit-temp-push buf 'rax)
     (nelisp-aot-compiler--emit-value cdr-ptr buf)
-    (nelisp-asm-x86_64-push buf 'rax)
+    (nelisp-aot-compiler--emit-temp-push buf 'rax)
     (nelisp-aot-compiler--emit-value slot buf)
-    (nelisp-asm-x86_64-push buf 'rax)
-    (nelisp-asm-x86_64-push buf 'rax)
+    (nelisp-aot-compiler--emit-temp-push buf 'rax)
+    (nelisp-aot-compiler--emit-temp-push buf 'rax)
     ;; Step 2: call nl_alloc_consbox -> rax; stash in r10.
     (when (eq nelisp-aot-compiler--abi 'win64)
       (nelisp-asm-x86_64-sub-imm32 buf 'rsp 32))
@@ -15608,20 +15633,20 @@ and the fresh NlConsBox already starts at refcount = 1."
       (nelisp-asm-x86_64-add-imm32 buf 'rsp 32))
     (nelisp-asm-x86_64-mov-reg-reg buf 'r10 'rax)
     ;; Step 3: restore alignment / slot / cdr-ptr / car-ptr.
-    (nelisp-asm-x86_64-pop buf 'r11)
-    (nelisp-asm-x86_64-pop buf 'rsi)
-    (nelisp-asm-x86_64-pop buf 'rdx)
-    (nelisp-asm-x86_64-pop buf 'rdi)
+    (nelisp-aot-compiler--emit-temp-pop buf 'r11)
+    (nelisp-aot-compiler--emit-temp-pop buf 'rsi)
+    (nelisp-aot-compiler--emit-temp-pop buf 'rdx)
+    (nelisp-aot-compiler--emit-temp-pop buf 'rdi)
     ;; Step 4: nl_val_clone_into(car-ptr, box).  Doc 147 Phase 3: store
     ;; the car as an 8-byte tagged WORD @ box+0 (immediate direct; boxed
     ;; child deep-cloned into a fresh 32B box, its 8-aligned ptr stored)
     ;; — NEVER a pointer to a transient scratch slot.  Save rsi/rdx/r10
     ;; across the call (= all caller-saved) plus a 4th push for the
     ;; 16-byte alignment.
-    (nelisp-asm-x86_64-push buf 'rsi)
-    (nelisp-asm-x86_64-push buf 'rdx)
-    (nelisp-asm-x86_64-push buf 'r10)
-    (nelisp-asm-x86_64-push buf 'rax)
+    (nelisp-aot-compiler--emit-temp-push buf 'rsi)
+    (nelisp-aot-compiler--emit-temp-push buf 'rdx)
+    (nelisp-aot-compiler--emit-temp-push buf 'r10)
+    (nelisp-aot-compiler--emit-temp-push buf 'rax)
     (if (eq nelisp-aot-compiler--abi 'win64)
         (progn
           (nelisp-asm-x86_64-mov-reg-reg buf 'rcx 'rdi)
@@ -15633,18 +15658,18 @@ and the fresh NlConsBox already starts at refcount = 1."
      buf "nl_val_clone_into" -4 'text)
     (when (eq nelisp-aot-compiler--abi 'win64)
       (nelisp-asm-x86_64-add-imm32 buf 'rsp 32))
-    (nelisp-asm-x86_64-pop buf 'r11)
-    (nelisp-asm-x86_64-pop buf 'r10)
-    (nelisp-asm-x86_64-pop buf 'rdx)
-    (nelisp-asm-x86_64-pop buf 'rsi)
+    (nelisp-aot-compiler--emit-temp-pop buf 'r11)
+    (nelisp-aot-compiler--emit-temp-pop buf 'r10)
+    (nelisp-aot-compiler--emit-temp-pop buf 'rdx)
+    (nelisp-aot-compiler--emit-temp-pop buf 'rsi)
     ;; Step 5: nl_val_clone_into(cdr-ptr, box + offset-cdr).  Doc 147
     ;; Phase 3: store the cdr as an 8-byte tagged WORD @ box+8 (offset-cdr
     ;; = 8).  rdi := cdr-ptr, rsi := box + 8.  Save rsi/r10 across the
     ;; call plus 2 alignment pushes (= 4 push = 16-byte aligned).
-    (nelisp-asm-x86_64-push buf 'rsi)
-    (nelisp-asm-x86_64-push buf 'r10)
-    (nelisp-asm-x86_64-push buf 'rax)
-    (nelisp-asm-x86_64-push buf 'rax)
+    (nelisp-aot-compiler--emit-temp-push buf 'rsi)
+    (nelisp-aot-compiler--emit-temp-push buf 'r10)
+    (nelisp-aot-compiler--emit-temp-push buf 'rax)
+    (nelisp-aot-compiler--emit-temp-push buf 'rax)
     (if (eq nelisp-aot-compiler--abi 'win64)
         (progn
           (nelisp-asm-x86_64-mov-reg-reg buf 'rcx 'rdx)
@@ -15659,10 +15684,10 @@ and the fresh NlConsBox already starts at refcount = 1."
      buf "nl_val_clone_into" -4 'text)
     (when (eq nelisp-aot-compiler--abi 'win64)
       (nelisp-asm-x86_64-add-imm32 buf 'rsp 32))
-    (nelisp-asm-x86_64-pop buf 'r11)
-    (nelisp-asm-x86_64-pop buf 'r11)
-    (nelisp-asm-x86_64-pop buf 'r10)
-    (nelisp-asm-x86_64-pop buf 'rsi)
+    (nelisp-aot-compiler--emit-temp-pop buf 'r11)
+    (nelisp-aot-compiler--emit-temp-pop buf 'r11)
+    (nelisp-aot-compiler--emit-temp-pop buf 'r10)
+    (nelisp-aot-compiler--emit-temp-pop buf 'rsi)
     ;; Step 6: write Sexp::Cons(box) into slot.
     (nelisp-asm-x86_64-mov-mem-imm8 buf 'rsi nelisp-sexp--tag-cons)
     (nelisp-asm-x86_64-mov-mem-reg-disp8
@@ -15680,17 +15705,17 @@ original handle pointer in rax."
   (let ((handle (nelisp-aot-compiler--ir-get node :handle))
         (val-ptr (nelisp-aot-compiler--ir-get node :val-ptr)))
     (nelisp-aot-compiler--emit-value handle buf)
-    (nelisp-asm-x86_64-push buf 'rax)
+    (nelisp-aot-compiler--emit-temp-push buf 'rax)
     (nelisp-aot-compiler--emit-value val-ptr buf)
-    (nelisp-asm-x86_64-push buf 'rax)
-    (nelisp-asm-x86_64-pop buf 'rsi)
-    (nelisp-asm-x86_64-pop buf 'rdi)
+    (nelisp-aot-compiler--emit-temp-push buf 'rax)
+    (nelisp-aot-compiler--emit-temp-pop buf 'rsi)
+    (nelisp-aot-compiler--emit-temp-pop buf 'rdi)
     ;; Preserve H across the helper call; caller-saved regs are not
     ;; stable, so keep it on the stack and pop it back into rax after.
-    (nelisp-asm-x86_64-push buf 'rdi)
+    (nelisp-aot-compiler--emit-temp-push buf 'rdi)
     ;; Same alignment rule as `cons-make': two extra pushes keep the
     ;; call site at a 16-byte boundary.
-    (nelisp-asm-x86_64-push buf 'rsi)
+    (nelisp-aot-compiler--emit-temp-push buf 'rsi)
     (if (eq nelisp-aot-compiler--abi 'win64)
         (progn
           (nelisp-asm-x86_64-mov-reg-reg buf 'rdx 'rsi)
@@ -15704,8 +15729,8 @@ original handle pointer in rax."
      buf (symbol-name helper-name) -4 'text)
     (when (eq nelisp-aot-compiler--abi 'win64)
       (nelisp-asm-x86_64-add-imm32 buf 'rsp 32))
-    (nelisp-asm-x86_64-pop buf 'r11)
-    (nelisp-asm-x86_64-pop buf 'rax)))
+    (nelisp-aot-compiler--emit-temp-pop buf 'r11)
+    (nelisp-aot-compiler--emit-temp-pop buf 'rax)))
 
 ;; ---- §97.c emit — comparisons + control flow ----
 
@@ -15722,12 +15747,11 @@ opcode reads the right combination.")
 
 (defun nelisp-aot-compiler--emit-cmp (node buf)
   "Emit signed comparison NODE; result (0 or 1) in rax.
-Strategy: compute B -> rax -> spill, compute A -> rax, reload r10
-(= B), cmp rax, r10 (= computes A - B flag set), then setCC al +
+Strategy: compute B -> rax -> push, compute A -> rax, pop r10 (=
+B), cmp rax, r10 (= computes A - B flag set), then setCC al +
 movzx eax, al to materialise the boolean into rax.  Uses r10 to
-avoid arg-reg aliasing inside chained calls while keeping rsp
-16-aligned across nested calls, mirroring the Doc 97.b arith
-convention."
+  avoid arg-reg aliasing inside chained calls, mirroring the
+  Doc 97.b arith convention."
   (let* ((op (nelisp-aot-compiler--ir-get node :op))
          (a (nelisp-aot-compiler--ir-get node :a))
          (b (nelisp-aot-compiler--ir-get node :b))
@@ -15750,11 +15774,11 @@ convention."
           (nelisp-asm-arm64-cset buf 'x0 arm64-cc))
       ;; Compute B -> rax, save on stack.
       (nelisp-aot-compiler--emit-value b buf)
-      (nelisp-aot-compiler--x86_64-spill-rax-slot buf)
+      (nelisp-aot-compiler--emit-temp-push buf 'rax)
       ;; Compute A -> rax.
       (nelisp-aot-compiler--emit-value a buf)
       ;; Recover B into r10.
-      (nelisp-aot-compiler--x86_64-unspill-slot-into-reg buf 'r10)
+      (nelisp-aot-compiler--emit-temp-pop buf 'r10)
       ;; cmp rax, r10                          (= A - B sets flags)
       (nelisp-asm-x86_64-cmp-reg-reg buf 'rax 'r10)
       ;; setCC al
@@ -16619,6 +16643,7 @@ helper signature.  Pass nil when no static-imm32 tables exist.
 Doc 101 §101.B Wave 5: buffer is created with the current
 `nelisp-aot-compiler--abi' so Win64 callers get a 'win64 buffer."
   (let ((nelisp-aot-compiler--table-vaddrs table-vaddrs)
+        (nelisp-aot-compiler--rsp-temp-depth 0)
         (buf (nelisp-asm-x86_64-make-buffer nelisp-aot-compiler--abi)))
     ;; Main `_start' body first (= the program's entry point).
     (nelisp-aot-compiler--emit-stmt
@@ -16846,7 +16871,8 @@ register budgeting while ELF/Mach-O keep SysV."
     ;;
     ;; Doc 101 §101.B Wave 5: COFF/Windows targets use the parse-time ABI
     ;; binding above for Win64 register conventions.
-    (let* ((buf (if (eq arch 'aarch64)
+    (let* ((nelisp-aot-compiler--rsp-temp-depth 0)
+           (buf (if (eq arch 'aarch64)
                     (nelisp-asm-arm64-make-buffer)
                   (nelisp-asm-x86_64-make-buffer
                    nelisp-aot-compiler--abi))))

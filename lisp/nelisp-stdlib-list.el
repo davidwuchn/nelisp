@@ -130,10 +130,23 @@ or non-sequence atom."
   (cond
    ((null seq) acc)
    ((consp seq)
-    (let ((cur seq))
+    (let ((cur seq) (nelisp--diag-steps 0))
       (while (consp cur)
         (setq acc (cons (car cur) acc))
-        (setq cur (cdr cur)))
+        (setq cur (cdr cur))
+        ;; DIAGNOSTIC (gc-retention-edge campaign, Phase B, 2026-07-06):
+        ;; see the identical instrumentation + rationale on the sibling
+        ;; copy of this function in scripts/nelisp-stdlib-prelude.el.
+        ;; This copy (loaded later, as part of the full library
+        ;; bootstrap bundle) shadows the prelude one via `defun'
+        ;; redefinition, so it -- not the prelude copy -- is the one
+        ;; actually active when the Magit-bridge repro runs; both must
+        ;; carry the guard for the diagnostic to fire in every boot
+        ;; path (bare `--load' vs. full-library `dump-runtime-image').
+        (setq nelisp--diag-steps (1+ nelisp--diag-steps))
+        (when (> nelisp--diag-steps 200000)
+          (signal 'nelisp-diag-runaway-append-collect
+                  (list seq cur acc nelisp--diag-steps))))
       (when cur
         (signal 'wrong-type-argument (list 'listp seq)))
       acc))

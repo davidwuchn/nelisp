@@ -972,3 +972,3685 @@ session per the task's "if the culprit is the open upstream defect itself,
 park it" guidance, applied here to the sibling defect (unconditional
 per-bind clone cost + absent macroexpansion cache) rather than the GC
 mark/sweep corruption defect the earlier entries in this file track.
+
+---
+
+2026-07-05 `org-element-parse-buffer` sampling-profile scoping session
+(branch `diag/parse-buffer-profile`, investigation-only, no runtime edits;
+run against worktree `nelisp.wt-coldgrow` @ `7ce7b13a`, reusing the kept
+cold image `/tmp/cold-image-org-e2e.10laLp/org-run1.img` and probe
+`/tmp/parse-probe.el` from the same-day cold-heap-growth work)
+
+Scope
+
+Task: profile where `(with-temp-buffer (insert "* h") (org-mode)
+(org-element-parse-buffer))` spends its time on this cold (org.el +
+org-element.el pre-loaded) image, which does not terminate within 300 s
+(rc=124) while consuming real CPU. Method: gdb sampling (`bt`) every 3-10 s
+over two runs, then micro-decomposition timing of smaller pieces, then
+source reading to explain the dominant frames. No source files changed;
+only this file.
+
+Sampling results (2 runs, 9 backtraces total, `gdb -p PID -batch -ex 'bt
+15..20'`, RSS-based 6 GB kill-switch tripped both times before a fixed
+sample-count budget was exhausted)
+
+RSS growth was extreme and monotonic, not a stall: run 2 alone measured
+673 MB (t=3s) -> 1.44 GB (6s) -> 2.55 GB (9s) -> 3.65 GB (12s) -> 4.76 GB
+(15s) -> 5.87 GB (18s) -> 6.98 GB (21s, killed) -- a sustained ~330-360
+MB/s allocation rate. This is real, large, genuine work, consistent with
+the earlier entries in this file, not a spin/sentinel bug.
+
+The 9 backtraces cluster into two closure-lifecycle families plus the
+already-documented generic eval/bind-path frames:
+
+- **Closure *application* side** (3/9 samples: run1 s1, run2 s1, run2 s5):
+  `nelisp_frame_bind` <- `nl_pc_bind_one` <- `nl_push_captured_walk`
+  (self-recursive, one stack frame per captured `(NAME . CELL)` pair, 12-19+
+  deep in a `bt 15-20` window that did not reach the base case) <-
+  `nl_env_push_captured`. This walks a closure's entire captured alist and
+  re-binds every entry into a fresh frame on every *call* of that closure
+  (`lisp/nelisp-cc-evalport-env-leaves-frame.el:144-174`).
+- **Closure *creation* side** (2/9 samples: run1 s2 via `nl_sf_cond_walk`
+  chains ending in alloc; run2 s2 via `nl_capture_walk_buckets` x8+ <-
+  `nl_capture_walk_frame`): walks *every bucket* of the captured frame's
+  `fast-hash-table`, explicitly regardless of population --
+  `lisp/nelisp-cc-frame-stack-find.el:274-296` ("Iterate the bucket array
+  slots j = 0..bc-1 ... `sexp-payload-ptr` on `Sexp::Nil` yields 0 ... which
+  the inner bucket walker handles" -- i.e. empty buckets are cheap to
+  reject but are still visited one recursive call each), then repeats this
+  for *every enclosing frame* from the current depth down to 0
+  (`nl_capture_walk_frames`, same file lines 316-335). The public entry is
+  `nelisp-lexframe-stack-capture-to-depth` (`lisp/nelisp-lexframe.el:254`,
+  wired through `nl_capture_descend_native` /
+  `lisp/nelisp-cc-frame-stack-find.el:337-365`), invoked once per `(lambda
+  ...)` literal evaluated, with `max-depth` = the *current* active-frame
+  stack depth at that point -- i.e. every closure created anywhere in a
+  deep call chain re-walks the *entire* lexical scope chain currently in
+  effect, not just the frames that hold its actual free variables.
+- Remaining 4/9 samples are the already-documented generic path: `nl_let_*`
+  / `nl_val_clone_into` / `nl_sexp_clone_into` / `nl_apply_lambda_inner` /
+  `nl_apply_function` chains (per-bind fresh-box clone, same mechanism as
+  the `nl_val_clone_into` finding earlier in this file,
+  `lisp/nelisp-cc-val-load.el:108`).
+
+Micro-decomposition (single-line probes, `time`, cold-image unless noted
+"vanilla" = bare `./target/nelisp --eval`, no cold-load)
+
+| probe | condition | N | wall | per-call (less ~0.6s cold-boot/~0.03s vanilla floor) |
+|---|---|---|---|---|
+| `(let ((x 1)) x)` in a `while` | vanilla | 100000 | 1.636s | ~16.4 us |
+| `(let ((x 1)) x)` in a `while` | cold image | 1000/5000 | 0.641/0.712s | ~17.8 us (delta) |
+| `(funcall (lambda () 1))` | vanilla | 10000 | 0.189s | ~15.9 us |
+| `(let ((y 5)) (funcall (lambda () y)))` (capturing) | vanilla | 10000 | 0.265s | ~20 us |
+| named trivial `(defun my-triv-fn () 1)` call | cold image | 100 | 0.623s | negligible (~= boot floor) |
+| named trivial defun call | vanilla | 10000 | 0.128s | ~10-13 us |
+| `(string-match "^\*+ " "* h")` in a `while` | vanilla | 10000 | 18.694s | **~1869 us** |
+| `(string-match "\*+" "* h")` in a `while` | cold image | 100 | 2.264s | **~16.6 ms (delta)** |
+| `with-temp-buffer` alone (no insert/goto-char/looking-at) | cold image | 10/50/100 | 0.630/0.653/0.706s | ~0.8 ms |
+| `with-temp-buffer` + `(insert "* h")` | cold image | 100 | 0.974s | ~2.7 ms (delta over temp-buffer-alone) |
+| `with-temp-buffer` + insert + `(goto-char 1)` | cold image | 100 | 1.142s | ~1.7 ms (delta over insert-alone) |
+| `with-temp-buffer` + insert + `(looking-at "\*+")` | cold image | 100 | 2.773s | **~18 ms (delta over insert-alone)** |
+| `with-temp-buffer` + insert + goto-char + looking-at (task's probe (d)) | cold image | 10/50/100 | 0.890/1.794/2.953s | ~23 ms/iter, linear in N (no acceleration) |
+| full task probe (org-mode + org-element-parse-buffer) | cold image | 1 | timeout (300s / 60s both) | n/a -- non-terminating in budget |
+
+The dominant cost, with evidence
+
+**Regex matching (`string-match`/`looking-at`) has an enormous per-call
+baseline cost even in isolation, and both `string-match` on a bare string
+and `looking-at` on a buffer show an additional ~10x regression once
+running inside the org-loaded cold image, while plain binds, plain
+closures, and plain named-function calls show *no* such regression
+between vanilla and cold image.** This rules out "any bind" and "any
+function call" as the org-specific driver (both measured within noise of
+each other, ~16-20 us, in both conditions) and narrows the org-specific 10x
+to something reached specifically from inside the search/regex call chain.
+
+`string-match`/`looking-at` are pure-Elisp (not native) --
+`nelisp-emacs-lib/packages/nelisp-emacs-buffer-core/lisp/emacs-buffer-builtins.el:87,248`
+delegate to `nelisp-emacs-lib/src/nelisp-regex.el`'s hand-written NFA
+engine (`nelisp-rx-compile` / `nelisp-rx--scan` / `nelisp-rx--match-from`,
+lines 657-877), which already has a compile-result cache
+(`nelisp-rx--compile-cache`, line 896, keyed by pattern string) precisely
+*because* "org-element matches the same handful of regexps thousands of
+times" per its own comment. A fresh cold boot's cache has only 2 entries
+before the probe runs (checked directly:
+`(hash-table-count nelisp-rx--compile-cache)` => `2`), and per-iteration
+cost in the `looking-at`/`string-match` loops above was flat/linear across
+N=10/50/100 (not "slow first call, fast rest"), so a bloated compile-cache
+from org.el's own *loading* is not the direct driver of the loop-level
+measurements here (loading mostly just `defun`s/`defvar`s org.el's forms
+without executing them). Two source-confirmed, independently real defects
+remain the leading candidates for *why calling into org.el/org-element.el's
+own function/closure machinery is expensive*, and best explain both the
+10x regex-path regression above and the full parse's multi-minute/multi-GB
+blowup:
+
+1. **Capture-on-creation walks the entire active frame stack, all buckets,
+   regardless of population** (`nl_capture_walk_buckets` /
+   `_frame` / `_frames`, `lisp/nelisp-cc-frame-stack-find.el:274-335`,
+   entered via `nelisp-lexframe-stack-capture-to-depth`,
+   `lisp/nelisp-lexframe.el:254`, `max-depth` = current call depth). This is
+   an O(depth x total-buckets-across-all-enclosing-frames) cost paid on
+   *every* `(lambda ...)` literal evaluated anywhere in a deep call chain,
+   not gated by the lambda's actual free variables. org.el/org-element.el
+   are large `lexical-binding: t` files with hundreds of top-level
+   forms/functions; a recursive-descent parser (org-element's own
+   architecture) both recurses deeply (growing `max-depth`) and evaluates
+   closures pervasively (`dolist`/`mapcar`/`cl-case`/`pcase` bodies,
+   `save-excursion`-adjacent helper closures inside the buffer-core
+   compat shim, etc.), so this cost compounds with parse depth -- a
+   plausible root cause for a superlinear-*looking* wall-clock curve
+   without a literal O(n^2) algorithm anywhere.
+2. **Hash tables never rehash/grow their bucket vector as entries
+   accumulate** (`wf_ht_put`, `scripts/nelisp-standalone-build.el:4790-4833`
+   -- every insert path, vector-backed or not, only ever *prepends* to
+   whatever bucket/chain already exists; no code path resizes the bucket
+   vector or reorganizes the flat pre-bucketing cons chain). Any
+   long-lived table that accumulates many entries (a large closure's
+   captured-variable table, or `nelisp-rx--compile-cache` after a real
+   parse run, or org.el's own module-level symbol tables if similarly
+   represented) degrades from O(1) toward O(chain length) per lookup/put,
+   permanently, with no self-healing.
+
+What was *not* isolated in the ~30-minute budget (flag for next session,
+before attempting a fix)
+
+The exact call site inside the `looking-at`/`string-match` chain that
+creates the closure(s) the profiler caught mid-capture-walk was not pinned
+down to a specific line -- `nelisp-ec-looking-at`
+(`nelisp-emacs-lib/packages/nelisp-emacs-buffer-core/lisp/nelisp-emacs-compat.el:1027-1038`)
+itself has no literal `(lambda` in its body, so the walk is most likely
+reached one or more frames deeper (inside `nelisp-rx--scan`/
+`nelisp-rx--match-from`'s own control flow, or inside a macro-expanded
+`dolist`/`cl-case` in a caller), or is in fact **not regex-specific at
+all** -- calling *any* function defined deep inside org.el/org-element.el
+(as opposed to a function freshly `defun`'d at the top of a throwaway
+probe script, which is what the "named trivial defun call" row above
+actually measured) may be equally expensive if defect #1 is the real
+driver, since a function's own closure over its *defining file's*
+accumulated module scope would be captured once and then re-walked on
+every subsequent lambda creation nested under it. The single highest-value
+next experiment is: call a small **non-regex** helper already defined deep
+inside org.el (e.g. `org-back-to-heading-or-point-min` or similar) 100x on
+this same cold image and compare against the "named trivial defun" and
+"looking-at" rows above -- if it is also ~ms-per-call, defect #1 (capture
+walk cost scales with *which module defined the callee*, not with regex)
+is confirmed as the primary driver and the fix should target
+`nl_capture_walk_buckets`/`nelisp-lexframe-stack-capture-to-depth` (replace
+whole-stack, whole-bucket capture with static free-variable-set capture,
+computed once per lambda source location and cached the same way the
+existing macroexpansion cache is, per the design already flagged in this
+file's `nl_val_clone_into` finding); if it is cheap, the regex engine
+itself (`nelisp-rx--scan`/`match-from`) is the correct target instead.
+
+Recommended fix, ranked by expected leverage (for whoever implements next)
+
+1. **First**: run the one experiment above to disambiguate "closure-capture
+   cost scales with enclosing module size" (fix target:
+   `lisp/nelisp-cc-frame-stack-find.el:274-335` +
+   `lisp/nelisp-lexframe.el:254`) vs. "the NFA regex engine itself is slow"
+   (fix target: `nelisp-emacs-lib/src/nelisp-regex.el:732-877`). Both are
+   real, source-confirmed inefficiencies regardless of which one turns out
+   to dominate `org-element-parse-buffer` specifically.
+2. If capture cost dominates: change `nl_capture_walk_frame`
+   (`lisp/nelisp-cc-frame-stack-find.el:298-314`) to skip the full
+   bucket-array scan for frames whose live-entry count
+   (`ht-record.slots[2]`, already tracked per that function's own comment
+   at lines 306-308 but currently *unused* by the walk) is 0, and to walk
+   only as many buckets as there are live entries once a cheap
+   free-variable filter is available -- or, for a bigger win with the same
+   risk profile as the already-proposed `nl_val_clone_into` fast path,
+   compute the lambda body's free-variable set once per distinct lambda
+   *source position* (cacheable the same way `nelisp-rx--compile-cache` and
+   the existing macroexpansion cache already are) and capture only those
+   bindings instead of the whole reachable frame stack.
+3. Independently of #2, fix `wf_ht_put`
+   (`scripts/nelisp-standalone-build.el:4790-4833`) to rehash/grow the
+   bucket vector past a load-factor threshold -- currently a correctness-
+   neutral but performance-unbounded gap that will keep re-manifesting
+   (regex compile-cache, closure captured-var tables, anything else
+   hash-table-backed that grows large over a long-lived run) even after
+   #2 lands.
+4. Out of scope for a quick fix, noted for completeness: the 4/9 generic-
+   path samples reconfirm the pre-existing `nl_val_clone_into`
+   unconditional-fresh-box-per-bind cost
+   (`lisp/nelisp-cc-val-load.el:108`) already tracked elsewhere in this
+   file; no new evidence here changes that finding's status.
+
+No source files were modified in this session; only this FINDINGS.md
+entry. Probe artifacts reused from the same-day cold-heap-growth session
+(`/tmp/parse-probe.el`,
+`/tmp/cold-image-org-e2e.10laLp/org-run1.img`) plus this session's own
+scratch probes under `/tmp/test-*.el` (not committed, scratch only).
+
+---
+
+## Post-all-fixes re-probe of `org-element-parse-buffer`: it no longer hangs -- it crashes with a corrupted frame-stack argument (exit 88)
+
+Ran at `perf/closure-capture-narrowing` @ `5d8bd34b` (closure-capture
+narrowing, macroexpansion cache, `wf_ht` rehash/growth, and the cold-heap
+chunk-cursor fix are all merged into this history). Binary
+`./target/nelisp` was already built matching this HEAD (no source file
+newer than the binary). Re-ran the exact task probe from the prior
+FINDINGS entry above --
+
+```
+(with-temp-buffer (insert "* h") (org-mode)
+  (prin1 (if (org-element-parse-buffer) 'PARSE-OK 'PARSE-NIL)))
+```
+
+-- against the freshest matching cold image
+(`/tmp/cold-image-org-e2e.A0Gb1u/org-run1.img`, dumped by this same
+binary at 01:12, one commit before HEAD; verified compatible: `(featurep
+'org)` / `(fboundp 'org-element-parse-buffer)` both `t` on this image
+under this binary).
+
+**Headline result: this is no longer a >300s hang. It is now a
+sub-second crash.** `timeout 15 ./target/nelisp --cold-load-from
+.../org-run1.img --no-prompt < /tmp/parse-probe.el` exits with code 88
+almost immediately, with *no* stdout at all (not even a partial print).
+`strace -f -e trace=mmap,exit` on the same invocation shows the process
+issuing a handful of legitimate chunk-growth `mmap`s (64 MiB / 256 MiB
+range, consistent with normal arena/chunk growth) and then one final:
+
+```
+mmap(NULL, 1125899906908160, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) = -1 ENOMEM
+exit(88)
+```
+
+1125899906908160 bytes is ~1 PiB (`0x4000000010000` = 2^50 + the 64 KiB
+chunk-alignment pad). `exit(88)` is this runtime's own designated
+out-of-memory panic exit (`nl_os_alloc_fail`, `scripts/nelisp-standalone-
+build.el:1282` on this Linux x86_64 path: `(syscall-direct 60 88 0 0 0 0
+0)` = `exit_group(88)`), not a signal/segfault -- the runtime detected
+the failed allocation and exited cleanly on purpose.
+
+### gdb: the exact call chain and the corrupted argument
+
+Breakpoints on `nl_chunk_alloc_new`, `nl_os_alloc_fail`, and
+`nelisp_frame_stack_ensure_capacity` (all present as ELF symbols in the
+release binary -- `nm target/nelisp` resolves 1462 of them) against the
+same cold-load + `parse-probe.el` invocation give a full, symbol-named
+native backtrace at the point of the fatal allocation:
+
+```
+nl_chunk_alloc_new
+  <- nl_alloc_bytes
+  <- nl_alloc_vector
+  <- nelisp_frame_stack_ensure_capacity_grow
+  <- nelisp_frame_stack_ensure_capacity
+  <- nelisp_frame_push
+  <- nl_push_and_bind
+  <- nl_ali_push_frame
+  <- nl_apply_lambda_inner
+  <- nl_apply_closure_or_lambda
+  <- nl_apply_function
+  <- nl_eval_inner_cons
+  <- nl_ei_cons_tail / nl_ei_cons_dispatch
+  <- nl_eval_inner
+  <- nelisp_eval_call
+  <- nl_driver_eval_published
+  <- bf_load_eval_loop
+  <- bf_load
+  <- nelisp_apply_function
+```
+
+i.e. the crash is in ordinary function-call machinery (applying a
+lambda pushes a new lexical frame, which must first ensure the
+frame-stack backing vector is big enough), not in regex, not in
+org-element's own logic, and not in `wf_ht` (hash-table) growth.
+
+Directly inspecting registers at the `nelisp_frame_stack_ensure_capacity`
+breakpoint (`(frames-ptr needed scratch-slot)` = `rdi rsi rdx` on this
+SysV target, `lisp/nelisp-cc-frame-ensure-capacity.el:118`) on the hit
+that leads to the crash:
+
+```
+frames_ptr (rdi) = 0x7fffa288ce38
+needed     (rsi) = 140735301062233   (~1.4e14)
+scratch    (rdx) = 0x7fff7da097e8
+```
+
+`frames_ptr` is a **native-C-stack address** (`0x7fff...` range) -- every
+legitimate arena/heap allocation observed in this same run lands in the
+`0x7ff3...`/`0x7ff9...` mmap range instead. Per
+`lisp/nelisp-cc-frame-push.el:96,178-183`, `frames-ptr` must be a
+persistent `Env::frames_record` living in the arena, and `needed` is
+computed as `(+ (sexp-int-unwrap (record-slot-ref-ptr frames-ptr 1)) 1)`
+-- i.e. a small depth counter read off of that same record. Here `needed
+- frames_ptr == 33`, i.e. `needed` is almost exactly `frames_ptr`'s own
+address plus a small constant, not a plausible depth+1 value. A
+"legitimate" explanation (the interpreter really did push ~1.4x10^14
+frames) is physically impossible in the sub-second wall time actually
+elapsed (this would require ~10^14 frame pushes/sec). This is therefore a
+**corrupted-argument bug**: some caller in this chain is handing
+`nelisp_frame_stack_ensure_capacity`/`nelisp_frame_push` a stack-resident
+garbage value in place of the real arena `frames-ptr`, and the resulting
+garbage "depth" propagates through
+`nelisp_frame_stack_ensure_capacity_compute_cap`'s power-of-two doubling
+(`lisp/nelisp-cc-frame-ensure-capacity.el:60-68`) to `new-cap = 2^47`,
+which `nelisp_frame_stack_ensure_capacity_grow` then asks `vector-make`
+to allocate (2^47 slots x 8 bytes = 2^50 bytes) -- the mmap that fails.
+
+### What was ruled out
+
+- **Not `wf_ht` rehash/growth** (the 7355c5e7/e9b42390 fix). Three
+  targeted micro-repros, each a plain `(make-hash-table)` grown then
+  round-tripped through the identical `nelisp--arena-dump-image-stream`
+  -> `--cold-load-from` path this task's harness uses, then grown
+  further *after* cold-load:
+  - 20 entries, no growth involved: count reads back correctly (20 ->
+    21) after cold-load, no corruption.
+  - 5000 entries (growth already triggered live, pre-dump, at the
+    2048->4096-bucket boundary): count reads back correctly (5000 ->
+    5001) after cold-load.
+  - 4095 entries pre-dump (just under the 4096 growth threshold), then
+    2 more puthashes *after* cold-load specifically crossing the growth
+    boundary for the first time post-restore: count reads back
+    correctly (4095 -> 4097), grows cleanly, no corruption, no extra
+    chunk mmap even needed.
+  All three: exit 0, correct counts, no huge mmap. `wf_ht_meta_count` /
+  `wf_ht_maybe_grow` are exonerated as the origin of this specific crash.
+- **Not the closure-capture-narrowing commit's own new allocations.**
+  5d8bd34b's new runtime code
+  (`nl_env_capture_lexical_with_filter`/`nl_clx_symbol_filter_walk`,
+  `scripts/nelisp-standalone-build.el:14010-14070`) only ever calls
+  `alloc-bytes 32 8` (fixed-size 32-byte scratch slots) or builds a small
+  cons-list filter -- it has no size-scaled `vector-make` call anywhere,
+  so it cannot be the direct source of a 2^47-element vector allocation.
+  It remains the leading suspect for *clobbering an adjacent call's
+  register/stack-slot* (see below), since the corruption is new/newly-
+  reachable specifically after this commit landed (its own commit
+  message reports "parse-buffer target timeout 300s -> timeout 300s" as
+  of 01:15; the crash reported here reproduces reliably against the
+  matching binary/image less than an hour later with no source changes
+  in between -- i.e. this session's own re-run is what surfaced the
+  crash, not a code change since that commit).
+- **Not literally a >300s hang any more** for this exact probe/image --
+  confirmed 5+ repeated runs, all exit 88 in well under a second.
+
+### Attempted minimal repro outside org.el (inconclusive in budget)
+
+`--eval` (vanilla boot, no cold image) of a recursive closure-creating
+function:
+
+```elisp
+(defun deep-rec (n)
+  (if (<= n 0) 0
+    (let ((clo (lambda () n)))
+      (+ (funcall clo) (deep-rec (1- n))))))
+(prin1 (deep-rec N))
+```
+
+- N=3000: completes correctly (`4501500`), <1s, no corruption.
+- N=50000: does **not** crash/corrupt -- it times out (>20s, the *old*
+  slow-hang symptom, not the new corrupted-argument crash).
+
+So plain "create one capturing closure per recursion level, N deep" does
+not by itself reproduce the corrupted-`frames-ptr` crash at either depth
+tried -- the real org-element call graph has some additional ingredient
+(pervasive macro-expanded closures, non-tail helper recursion inside
+org-element.el/org-macs.el, and/or `nelisp_frame_stack_ensure_capacity
+_copy`'s own native recursion cost scaling with current depth,
+`lisp/nelisp-cc-frame-ensure-capacity.el:69-90`, being non-tail and thus
+itself consuming native stack proportional to live frame count on every
+single grow event) that this synthetic repro didn't hit within the N
+values tried in this session's time budget.
+
+### Recommended fix, ranked (for whoever/whatever implements next)
+
+1. **First**: bisect a minimal non-org repro between N=3000 (clean) and
+   N=50000 (slow-hang, not crash) from the synthetic `deep-rec' probe
+   above -- ideally add nested/non-tail helper calls per level (not just
+   one closure) to better mirror org-element's own call shape -- so the
+   corrupted-`frames-ptr` crash can be hit in under a second instead of
+   only via the multi-minute org cold-image pipeline. This is the
+   single highest-leverage next step; everything else is much slower to
+   iterate on without it.
+2. Audit the AOT-generated calling convention for the call chain
+   `nl_ali_push_frame` -> `nl_push_and_bind` -> `nelisp_frame_push` ->
+   (`extern-call`) `nelisp_frame_stack_ensure_capacity`
+   (`lisp/nelisp-cc-frame-push.el:178-183`), specifically cross-
+   referenced against the 5d8bd34b diff to
+   `nl_env_capture_lexical_with_filter` (widened its internal `invec`
+   from 3 to 5 slots, `scripts/nelisp-standalone-build.el` around line
+   14041-14060) and its two new callers `nl_env_capture_lexical` /
+   `nl_env_capture_lexical_filtered`. The corrupted `frames-ptr` reads as
+   a stack slot rather than the real arena Record pointer, which is the
+   signature of a caller-saved register or stack slot getting clobbered
+   by a widened call signature emitted earlier in the same native frame
+   (i.e. lambda-creation immediately preceding the next `frame_push` for
+   applying it) -- check whether the AOT compiler's register/stack-slot
+   allocation for calls into the newly 5-slot `invec` path correctly
+   preserves whatever slot the *subsequent* `nelisp_frame_push` still
+   expects to hold `frames-ptr`.
+3. Independently of #2: `nelisp_frame_stack_ensure_capacity_copy` and
+   `_compute_cap` (`lisp/nelisp-cc-frame-ensure-capacity.el:60-90`) are
+   non-tail-recursive elisp helpers whose own native recursion depth is
+   O(live frame count) / O(log(needed/cap)) respectively -- every single
+   grow event burns additional native call-stack frames proportional to
+   how many live interpreter frames are being copied, stacking on top of
+   the ~11-native-frames-per-Elisp-level cost already visible in the
+   backtrace above. This is a plausible contributor to the N=50000
+   synthetic repro's hang-instead-of-crash and to native stack pressure
+   generally; converting these two to real iteration (if/when the AOT
+   DSL gains mutable locals) removes one axis of native-stack
+   consumption independent of whichever call site turns out to own the
+   register-clobber from #2.
+4. Do **not** re-open "regex is slow" or "closure-capture walks every
+   bucket" as explanations for the current blocker -- both are prior,
+   now-separately-fixed/mitigated findings in this file about a
+   *different* bottleneck. The mechanism documented here is new (or was
+   previously masked by the old bottleneck timing out before the
+   interpreter ever recursed deep enough to hit it) and is a distinct
+   defect in the frame-stack/call machinery, not the regex engine or the
+   `wf_ht` hash-table implementation.
+
+No source files were modified in this session; only this FINDINGS.md
+entry (branch `diag/parse-buffer-focus`). Reused the prior session's
+`/tmp/parse-probe.el`. New scratch artifacts from this session (not
+committed): `/tmp/mini-ht-repl.txt`, `/tmp/mini-ht-cold-repl.txt`,
+`/tmp/mini-ht-grow-repl.txt`, `/tmp/mini-ht-grow-cold-repl.txt`,
+`/tmp/mini-ht-boundary-repl.txt`, `/tmp/mini-ht-boundary-cold-repl.txt`,
+`/tmp/deep-closure-repro.el`, `/tmp/deep-closure-repro2.el`,
+`/tmp/gdb-chunk-trace.gdb`, `/tmp/gdb-depth-trace.gdb` (gdb batch
+scripts used for the backtraces/register dumps above), and the cold
+image reused from the pre-existing e2e run at
+`/tmp/cold-image-org-e2e.A0Gb1u/org-run1.img`.
+
+## 2026-07-05 re-profile session: the >300s parse-buffer probe does NOT run at all on this HEAD -- it still crashes (exit 87), inside `(org-mode)` itself, before `org-element-parse-buffer` is ever reached
+
+Investigation-only, branch `profwork` (clone `nelisp.clone-capture`, tracking
+`origin/main`), HEAD `f36e6e82` ("Merge fix/frames-ptr-corruption: exit-88
+crash eliminated, loud guard added"). Task handed down asserted this probe
+was, on the current binary, "a genuine >300s CPU-bound computation" needing
+a real cost profile (gdb sampling, RSS growth, loop-vs-advance). **That
+premise does not hold on this exact HEAD/build: the probe crashes
+deterministically in well under a second, via the guard `93b011bc` itself
+added, and it crashes before `org-element-parse-buffer` runs at all.** This
+finding -- not a performance profile -- is this session's headline result.
+
+### Reproduction
+
+Built `./target/nelisp` fresh from this HEAD (`make standalone-reader`,
+binary timestamped after both `93b011bc` and the `f36e6e82` merge commit --
+not a stale pre-fix binary). Generated a fresh cold image with this exact
+binary via `NELISP_E2E_KEEP=1 timeout 300 bash scripts/cold-image-org-e2e.sh
+1` (default env, no overrides -- matching this file's own established
+methodology): replay-load 6.28s, dump 0.56s, cold-boot 0.52s/513,808 KB
+peak RSS, faithfulness conjuncts `(t t t t (interactive) t)` IDENTICAL
+between replay-loaded and cold-booted process. Image kept at
+`/tmp/cold-image-org-e2e.f2U2Hz/org-run1.img`.
+
+Reused the existing task probe verbatim (`/tmp/parse-probe.el` from a
+prior session):
+
+```elisp
+(with-temp-buffer (insert "* h") (org-mode)
+  (prin1 (if (org-element-parse-buffer) 'PARSE-OK 'PARSE-NIL)))
+(prin1 'probe-end)
+```
+
+`timeout 10 ./target/nelisp --cold-load-from .../org-run1.img --no-prompt <
+/tmp/parse-probe.el` -- **3/3 repeated runs, exit code 87, zero stdout,
+stderr `nelisp: frame-stack corrupt needed > 2^32`, in well under a
+second each time.** This is the loud guard `93b011bc` added at
+`lisp/nelisp-cc-frame-ensure-capacity.el:185-186` /
+`nelisp_frame_stack_ensure_capacity_bad_needed` (`:163-168`, writes the
+message and `exit_group(87)`), not a hang and not the old exit-88
+PiB-mmap crash -- but it is still a crash, and it fires on a completely
+fresh cold image built from this exact HEAD.
+
+**Isolation: the crash is entirely inside `(org-mode)`, never reaches
+`org-element-parse-buffer`.** A second probe with `org-element-parse-buffer`
+removed --
+
+```elisp
+(with-temp-buffer (insert "* h") (org-mode) (prin1 'ORG-MODE-OK))
+(prin1 'probe-end)
+```
+
+-- crashes identically: exit 87, same stderr message, same wall time (well
+under a second). gdb (`break nelisp_frame_stack_ensure_capacity`, print
+`$rdi`/`$rsi`/`$rdx` on every hit, `bt` when `$rsi > 4294967296`) confirms
+the two probes hit the **bit-identical** bad call --
+`frames-ptr=0x7fffa28d2ce0 needed=140735301062233 (0x7fff7da08e59)
+scratch=0x7fff7da097e8` -- after the *same* number of preceding legitimate
+`nelisp_frame_stack_ensure_capacity` calls (2163, all with small correct
+`needed` values climbing normally, e.g. `...14 15 140735301062233`
+immediately before the bad one) regardless of whether
+`org-element-parse-buffer` is present in the script at all. The backtrace
+at the bad call:
+
+```
+nelisp_frame_stack_ensure_capacity <- nelisp_frame_push <- nl_push_and_bind
+  <- nl_ali_push_frame <- nl_apply_lambda_inner <- nl_apply_closure_or_lambda
+  <- nl_apply_function <- nl_eval_inner_cons <- nl_ei_cons_tail
+  <- nl_ei_cons_dispatch <- nl_eval_inner <- nelisp_eval_call
+  <- nl_driver_eval_published <- bf_load_eval_loop <- bf_load
+  <- nelisp_apply_function <- nl_apply_builtin <- nl_apply_function
+  <- nl_eval_inner_cons <- ... <- nl_sf_progn_body_step <- nl_sf_progn_get_cdr
+```
+
+-- the identical call-chain shape `93b011bc`'s own commit documented fixing
+(`nl_apply_lambda_inner -> nl_ali_push_frame -> nl_push_and_bind ->
+nelisp_frame_push -> nelisp_frame_stack_ensure_capacity`). This is a
+**sibling instance of the same defect class**, not a new bug family: this
+time it is the `needed` argument (2nd arg, `rsi`) that goes bad while
+`frames-ptr` (`rdi`) stays the same, correct-looking value across all 2163+
+calls in the run (`0x7fffa28d2ce0`, constant); previously (`11346ea0`
+entry) it was `frames-ptr` itself that went bad while `needed` looked
+plausible. `93b011bc`'s commit message says it "pre-localize[d]
+frames-ptr/depth/needed [in `nelisp_frame_push`] so extern-call argument
+evaluation does not re-read them" -- i.e. it already specifically targeted
+`needed` as a clobber-risk local, and this session's reproduction shows
+that mitigation is incomplete.
+
+### Likely exact site: `nelisp_frame_push`'s own `needed` local, `lisp/nelisp-cc-frame-push.el:143-184`
+
+```elisp
+(let* ((fp frames-ptr)
+       (depth (sexp-int-unwrap (record-slot-ref-ptr fp 1)))
+       (needed (+ depth 1))                    ; computed here, line 145
+       (ht-slot (alloc-bytes 32 8))
+       (buckets-slot (alloc-bytes 32 8))
+       (frame-slot (alloc-bytes 32 8))
+       (int-slot (alloc-bytes 32 8)))
+  (and
+   (record-make ... 3 ht-slot)                 ; 7 intervening calls
+   (vector-make 16 buckets-slot)               ; (record-make / vector-make /
+   (record-slot-set ht-slot 1 buckets-slot)    ;  record-slot-set x3 /
+   (sexp-int-make int-slot 16)                 ;  sexp-int-make x2)
+   (record-slot-set ht-slot 0 int-slot)
+   (sexp-int-make int-slot 0)
+   (record-slot-set ht-slot 2 int-slot)
+   (record-make ... 1 frame-slot)
+   (record-slot-set frame-slot 0 ht-slot)
+   (extern-call nelisp_frame_stack_ensure_capacity
+                fp needed (vector-ref-ptr scratch-vec-ptr 2))  ; used here, line 183
+   ...))
+```
+
+`needed` is computed once, early, from a fully legitimate small `depth`
+value, then must survive across 7 intervening AOT-compiled calls (4 of
+them freshly-added `alloc-bytes 32 8` scratch buffers on the same call's
+native stack) before its only use. The corrupted value observed,
+`0x7fff7da08e59`, sits in the *same page* as this run's most recent
+`alloc-bytes`-derived scratch/`scratch-slot` pointers (e.g.
+`0x7fff7da07bd8`, `0x7fff7da08ec8`, `0x7fff7da097e8` -- all within the same
+~2.4 KB region) -- i.e. `needed`'s storage (register or stack slot) is
+most plausibly being overwritten by one of `ht-slot`/`buckets-slot`/
+`frame-slot`/`int-slot`'s own `alloc-bytes` result or by a call that
+reuses whatever slot the AOT allocator assigned to `needed`. This is the
+single most concrete, narrowly-scoped lead produced by this session:
+audit the AOT compiler's register/stack-slot allocation for
+`nelisp_frame_push` specifically across the 4 `alloc-bytes 32 8` +
+`record-make`/`vector-make`/`record-slot-set` sequence between `needed`'s
+binding and its use at the `extern-call` -- `93b011bc`'s "pre-localize"
+fix evidently did not give `needed` a slot/register that survives this
+particular sequence of intervening calls.
+
+### Regex engine location (asked for, previously unresolved) -- definitively answered
+
+`string-match`/`string-match-p`/`match-beginning`/`match-end`/
+`match-string`/`split-string`/`replace-regexp-in-string` are **interpreted
+prelude Elisp**, not DSL-native/AOT-compiled and not sourced from the
+sibling `nelisp-emacs-lib` repo. They are thin aliases
+(`scripts/nelisp-standalone-build.el:10332-10347`,
+`nelisp-standalone--reader-repl-prelude-source`) over a from-scratch
+backtracking regex matcher, `lisp/nelisp-stdlib-regexp.el` (364 lines,
+"Doc 143": `nlre--parse`/`nlre--parse-alt`/`nlre--parse-seq`/
+`nlre--parse-atom`/`nlre--parse-set` build an AST; `nlre--match-list`/
+`nlre--match-atom1`/`nlre--match-star` do the actual backtracking match;
+entry point `nlre-string-match`, line 287). This file is concatenated
+into the reader's REPL prelude text and evaluated by the ordinary
+interpreter at boot (`nelisp-standalone--reader-repl-prelude-forms`,
+`:10350-10360`) -- it is genuinely interpreted, dynamically-scoped
+(`-*- lexical-binding: nil -*-` per its own header), plain Elisp, not
+compiled to native code by the `nelisp-cc-*` pipeline. Landed in commits
+`7a69693c`/`c8677e73` ("Doc 143"), superseding (in this repo) an older
+regex engine an earlier FINDINGS entry (the `7ce7b13a`-era gdb-sampling
+session, above) described living in the *sibling* repo
+(`nelisp-emacs-lib/src/nelisp-regex.el`, a hand-written NFA with a
+`nelisp-rx--compile-cache`) -- that description is now **stale for this
+worktree**: `nelisp-rx`/`nelisp-emacs-lib` do not appear anywhere in this
+repo's actual matching code path any more; `nelisp-emacs-lib` is used
+*only* for host-side `.repl` generation (`cold-image-org-e2e.sh`'s phase
+(a), read-only), never for the runtime string-match implementation baked
+into `./target/nelisp`.
+
+**Cache status: there is no compiled-pattern cache at all.**
+`nlre-string-match` (`lisp/nelisp-stdlib-regexp.el:287-305`) calls
+`(nlre--parse regexp)` -- a fresh recursive-descent parse allocating a new
+AST -- on **every single call**, unconditionally, before any matching is
+attempted. There is no `defvar`/hash-table anywhere in this file keyed on
+pattern text, no memoization of `nlre--parse`'s result, nothing analogous
+to the sibling repo's now-superseded `nelisp-rx--compile-cache`. Every
+`string-match`/`looking-at`/`re-search-forward` call pays a full O(pattern
+length) parse cost from scratch, independent of how many times that exact
+pattern string was already seen -- a large fixed per-call overhead for
+org.el's own giant precompiled regexps (`org-element-paragraph-separate`
+and friends, built via `regexp-opt`-style alternation and potentially
+thousands of characters), on top of the O(buffer length x backtracking)
+match cost proper. This is a real, source-confirmed inefficiency
+independent of the crash above, and matches this session's task
+description's suspicion exactly ("is a compiled-pattern cache present").
+
+### Micro-timing (this HEAD's binary; org.el loaded but `(org-mode)` never
+called, to stay clear of the crash above)
+
+| probe | condition | N | wall | delta vs. empty-loop baseline (same N) | per-call |
+|---|---|---|---|---|---|
+| `(let ((i 0)) (while (< i 1000) (setq i (1+ i))))` | vanilla `--repl` | 1000 | 0.046s | -- (baseline) | -- |
+| `(let ((i 0)) (while (< i 1000) (string-match "\*+" "* h") (setq i (1+ i))))` | vanilla `--repl` | 1000 | 1.287s | +1.241s | **~1.24 ms/call** |
+| single `(prin1 (string-match "\*+" "* h"))` | vanilla `--repl` | 1 | -- | -- | prints `00` correctly -- sanity OK |
+| empty-loop baseline | cold org image, no `(org-mode)` call | 10000 | 0.563s | -- | -- |
+| `string-match` loop, same pattern | cold org image, no `(org-mode)` call | 10000 | 0.501s | **not measurable -- see anomaly below** | n/a |
+
+Vanilla-boot per-call cost (~1.24 ms for a trivial 2-char pattern against a
+2-char string, no cache -- consistent with this file's prior ~1.87 ms/call
+vanilla measurement, same order of magnitude) is confirmed genuine: the
+`while` loop's own auto-printed return value (this runtime prints a
+top-level form's final value after evaluating it) correctly showed `1000`
+for the baseline, confirming real completion, not a truncated loop.
+
+**New anomaly found this session, NOT chased to root cause (flag for next
+session): on the cold-loaded org image specifically (not vanilla), calling
+`string-match` -- even exactly once, e.g. bare
+`(prin1 (string-match "\*+" "* h"))` as the only top-level form -- produces
+*zero* stdout for that form, silently, while the reader continues normally
+and the *next* top-level form (e.g. a subsequent `(prin1 'done)`) prints
+fine.** Verified at N=1 (single bare call), N=3 (loop with a `prin1` on
+every iteration -- none of the 3 print), and N=1000/5000/10000/50000
+(loop wall time stays flat at ~0.49-0.51s regardless of N, i.e. *not*
+scaling with N the way the baseline empty loop does, e.g. baseline
+0.563s@10000 -> 0.871s@50000 while the string-match version stays
+~0.50s@10000 and ~0.51s@50000) -- both facts together indicate the loop
+body is not actually completing anywhere near N real iterations of
+`string-match` on this image, and/or its output is being suppressed, via
+some cold-load-specific state (the reader's own "quit flag" /
+epoch-boundary check at a fixed arena offset,
+`nelisp-standalone--reader-repl-eval-suffix`'s
+`(ptr-read-u64 (+ (car (nelisp--arena-stats)) 8) 0)` gate and/or
+`nl_boundary_maybe_reclaim`'s epoch check, `scripts/nelisp-standalone-
+build.el` -- both consulted around chunk/form boundaries -- are the
+leading suspects, unverified). This makes **any** cold-image loop-based
+wall-clock string-match timing (including this file's own prior "~16.6
+ms/call org image" figure from the earlier gdb-sampling entry above,
+which used the same loop-timing methodology without verifying the loop's
+own return value) suspect until this is root-caused: a suppressed/short-
+circuited loop and a genuinely-fast loop are wall-clock-indistinguishable
+without checking the loop's actual completion value, which this session's
+probes did check (and found inconsistent with real completion) but the
+prior session's probes, as documented, did not.
+
+### What could not be done, and why
+
+The task's Method steps 1 (gdb sampling of the parse loop, 12+ samples
+over ~2 min), 3 (loop-vs-advance verdict via buffer-position progress
+between samples), and the `org-element--current-element` direct-call
+probe are all **inapplicable**: there is no multi-minute (or even
+multi-second) `org-element-parse-buffer` execution to sample. The call
+never begins -- `(org-mode)` itself crashes first, deterministically, in
+well under a second, every time, on this exact binary/image. RSS growth
+during the (nonexistent) parse could not be measured for the same reason.
+
+### Recommended fix, ranked
+
+1. **First**: audit `nelisp_frame_push`'s AOT codegen
+   (`lisp/nelisp-cc-frame-push.el:143-184`) for why the `needed` local
+   (bound line 145, used only at the `extern-call` on line 183) does not
+   survive the 4 `alloc-bytes 32 8` + `record-make`/`vector-make`/
+   `record-slot-set` x3/`sexp-int-make` x2 calls in between -- despite
+   `93b011bc` already claiming to "pre-localize" exactly this variable.
+   The corrupted value's proximity to this same `let*`'s own
+   `alloc-bytes`-derived scratch addresses is a strong, specific lead:
+   check whether the AOT compiler is reusing `needed`'s assigned
+   register/stack slot for one of `ht-slot`/`buckets-slot`/`frame-slot`/
+   `int-slot`, or failing to reload `needed` from its spill slot before
+   the final `extern-call`.
+2. Do **not** re-run this exact probe again expecting a >300s CPU-bound
+   result until (1) is fixed and independently re-verified (e.g. a bare
+   `(org-mode)`-only smoke test exiting 0, not 87) -- this session's
+   reproduction was 3/3 deterministic on a freshly-built binary from
+   current HEAD, so this is not a flake.
+3. Separately, root-cause the cold-image-only `string-match`
+   output/loop-completion anomaly above before trusting any future
+   cold-image wall-clock timing of regex-calling code (including
+   re-validating this file's own prior "~16.6 ms/call" org-image figure).
+4. Independent of both crashes: `nlre-string-match`
+   (`lisp/nelisp-stdlib-regexp.el:287-305`) has no compiled-pattern
+   cache and re-parses every regexp from scratch on every call -- adding
+   one (keyed on pattern string, analogous to the already-existing
+   macroexpansion cache) is a real, source-confirmed, independent
+   optimization opportunity for whenever `org-element-parse-buffer`
+   becomes reachable again.
+
+No source files were modified in this session; only this FINDINGS.md
+entry (branch `profwork`). New scratch artifacts (not committed):
+`/tmp/parse-sanity*.{out,err}`, `/tmp/gdb-parse-probe2.{gdb,out}`,
+`/tmp/orgmode-only-probe.el`, `/tmp/gdb-orgmode-only.{gdb,out}`,
+`/tmp/regex-len-probe.el`, `/tmp/sm-*.el`, `/tmp/baseline-*.el`,
+`/tmp/t1.el`..`/tmp/t5.el`, `/tmp/sm-single*.el`, `/tmp/sm-n3.el`, and the
+cold image `/tmp/cold-image-org-e2e.f2U2Hz/org-run1.img` (freshly built
+this session from this exact HEAD; regenerate with
+`NELISP_E2E_KEEP=1 timeout 300 bash scripts/cold-image-org-e2e.sh 1` if
+resuming).
+
+## 2026-07-05 fix follow-up: frame-push `needed` corruption is eliminated by call-adjacent recomputation
+
+Implementation branch attempt: requested branch creation could not be
+performed in this sandbox because `.git/index.lock` creation failed with a
+read-only filesystem error.  Work was done on the existing checkout, base
+HEAD `56a0f382` (`docs(FINDINGS): re-profile invalidated -- parse-buffer
+probe still crashes (exit 87), never reaches org-element-parse-buffer`).
+
+### Mechanism confirmed
+
+The latest `profwork` finding was correct: `93b011bc` pre-localized
+`frames-ptr`/`depth`/`needed`, but `nelisp_frame_push` still computed
+`needed` before four `alloc-bytes` calls and the subsequent
+`record-make`/`vector-make`/`record-slot-set`/`sexp-int-make` call chain.
+Fresh rebuilds could assign that local to storage later reused/clobbered by
+the same frame-push sequence.  The bad value then reached
+`nelisp_frame_stack_ensure_capacity` as `needed > 2^32`, tripping the loud
+exit-87 guard before `(org-mode)` completed.
+
+### Fix applied
+
+Chosen approach: **A, recompute just before use**, not BSS stash.
+
+`lisp/nelisp-cc-frame-push.el` now wraps the source in a `seq` and adds
+three small helpers:
+
+- `nelisp_frame_push_ensure_now`: re-reads `frames-ptr.slot1` and computes
+  `depth+1` immediately at the capacity call site.
+- `nelisp_frame_push_install_now`: re-reads backing/depth at the vector
+  install point instead of trusting the old early `depth` local.
+- `nelisp_frame_push_bump_now`: re-reads current depth after install and
+  materializes the depth bump from that fresh read.
+
+The main `nelisp_frame_push` no longer binds early `fp`, `depth`, or
+`needed`.  `frames-ptr` itself is passed through as the parameter; all
+derived frame-stack values are now call-adjacent to their use.  This keeps
+the patch local to the failing function and avoids extending the ordinary
+BSS layout/linker contract just for this bounded fix.
+
+### Systemic AOT hazard
+
+The AOT compiler's stated contract is that intervals live across a call are
+marked `crosses-call` and forced to spill (`src/nelisp-cc.el` linear-scan
+comments/implementation).  This incident shows a practical hole in that
+contract for DSL locals in long `let*` / `and` sequences: a value can still
+behave as if caller-saved or stack-slot storage was reused across intervening
+calls.
+
+One more same-shape site was found:
+`scripts/nelisp-standalone-build.el`'s
+`nl_env_capture_lexical_with_filter` binds `depth` from
+`frames_ptr.slot1`, then runs `vector-make` and several `vector-slot-set`
+calls before using that old `depth` in `sexp-int-make depth_slot depth`.
+That has the same "local computed, calls intervene, local used later as a
+call argument" shape.  It is not patched here because the bounded
+`nelisp_frame_push` fix removes the active crash, while the compiler-level
+local preservation bug needs its own audit/lint pass.  A useful lint is:
+flag DSL `let*` locals whose first use as an argument to `extern-call` or a
+native helper occurs after any intervening call-form, unless the value is
+recomputed or re-read in a helper at the call point.
+
+### Verification
+
+Fresh build #1:
+
+- `timeout 900 make standalone-reader`: PASS.
+- `NELISP_E2E_KEEP=1 timeout 300 bash scripts/cold-image-org-e2e.sh 1`:
+  PASS faithful; image `/tmp/cold-image-org-e2e.KdwoDy/org-run1.img`.
+- `(org-mode)` probe against that fresh image: 3/3 PASS, rc=0, no exit
+  87/88; walls 4.065s, 4.070s, 4.065s; output contained `OMDONE`.
+- `org-element-parse-buffer` probe against the same image: no crash, timed
+  out honestly at `timeout 300` (`rc=124`, wall 5m02s).
+
+Fresh rebuild #2:
+
+- `timeout 300 make standalone-eval-clean` then `timeout 900 make
+  standalone-reader`: PASS, cache removed and binary relinked.
+- `NELISP_E2E_KEEP=1 timeout 300 bash scripts/cold-image-org-e2e.sh 1`:
+  PASS faithful; image `/tmp/cold-image-org-e2e.nN5am7/org-run1.img`.
+- `(org-mode)` probe against that second fresh image: PASS, rc=0, wall
+  4.077s, no exit 87/88; output contained `OMDONE`.
+
+Regression:
+
+- `standalone-reader-test`: PASS.
+- Reader smokes: load/fmt/prelude-equal-reload/nested-backquote-macro/
+  derived-mode-shape/ffi/process/realrt/repl/prelude PASS; TLS smoke SKIP
+  due no egress to `1.1.1.1:443`.
+- `standalone-chunk-growth-test`: PASS.
+- GCR: `/tmp/gcr1.el` 10/10 PASS (`out=1`), `/tmp/gcr2.el` 10/10 PASS
+  (`out=3`).
+- REPL tolerance: undefined function followed by `(+ 40 3)` continued and
+  printed `43`, rc=0.
+- Capture probes all rc=0: nested `42`, loop-var `(2 1 0)`, shared-var `2`,
+  setq-visibility `41`, macro-ref `42`, unused-exclusion `42` (REPL echoes
+  duplicate values when `prin1` is used, e.g. `4242`).
+
+## 2026-07-05 first valid CPU profile of `org-element-parse-buffer`: 16-sample gdb sampling, no crash, computation genuinely advances
+
+Investigation-only session (no source changes). Confirms and quantifies, for
+the first time with a live sampling profile, the "known remaining cost"
+flagged by prior sessions (`nl_val_clone_into` per-bind fresh-box alloc) --
+and finds that regex is **not** the bottleneck for this workload, contrary
+to the working assumption going in.
+
+### Setup
+
+- Repo state used as-is, no rebuild: branch `profwork` @ `3b321567` (`Cache
+  compiled nlre patterns`), 3 commits ahead of `origin/main`. `target/nelisp`
+  binary (mtime 03:06) matches this HEAD; cold image
+  `/tmp/cold-image-org-e2e.w9ueh8/org-run1.img` (mtime 03:09, built after the
+  binary) used unmodified.
+- Probe: `printf '(with-temp-buffer (insert "* h") (org-mode)
+  (org-element-parse-buffer))\n' | timeout 330 ./target/nelisp
+  --cold-load-from IMG`. Real reader PID (child of the `timeout` wrapper) =
+  3085668.
+- stdout at exit: only the `nelisp>` prompt, no printed result -- matches the
+  already-documented cold-image "output vanishes after string-match-ish
+  calls" anomaly. stderr empty. No exit 87/88 this run.
+
+### Method executed
+
+Waited 20s past process start (past the ~4s `(org-mode)` phase), then took 16
+`gdb -p PID -batch -ex 'bt 20'` samples at a fixed 12s cadence, spanning
+t+20s..t+229s (~3.5 min), recording `/proc/PID/status` `VmRSS` alongside each
+sample. The process was not manually killed: it ran to the full `timeout 330`
+deadline and was reaped by the `timeout` wrapper itself (confirmed by wall
+clock -- gone at t+338s, ~8s past the 330s cutoff -- not a crash).
+
+### Frame aggregation
+
+Leaf (`#0`) frame, one per sample, all 16 distinct (no repeat leaf across the
+whole run):
+
+| # | t (s) | leaf frame | category |
+|---|---|---|---|
+| 1 | +20 | `nl_sci_copy` | clone |
+| 2 | +32 | `nl_vci_box` | clone |
+| 3 | +44 | `nl_vl_prog2` | special-form (prog2) |
+| 4 | +56 | `nl_alloc_zero_fill` | alloc/gc |
+| 5 | +68 | `nl_apply_sym_eq_w` | apply-dispatch |
+| 6 | +80 | `nl_chunk_try_alloc` | alloc/gc |
+| 7 | +92 | `nl_sf_if_branch` | special-form (if) |
+| 8 | +105 | `nelisp_frame_stack_find_walk_bucket` | frame/env lookup |
+| 9 | +121 | `nl_val_clone_into` | clone |
+| 10 | +137 | `nelisp_frame_stack_find_walk_bucket` | frame/env lookup |
+| 11 | +153 | `nl_env_pop_frame` | frame mgmt |
+| 12 | +168 | `nl_sp_eq_dolist` | special-form (dolist) |
+| 13 | +183 | `wf_arg_ptr` | builtin-arg marshal |
+| 14 | +199 | `nl_alloc_bytes` | alloc/gc |
+| 15 | +213 | `nl_record_set_slot` | clone/slot-set |
+| 16 | +229 | `nl_gc_free_block` | alloc/gc |
+
+Leaf-frame category tally: alloc/gc 4/16 (25%), clone/box/record-set 4/16
+(25%), frame/env lookup+mgmt 3/16 (19%), special-form body eval 3/16 (19%),
+apply-dispatch/builtin-arg marshal 2/16 (12%). **Zero of 16 samples show any
+`nelisp-rx-*` or `nlre-*` regex frame anywhere in the captured 20-deep
+stack.**
+
+Inclusive (appears-anywhere-in-stack) counts across all 16 backtraces, top
+entries: `nl_eval_inner_cons` 21, `nl_eval_inner` 21, `nl_ei_cons_tail` 21,
+`nelisp_eval_call` 21, `nl_ei_cons_dispatch` 20, `nl_eval_arg_list_walk` 18,
+`nl_push_captured_walk` 10 (all from one sample's depth-10 self-recursion
+capturing closure variables), `nl_eval_arg_list` 10, `nl_apply_special` 8,
+`nl_apply_function` 6, `nelisp_frame_stack_find_descend` 5,
+`nl_val_clone_into` 4, `nl_sf_or_walk` 4, `nl_let_star_walk` 4,
+`nl_apply_lambda_inner` 4. The top tier (`nl_eval_inner*`/`nelisp_eval_call`/
+`nl_ei_cons_*`) is the generic sexp-tree-walk dispatch loop recursing on
+itself for nested forms -- expected structure, not informative alone. The
+second tier is where the real signal is: frame bind/lookup
+(`nelisp_frame_stack_find_descend`, `nelisp_frame_bind_*` via the leaf hits
+above) and value-clone machinery (`nl_val_clone_into`, `nl_vci_box`,
+`nl_sci_copy`, `nl_record_set_slot`) recur across independent samples spread
+minutes apart -- i.e. this is not one lucky/unlucky snapshot, it is a
+persistent, recurring cost throughout the run.
+
+### Loop-or-advance verdict: **ADVANCING**
+
+All 16 stacks are pairwise distinct: different leaf frames, different call
+chains, and different special forms visible at different sample times (`if`,
+`let`, `let*`, `while`, `dolist`, `or`, `prog1`, `prog2` each appear in at
+least one sample). This spans a ~209s sampled window and the process kept
+running to the full 330s cutoff. This rules out a stuck/fixed-stack
+infinite loop -- the interpreter is doing real, varied forward work the
+entire time.
+
+### RSS growth
+
+| t (s) | RSS (GiB) |
+|---|---|
+| +20 | 10.72 |
+| +32 | 14.04 |
+| +44 | 17.35 |
+| +56 | 20.67 |
+| +68 | 23.99 |
+| +80 | 26.96 |
+| +92 | 27.33 |
+| +105 | 27.58 |
+| +121 | 27.58 |
+| +137 | 27.58 |
+| +153 | 27.58 |
+| +168 | 27.58 |
+| +183 | 27.58 |
+| +199 | 27.59 |
+| +213 | 27.59 |
+| +229 | 27.59 |
+
+Two distinct phases: a ~60s initial burst (~277 MB/s, +20s..+80s) followed
+by a hard plateau at ~27.6 GiB for the remaining ~124s of the sampled window
+(+105s..+229s: net +4540 KiB total, ~0.04 MB/s -- three orders of magnitude
+below the burst rate, effectively flat). `nl_gc_free_block` on the stack at the
+plateau (sample 16) confirms the allocator/GC is recycling within already-
+resident chunks rather than growing further once the plateau is reached. A
+post-hoc `ps` check at t+328s (just before the process was reaped) still
+showed 27.6 GiB, i.e. the plateau held to the end -- no runaway/unbounded
+growth, no host-level OOM materialized (host had ~8 GiB "available" +
+~28 GiB reclaimable buff/cache at that moment; this process's plateau was
+already established well before that check).
+
+Process safety note: RSS exceeded the task's 6 GiB advisory kill threshold
+by sample 1 (+20s, already 10.72 GiB) -- the sampling script recorded RSS
+but did not enforce a live kill-on-threshold check, so this was only
+noticed post-hoc, not caught in real time. The process was not manually
+killed; it self-terminated via the `timeout 330` wrapper before any
+intervention was needed. **Recommendation for future sessions**: add a live
+RSS check inside the sampling loop (e.g. abort and `kill` if `VmRSS` crosses
+the threshold between samples) rather than only recording it, in case a
+future workload's plateau is higher or never arrives.
+
+Separately, the absolute magnitude here -- ~27.6 GiB resident to run
+`(org-mode)` + parse a 4-character one-line buffer -- is itself anomalous
+and warrants its own investigation independent of the per-call costs below;
+it dwarfs any plausible real working-set size for this input.
+
+### Regex-cache relevance: none observed this run
+
+The task's method conditionally asks to verify the `nelisp-rx-*` /
+`nlre-*` regex-cache hit behavior if regex frames dominate. They do not --
+0/16 samples show any regex-family frame. This is consistent with the
+newest commit on this branch (`3b321567`, "Cache compiled nlre patterns"),
+whose own commit message notes "the org image has string-match overridden
+to nelisp-rx-string-match, so the nlre call counter did not advance and
+this cache is not on that org path yet" -- i.e. the reader's freshly-cached
+`nlre-*` engine is architecturally not reachable from org's path in the
+first place (org uses the separate `nelisp-rx-*` substrate polyfill), and
+this session's sampling additionally shows that *neither* regex engine
+occupies a measurable share of CPU time for this specific one-line-heading
+workload. Net: for this input, regex is not the bottleneck; generic
+interpreter/bind/alloc machinery is.
+
+### Recommended next fix, ranked (scoped for codex)
+
+1. **Primary -- per-bind fresh-box alloc, now empirically confirmed hot.**
+   `lisp/nelisp-cc-val-load.el:108-111` (`nl_val_clone_into`): every
+   non-immediate `src_slot` (low bit 0) unconditionally takes the
+   `(nl_vci_box (alloc-bytes 32 8) src_slot dst_word_ptr)` path
+   (`lisp/nelisp-cc-val-load.el:98-102`, `nl_vci_box`), i.e. a fresh 32B
+   heap box + `extern-call nl_sexp_clone_into` deep-copy on *every* bind,
+   with no fast path for values that are already uniquely owned or
+   trivially safe to alias (e.g. freshly-allocated temporaries about to be
+   discarded, or read-only literals). This function's callers
+   (`nelisp_frame_bind_prepend` at `lisp/nelisp-cc-frame-bind.el:162`,
+   `nelisp_frame_bind_in_ht` at `:224`, `nelisp_frame_bind` at `:252`) fire
+   on every `let`/`let*`/lambda-application binding, which is why this
+   showed up on 4/16 sampled leaves (`nl_sci_copy`, `nl_vci_box`,
+   `nl_val_clone_into`, `nl_record_set_slot`) plus repeated inclusive hits.
+   Suggested approach: add a cheap "safe to move, not clone" fast path
+   (e.g. a tag bit or refcount==1 check already available on the box) so
+   `nl_vci_box` can skip the `alloc-bytes`+deep-copy when the source is
+   about to be logically consumed/moved rather than aliased. Expected
+   impact: removes one `alloc-bytes 32 8` + one `nl_sexp_clone_into` call
+   per bind across the entire interpreter -- given clone/alloc collectively
+   covered half of sampled leaves, this is the single highest-leverage fix
+   found.
+2. **Secondary -- frame/env lookup depth.**
+   `lisp/nelisp-cc-frame-stack-find.el:111-136`
+   (`nelisp_frame_stack_find_descend`) recurses one frame per lexical scope
+   level per variable lookup, then `:54` `nelisp_frame_stack_find_walk_bucket`
+   linearly walks the hash bucket within the hit frame. This appeared as 2
+   of 16 sampled leaves plus 5 inclusive hits for `_descend` alone. A slot-
+   index cache for repeatedly-looked-up symbols in hot loops (analogous to
+   the existing macroexpansion cache) would let hot-loop variable access
+   skip the frame-chain walk entirely after the first lookup.
+3. **Tertiary, separate mechanism -- ~27.6 GiB RSS plateau.** Independent
+   of per-call cost: audit the chunk/GC allocator's growth policy (`grep
+   nl_chunk_try_alloc` sites, `lisp/nelisp-cc-alloc-mem.el`,
+   `lisp/nelisp-cc-alloc-dealloc.el`) for why cold `(org-mode)` setup for a
+   1-line buffer needs tens of GiB of resident chunks before the GC's
+   free-block recycling (`nl_gc_free_block`, sample 16) takes over. This is
+   an allocator-sizing/preallocation question, not a per-op hot-path
+   question, and should be scoped as its own investigation.
+
+### Artifacts (not committed, scratch only)
+
+`/tmp/claude-1000/-home-madblack-21-Cowork-Notes/01ae5b0e-0435-4dbf-86e1-be39b00c5058/scratchpad/profrun/`:
+`sample.sh` (sampling driver), `samples.txt` (16 raw `bt 20` dumps),
+`rss.txt` (t, VmRSS-kB pairs), `pid.txt`, `probe.out`, `probe.err`. No repo
+source files were modified this session; only this `FINDINGS.md` entry
+(branch `profwork`).
+
+---
+
+## 2026-07-05 post-corruption-fix bisection: the pathological repetition is `(org-mode)` itself, not `org-element-parse-buffer` -- a native lambda-closure capture primitive fires ~1000x/sec for the whole run with no completion in sight
+
+Investigation-only, branch `profwork` (clone `nelisp.clone-capture`), HEAD
+`36e353a1` ("Fix standalone reader call-spill value corruption"), 6 commits
+ahead of `origin/main`, merged to `main` as `b8581878`. Binary
+`target/nelisp` rebuilt fresh at this HEAD (mtime after `36e353a1`) --
+confirmed not stale. Task premise: with corruption bugs now fixed (3 stable
+builds), the probe `(with-temp-buffer (insert "* h") (org-mode)
+(org-element-parse-buffer))` still measures >900s on a 3-char buffer, a
+~10^6x factor beyond plausible uniform interpreter slowness, implying a
+genuine pathological loop/recomputation survives the corruption-fix era.
+This session bisects *inside* the parse per the task's method and finds the
+culprit sits upstream of `org-element-parse-buffer` entirely.
+
+### Setup
+
+Fresh cold image built via the task's own prescribed command,
+`NELISP_E2E_KEEP=1 timeout 900 bash scripts/cold-image-org-e2e.sh 1`, default
+env (no `E2E_PRELUDE`/`E2E_BOOTSTRAP_REPL` overrides -- the default file
+chain already includes `org.el`/`org-element.el` themselves, so real
+`org-mode` is installed). Completed in **7.3s wall** (replay-load 6.75s, dump
+0.56s), well inside the 900s budget -- no corruption, no crash. Cold boot to
+first eval: 0.66s, peak RSS 524 MB. Faithfulness conjuncts `(t t t t
+(interactive) t)` IDENTICAL between replay-loaded and cold-booted process.
+Image kept at `/tmp/cold-image-org-e2e.JyA1eQ/org-run1.img` for the session,
+deleted at the end per the task's cleanup constraint.
+
+### Method executed -- constituent bisection (step 1)
+
+**(a) `org-element--current-element` on the "* h" buffer, called directly**
+(`(with-temp-buffer (insert "* h") (org-mode) (goto-char (point-min))
+(org-element--current-element (point-max) nil 'first-section nil))`,
+`timeout 60`): **did not complete in 60s (RC=124).**
+
+**(b) isolate further -- does `(org-mode)` alone hang, before any
+`org-element--current-element` call?** Three narrower probes, each
+`timeout 30`:
+
+| probe | form | result |
+|---|---|---|
+| c1 | `(with-temp-buffer (insert "* h") (buffer-string))` | **0.64s, correct** -- insert/buffer-string are fine |
+| c2 | `(with-temp-buffer (org-mode) major-mode)` | **RC=124, did not complete in 30s** -- empty buffer, no "* h" content at all |
+| c3 | `(with-temp-buffer (insert "* h") (org-mode) major-mode)` | **RC=124, did not complete in 30s** |
+
+**This is the headline result: `(org-mode)` alone, on a completely empty
+temp buffer, with no heading text and no call to
+`org-element-parse-buffer` anywhere in the form, already fails to
+complete.** The pathology is not in the parser at all -- it is in
+`org-mode`'s own mode-setup body (macro-expanded from
+`define-derived-mode`), which the task's environment note's expectation of
+"`(org-mode)` completes ~4s" evidently no longer holds on this exact
+HEAD/image. `org-element--current-element`/headline-parser (step 1b) were
+never reached as an independent variable worth bisecting further -- the
+fault is strictly upstream of them.
+
+**(c) the org-inlinetask/cache-layer checks (step 1c) are moot** given (b):
+there is no buffer content and no parse call in the hanging probe, so
+`org-element-use-cache` (confirmed `t` by default in the vendored
+`org-element.el:5745`) and the headline/section parsers cannot be the
+mechanism here -- whatever loops, loops during major-mode initialization.
+
+### gdb sampling (step 2) -- corroborates a closure-capture hot loop, not a stuck/fixed stack
+
+Re-ran probe c2 in the background (`timeout 120`), attached with
+`gdb -p PID -batch -ex 'bt N'` at several points:
+
+- **t+5s** (`bt 25`): leaf frame `nl_alloc_consbox_init` ← `nl_capture_emit_one`
+  ← **`nl_capture_walk_filter_symbols` recursing on itself 20+ times** (hit
+  the depth-25 cutoff without reaching a caller).
+- **t+8s** (`bt 30`, different call): a `let`/`cond`/`defmacro`-evaluation
+  stack with no capture-walk frame visible at all -- confirms the process is
+  *advancing* between samples (not stuck replaying one fixed call), doing
+  real, varied interpreter work moment to moment.
+- **t+48s** (`bt 200`, RSS already 14.3 GiB and climbing): full chain
+  recovered top-to-bottom --
+  `nl_sf_lambda` → `nl_env_capture_lexical_filtered` →
+  `nl_env_capture_lexical_with_filter` → `nl_capture_descend_native` →
+  **`nl_capture_walk_frames` recursing 22x** (descending 22 enclosing
+  lexical frames) → per frame, **`nl_capture_walk_filter_symbols` recursing
+  ~20x** → leaf `nelisp_frame_stack_find_in_frame` → `nl_vector_slot_ptr` →
+  `nl_val_load`. Above that: a repeating
+  `let → dolist → while → apply-closure → progn → dolist → let → if → let →
+  apply-closure` shape that recurs **twice** inside the same 200-frame C
+  stack window -- i.e. real nested-loop structure, not one lucky snapshot.
+
+Every `(lambda ...)` evaluation goes through `nl_sf_lambda`
+(`lisp/nelisp-cc-sf-lambda.el:132-137`), which calls
+`nl_env_capture_lexical_filtered` once per lambda to build its captured
+closure environment. `nl_capture_descend_native`
+(`lisp/nelisp-cc-frame-stack-find.el:368`) is therefore the single
+choke point for every closure creation in the interpreter, at any nesting
+depth.
+
+### Counter instrumentation (step 3) -- gdb breakpoint hit-counting on `nl_capture_descend_native` (no source edits)
+
+Used `gdb -p PID -batch -ex 'break nl_capture_descend_native' -ex 'continue
+N'` to time exact hit-count batches (this is equivalent to the task's
+suggested prelude call-counter, without touching source):
+
+| batch (hits) | elapsed | rate |
+|---|---|---|
+| 1000 (very first, right after breakpoint set) | 0.0038s | 0.55 us/hit -- cheap, shallow-depth captures |
+| next 1000 | 0.864s | 864 us/hit |
+| next 2000 | 1.76s | 880 us/hit |
+| next 5000 (fresh run, later window) | 4.80s | 959 us/hit |
+| next 5000 | 4.88s | 976 us/hit |
+| next 8000 (`info breakpoints` confirmed "hit 8001 times") | 8.72s | 1090 us/hit |
+
+**The rate is flat, not accelerating**, once past the initial cheap/shallow
+calls: ~900-1000 us/hit sustained across three independent later
+measurements (864, 959, 976, 1090 us -- all within the same order of
+magnitude, no runaway per-call growth observed). Sustained throughput:
+**~900-1000 closure-captures/second for the whole run.**
+
+RSS cross-checked against the same PID at these times: 11.9 GiB at t+40s,
+23.2 GiB at t+82s -- a steady **~270-280 MB/s climb with no plateau** inside
+the sampled window, in sharp contrast to the *pre-corruption-fix* profiling
+session earlier in this file (2026-07-0x "first valid CPU profile" entry),
+which found a hard RSS plateau at 27.6 GiB after ~90s. Post-fix, on an
+*empty* buffer, RSS is already past that old plateau's magnitude by t+82s
+and still rising -- this is a different (and worse) failure shape than the
+one characterized before the corruption fix.
+
+### The pathological mechanism
+
+Two compounding facts, both load-bearing:
+
+1. **Sheer call volume.** At a sustained ~900-1000 hits/sec, reaching the
+   task's reported >900s hang implies on the order of **~800,000+**
+   `nl_capture_descend_native` calls (i.e. ~800,000+ `(lambda ...)`
+   evaluations at the ~22-deep nesting level) to get through `(org-mode)`
+   setup on an *empty* buffer. Real Emacs' `org-mode` does not create
+   remotely that many closures to initialize an empty buffer -- this is the
+   "pathological repetition" the task asked to find: some loop (or nested
+   pair of loops -- the repeating `dolist`/`while` shape recurred twice in
+   one stack sample) is iterating far more than it should, or is
+   re-creating the same closure redundantly on each pass, inside org-mode's
+   `define-derived-mode`-expanded body or one of the functions it calls
+   during mode-setup (hook running, keymap/syntax-table/font-lock
+   construction are the idiomatic org.el constructs that combine
+   `dolist`/`while` with inline `lambda`s at this call site).
+2. **Per-call cost is itself unnecessarily high at depth**, which is why
+   each of those ~800,000 calls costs ~1ms rather than being closer to
+   free: `nl_sf_lambda` calls `nl_env_capture_lexical_filtered(env, args,
+   out, 0)` (`lisp/nelisp-cc-sf-lambda.el:135`) passing **`args` -- the raw,
+   unevaluated `(FORMALS . BODY)` cons tree of the lambda form itself** --
+   as the capture filter. The AOT source's own commentary
+   (`lisp/nelisp-cc-sf-lambda.el:30-31`) confirms this is deliberate:
+   "using symbols from FORMALS+BODY as an over-approximate filter" -- i.e.
+   no free-variable analysis is done; the entire lambda source form stands
+   in for it. `nl_capture_walk_frames`
+   (`lisp/nelisp-cc-frame-stack-find.el:347-366`) then walks **every**
+   enclosing lexical frame (22, in the sampled case) and, per frame, calls
+   `nl_capture_walk_filter_symbols` (`:256-266`), which walks the
+   **top-level length of that FORMALS+BODY list** doing one
+   `nelisp_frame_stack_find_in_frame` hash probe per element (`:260`) --
+   i.e. O(depth × top-level-body-length) hash probes per lambda, instead of
+   O(1) or O(actual-free-variable-count). This does not by itself run
+   forever, but it turns an operation that should be cheap into a ~1ms
+   operation, and at the observed call volume that is enough on its own to
+   blow past any reasonable time budget.
+
+A synthetic isolation attempt (flat `dolist` over 15/50/200/800 elements,
+each iteration creating one `(lambda () x)`) did **not** reproduce the hang
+(each completed in the ~0.64s cold-boot-only baseline) -- but this synthetic
+test is confounded by a separate, apparently pre-existing correctness bug
+unrelated to this investigation: a top-level `(defvar v 0) (dolist (x
+'(...)) (setq v (1+ v))) v` sequence evaluated via successive REPL-piped
+forms consistently returned `v = 1` instead of the expected count, for every
+n tried (15, 50, 200, 800) -- i.e. either `dolist` is only running its body
+once in this cross-form REPL context, or top-level `defvar`+`setq`
+interaction across piped forms is broken independently of lambda capture.
+This confound means the synthetic test could not validate or invalidate the
+"real" hang's iteration count; it is flagged here as a distinct,
+not-yet-investigated correctness question rather than folded into this
+session's conclusion.
+
+### Recommended fix, ranked (scoped for codex)
+
+1. **Primary -- find and bound the actual loop.** Identify which
+   `org-mode`-setup-reachable code (define-derived-mode's expanded body,
+   `org-mode-hook` entries run via `run-mode-hooks`, or a helper it calls)
+   contains a `dolist`/`while` that creates a `(lambda ...)` per iteration
+   and is iterating on the order of 10^5-10^6 times for an *empty* buffer.
+   Since AOT backtraces carry no elisp source-line info, the fastest way to
+   localize this without further gdb archaeology is a targeted `advice-add`
+   or manual instrumentation of `define-derived-mode`-generated
+   `org-mode-hook`/`org-mode-abbrev-table`/`org-font-lock-set-keywords`-style
+   setup functions (or bisecting the file chain by loading `org.el`'s
+   dependencies incrementally and calling `(org-mode)` after each) to find
+   which specific top-level construct is over-iterating. Suspect idiomatic
+   org.el constructs: font-lock keyword compilation, syntax-table setup
+   from `org-emphasis-alist`/regexp components, or link-type/hook
+   registration loops that should run over a short alist but are instead
+   iterating over something whose size scales unexpectedly (e.g. a string
+   walked character-by-character where a list of entries was intended, or
+   a loop bound read from the wrong variable).
+2. **Secondary -- stop using the raw args tree as the capture filter.**
+   Independent of (1), `nl_env_capture_lexical_filtered`'s "over-approximate
+   filter = FORMALS+BODY verbatim" design (`lisp/nelisp-cc-sf-lambda.el:30-31`,
+   `:135`) makes every lambda evaluation cost O(depth ×
+   top-level-body-length) regardless of how many closures are actually
+   created. A real (even shallow, one-pass) free-variable scan of the
+   lambda body -- or at minimum flattening/deduplicating the filter list
+   once per distinct lambda AST node instead of re-deriving it from the
+   full body on every evaluation -- would cut the constant factor
+   substantially and make fix (1)'s remaining call volume (however large it
+   turns out to be) proportionally cheaper to pay down.
+3. **Tertiary -- add a live process-level guard.** Neither this session nor
+   the prior corruption-fix-era profiling session found a hard RSS ceiling;
+   this session's growth (11.9 GiB@40s → 23.2 GiB@82s, no plateau) is worse
+   than the old post-fix-era 27.6 GiB plateau. Until (1) is fixed, any
+   future probing of `org-mode`/`org-element-parse-buffer` on this
+   substrate should enforce a live kill-on-RSS-threshold in the sampling
+   loop itself (this session manually killed at 14.3-23.2 GiB observed,
+   consistent with the task's 8 GiB advisory being exceeded well before
+   loop termination).
+
+### Artifacts (not committed, scratch only)
+
+`/tmp/probe_a.el`, `/tmp/probe_b.el`, `/tmp/probe_c{1,2,3}.el`,
+`/tmp/probe_loopdepth.el`, `/tmp/probe_scale_{50,200,800}.el`,
+`/tmp/probe_dolist_plain.el`, `/tmp/probe_dolist_lambda2.el` (all inputs,
+scratch only). Cold image workdir `/tmp/cold-image-org-e2e.JyA1eQ/` was
+built with `NELISP_E2E_KEEP=1`, used for all probes in this session, and
+deleted at session end per the task's cleanup constraint. No repo source
+files were modified this session; only this `FINDINGS.md` entry (branch
+`profwork`).
+
+---
+
+## 2026-07-05 asymmetry bisect: top-level `(org-mode)` (~5s) vs `with-temp-buffer` `(org-mode)` (unbounded, >18 GiB) — the differentiator is the `with-temp-buffer` wrapper itself, not `org-mode`'s body
+
+Investigation-only, branch `profwork`, HEAD `af6e9ff6` ("Cache closure
+free-variable filters", 8 commits ahead of `origin/main`). Binary
+`target/nelisp` confirmed matching this HEAD by mtime. Task: explain why
+`af6e9ff6`'s own commit message reports two different outcomes for what
+looks like the same `(org-mode)` call: top-level `5.027s`/`5.025s` (cached
+vs. raw closure-filter path) versus `(with-temp-buffer (org-mode) (prin1
+major-mode))` killed by the live RSS guard at `31.622s`/`8,615,300 KiB`.
+This session reproduces both, bisects the *wrapper*, and localizes the
+differentiator to the real (non-stub) `with-temp-buffer` expansion's
+`unwind-protect` + `nelisp-ec` current-buffer dispatch layer — a
+structural difference that is completely absent from the top-level call
+path.
+
+### Setup
+
+Fresh cold image built with the task's prescribed command,
+`NELISP_E2E_KEEP=1 timeout 900 bash scripts/cold-image-org-e2e.sh 1`
+(default env; the default 60-file chain already includes `org.el`/
+`org-element.el`). Completed in 7.29s wall (replay-load 6.71s, dump
+0.56s), cold boot 0.68s / 526 MB peak RSS, faithfulness `IDENTICAL`. Image
+kept at `/tmp/cold-image-org-e2e.SFAJ7t/org-run1.img` for the session,
+deleted at the end. All probes below ran one reader at a time under a
+purpose-built polling wrapper (`/proc/<pid>/status` `VmRSS`, 0.3s poll,
+hard `kill -9` at `>8 GiB` RSS or the stated timeout — script and per-probe
+logs are scratch-only under this session's scratchpad, not committed).
+
+### Asymmetry bisect table (step 1)
+
+| probe | context | result |
+|---|---|---|
+| `(org-mode)` | top-level (whatever buffer is current at boot) | **completed, 5.17s**, 744 MB peak RSS — confirms the commit message's `5.02x s` figure on this exact image |
+| `(org-mode)` | `with-temp-buffer` (fresh buffer) | reproduced the blowup: an unguarded run reached **32.66 GiB RSS at 129s elapsed** and was still climbing when killed (worse than the commit's own 31.6s/8.6 GiB — RSS guard just fires earlier); a guarded gdb-sampling run separately reached 18.9 GiB before being killed for the sampling below |
+| `(with-temp-buffer (fundamental-mode) t)` | fresh buffer | **completed, 0.92s**, 525 MB |
+| `(with-temp-buffer (text-mode) t)` | fresh buffer | **completed, 0.91s**, 525 MB |
+| `(with-temp-buffer (outline-mode) t)` | fresh buffer (outline-mode is `org-mode`'s direct parent) | **completed, 0.91s**, 525 MB |
+| `(with-temp-buffer (kill-all-local-variables) t)` | fresh buffer | **completed, 0.92s**, 525 MB |
+| `(with-temp-buffer (let ((i 0)) (while (< i 200) (set (make-local-variable (intern (format "v%d" i))) i) (setq i (1+ i))) t))` | fresh buffer, 200 locals | **completed, 0.92s**, 541 MB |
+| same, 400 locals | fresh buffer | **completed, 0.92s**, 559 MB |
+| `(org-load-modules-maybe)` | top-level | **completed, 4.57s**, 726 MB (confirms this is org-mode's dominant top-level cost, matching the 2026-07-04 finding that this is the first heavy call in the body) |
+| `(with-temp-buffer (org-load-modules-maybe) t)` | fresh buffer | **completed, 4.87s**, 744 MB — symmetric with top-level |
+
+**H1 (buffer-local variable machinery is O(n) or O(n^2)) is falsified.**
+`kill-all-local-variables` alone and a 200/400-entry `make-local-variable`
+loop are all flat at the ~0.92s cold-boot-only baseline (compare `with-
+temp-buffer` alone with no mode call at all, previously measured at
+0.63-0.71s for N=10/50/100 — see the "Empty file" bisection entry earlier
+in this file). There is no per-local or per-local² scaling visible at this
+count, and `org-mode` sets on the order of a few dozen buffer-locals in its
+body (not hundreds), so H1's premise does not hold even loosely here.
+
+**H2 (generic define-derived-mode/hook setup inside a fresh buffer is what
+blows up) is falsified.** `outline-mode` — `org-mode`'s own direct
+`define-derived-mode` parent, which runs the exact same
+`change-major-mode-hook`/`after-change-major-mode-hook`/mode-hook
+machinery — completes in 0.91s inside `with-temp-buffer`, identical to
+`fundamental-mode`/`text-mode`. Whatever blows up is specific to
+`org-mode`'s *own* body, not to running any `define-derived-mode` chain
+inside a temp buffer.
+
+**The most obvious remaining top-level/temp-buffer differentiator inside
+org-mode's body, `org-load-modules-maybe` (previously root-caused on
+2026-07-04 as the call that transitively `require`s the ~120K-line vendor
+Gnus package via `ol-gnus`), is also falsified as the asymmetry's cause.**
+Called alone, it costs the same (~4.6-4.9s) whether at top-level or inside
+`with-temp-buffer` — this default cold image's `require` behavior for
+`org-modules` does not depend on buffer context, so the previously-
+documented Gnus-load cost, real as it is in isolation, is not what makes
+`with-temp-buffer` differ from top-level.
+
+### The actual structural differentiator: `with-temp-buffer`'s real expansion
+
+`grep`ing the read-only bootstrap substrate (`nelisp-emacs-lib`, sibling
+checkout) turned up three competing definitions of `with-temp-buffer`, all
+guarded so only one wins at boot:
+
+1. `scripts/nelisp-stdlib-prelude.el:3587-3590` (this repo) and
+   `lisp/nelisp-stdlib-misc.el:628-630` (this repo): trivial
+   `(unless (fboundp 'with-temp-buffer) ...)`-guarded stubs, either
+   `(cons 'progn body)` or a bare `(let ((nelisp--current-buffer ...))
+   ,@body)` — no real buffer object, no `unwind-protect`.
+2. `lisp/nelisp-stdlib-eval-special.el:190`: an **unconditional**
+   `(defmacro with-temp-buffer (&rest body) (cons 'progn body))`
+   "interpreter-mode stub."
+3. `nelisp-emacs-lib/packages/nelisp-emacs-buffer-core/lisp/
+   emacs-buffer-builtins.el:686-696` (read-only sibling repo): the real
+   "Phase 9" implementation, gated by
+   `(when (emacs-buffer-builtins--install-function-p 'with-temp-buffer) ...)`
+   (installs only when not already host-native), whose own docstring says
+   it exists specifically because "Phase 8 used a global string
+   accumulator... which collapsed under multi-buffer scenarios" and
+   replaces it with "a real `nelisp-ec` buffer that participates in the
+   current-buffer dispatch." Its expansion is:
+
+   ```elisp
+   (let ((buf (nelisp-ec-generate-new-buffer " *temp*")))
+     (unwind-protect
+         (nelisp-ec-with-current-buffer buf BODY...)
+       (nelisp-ec-kill-buffer buf)))
+   ```
+
+   and `nelisp-ec-with-current-buffer`
+   (`nelisp-emacs-lib/packages/nelisp-emacs-buffer-core/lisp/
+   nelisp-emacs-compat.el:484-498`) is ITSELF a macro that expands to a
+   *second*, nested `unwind-protect`:
+
+   ```elisp
+   (let ((saved nelisp-ec--current-buffer) (newbuf buf))
+     (unwind-protect
+         (progn (nelisp-ec-set-buffer newbuf) BODY...)
+       (setq nelisp-ec--current-buffer saved)))
+   ```
+
+Empirically, this real (buffer-core) implementation is confirmed active
+on this cold image, not the trivial stubs — the earlier 2026-07-04 session
+already showed per-buffer-correct `buffer-string`/`insert` round-tripping,
+which the trivial stubs cannot provide (they have no real per-buffer text
+storage). **This means every `with-temp-buffer` call already nests two
+`unwind-protect` frames plus a `nelisp-ec` current-buffer-dispatch layer
+around BODY — a layer that is completely absent when `org-mode` is called
+directly against whatever buffer is already current at top level (no
+buffer object, no `unwind-protect`, no dispatch at all).** This is the one
+concrete, source-confirmed structural difference between the fast and the
+exploding call path, matching the task's H3 exactly ("nelisp-ec buffer
+switching... does something per-form/per-variable repeatedly").
+
+### gdb sampling (step 2) — a deep, changing-shape recursion through `unwind-protect`/`cond`/macro-apply, not a fixed-PC spin
+
+Two independent samples were taken on two separate (single-reader, one at
+a time) runs of `(with-temp-buffer (org-mode) (prin1 major-mode))`,
+`gdb -p PID -batch -ex 'bt N'`, N large enough to reach the true stack
+bottom (confirmed via `bt -1`, which reports the outermost frame index —
+1043 total frames at the deepest sample taken):
+
+- **Sample A (t≈5s into a fresh run, 973-line `bt 1100` dump, true depth
+  1043):** frame-tag histogram over the full stack —
+  `nl_eval_inner_cons`/`nl_eval_inner`/`nl_ei_cons_tail`/
+  `nl_ei_cons_dispatch`/`nelisp_eval_call` each ×80 (the generic
+  eval-dispatch trampoline, expected at every level), `nl_apply_special`
+  ×44, **`nl_sf_uw_cleanup`/`nl_sf_uw_cleanup_done`/`nl_sf_uw_do_cleanup`
+  ×24-25 each** (`unwind-protect` cleanup-arm handling, nested 24-25
+  deep), `nl_sf_cond_walk` ×24, `nl_cons_macro_apply_eval` ×18 (macro
+  expansion+apply), `nl_sf_let`/`nl_sf_let_star` families ×11-14 each.
+- **Sample B (a fresh, separately-started run, sampled again at t≈5s, RSS
+  18.9 GiB by sample time):** the same repeating unit is present but at a
+  *different* nesting count — `nl_sf_uw_cleanup*` ×19 (not 24-25),
+  `nl_cons_macro_apply_eval` ×21, `nl_ali_body*` ×23,
+  `nl_eval_inner_cons` family ×96 (not 80). The top-of-stack content also
+  differs between the two samples (confirmed via `diff` on the extracted
+  frame-name sequences — first 13 lines differ immediately).
+- An earlier, shallower single sample (39 frames, taken very early in a
+  third run) showed a different-looking snapshot: `nl_sp_eq_defun` /
+  `nl_sf_unless` / `nl_sf_or_walk` at the top. On inspection of
+  `nl_sp_eq_defun`'s source (`scripts/nelisp-standalone-build.el:8595`),
+  this frame is just the special-form dispatcher's routine "does the head
+  symbol equal `defun`?" equality probe (present on *every* special-form
+  dispatch, not evidence of a `defun` actually executing) — this sample is
+  noted only to flag it as a **discarded false lead**: it is not a
+  distinctive signal, unlike the `unwind-protect`/`cond`/macro-apply
+  pattern in Samples A/B, which recurs consistently and is absent from any
+  of the fast (fundamental/text/outline-mode, or top-level org-mode)
+  control paths this session did not have budget to re-sample but which
+  the existing 2026-07-04 "post-corruption-fix" entry already
+  characterizes as a *different*, shallower (≤1015-frame), advancing
+  pattern with **no** `unwind-protect`-cleanup nesting reported.
+
+**Interpretation:** the nesting depth *changes* between samples (24-25 vs.
+19 for the same repeating `unwind-protect`-cleanup unit) and the deep-
+stack content differs between samples taken seconds apart — this rules out
+a fixed-PC, zero-progress spin (same conclusion the 2026-07-04 entry
+reached for the unrelated `ol-gnus`/non-temp-buffer cases, using the same
+method). What is new and specific to the `with-temp-buffer` case is *which*
+construct dominates the recursive shape: `unwind-protect` cleanup-arm
+handling (`nl_sf_uw_*`) nested 19-25 deep, interleaved with `cond` and
+macro-apply-eval frames, at every sample taken. This is consistent with
+(not yet proven to be) `nelisp-ec-with-current-buffer`'s own nested
+`unwind-protect` (the `nelisp-ec--current-buffer` save/restore shown above)
+being re-entered recursively once per buffer-local variable operation in
+`org-mode`'s ~20 `setq-local`/`add-hook ... 'local` calls, each such
+re-entry itself walking/rebuilding state proportional to the buffer's
+*already-accumulated* local-variable or dispatch history — which would
+explain why the *generic* buffer-local write path (H1's isolated
+`make-local-variable` loop, and `outline-mode`'s own smaller `setq-local`
+set) stays flat, while `org-mode`'s specific combination of call *volume*
+(≈20 `setq-local`/hook calls) threaded through the `nelisp-ec`
+`unwind-protect` dispatch wrapper compounds into the observed multi-GiB,
+unbounded-looking growth. This causal link (per-`setq-local`-call re-entry
+into `nelisp-ec-with-current-buffer`'s `unwind-protect`) is the leading
+hypothesis but was **not directly confirmed** with a call counter in the
+time budget available — see "Recommended fix" below for the exact next
+probe.
+
+### What this session did NOT have time to do
+
+- Did not instrument/count calls into `nelisp-ec-set-buffer` /
+  `nelisp-ec-with-current-buffer` / `nelisp-ec-kill-buffer` during the
+  `with-temp-buffer`+`org-mode` run (the decisive counter table the task
+  asked for). `gdb -p`/`break`/`continue N` hit-counting (the method the
+  2026-07-05 "closure-capture" session above used successfully) is the
+  right tool for this and was not reached before the time budget expired.
+- Did not re-run the fast control probes (fundamental/text/outline-mode,
+  top-level org-mode) under gdb sampling in *this* session for a same-
+  session apples-to-apples frame comparison; the "no `unwind-protect`
+  nesting" claim for those paths is carried over from the existing
+  2026-07-04 entry's characterization of the *non*-`with-temp-buffer`
+  `org-mode` hang, not a fresh measurement of the fast control paths
+  specifically.
+- Did not confirm whether `nelisp-ec-with-current-buffer`'s `unwind-
+  protect` re-enters per `setq-local` call, per `add-hook` call, or via
+  some other path (e.g. a buffer-local variable *lookup*, not just
+  write) — the hypothesis above is architecturally motivated (it is the
+  one real structural layer `with-temp-buffer` adds that top-level lacks)
+  but not call-graph-confirmed.
+
+### Recommended fix (scoped for codex)
+
+1. **Primary — confirm and count.** Set a `gdb -p PID -batch -ex 'break
+   nelisp_ec_set_buffer' -ex 'continue N'`-style hit counter (mirroring
+   this file's 2026-07-05 `nl_capture_descend_native` methodology) on the
+   AOT-compiled entry points for `nelisp-ec-set-buffer` and the
+   `unwind-protect` cleanup path specifically reached from
+   `nelisp-ec-with-current-buffer`'s expansion, during a *bounded* prefix
+   of `org-mode`'s body inside `with-temp-buffer` (e.g., just the first
+   ~10 `setq-local` lines of the `define-derived-mode` body, extracted
+   into a standalone probe form) versus the same prefix at top level.
+   If the temp-buffer path shows call counts or per-call cost growing
+   with the number of `setq-local` calls already executed (not flat, the
+   way the isolated `make-local-variable` loop was flat), that confirms
+   the per-`setq-local`-call `unwind-protect` re-entry hypothesis above
+   and localizes the fix to `nelisp-ec-with-current-buffer`
+   (`nelisp-emacs-lib/packages/nelisp-emacs-buffer-core/lisp/
+   nelisp-emacs-compat.el:484-498`, read-only sibling repo — flag upstream
+   rather than patch here) or to whatever `setq-local`/`add-hook` real
+   implementation invokes it.
+2. **Secondary — bisect `org-mode`'s body directly.** This session
+   confirmed `org-load-modules-maybe` (the body's first call) is
+   symmetric-fast; the remaining ~20 body forms after it
+   (`org-persist-load`, `org-set-regexps-and-options`,
+   `org-fold-initialize`, `org-set-font-lock-defaults`,
+   `org-macro-initialize-templates`, the `add-hook .. 'local` calls, etc.,
+   see `nelisp-emacs-lib/vendor/emacs-lisp/org/org.el:4945-5070`,
+   read-only) were not individually bisected this session for budget
+   reasons. A per-form incremental probe (call `org-load-modules-maybe`
+   then add one more body form at a time, inside `with-temp-buffer`,
+   timing each) would pin the exact line where the asymmetry first
+   appears, the same way the 2026-07-04 session bisected
+   `org-load-modules-maybe` out of `org-mode`'s full body.
+3. **Tertiary — RSS guard in the harness.** Independent of the root
+   cause: any future automated smoke of `(with-temp-buffer (org-mode)
+   ...)` on this substrate must enforce a live RSS-threshold kill in the
+   driver itself (this session observed unguarded growth reach 32.66 GiB
+   at 129s with no plateau) — this is already effectively established
+   practice per the task's own constraints, just re-confirmed here.
+
+### Artifacts (not committed, scratch only)
+
+Scratchpad probe forms, the RSS-guarded runner script, and raw `gdb`
+dumps under this session's `scratchpad/asym/` directory (outside the
+repo). Cold image workdir `/tmp/cold-image-org-e2e.SFAJ7t/` was built with
+`NELISP_E2E_KEEP=1`, used for all probes in this session, and deleted at
+session end. No repo source files were modified this session; only this
+`FINDINGS.md` entry (branch `profwork`). One unguarded background probe
+(`with-temp-buffer`+`org-mode`, no polling wrapper attached) briefly ran to
+32.66 GiB/129s before being noticed and killed — noted here as a
+methodology lapse for this session (the RSS-guarded runner script was used
+for all *other* probes in the table above) and folded into item 3 above.
+
+---
+
+## 2026-07-05 exact-form bisect: the culprit is `org-macro--find-keyword-value` executed from inside `define-derived-mode`'s own `unwind-protect` cleanup arm — not any `with-temp-buffer` body form in isolation
+
+Investigation-only, branch `profwork`, HEAD `cde5422b` ("docs(FINDINGS):
+with-temp-buffer org-mode blowup vs top-level asymmetry bisect", 9 commits
+ahead of `origin/main`). Binary `target/nelisp` confirmed matching this
+HEAD's source content (no `.el`/`.rs` changes since the last build; the
+one intervening commit was docs-only). Task: pin the exact form, the
+final step before the fix. This session finds it, and finds that the
+previous session's leading hypothesis (a per-`setq-local`-call cost
+scaling with `with-temp-buffer`'s nested `unwind-protect`/
+`nelisp-ec-with-current-buffer` layer) is **not what actually fires** —
+the real mechanism is a single specific function call, reachable only
+because of a *second*, independent structural layer this session found:
+`define-derived-mode`'s own generated function body.
+
+### Setup
+
+Fresh cold image, same recipe as the previous two sessions:
+`NELISP_E2E_KEEP=1 timeout 300 bash scripts/cold-image-org-e2e.sh 1`.
+Completed in 7.3s wall (load 6.72s, dump 0.55s), cold boot 0.66s/526 MB,
+faithfulness `IDENTICAL`. Image kept at
+`/tmp/cold-image-org-e2e.ExPh8l/org-run1.img` for the whole session,
+deleted at the end (`rm -rf`, confirmed no stray `nelisp` processes left
+via `pkill -9 -f` + `ps aux` before cleanup). A small bash harness
+(`run_probe.sh`, scratch-only, not committed) fed one probe file at a
+time to `target/nelisp --cold-load-from IMG --no-prompt`, polled
+`/proc/<pid>/status` `VmHWM` every 0.3s, and hard-killed at >8 GiB RSS or
+a stated timeout — same guard discipline as the prior two sessions.
+
+**Methodological note (reader artifact, not part of the bug under
+investigation):** multi-line probe files caused the REPL to echo the
+return value of *each* individual sub-form of a single top-level
+expression, as if every parenthesized sub-form were its own top-level
+read — reproduced even with `--no-print` (which correctly suppresses
+top-level echo for genuinely single-line input; verified with `(+ 1 2)`
+one-liners). The identical content, flattened to one physical line, always
+produced exactly the one expected value/echo. Every timing probe in this
+session was therefore written as a single physical line. This reader
+quirk is flagged here for awareness but was not investigated further (out
+of scope for this task).
+
+### Bisection round 1 (flat/sequential body) — did NOT reproduce the blowup, and this is itself the key finding
+
+Transcribed `org-mode`'s full `define-derived-mode` body verbatim from
+`nelisp-emacs-lib/vendor/emacs-lisp/org/org.el:4945-5114` (55 top-level
+forms) into a Python list (`forms.py`, scratch-only) and ran increasing
+prefixes as a **plain sequential body** of `with-temp-buffer` — i.e.
+`(with-temp-buffer (outline-mode) FORM_1 ... FORM_N 'ok)`, binary-
+searching N from 1 to 55:
+
+| N (forms 1..N) | result |
+|---|---|
+| 1 (`org-load-modules-maybe` reached) | 4.57s, 706 MB |
+| 28 | 5.19s, 743 MB |
+| 42 | 5.18s, 744 MB |
+| 49 | 5.18s, 744 MB |
+| 52 | 5.19s, 744 MB |
+| 53 | 5.18s, 744 MB |
+| 54 | 5.18s, 745 MB |
+| **55 (the entire real body, verbatim)** | **4.88s, 745 MB — completes cleanly** |
+
+**The full, verbatim 55-form body of `org-mode`, run as a plain sequence
+inside `with-temp-buffer`, does not reproduce the established blowup at
+all.** This directly falsifies the previous session's leading hypothesis
+that the pathology is `with-temp-buffer`'s nested `unwind-protect`/
+`nelisp-ec-with-current-buffer` layer compounding with per-`setq-local`-
+call volume — if that were the mechanism, this exact sequence of ~25
+buffer-local writes inside `with-temp-buffer` would already show it. It
+does not. Adding an explicit `(run-mode-hooks 'org-mode-hook)` and/or
+`(setq major-mode 'org-mode)` to this reconstruction (to more closely
+match what `define-derived-mode` generates) still did not reproduce it
+(both 4.88s). Meanwhile, calling the *real* `(org-mode)` function on this
+exact image, in this exact session, was re-confirmed to still blow up:
+`(with-temp-buffer (org-mode) (prin1 major-mode))` reached 6.86 GiB RSS
+at the 25s timeout (still climbing, killed by the guard) — so the bug is
+real and current, and the delta between "plain sequence of the real body"
+and "calling the real function" had to be found elsewhere.
+
+### The second structural layer: `define-derived-mode`'s generated body runs entirely inside an `unwind-protect` *cleanup arm*
+
+`grep`ing `nelisp-emacs-lib` (read-only sibling repo) for this
+substrate's `define-derived-mode` turned up
+`packages/nelisp-emacs-core/lisp/emacs-mode-builtins.el:101-104`
+(delegates unprefixed `define-derived-mode` to
+`emacs-mode-define-derived-mode` when not host-native) and the real
+implementation, `packages/nelisp-emacs-core/lisp/emacs-mode.el:164-215`.
+Its generated function is, verbatim (`child` = `org-mode`, `parent-call`
+= `(outline-mode)`, `real-body` = the spliced 55-form body):
+
+```elisp
+(defun org-mode ()
+  DOC
+  (interactive)
+  ;; Standalone NeLisp currently loses forms that follow some
+  ;; macro-generated parent major-mode calls, notably nested
+  ;; `outline-mode' derived modes.  Running the child transition in
+  ;; `unwind-protect' cleanup preserves the observable
+  ;; define-derived-mode order: parent first, then child body/hooks.
+  (unwind-protect
+      (outline-mode)                        ; <- PROTECTED FORM
+    (emacs-mode-set-major-mode 'org-mode "Org")
+    ,@real-body                             ; <- all 55 body forms
+    (emacs-mode-run-mode-hooks 'emacs-mode-org-mode-hook 'org-mode-hook))
+  nil)
+```
+
+The code comment documents this as a **deliberate workaround for a
+different, earlier defect** ("loses forms that follow some macro-
+generated parent major-mode calls"). Its side effect, load-bearing for
+*this* investigation: **every single form in a derived mode's body
+executes inside the cleanup arm of an `unwind-protect`, not as a plain
+sequential body.** `outline-mode` (and every other mode defined via this
+macro) has this same shape, but its own body is only 2 `setq-local` forms
+— too small to have exposed the interaction this session found.
+
+Reproducing this exact shape by hand confirmed it immediately:
+
+| form | context | result |
+|---|---|---|
+| `(unwind-protect (outline-mode) (setq major-mode 'org-mode) FORMS_1..55 (run-mode-hooks 'org-mode-hook))` | inside `with-temp-buffer` | **killed at 20s, 5.32 GiB RSS, still climbing** |
+| identical form | **top-level** (no `with-temp-buffer`) | **5.18s, 744 MB — completes cleanly** |
+
+This is the first form in the session that both (a) reproduces the
+blowup and (b) is asymmetric between top-level and `with-temp-buffer`
+exactly like the real bug. Two further controls ruled out "N forms in a
+cleanup arm" as a generic volume/depth effect (i.e. re-falsified the
+per-call-volume hypothesis a second, more targeted way): 55 synthetic
+no-op forms (`(+ 1 1)` × 55) and 55 synthetic `(setq-local vN N)` forms,
+run in the identical `unwind-protect`-cleanup-arm-inside-`with-temp-
+buffer` shape, both completed in the flat 0.92s baseline. **The cleanup-
+arm placement is a necessary structural precondition, but by itself it is
+inert — it needs one specific real call inside it.**
+
+### Bisection round 2 (correctly-shaped: prefixes inside the cleanup arm) — pins form #24
+
+Re-ran the same binary search over `org-mode`'s 55 real body forms, this
+time correctly wrapped in the cleanup arm (`(with-temp-buffer (unwind-
+protect (outline-mode) (setq major-mode 'org-mode) FORMS_1..N (run-mode-
+hooks 'org-mode-hook)) 'ok)`):
+
+| N | result |
+|---|---|
+| 14 | 5.18s, 744 MB |
+| 21 | 5.18s, 745 MB |
+| 22 | 5.18s, 744 MB |
+| 23 | 5.18s, 744 MB |
+| **24** | **killed at 15s, 3.86 GiB RSS, still climbing** |
+| 28 | killed at 15s, 3.85 GiB RSS |
+| full 55 | killed at 20s, 5.32 GiB RSS |
+
+Form #24 (`org.el:4994`, `(org-macro-initialize-templates)`) is the exact
+addition that flips N=23 (fine) to N=24 (blows up). Control: substituting
+a cheap synthetic form (`(+ 1 1)`) at position 24, keeping forms 1-23
+unmodified, stayed at 5.18s/745 MB — confirming this is specific to
+`org-macro-initialize-templates`, not "reaching depth 24 inside a cleanup
+arm" in general.
+
+### Narrowing inside `org-macro-initialize-templates` to the minimal repro
+
+Testing constituents of `org-macro-initialize-templates`
+(`nelisp-emacs-lib/vendor/emacs-lisp/org/org-macro.el:157-169`)
+individually, alone, in the same `(with-temp-buffer (unwind-protect
+(outline-mode) FORM) 'ok)` shape:
+
+| form under test | source | result |
+|---|---|---|
+| `(require 'org-element)` | org-macro.el:168 | fine, 0.92s |
+| `(org-macro--counter-initialize)` | org-macro.el:169, :417 | fine, 0.92s |
+| `(org-macro--collect-macros)` | org-macro.el:140-155 | **blows up**, killed 10s/3.56 GiB |
+| — within it: `(org-collect-keywords '("MACRO"))` | org.el:4478 | fine, 0.92s |
+| — within it: `(org-macro--find-keyword-value "AUTHOR" t)` | org-macro.el:352-369 | **blows up**, killed 10s/3.53 GiB |
+
+`org-macro--collect-macros`'s first three template entries
+(`"author"`/`"email"`/`"title"`) are each produced by a call to
+`org-macro--find-keyword-value` — this is the minimal culprit call.
+
+### Final minimal reproducing form
+
+```elisp
+(with-temp-buffer
+  (unwind-protect
+      (outline-mode)
+    (org-macro--find-keyword-value "AUTHOR" t)))
+```
+
+- Inside `with-temp-buffer`: **killed at 25.77s, 8.06 GiB RSS, still
+  climbing** (hit the 8 GiB guard essentially at the same moment as the
+  timeout).
+- Identical form at **top level** (no `with-temp-buffer`): **0.92s**,
+  returns `nil` (the correct answer — an empty buffer has no `#+AUTHOR:`
+  keyword).
+- Control, same shape, `org-collect-keywords` in place of
+  `org-macro--find-keyword-value`: 0.92s, fine.
+
+`org-macro--find-keyword-value`'s only buffer-touching logic on an empty
+buffer is `(org-with-point-at 1 (let (...) (catch :exit (while (re-
+search-forward regexp nil t) ...BODY-NEVER-RUNS...) (and result ...))))`
+(org-macro.el:358-369) — since the regexp cannot match an empty buffer,
+the `while` body (which contains a second, nested `org-with-point-at`
+call) never executes, so the pathology is not in that inner body. Further
+isolation:
+
+| sub-form tested (same cleanup-arm/`with-temp-buffer` shape) | result |
+|---|---|
+| `(org-with-point-at 1 1)` | fine |
+| `(org-with-wide-buffer 1)` | fine |
+| `(org-with-point-at 1 (re-search-forward "xyz" nil t))` | fine |
+| `(org-with-wide-buffer (re-search-forward "xyz" nil t))` | fine |
+| `(save-excursion (re-search-forward "xyz" nil t))` (no org macro at all) | fine |
+| `(org-with-point-at 1 (let ((case-fold-search t)) (re-search-forward "xyz" nil t)))` | fine |
+| `(org-with-point-at 1 (catch :exit (while (re-search-forward "xyz" nil t) (throw :exit t)) nil))` | fine |
+| **`(org-macro--find-keyword-value "AUTHOR" t)` itself (the real, named function call)** | **blows up** |
+
+None of the hand-assembled sub-pieces (individually matching every
+syntactic ingredient of the real function's body: `org-with-point-at`,
+`org-with-wide-buffer`, a `let`-bound `case-fold-search`, a `catch`/
+`while`/`re-search-forward` combination) reproduce it when spliced inline
+at the call site. Only invoking the real, named function
+`org-macro--find-keyword-value` does. This points at the interpreter's
+own named-function-call/closure-application dispatch (not at anything
+syntactically special in `org-with-point-at`'s macro-expansion) as the
+layer where the cost actually lives, when that call happens from inside
+the `unwind-protect` cleanup arm described above.
+
+### gdb evidence (single snapshot — see "what this session did not have time for")
+
+Backgrounded the minimal repro, attached with `gdb -p PID -batch -ex 'bt
+40'` once RSS had reached ~4 GiB. From the leaf upward: `nl_sexp_clone_into`
+← `nl_sf_dolist` ← `nl_apply_special` ← the generic eval-dispatch
+trampoline (`nl_eval_inner_cons`/`nl_ei_cons_tail`/`nl_ei_cons_dispatch`/
+`nl_eval_inner`/`nelisp_eval_call`) ← `nl_sf_let_body*`/`nl_sf_let` ← eval
+dispatch again ← `nl_ali_body*`/`nl_ali_push_frame`/`nl_ali_after_cap`
+(closure-application-with-capture frames) ← `nl_apply_lambda_inner` ←
+`nl_apply_closure_or_lambda` ← `nl_apply_function` ←
+`nl_apply_do_funcall` ← `nl_apply_builtin` ← `nl_apply_function` ← eval
+dispatch ← `nl_sf_while_body*` (top of the 40-frame window, chain still
+ascending, true depth not reached at this sample size). This is a
+`dolist`-driven s-expression clone running inside a `let`, inside an
+*applied* lambda/closure, inside a `while` loop — the same repeating
+"`dolist`/`while` + lambda-application" shape the 2026-07-05 "post-
+corruption-fix" session in this file characterized for a *different* call
+site (font-lock/closure-capture via `nl_capture_descend_native`), now
+observed at a **third, distinct call site** reached only through
+`org-macro--find-keyword-value`'s real function-call boundary combined
+with the cleanup-arm nesting above.
+
+### What this session did NOT have time to do
+
+- **Did not get a second timed gdb sample or a `break`/`continue N` hit-
+  count table** for the minimal repro (the rate/scaling table this file's
+  other entries produced for their respective culprits). The backgrounded
+  process was reclaimed by its own `timeout` wrapper between tool-call
+  round-trips before a second attach could be made; only one qualitative
+  backtrace snapshot was captured. **This is the single most valuable
+  next probe**: `gdb -p PID -batch -ex 'break nl_sf_dolist' -ex 'continue
+  N'` (and the same for `nl_apply_closure_or_lambda` /
+  `nl_sexp_clone_into`) on a fresh run of the minimal repro above, batched
+  the way the 2026-07-05 "post-corruption-fix" session did for
+  `nl_capture_descend_native`, would both confirm which of these three
+  frames is the actual hot loop and produce the hits/sec + RSS-growth-
+  rate table needed to fully close this out.
+- Did not trace *why* `org-macro--find-keyword-value` specifically (vs.
+  `org-collect-keywords`, which shares the same buffer/regex-scanning
+  shape and stays fast) triggers the interpreter-level pathology — i.e.
+  did not get from "this one real function call is the minimal repro" to
+  "this is the exact interpreter source line that mishandles it." The
+  three-call-site recurrence (font-lock keyword compilation → previous
+  session; `org-macro--find-keyword-value`'s named-call boundary → this
+  session; the still-open third site implied by the earlier "twice in one
+  200-frame stack" observation) suggests a shared root cause in closure/
+  lambda application cost scaling with something ambient (nesting depth,
+  accumulated frame count, or similar) rather than three independent
+  bugs, but this is not yet proven.
+
+### Owner classification
+
+1. **Structural precondition (confirmed root cause of the top-level vs.
+   `with-temp-buffer` asymmetry itself)** — `nelisp-emacs-lib` (read-only
+   sibling repo): `emacs-mode-define-derived-mode`'s unwind-protect-
+   cleanup-arm body placement
+   (`packages/nelisp-emacs-core/lisp/emacs-mode.el:201-214`, itself a
+   documented workaround for a separate, earlier defect), combined with
+   `with-temp-buffer`'s own nested `unwind-protect` +
+   `nelisp-ec-with-current-buffer` current-buffer dispatch (established
+   by the previous session:
+   `packages/nelisp-emacs-buffer-core/lisp/emacs-buffer-builtins.el:686-696`,
+   `packages/nelisp-emacs-buffer-core/lisp/nelisp-emacs-compat.el:484-498`).
+   Both are read-only from this repo; flag upstream.
+2. **Triggering mechanism (why this one call blows up while dozens of
+   others in the same cleanup arm do not)** — most likely this repo's
+   own (`nelisp.clone-capture`) AOT-compiled core evaluator: the
+   `nl_sf_dolist` / `nl_apply_closure_or_lambda` / `nl_sexp_clone_into`
+   family visible in the gdb sample. The earlier "post-corruption-fix"
+   session in this file pinned the *analogous* pattern (there,
+   `nl_capture_descend_native`) to `lisp/nelisp-cc-frame-stack-find.el`
+   and `lisp/nelisp-cc-sf-lambda.el` in *this* repo (not
+   `nelisp-emacs-lib`) — this session's evidence is consistent with the
+   same ownership but was not re-confirmed to file:line for this call
+   site in the time available (see "what this session did not have time
+   to do", item 1).
+
+### Recommended fix, ranked (scoped for codex)
+
+1. **Primary — get the hit-count/scaling table.** Run the "what this
+   session did not have time to do" item 1 probe above on a fresh cold
+   image + fresh minimal-repro process: `break nl_sf_dolist` /
+   `nl_apply_closure_or_lambda` / `nl_sexp_clone_into`, `continue N`
+   batches, compare against the `org-collect-keywords` control (which
+   should show a flat, small hit count and complete in under a second).
+   This pins the exact recursive call by file:line and gives the
+   rate/scaling evidence needed to write a real fix.
+2. **Secondary — check whether the "Cache closure free-variable filters"
+   fix (`af6e9ff6`) already addresses this call site.** That commit
+   targeted `nl_capture_descend_native`'s over-approximate filter cost;
+   if the actual hot function here turns out to be the *same* underlying
+   routine reached through a different caller, the fix may already be
+   partially in place and only need its cache/dedup logic extended to
+   cover whatever code path `org-with-point-at`/`org-with-gensyms`'s
+   macro-expansion-time `let` + closure application takes that
+   `org-collect-keywords` does not.
+3. **Tertiary, independent of the interpreter bug** —
+   `emacs-mode-define-derived-mode`'s cleanup-arm body placement
+   (nelisp-emacs-lib, emacs-mode.el:201-214) is itself flagged as a
+   workaround for a *different*, undocumented-here defect ("loses forms
+   that follow some macro-generated parent major-mode calls"). Once the
+   interpreter-level bug above is fixed, it is worth re-testing whether
+   that workaround is still needed at all, since running an entire
+   derived-mode body inside an `unwind-protect` cleanup arm is unusual
+   and may itself be a latent source of other, not-yet-observed
+   interpreter edge cases.
+4. **Quaternary — harness note.** Any future probe file fed to
+   `--cold-load-from`/`--repl` must be a single physical line per
+   top-level form (see the methodological note above); multi-line input,
+   even when correctly paren-balanced, causes spurious per-sub-form
+   value echoes that make output hard to interpret (though it does not
+   affect wall-clock/RSS measurements, which is why the timing numbers in
+   this and the previous two sessions remain reliable).
+
+### Artifacts (not committed, scratch only)
+
+`forms.py` (the 55-form transcription of `org-mode`'s body plus prefix/
+cleanup-arm-shape generators), `run_probe.sh` (the RSS-guarded runner),
+and all `f_*.el` probe files under this session's scratchpad directory
+(outside the repo, not committed). Cold image workdir
+`/tmp/cold-image-org-e2e.ExPh8l/` was built with `NELISP_E2E_KEEP=1`,
+used for every probe in this session, and deleted at session end (`rm
+-rf`, after confirming via `pkill -9 -f` + `ps aux` that no `nelisp`
+process was left running). No repo source files were modified this
+session; only this `FINDINGS.md` entry (branch `profwork`).
+
+## "Line-drop after macro-generated parent major-mode calls" (Doc 33 item
+226) is not a reader/GC defect: it is a missing compat shim
+(`add-to-invisibility-spec`) plus a pre-existing, intentional REPL
+error-suppression design choice (branch `linedrop`, base `origin/main`
+5432fd1d)
+
+### Task and starting hypothesis
+
+Doc 33 item 226 (`nelisp-emacs-lib` `docs/design/33-emacs-core-substrate-
+priority-plan.org`, merge `554a975`) retired the `7b0d034`-era
+cleanup-arm workaround that ran `define-derived-mode`'s child BODY/hooks
+from an `unwind-protect` cleanup arm, because standalone NeLisp was
+believed to lose top-level forms that follow "macro-generated parent
+major-mode calls, especially nested `outline-mode` derived modes." After
+the retirement (parent call now in its own minimal
+empty-cleanup-`unwind-protect` + completion-flag wrapper;
+`src/emacs-mode.el`/`packages/nelisp-emacs-core/lisp/emacs-mode.el`,
+diff `e85577f6..dd6934ff`), the doc records that a cold image still shows
+`(with-temp-buffer (org-mode) major-mode)` exiting 0 with **blank
+stdout**, "the activation line itself is still silently dropped," and
+flags this as the still-open item 226 defect — implying the same
+evaluator/GC-class bug survived in a new shape. This session's job was
+to determine whether that's actually still true, and if so, localize the
+mechanism.
+
+It is not true. The symptom reproduces exactly as described, but it is
+two small, unrelated, already-legible things stacked together, neither
+of which is an evaluator abort, a GC defect, or specific to cold images
+or macro-generated parent calls.
+
+### Repro matrix (cold image, `scripts/cold-image-org-e2e.sh 1` with
+`NELISP_E2E_KEEP=1`, default bootstrap-repl/prelude, 60-file org vendor
+chain — faithfulness columns identical replay vs. cold-boot: `(t t t t
+(interactive) t)`)
+
+Fed one line at a time via stdin to `./target/nelisp --cold-load-from
+IMG --no-prompt`:
+
+| # | form | result |
+|---|------|--------|
+| (a) | `(with-temp-buffer (org-mode) (prin1 'M1))` | blank stdout, exit 0 — dropped |
+| (b) | `(org-mode) (prin1 'M2)` (two top-level forms) | blank stdout, exit 0 — dropped |
+| (c) | `(with-temp-buffer (outline-mode) (prin1 'M3))` | blank stdout, exit 0 — dropped |
+| (d) | `(with-temp-buffer (text-mode) (prin1 'M4))` | `M4` printed — NOT dropped |
+
+(d) rules out `with-temp-buffer` itself, the parent-call wrapper shape in
+the abstract, and the REPL harness in the abstract: only the two forms
+that reach outline/org-specific mode-body code drop.
+
+### Abort-vs-suppression verdict: ordinary signal, normal unwind,
+REPL-only suppression — not an evaluator abort
+
+Wrapping form (a) in `condition-case` immediately un-hides everything:
+
+```
+(condition-case err (with-temp-buffer (org-mode) (prin1 'M1)) (error (prin1 (list 'ERR err))))
+=> (ERR (void-function add-to-invisibility-spec))
+(condition-case err (with-temp-buffer (org-mode) (prin1 'M1)) (t (prin1 (list 'T err))))
+=> (T (void-function add-to-invisibility-spec))
+```
+
+Both the `error` and `t` handlers fire on the first try. `(catch 'x
+(with-temp-buffer (org-mode) (prin1 'M1)) 'fell-through)` prints nothing
+(as expected — `catch` only catches `throw`, not `signal`). So this is an
+ordinary, condition-case-catchable `void-function` signal, not an
+unsignaled/abort-class failure that bypasses the signal machinery.
+
+Side-effect test (task step 3), to settle whether the form actually ran
+up to the error or was never attempted at all:
+
+```
+(with-temp-buffer
+  (nl-write-file "/tmp/sidefx_before.txt" "BEFORE")
+  (org-mode)
+  (nl-write-file "/tmp/sidefx_after.txt" "AFTER")
+  (prin1 'M1))
+```
+
+`/tmp/sidefx_before.txt` = `BEFORE` (written). `/tmp/sidefx_after.txt`:
+does not exist. Execution ran normally up through `(org-mode)`, signaled
+there, and unwound the rest of the top-level form exactly as real Emacs
+would — this is a completely ordinary error abort of one top-level form,
+not "output suppressed while the form still runs" and not "the reader
+never evaluated the form."
+
+Marker-after test (task step 2): appending `(prin1 'MARKER-AFTER)` as a
+**separate** top-level form after the dropping form still prints
+`MARKER-AFTER` — the REPL loop is not stuck or dead; it silently
+swallows the failed form and moves on to the next one.
+
+The same behavior reproduces identically in the **warm**, still-running
+replay-load process (append the probes to `load-only.repl` and feed to
+`--repl` before any dump/cold-boot at all): `(fboundp
+'add-to-invisibility-spec)` → `nil`, and the org-mode probe gives the
+identical `(void-function add-to-invisibility-spec)` signal. So this has
+nothing to do with cold-image fidelity, dump/restore, or GC roots —
+warm and cold behave identically.
+
+### Mechanism, part 1: missing compat shim (`nelisp-emacs-lib`, read-only)
+
+`add-to-invisibility-spec` is a plain ~6-line pure-Elisp function in
+real Emacs's `emacs-lisp/subr.el` (no C primitive needed):
+`vendor/emacs-lisp/subr.el:6092` in the `nelisp-emacs-lib` checkout. It
+is called directly from `outline-mode`'s own body
+(`vendor/emacs-lisp/outline.el:458,592`) and from `org-mode`'s own body
+(`vendor/emacs-lisp/org/org.el:4963,4967`) — org-mode does not need to
+go through `outline-mode` to hit it. The 60-file vendor chain's
+generated `.repl` defines the `buffer-invisibility-spec` *variable*
+(`(defvar buffer-invisibility-spec nil)`, from
+`nelisp-emacs-compat.el`/`emacs-buffer-builtins.el`) and a
+read-side analog (`emacs-buffer-builtins-invisible-p`), but never
+defines or aliases `add-to-invisibility-spec` (or
+`remove-from-invisibility-spec`) itself — confirmed absent from
+`packages/nelisp-emacs-buffer-core/lisp/nelisp-emacs-compat.el` and from
+the generated `load-only.repl` (7 hits, none a `defun`). `text-mode`
+(probe d) doesn't touch invisibility specs, which is why it alone
+survives.
+
+This half is entirely in the read-only `nelisp-emacs-lib` sibling repo;
+no fix here, just localization.
+
+### Mechanism, part 2: `nl_repl_loop` intentionally suppresses ALL
+uncaught top-level error diagnostics (this repo, `scripts/nelisp-
+standalone-build.el`) — this is the part that manufactures the "silent
+drop" illusion
+
+`nl_eval_source_all` (`scripts/nelisp-standalone-build.el:10606`) takes
+a `report_errors` flag. Per its own doc comment (added for the earlier
+Doc 152 "DEFECT-2 artifact-cli-silent-noop" fix) and the call site
+comment in `nl_repl_loop`
+(`scripts/nelisp-standalone-build.el:13509-13532`, `report_errors=0`
+literal at line 13529):
+
+> "report_errors=0: REPL semantics MUST NOT change here — a form error
+> must not abort the session (the vendor replay harness depends on the
+> REPL surviving form errors exactly as it does today; QUIT_FLAG below
+> is still honored so explicit (exit N)/(kill-emacs N) from
+> REPL-evaluated code keeps working unchanged)."
+
+Inside `nl_eval_source_all`, the branch that calls
+`nl_eval_source_report_error` (which writes `"nelisp: uncaught error:
+..."` to stderr and arms `QUIT_FLAG` so the caller reports a non-zero
+exit) is *only* reached `(if (= report_errors 1) ...)`
+(`scripts/nelisp-standalone-build.el:10641-10659`); when
+`report_errors=0` the whole branch collapses to `0` and the loop just
+continues (`more` stays `1`). `--repl` and `--cold-load-from IMG <
+stdin` both go through `nl_repl_loop`, so **every** invocation this
+session used to probe org-mode/outline-mode activation on a cold image
+was, by construction, running with error reporting hard-disabled.
+`--eval`/`--load`/the artifact-and-runtime-image CLI paths pass
+`report_errors=1` and DO report:
+
+```
+$ ./target/nelisp --load probe-with-void-function-call.el
+(stdout empty, exit 1)
+stderr: nelisp: uncaught error: void-function: (some-totally-undefined-function-xyz)
+```
+
+vs. the identical error via `--repl`/`--cold-load-from ... --no-prompt`:
+completely empty stdout AND stderr, exit 0.
+
+gdb confirms this live (symbols present, binary not stripped):
+
+```
+break nl_eval_source_report_error
+run --cold-load-from IMG --no-prompt   (stdin = form (a))
+=> breakpoint never hit; "[Inferior 1 ... exited normally]"
+
+break nl_eval_source_report_error
+run --load probe-with-void-function-call.el
+=> Breakpoint 1, nl_eval_source_report_error ()
+   #0 nl_eval_source_report_error ()
+   #1 nl_eval_source_all ()
+   #2 driver ()
+   #3 _start ()
+   nelisp: uncaught error: void-function: (some-totally-undefined-function-xyz)
+```
+
+So the two paths are provably, structurally different at the call-frame
+level, not just different in observed output.
+
+### Why this looked like the historical "line-drop" class of bug
+
+Every prior investigation of item 226 (and, per its own text, the
+original `7b0d034` workaround) tested activation via a REPL-style
+invocation (interactive `--repl`, or piped forms — exactly what
+`--cold-load-from IMG < forms.txt` is under the hood) and never via
+`--load`/`--eval`. A REPL-mode uncaught error and a genuinely vanished
+form are indistinguishable from stdout/exit-code alone: both produce
+blank output and exit 0. The historical bug (forms lost after
+macro-generated parent major-mode calls, root-caused to the cleanup-arm
+body placement and fixed by the `dd6934ff` retirement itself) was real
+and is fixed — item 226's own regression coverage (nested derived-mode
+sequencing ERT, 19/19 PASS) and this session's own side-effect test both
+confirm ordinary sequential execution now happens. What's left is not a
+reader defect at all: it's a missing 6-line compat shim plus a
+deliberate, pre-existing "REPL tolerates form errors" design decision
+whose implementation also (unintentionally, as far as the comments show)
+suppresses the diagnostic that would have made the missing shim obvious
+immediately.
+
+### Recommended fix, ranked (scoped for codex)
+
+1. **Primary, small, unblocks org-mode/outline-mode entirely —
+   `nelisp-emacs-lib` (read-only from here, flag upstream):** port
+   `add-to-invisibility-spec` (and `remove-from-invisibility-spec` for
+   symmetry — both are trivial, no-C-primitive functions, `vendor/
+   emacs-lisp/subr.el:6092` and the lines immediately after) into
+   `packages/nelisp-emacs-buffer-core/lisp/nelisp-emacs-compat.el`
+   alongside the existing `buffer-invisibility-spec` defvar and
+   `emacs-buffer-builtins-invisible-p`. This alone should make
+   probes (a)/(b)/(c) run to completion (still subject to whatever the
+   *next* void-function turns out to be — this session did not attempt
+   to whack-a-mole past this first one to find a "fully clean org-mode
+   activation," since the reader-side question this session owns was
+   already answered by this first hit).
+2. **Primary, this repo — stop conflating "tolerate" with "stay
+   silent" in `nl_eval_source_all`/`nl_repl_loop`
+   (`scripts/nelisp-standalone-build.el:10606-10682`,
+   `13509-13532`).** The `report_errors=1` branch currently couples two
+   independent decisions in one flag: (i) print a diagnostic, (ii) arm
+   `QUIT_FLAG` (abort the session). `nl_repl_loop`'s own comment says it
+   wants to keep behavior (ii) = "don't abort" unchanged (real
+   constraint: the vendor replay harness relies on this). It does not
+   say it wants (i) = "print nothing, ever." Recommended shape: split
+   `nl_eval_source_report_error`'s stderr-diagnostic call out from the
+   `QUIT_FLAG`-arming, and have `nl_repl_loop` still call the
+   diagnostic-print half unconditionally on a genuine stashed
+   signal/throw (flag != 0, i.e. skip only the already-documented
+   "transient non-zero rc with nothing stashed" case at line
+   10644-10658), while continuing to pass `report_errors=0`'s "don't
+   arm QUIT_FLAG" behavior through unchanged. This is a self-contained,
+   low-risk change confined to two functions in one file, with an
+   obvious regression test: `--repl --no-prompt` fed a single
+   `(void-function-call)` line should print `nelisp: uncaught error:
+   ...` to stderr, continue to the next form (exit 0 if no more errors),
+   and NOT regress the existing `nl_repl_loop`/vendor-replay-harness
+   error-tolerance semantics (same exit-code/continuation behavior,
+   only stderr output changes from empty to non-empty).
+3. **Verification after both fixes land:** re-run this session's exact
+   repro matrix (a)-(d) plus the marker-after test on a fresh cold
+   image; (a)/(b)/(c) should now either complete and print their markers
+   or — if some other function is still missing — print a clear `nelisp:
+   uncaught error: void-function: (...)` to stderr instead of going
+   silent, which by itself finishes closing out Doc 33 item 226 as
+   "not a reader defect" rather than requiring further reader-side
+   archaeology.
+
+### Artifacts (not committed, scratch only)
+
+`/tmp/probe_*.el` single-line probe files, `/tmp/warm-test.repl` (copy
+of the e2e-generated `load-only.repl` with two probe lines appended),
+`/tmp/gdb_*.cmds`. Cold image workdir `/tmp/cold-image-org-e2e.I05Uug/`
+was built with `NELISP_E2E_KEEP=1` via `scripts/cold-image-org-e2e.sh 1`
+(default bootstrap-repl/prelude — same "regenerated `build/nemacs-
+bootstrap.repl`" input Doc 33 item 226 itself used), used for every cold
+probe and the gdb runs, and deleted at session end (`rm -rf`, after
+confirming via `pkill -9 -f` + `ps aux` that no `nelisp` process was left
+running). No repo source files were modified this session; only this
+`FINDINGS.md` entry (branch `linedrop`, base `origin/main` @ 5432fd1d).
+
+## Doc 33 item 228 follow-up: in-buffer `outline-mode`/`org-mode` activation segfault (branch `segv-diag`, base `origin/main` @ 6020ca18)
+
+### Task and setup
+
+Investigated the "NEW reader segfault exposed by in-buffer mode
+activation" reported against `nelisp-emacs-lib` Doc 33 item 228 (commit
+`c77e9782`, HEAD `f19f595b` at investigation time). Built this repo's
+`./target/nelisp` fresh via `make standalone-reader` at `origin/main`
+6020ca18 (merge of `440cdfb7`, the exact reader commit the original
+report used), then built a fresh cold image via
+`NELISP_E2E_KEEP=1 scripts/cold-image-org-e2e.sh 1` against the current
+`nelisp-emacs-lib` bootstrap (`build/nemacs-bootstrap.repl`,
+`f19f595b`). Faithfulness columns matched
+(`(t t t t (interactive) t)` replay == cold-boot), replay-load 6.735s,
+dump 0.548s, cold boot 0.635s, peak RSS 525348 KB — all consistent with
+the numbers in the `nelisp-emacs-lib` doc entry, confirming this is the
+same build+image setup the original report used.
+
+### The natural/unforced symptom did NOT reproduce in this session
+
+Ran both exact probes from the symptom, `(with-temp-buffer (outline-mode)
+(prin1 major-mode))` and `(with-temp-buffer (org-mode) (prin1
+major-mode))`, against the fresh cold image via `--cold-load-from IMG
+--no-prompt`, with **no debug switches, no gdb**:
+
+- outline-mode probe: **0/60+ runs crashed** (single-shot repeats,
+  20s/15s/10s timeouts, with and without `timeout` wrapper, under gdb
+  with ASLR disabled). Every run: `rc=0`, stdout exactly
+  `outline-modeoutline-mode` (see "double print" note below), no
+  stderr.
+- org-mode probe: **0/35+ runs crashed**. Every run: `rc=0`, stdout
+  empty, stderr `nelisp: uncaught error: void-function:
+  (easy-menu-change)` after a consistent ~4.78-4.8s (org-mode's
+  activation is expensive even when it aborts on a missing symbol).
+
+(The "double print" — `prin1`'s own output followed immediately by the
+same text again with no separator — is expected `--cold-load-from
+--no-prompt`/`--repl` REPL behavior: the REPL auto-prints each
+top-level form's return value in addition to whatever the form itself
+printed, and `(prin1 X)` returns `X`. Confirmed with `(with-temp-buffer
+(kill-all-local-variables) (prin1 "ok"))` -> `"ok""ok"` and bare
+`(garbage-collect)` printing its own return tuple unprompted. Not a
+bug, and orthogonal to the segfault question.)
+
+So: this session could not force the crash the `nelisp-emacs-lib` doc
+entry describes (probe (a): exit 0 reported by the harness but shell-
+level `Segmentation fault` after `outline-modeoutline-mode` printed;
+probe (b): exit 139, completely empty stdout/stderr) using the same
+reader binary commit, the same cold-image-build procedure, and the same
+probe forms, across dozens of repeats including a gdb-attached run.
+This divergence between two investigations following an identical
+recipe is itself a data point: whatever roots the missing object
+depends on (see mechanism below) is either a native-CPU-register-vs-
+stack-spill timing detail that is fixed per compiled binary but
+apparently NOT identical between the previous investigator's process
+and this session's, or a byte-level allocation-total coincidence
+relative to the 16 MiB form-boundary GC trigger (`ptr-write-u64
+268435560 0 16777216`, `scripts/nelisp-standalone-build.el:13746`) that
+this session's exact sequence of allocations missed by a small margin.
+Nothing in `nelisp-emacs-lib` or this repo changed between when the bug
+was authored (`f19f595b`, today) and this session started (confirmed:
+`1cfb42f4`/`cf01918c`, the existing STACK_TOP/conservative-stack-scan
+root-coverage fix, both pre-date `440cdfb7`, i.e. were already present
+when the crash was first reported — so this is not a case of the bug
+having been silently fixed in between).
+
+### Minimal deterministic repro (found via the debug-switch lever the task suggested)
+
+`nelisp--debug-switch` value 5 arms a pre-existing, off-by-default
+diagnostic hook: **MIDFORM poison-validation GC**
+(`scripts/nelisp-standalone-build.el:2837-2847`
+`nl_gc_midform_collect`, wired to the real `while`-loop back-edge in
+`lisp/nelisp-cc-sf-while.el:134-161`
+`nl_sf_while_midform_collect`/`extern-call nl_gc_midform_collect`).  Per
+its own comments this collector is deliberately unsound-by-design for
+validation purposes: it marks only "recorded root frames"
+(`nl_gc_ctx_push`/`nl_gc_mark_recorded_contexts`,
+`scripts/nelisp-standalone-build.el:2723-2802`) and **never** falls back
+to the conservative native-stack scan (`nl_gc_conserv_maybe` is skipped
+whenever `mode=1`, i.e. always in MIDFORM mode — line 2819). The
+`nl_gc_ctx_push`/`pop` machinery that would populate those recorded
+frames is explicitly marked **"DORMANT — no caller yet"** in its own
+comment (line 2723-2725) — nothing in the codebase calls it, so MIDFORM
+collections currently always mark **zero** recorded frames. Arming it
+(gated OFF by default -> zero behavior change for ordinary runs, so this
+requires the explicit debug switch and does not fire in production)
+turns any `while`-loop back-edge that crosses the 16 MiB-since-arm
+watermark into a maximally unsound collection.
+
+With this armed, the crash is **100% reproducible**:
+
+```
+(nelisp--debug-switch 5)
+(with-temp-buffer (org-mode) (prin1 major-mode))
+```
+
+- 10/10 direct single-shot runs against the cold image: `rc=139`,
+  stdout only the `nelisp--debug-switch` return tuple (no `"org-mode"`
+  ever printed — crash happens **before** `org-mode` returns, matching
+  the original report's "(b) crashes earlier, empty output").
+- Also reproduces **warm** (no cold-load at all): appended the same two
+  forms to the 60-file chain's `load-only.repl` and ran it through
+  `--repl --no-prompt --no-print` (never touches
+  `nl_cold_load_arena`/`nl_cold_grow_chunk0` at all) — `rc=139`,
+  identical signature. **Not cold-load-specific.**
+- The same arming + `(with-temp-buffer (outline-mode) (prin1
+  major-mode))` did **not** crash (5/5 clean, `"outline-mode"` printed
+  both auto-print + explicit) — outline-mode's activation is light
+  enough that it apparently never loops through a `while` back-edge
+  that crosses the re-armed 16 MiB watermark within a single call, so
+  this specific lever cannot reproduce the "(a) crashes after the
+  print" half of the symptom. This session did not find a way to force
+  that half; see "Unresolved" below.
+- A precursor experiment additionally interposed a large (buggy,
+  `void-variable: (i)`-erroring) `dotimes` consing loop between the arm
+  and the mode call — same org-mode crash (5/5), same signature,
+  confirming the trigger is the arm + org-mode's own allocation, not
+  the interposed loop.
+- Explicit, ordinary `(garbage-collect)` (no debug switch) immediately
+  before `(with-temp-buffer (org-mode) ...)` does **not** crash (5/5
+  clean, same `void-function: (easy-menu-change)` outcome as baseline)
+  — ruling out "any GC right before org-mode" as sufficient; the
+  MIDFORM-specific (recorded-roots-only, no conservative fallback)
+  collection path is what is unsound, not GC-in-general.
+
+### GC verdict
+
+**Confirmed GC-caused.** Clean A/B: baseline (no debug switch) = 0
+crashes across 90+ runs (both probes, single-shot and gdb); armed
+(`nelisp--debug-switch 5`) = crash on every run that reaches org-mode's
+activation body. This is not a coincidence-of-timing artifact of the
+switch itself — an equivalent plain `(garbage-collect)` call does not
+reproduce it, so it is specifically the MIDFORM/precise-root-only
+collection mode (not "a collection happened") that is unsound.
+
+### Cold vs warm verdict
+
+**General, not cold-load-specific.** The minimal repro crashes
+identically under `--repl` (warm, chain replay-loaded in-process, never
+dumped/reloaded) and under `--cold-load-from IMG` (cold). The existing,
+already-landed cold-load-specific fix (`1cfb42f4`
+`fix(standalone-reader): re-capture STACK_TOP after cold-load arena
+growth`, `cf01918c` `Doc 152 §11.21`) — which fixes a *different*,
+already-closed gap where `nl_cold_grow_chunk0`'s arena-base relocation
+could leave `STACK_TOP` reading as 0 and silently disable the
+conservative stack scan — is irrelevant to this crash and does not
+regress it; this bug is orthogonal.
+
+### gdb backtrace (minimal repro, `--cold-load-from`)
+
+```
+$ gdb -q -batch -ex 'run --cold-load-from IMG --no-prompt < probe.el' -ex 'bt 30' ./target/nelisp
+(0 0 0 0 0 0 1 0 0)
+
+Program received signal SIGSEGV, Segmentation fault.
+0x00000000007bc18b in nl_kw_is_keyword ()
+#0  0x00000000007bc18b in nl_kw_is_keyword ()
+#1  0x00000000007bc279 in nl_eval_inner ()
+#2  0x00000000007b2e48 in nelisp_eval_call ()
+#3  0x00000000007ef960 in nl_sf_let_star_body_eval ()
+#4  0x00000000007ef9b8 in nl_sf_let_star_body_cdr ()
+#5  0x00000000007efaa0 in nl_sf_let_star_body ()
+#6  0x00000000007ef906 in nl_sf_let_star_body_step ()
+#7  0x00000000007ef973 in nl_sf_let_star_body_eval ()
+#8  0x00000000007ef9b8 in nl_sf_let_star_body_cdr ()
+#9  0x00000000007efaa0 in nl_sf_let_star_body ()
+#10 0x00000000007efb0c in nl_sf_let_star_setup_done ()
+#11 0x00000000007efb68 in nl_sf_let_star_got_bindings ()
+#12 0x00000000007efc3c in nl_sf_let_star ()
+#13 0x00000000007c2d3c in nl_apply_special ()
+#14 0x00000000007c3a6e in nl_eval_inner_cons ()
+#15 0x00000000007bc586 in nl_ei_cons_tail ()
+#16 0x00000000007bc504 in nl_ei_cons_dispatch ()
+#17 0x00000000007bc406 in nl_eval_inner ()
+#18 0x00000000007b2e48 in nelisp_eval_call ()
+#19 0x00000000007ef0df in nl_sf_if_else_eval ()
+... (repeats: nested if/let* combinator frames all the way up)
+
+rdi = 0x0   (NULL)
+=> 0x7bc18b <nl_kw_is_keyword+136>:  movzbq (%rdi),%rax   <- crash: read byte 0 of a NULL Sexp pointer
+   0x7bc18f <nl_kw_is_keyword+140>:  pop    %r10
+   0x7bc191 <nl_kw_is_keyword+142>:  cmp    %r10,%rax
+   0x7bc194 <nl_kw_is_keyword+145>:  sete   %al
+```
+
+Binary not stripped, symbols present, deterministic (5 repeat gdb/plain
+runs, identical faulting instruction and register state each time).
+
+### Mechanism
+
+`nl_kw_is_keyword` (`scripts/nelisp-standalone-build.el:14375-14381`,
+spliced in as the **first** clause of `nl_eval_inner`'s dispatch `cond`
+by `nelisp-standalone--patch-eval-inner-defun`,
+`scripts/nelisp-standalone-build.el:14383-14397`/comment at
+14370-14374) runs on **every** form/sub-form the interpreter evaluates,
+before variable lookup, to decide "is this literal a self-evaluating
+keyword symbol." It reads `(sexp-tag form)` — dereferences `form`
+unconditionally. The backtrace shows it being reached through a long
+chain of `nl_sf_let_star_*`/`nl_sf_if_*` combinators — i.e., deep
+inside nested `let*`/`if` evaluation, the kind of shape
+`define-derived-mode`'s macro-expanded body (and org-mode's own large
+activation body, keymap/menu/syntax-table setup) produces. `form` is
+NULL at the crash site, meaning some intermediate cons/value that a
+`let*` binding or continuation held **only via native C call-stack
+frames** (this interpreter's own recursive-descent evaluator has no
+separate managed frame stack for this kind of state — see the
+combinator names) was reclaimed by a GC pass that ran mid-evaluation
+without that frame chain in its root set, and the freed/zeroed slot was
+later fed back into `nl_eval_inner`.
+
+This is the exact failure class this codebase's own comments already
+document and treat as a known, only-partially-closed defect (Doc 146
+§2 "eval root-coverage gap", Doc 152 §11.18-21): "a form-boundary GC
+that fires from a nested runtime `(load ...)`/`(require ...)` call deep
+inside a large interpreted body (e.g. org-mode's `define-derived-mode`
+expansion) can then free a cons cell that is reachable only via an
+ancestor `progn`/`let` continuation sitting in native call-stack frames
+-- observed as a deterministic SIGSEGV in `nl_kw_is_keyword` (NULL
+`str-byte-at`/`sexp-tag` deref)" (`scripts/nelisp-standalone-build.el`
+comment at lines 13609-13617, written *before* this session, describing
+the identical signature this session independently hit via gdb).
+
+The **production** mitigation for this class is the always-on
+conservative native-stack scan (`nl_gc_conserv_maybe`, flag
+`268436464`, gated on in `nl_gc_collect`'s normal boundary path). The
+MIDFORM/`nelisp--debug-switch 5` path this session used to force a
+reproducible crash is explicitly designed to **bypass** that mitigation
+(mode=1 skips `nl_gc_conserv_maybe` unconditionally,
+`scripts/nelisp-standalone-build.el:2819`) so that root-coverage gaps
+can be validated deterministically — which is exactly what it did here.
+Because the precise-root side of that same validation mechanism
+(`nl_gc_ctx_push`/`nl_gc_mark_recorded_contexts`) is dormant (no
+caller), MIDFORM collections currently mark **nothing** beyond the
+global root stack and shared symtab entry, so this specific lever will
+crash on essentially any `while`-loop-driven allocation big enough to
+reach the watermark — that part is not really "testing whether
+org-mode's activation is root-safe," it is "testing an intentionally
+unfinished validation feature," and should not by itself be read as
+proof that ordinary (unarmed) production runs are unsafe. Whether the
+*unarmed* conservative-stack-scan fallback has its own residual gap for
+this same nested-let*-under-a-nested-form-boundary-collection shape
+(distinct from the already-fixed cold-load STACK_TOP case) is the
+question this session could not settle empirically (0/90+ natural
+reproductions).
+
+### Recommended fix (ranked, scoped for codex)
+
+1. **Primary, this repo, small and self-contained:** wire up
+   `nl_gc_ctx_push`/`nl_gc_ctx_pop`
+   (`scripts/nelisp-standalone-build.el:2723-2747`) at the real
+   per-form-evaluation entry/exit points (driver's top-level form eval
+   and/or `load`/`require`'s per-form loop) so
+   `nl_gc_mark_recorded_contexts` has actual frames to mark. This is
+   the concrete, self-documented gap ("DORMANT — no caller yet") that
+   makes MIDFORM collections unconditionally unsound today, independent
+   of org-mode specifically. Regression test: this session's exact
+   minimal repro (`(nelisp--debug-switch 5) (with-temp-buffer (org-mode)
+   (prin1 major-mode))`) should stop segfaulting once frames are
+   recorded and marked (it may still hit a downstream `void-function`
+   like `easy-menu-change`, same as the unarmed baseline — that is fine
+   and orthogonal).
+2. **Secondary, needs an in-situ instrumentation pass, not another
+   guess-and-check debug-switch session:** determine whether the
+   *unarmed*, production boundary-GC path (`nl_gc_collect`, conservative
+   stack scan ON) can independently hit the same `nl_kw_is_keyword(NULL)`
+   signature when a nested `require`/`load` deep inside org-mode's
+   activation body triggers its own per-form collection (the scenario
+   the pre-existing `scripts/nelisp-standalone-build.el:13609-13617`
+   comment already flags as a risk, distinct from the STACK_TOP case it
+   goes on to fix). Recommend adding a one-line diagnostic counter/log
+   at `nl_gc_collect`'s entry (object count before/after, or a debug
+   dump of `nl_gc_conserv_maybe`'s scanned-word count) gated by the
+   existing `nl_gc_diag`/switch-1 mechanism, then re-run the exact
+   `(with-temp-buffer (org-mode) (prin1 major-mode))` probe on a fresh
+   cold image repeatedly (dozens of runs, ideally on more than one
+   machine/container) until either it fires naturally with the log
+   showing which collection ran, or enough runs accumulate to conclude
+   the unarmed path is in fact sound for this shape and the original
+   report's crash needs to be re-examined for an unrelated cause (stale
+   binary, stale image, or session-local state this investigation did
+   not have visibility into).
+3. **Verification after (1):** re-run this session's full matrix (org
+   armed-crash repro, warm/cold, outline armed-no-crash, unarmed
+   baseline x2) on a fresh cold image; the armed org-mode repro should
+   no longer segfault (or, if a real live object is still unrooted
+   after recorded-frame marking too, should crash at a *different*
+   `nl_kw_is_keyword` call site / different backtrace shape, which would
+   itself be informative).
+
+### Artifacts (not committed, scratch only)
+
+Cold image workdir `/tmp/cold-image-org-e2e.vxPFH6/` (built with
+`NELISP_E2E_KEEP=1`, `scripts/cold-image-org-e2e.sh 1`); probe files,
+gdb command files, and per-run logs under this session's scratchpad
+(`/tmp/claude-1000/.../scratchpad/probe_*.el`, `gdb_*.cmds`,
+`o5_*`/`gg_*`/`org_run_*` etc.). No repo source files were modified
+this session; only this `FINDINGS.md` entry (branch `segv-diag`, base
+`origin/main` @ 6020ca18).
+
+## Doc 33 item 229: classifying the silent org-mode abort that bypasses both the REPL stderr diagnostic and `catch`/`condition-case` (branch `silent-abort-diag`, base `main` @ 52928050 / `segv-diag` @ 23ab8670)
+
+### Task and setup
+
+Investigated a reported SILENT abort in the standalone reader: a prior
+session's staged probes on an image at `/tmp/cold-image-org-e2e.oar79d`
+(binary provenance stated as "unknown") showed a stark contradiction —
+`(with-temp-buffer (org-mode) (prin1 major-mode))` printed
+`nelisp: uncaught error: void-function: (easy-menu-change)` to stderr
+about an hour before the session ended, then, with no source change in
+between (the one intervening commit, `nelisp-emacs-lib`'s `6fd5f19e`, is
+doc-only), the *same* form — even wrapped in
+`(catch '--any (with-temp-buffer (org-mode) (throw '--any "COMPLETED")))`
+— produced **no** file, **no** stdout, **no** stderr, `rc=0`.
+
+Per the task's own instruction (binary state explicitly flagged
+"UNKNOWN"), this session did not trust the pre-existing
+`target/nelisp`/image and rebuilt both from scratch:
+
+1. `rm -f target/nelisp && make standalone-reader` — clean rebuild from
+   this worktree's current HEAD (`silent-abort-diag`/`segv-diag` @
+   `23ab8670`, content-identical to `main` @ `52928050`, a merge of the
+   same commit). Build succeeded (`[standalone-reader] linked 107 units`),
+   fresh binary at `target/nelisp` (4,352,240 bytes).
+2. `NELISP_E2E_KEEP=1 timeout 300 scripts/cold-image-org-e2e.sh 1` —
+   fresh cold image against this fresh binary and the standard
+   `nelisp-emacs-lib` bootstrap/prelude (60-file org vendor chain).
+   Completed cleanly: load 6.78s, dump 0.54s, cold boot 0.63s, peak RSS
+   525,352 KB, faithfulness `IDENTICAL`
+   (`(t t t t (interactive) t)` both columns). Image kept at
+   `/tmp/cold-image-org-e2e.JNyhha/org-run1.img` (536,780,096 bytes) for
+   the whole session, deleted at the end.
+
+### Q1: does the plain org-mode probe emit the diagnostic on a from-scratch rebuild? (5 runs)
+
+```
+(with-temp-buffer (org-mode) (prin1 major-mode))
+```
+
+against the fresh cold image via `--cold-load-from IMG --no-prompt`:
+
+| run | rc | stdout | stderr |
+|---|---|---|---|
+| 1-5 | 0 | (empty) | `nelisp: uncaught error: void-function: (easy-menu-change)` |
+
+**5/5 runs printed the diagnostic. The silence did not reproduce** on a
+clean rebuild of both the binary and the image.
+
+Two further cross-checks, to rule out the specific image as the
+variable:
+
+- Re-ran the *catch-wrapped* variant from the staged evidence,
+  `(nl-write-file "..." (if (catch '--any (with-temp-buffer (org-mode)
+  (throw '--any "COMPLETED"))) "CAUGHT" "NIL"))`, 3x: **3/3** printed the
+  same diagnostic, no file written (expected and correct — `org-mode`'s
+  own `void-function` signal is not a `throw`, so a bare `catch` never
+  sees it; it propagates straight past the `catch '--any` to the top
+  level, same as real Emacs `catch` semantics).
+- The prior investigator's own kept image,
+  `/tmp/cold-image-org-e2e.oar79d/org-run1.img` (built independently,
+  ~5 minutes before this session's own build, so a genuinely different
+  arena dump), against **this session's freshly-built binary**: **3/3**
+  runs, identical diagnostic. So neither "this session's own image" nor
+  "the specific old image" is sufficient to reproduce the silence when
+  paired with a binary built cleanly, just now, from unmodified HEAD.
+
+**Verdict for Q1: diagnostic visibility is intact and deterministic (8/8
+combined runs across two different images) on a from-scratch rebuild.**
+Whatever produced the staged silence is not reproducible from this
+repo's current committed source under a clean build.
+
+### Q2/Q3: minimal silent-abort repro + gdb
+
+Since the org-mode-specific silence would not reproduce, this session
+built the minimal repro requested by the task's own candidate (c) —
+"errors inside `with-temp-buffer`'s `unwind-protect` cleanup" — directly,
+without org-mode, against the plain (non-cold-loaded) `target/nelisp`:
+
+| form | rc | stdout | stderr |
+|---|---|---|---|
+| `(progn (no-such-fn))` | 1 | (empty) | `nelisp: uncaught error: void-function: (no-such-fn)` |
+| `(with-temp-buffer (no-such-fn))` | 1 | (empty) | same diagnostic |
+| `(catch 'x (no-such-fn))` | 1 | (empty) | same diagnostic |
+| `(let ((y (no-such-fn))) y)` | 1 | (empty) | same diagnostic |
+| `(unwind-protect (no-such-fn) 1)` | 1 | (empty) | same diagnostic (error is in the **protected body**) |
+| **`(unwind-protect 1 (no-such-fn))`** | **0** | **`1`** | **(empty) — SILENT** |
+| `(unwind-protect (progn 1) (no-such-fn) (no-such-fn2))` | 0 | `1` | (empty) — SILENT, both cleanup errors swallowed |
+| `(unwind-protect (progn (prin1 99) 1) (no-such-fn))` | 0 | `991` | (empty) — SILENT |
+| `(progn (unwind-protect 1 (no-such-fn)) (prin1 "after"))` | 0 | `"after""after"` | (empty) — SILENT, execution continues normally past the swallowed error |
+
+**Minimal deterministic repro (100% reproducible, no GC/timing dependence):**
+
+```elisp
+(unwind-protect 1 (no-such-fn))
+```
+
+`rc=0`, stdout `1`, stderr completely empty. This is the exact
+mechanism the task's candidate (c) named.
+
+`catch`/`condition-case` do not see it either — confirmed directly:
+
+| form | result |
+|---|---|
+| `(condition-case err (unwind-protect 1 (no-such-fn)) (error (prin1 (list 'CAUGHT err))))` | `1` printed, no `CAUGHT` — handler never runs |
+| `(catch 'x (prin1 (unwind-protect 1 (no-such-fn))))` | `1` printed, no crash, no diagnostic |
+
+One asymmetry worth flagging: when the *protected* body itself is a
+non-local `throw` (not a plain return) and the *cleanup* form errors,
+the **cleanup's** error is what surfaces, not the throw:
+`(catch 'x (unwind-protect (throw 'x 42) (no-such-fn)))` → `rc=1`,
+`nelisp: uncaught error: void-function: (no-such-fn)` (the `throw`'s
+value 42 is lost, silently replaced by the cleanup's error becoming
+visible). This is a second-order finding, not chased further this
+session — it shows the swallow behavior is asymmetric depending on
+whether the M6 stash already held something (a stashed throw) when the
+cleanup ran, not a uniform "cleanup errors are always invisible" rule.
+
+### gdb: where the diagnostic printer is (not) reached
+
+```
+$ gdb -q -batch \
+    -ex 'break nl_eval_source_print_error' \
+    -ex 'break nl_eval_source_report_error' \
+    -ex 'break nl_sf_uw_do_cleanup' \
+    -ex 'run --load /tmp/mini_uwp.el' \
+    -ex 'bt 10' -ex continue -ex 'bt 10' -ex continue \
+    ./target/nelisp
+```
+(`/tmp/mini_uwp.el` = `(unwind-protect 1 (no-such-fn))`)
+
+```
+Breakpoint 3, 0x00000000007f12a3 in nl_sf_uw_do_cleanup ()
+#0  nl_sf_uw_do_cleanup ()
+#1  nl_sf_uw_got_cdr ()
+#2  nl_sf_uw_cleanup ()
+#3  nl_sf_uw_with_cleanup ()
+#4  nl_sf_uw_after_body ()
+#5  nl_sf_uw_got_car ()
+#6  nl_sf_unwind_protect ()
+#7  nl_apply_special ()
+#8  nl_eval_inner_cons ()
+#9  nl_ei_cons_tail ()
+1
+[Inferior 1 (process 3419648) exited normally]
+```
+
+`nl_sf_uw_do_cleanup` (which evaluates the cleanup form `(no-such-fn)`
+via `extern-call nl_eval_is_truthy`) is reached exactly once, as
+expected. **Neither `nl_eval_source_print_error` nor
+`nl_eval_source_report_error` is ever hit** — the process prints `1`
+(the body's own value) and exits normally with rc=0. The error never
+reaches the diagnostic layer because it never reaches the M6 stash at
+all: it is discarded one level below, inside cleanup evaluation.
+
+### Mechanism (file:line)
+
+`lisp/nelisp-cc-sf-unwind-protect.el` (AOT swap for
+`sf_unwind_protect`), `nl_sf_uw_do_cleanup` (lines 92-100) and the
+recursive walk `nl_sf_uw_cleanup`/`nl_sf_uw_got_cdr`/
+`nl_sf_uw_cleanup_done` (lines 83-119): every cleanup form is evaluated
+via `extern-call nl_eval_is_truthy`, not `nelisp_eval_call`. Per this
+same file's own comment (lines 39-45, 53-55, 180-182):
+
+> `nl_eval_is_truthy` discards errors silently (returns -1 on error but
+> does NOT touch `nelisp--last-signal-data`). Because cleanup eval uses
+> only `nl_eval_is_truthy`, the body's stashed error ... is preserved
+> intact through all cleanup steps.
+
+This is intentional, self-documented behavior — but the file's own
+justification for it, "matching GNU Emacs `unwind-protect` semantics"
+(line 35, repeated at line 183), is **empirically false**. Checked
+directly against GNU Emacs 30.1:
+
+```
+$ emacs -Q --batch --eval '(prin1 (unwind-protect 1 (no-such-fn)))'
+Symbol's function definition is void: no-such-fn
+Error: void-function (no-such-fn)
+  ...
+```
+(exits 255, signals the cleanup's error — does not return 1 silently).
+
+Real Emacs Lisp's `unwind-protect` guarantees the cleanup forms *run*
+even across a non-local exit from the body; it does not guarantee their
+own errors are swallowed. If a cleanup form signals, that signal
+propagates normally (this is the well-known "an error while unwinding
+can mask the original condition" Lisp hazard — the *new* error becomes
+visible, it is not silently thrown away). NeLisp's implementation
+instead unconditionally discards **all** cleanup-form errors, visible or
+not, using a builtin (`nl_eval_is_truthy`) that was designed for
+boolean-conditional evaluation (`if`/`while`/`and`/`or` test positions,
+where "discard errors, treat as false" is arguably defensible) and
+repurposed here for side-effecting cleanup evaluation, where it is not.
+
+### Why this is the right classification for "bypasses both the diagnostic and catch wrappers"
+
+- **Bypasses the stderr diagnostic**: `nl_eval_source_print_error`/
+  `nl_eval_source_report_error` (the July-5 REPL-visibility fix,
+  `440cdfb7`/`6020ca18`) only fire when the M6 stash flag
+  (`268435472`) is non-zero at the top-level driver's post-form check
+  (`scripts/nelisp-standalone-build.el:10629-10658`). Cleanup-form
+  errors evaluated via `nl_eval_is_truthy` never touch that flag, so
+  they are invisible to this mechanism *by construction*, independent of
+  whether the fix itself is working correctly (it is — see Q1).
+- **Bypasses `catch`/`condition-case`**: both are implemented in terms of
+  the same non-local-exit/stash machinery (this codebase's own
+  documented "M6 stash" contract; see also the pre-existing memory item
+  on `condition-case` mis-handling `throw`). Since the cleanup error
+  never becomes a stash entry, there is nothing for an enclosing
+  `catch`/`condition-case` to intercept — from their point of view the
+  `unwind-protect` simply returned its body's value normally. This
+  matches the task's phrasing exactly: not "an error catch fails to
+  match," but "there was never anything to catch."
+
+### Relationship to the specific org-mode probe (why it does *not* explain the staged silence, and why it still matters)
+
+A prior `FINDINGS.md` entry in this same file ("2026-07-05 exact-form
+bisect...") had already found, on an *earlier* HEAD, that
+`org-mode`'s entire real body executed inside the **cleanup arm** of an
+`unwind-protect` whose protected form was `(outline-mode)` — a
+deliberate workaround in `nelisp-emacs-lib`'s
+`packages/nelisp-emacs-core/lisp/emacs-mode.el` for a *different*,
+earlier defect ("loses forms that follow some macro-generated parent
+major-mode calls"). That would have been the ideal setup to trigger
+*this* session's swallow bug for org-mode specifically. Re-reading that
+file at its current checkout (read-only, sibling repo) shows it has
+since been rewritten (comment: "Keep the body/hooks outside cleanup"):
+the generated `org-mode` function now runs its real 55-form body and
+mode hooks as a **plain sequential** tail, with only a trivial `nil`
+cleanup arm on the *parent*-call `unwind-protect`
+(`emacs-mode.el:220-231`). That upstream fix is why this session's
+org-mode probe surfaces `easy-menu-change`'s `void-function` cleanly
+(Q1) instead of hitting the swallow bug: the specific structural
+precondition (real logic inside a cleanup arm) that used to exist for
+`org-mode` no longer does, on this HEAD.
+
+The swallow bug itself, however, is independent of `org-mode` and is
+still live in this repo today (Q2/Q3, 100% reproducible). It remains a
+real, general hazard for *any* code path whose cleanup arm can run
+non-trivial logic and hit a not-yet-ported primitive or a corrupted
+value — which in ordinary Elisp is extremely common: `save-excursion`,
+`save-match-data`, `save-restriction`, and `with-current-buffer` are all
+themselves `unwind-protect`-based, with real (not `nil`) cleanup forms
+that restore buffer/point/match-data state. Org-mode's own body (not the
+`emacs-mode.el` wrapper) uses all of these throughout its activation and
+parsing paths. So while this session could not reproduce the exact
+staged silence, this bug is a fully generic, already-confirmed
+mechanism by which *some other* future (or GC-timing-dependent) error
+inside any such restore/cleanup step would vanish exactly as described
+— no stderr, no `catch`, `rc=0` — the moment one of those cleanup steps
+happens to fail.
+
+### On the staged-evidence contradiction itself (unresolved, secondary)
+
+This session could not determine *why* the earlier probes flipped from
+visible to silent with no source change, because:
+
+- The from-scratch rebuild in this session reproduces neither behavior
+  consistently silent nor inconsistent — it is consistently *visible*
+  (8/8 runs, two different images, the freshly-built binary in both
+  cases).
+- The actual binary bytes in use during the earlier "silent" runs no
+  longer exist (this session's first action per its own instructions was
+  `rm -f target/nelisp && make standalone-reader`, overwriting whatever
+  was there).
+
+The task's framing ("binary state UNKNOWN") already anticipated this.
+Given `nelisp.clone-capture` is a plain clone directory (not an isolated
+`git worktree`) potentially shared across agent sessions/tool
+invocations, the most plausible explanations, in order of likelihood,
+are: (a) a concurrent rebuild of `target/nelisp` (e.g. another session
+running `make standalone-reader` mid-probe) produced a torn/partially
+written binary for some of the "silent" runs — a non-atomic overwrite of
+a several-MB executable while another process holds it open/exec'd is a
+classic source of exactly this kind of "worked, then silently broke,
+then would presumably work again after the write finished" pattern; or
+(b) a stale `target/nelisp-artifact-runtime.el.nelc` artifact-runtime
+cache (this build's own log shows this companion file is written
+alongside `target/nelisp` and, per this codebase's own documented
+"stale .elc" hazard class, is not guaranteed to be regenerated in lock-
+step with the main binary) was paired with a binary from a different
+build. Neither could be confirmed from this session's own evidence
+(no crash, no corruption signature — just absence of output), but both
+are consistent with "no source change, yet behavior changed," which a
+genuine reader defect on unmodified, cleanly-built artifacts is not.
+
+### Recommended fix, ranked (scoped for codex)
+
+1. **Primary, this repo, small and self-contained
+   (`lisp/nelisp-cc-sf-unwind-protect.el`):** stop using
+   `nl_eval_is_truthy` for cleanup-form evaluation when the *body*
+   completed with no stashed error (rc=0, stash flag 0). In that case
+   there is nothing worth protecting by discarding — use
+   `nelisp_eval_call` (the stash-preserving entry point, same as the
+   body's own evaluation) for the *last* cleanup form only (or all of
+   them), and let a genuine error from it propagate/stash normally,
+   matching the real-Emacs behavior confirmed above. When the body
+   *did* stash an error (rc=1, flag != 0), keep something close to the
+   current discard-and-preserve behavior for now (this is the one case
+   where "the original condition should usually win over a masking
+   cleanup error" is a defensible product decision, distinct from "cleanup
+   errors are invisible unconditionally") — but note the throw-vs-error
+   asymmetry found above (`(catch 'x (unwind-protect (throw 'x 42)
+   (no-such-fn)))`) as a related follow-up: right now a stashed *throw*
+   can be silently replaced by a later cleanup error rather than
+   preserved, which deserves its own look.
+2. **Regression tests, both minimal and both self-contained (no
+   org-mode/cold-image needed):**
+   - `(unwind-protect 1 (no-such-fn))` via `--load`: should now exit
+     non-zero and print `nelisp: uncaught error: void-function:
+     (no-such-fn)`, not `rc=0`/stdout `1`.
+   - `(condition-case err (unwind-protect 1 (no-such-fn)) (error
+     (prin1 (list 'CAUGHT err))))`: should now print `(CAUGHT ...)`.
+3. **Verification after (1):** re-run this session's exact org-mode
+   probe matrix (plain + catch-wrapped, 5x/3x) on a fresh cold image;
+   behavior should be unchanged (org-mode's current body has no real
+   cleanup-arm logic left to expose this fix, per the "Relationship"
+   section above) — this is the expected, correct outcome, not a sign
+   the fix did nothing.
+4. **Follow-up, not scoped for this session:** since `save-excursion`/
+   `save-match-data`/`save-restriction`/`with-current-buffer` all wrap
+   real cleanup logic in `unwind-protect`, once (1) lands it would be
+   worth deliberately forcing a cleanup-arm error inside each of those
+   (e.g. `(save-excursion (no-such-fn))`'s cleanup restoring a killed
+   buffer's point) to check for any other latent instances of this same
+   class already masked in production code paths.
+
+### Artifacts (not committed, scratch only)
+
+`/tmp/probe_org2.el`, `/tmp/probe_catch.el`, `/tmp/mini*.el`,
+`/tmp/mini_uwp.el`, `/tmp/gdb_uwp.cmds` (all under this session's
+scratchpad, not the repo). Cold image workdir
+`/tmp/cold-image-org-e2e.JNyhha/` (built with `NELISP_E2E_KEEP=1`,
+`scripts/cold-image-org-e2e.sh 1`) and the prior session's kept workdir
+`/tmp/cold-image-org-e2e.oar79d/` were both used for cross-checks and
+deleted at the end of this session (`rm -rf`, after confirming via
+`ps aux`/`pkill -9 -f` that no `nelisp` process was left running). No
+repo source files were modified this session; only this `FINDINGS.md`
+entry (branch `silent-abort-diag`, base `main` @ `52928050`).
+
+## Cold-image `org-mode` activation: garbage-name `void-variable` / SIGSEGV diagnosis (branch `garbage-symbol-diag`, base `main` @ `b4f4b4b5`)
+
+### Task and setup
+
+Diagnosed a reported memory-corruption-signature error during in-buffer
+`org-mode` activation on a cold-loaded (`--cold-load-from`) image:
+`nelisp: uncaught error: void-variable: (LULF\0\0\0...garbage...)`.
+
+Repos: `dev/nelisp` @ `b4f4b4b5` (this repo, this branch, no source files
+touched). `dev/nelisp.clone-capture` @ `7aa3ed8b` (branch
+`fix/uw-cleanup-errors`), reader binary sanity-checked (`(+ 40 3)` -> `43`),
+**not rebuilt**. `dev/nelisp-emacs-lib` @ `be3d139b` ("Fix easymenu
+conversion cache aliasing") -- `build/nemacs-bootstrap.{el,repl}` were stale
+(built ~4 minutes *before* `be3d139b` landed) and were regenerated fresh
+before use, per the staleness pitfall documented in
+`dev/nelisp-emacs-lib/tmp-diag/e2e-regression-bisect.md` (read-only
+reference, not modified). Gitignored generated artifacts; no repo state
+changed there.
+
+### Reproduction
+
+Built one fresh image via
+`NELISP_E2E_KEEP=1 timeout 300 bash scripts/cold-image-org-e2e.sh 1` in
+`dev/nelisp.clone-capture` against the freshly-rebuilt bootstrap. Result:
+`org-run1.img` (1,188,639,152 B, ~1.13 GiB), faithfulness `RESULT:
+IDENTICAL` on the harness's own 6-conjunct probe (`featurep org` /
+`featurep org-element` / `fboundp org-mode` / `fboundp
+org-element-parse-buffer` / `commandp org-mode` / `fboundp commandp` --
+none of which actually *call* `org-mode`). Image bloat vs. the ~979 MiB
+pre-`a6868f72` baseline is confirmed present (the easymenu aliasing fix,
+unrelated, did not eliminate the bloat).
+
+Then ran the task's real probe, `(with-temp-buffer (org-mode)
+(nl-write-file "/tmp/om.txt" (symbol-name major-mode)))`, against
+`org-run1.img`:
+
+| run | mode | result |
+|---|---|---|
+| 1 | `--cold-load-from`, plain (no debugger) | **SIGSEGV** (rc=139), zero stdout/stderr captured |
+| 2 | `--cold-load-from`, plain (rerun, same image) | **SIGSEGV** (rc=139), zero output -- consistent crash mode |
+| 3 | `--cold-load-from`, plain (3rd rerun) | **SIGSEGV** (rc=139) again |
+| -- | `--cold-load-from`, under `gdb` (default: ASLR disabled for inferior) | **no crash**, exited normally; stderr: `nelisp: uncaught error: void-function: (org-mode)` |
+| -- | `--cold-load-from`, under `gdb` with `set disable-randomization off` (ASLR preserved) | **no crash**, exited normally; gdb reported "No stack" (nothing to unwind) |
+
+**Consistency verdict: the crash is reproducible (3/3 SIGSEGV) but the
+manifestation is layout-sensitive.** The exact literal `void-variable:
+(LULF...)` text was not reproduced this session; instead a hard SIGSEGV
+(3/3, no debugger) and a *different* symbol's void-function error (once,
+under gdb -- `org-mode` itself reported unbound-as-function despite
+`(fboundp 'org-mode)` having just been confirmed `t` by the e2e harness's
+own conjunct probe on the same image). Both are consistent with the same
+underlying defect class, and this exact
+"symptom-shifts-with-the-debugger/every-rerun" behavior is independently
+already documented and named a "slippery heisenbug" in
+`docs/design/152-sound-form-boundary-gc.org` section 11.24, for an
+unrelated workload (a long count-loop) -- see Root cause below.
+
+### Decisive experiment: warm vs. cold
+
+Re-ran the *identical* probe form directly against the **warm**
+(replay-loaded, never dumped/reloaded) process, by appending it to a copy
+of the same `load-only.repl` chain and feeding it to `./target/nelisp
+--repl --no-prompt --no-print` (no dump, no cold-load):
+
+- **rc=0, no crash.** `org-mode` activation ran into ~20 *legitimate*
+  `void-variable`/`void-function`/other errors for genuinely-missing
+  nelisp-emacs-lib substrate symbols: `org-tags-overlay`, `org-date-ovl`,
+  `org-org-menu`, `regexp-unmatchable`,
+  `org-element-planning-keywords-re`, `org-element-clock-line-re`,
+  `filter-buffer-substring-function`, `try-completion`, `comma`, etc. --
+  **every single one legible and correct.** No garbage symbol names, no
+  crash, at any point.
+- The final `nl-write-file` never ran (org-mode's own activation body
+  aborts partway on the first real substrate gap it hits, a separate
+  known "silent truncation" behavior documented in
+  `nelisp-cc-eval-inner.el`'s own header comment), so `/tmp/om-warm.txt`
+  was not produced -- expected and orthogonal to this bug.
+
+**Verdict: this is a dump/reload (cold-load)-specific corruption, not a
+general in-process eval/GC defect.** The *same* deeply-nested,
+allocation-heavy `org-mode` activation body runs, on the *same* reader
+binary, against arena state at least as large (60-file replay + prelude
+already loaded) as the cold-boot case -- and produces zero corruption.
+Only after the arena is dumped to an image and reloaded at a new
+process's (necessarily different) load address does a
+`void-variable`/`void-function` reference start resolving to garbage or
+to the wrong answer.
+
+### Root cause hypothesis (file:line evidence)
+
+1. `nl_stash_void_variable` (`lisp/nelisp-cc-eval-inner.el:86-105`, wired
+   in at `:112-113`) builds the `(void-variable SYM)` signal by calling
+   `nl_sexp_clone_into name_ptr clone_slot` on the unbound
+   variable-reference Symbol. It is a faithful, field-for-field copy of
+   the already-working `nl_cons_stash_void_function`
+   (`lisp/nelisp-cc-evalport-combiner-cons.el`) -- not itself buggy, but
+   it faithfully reports whatever it is handed.
+2. `nl_sexp_clone_into` (`lisp/nelisp-cc-sexp-clone-into.el`) clones a
+   tag-4 (Symbol) or tag-5 (Str) Sexp via a **shallow buffer alias** by
+   default (`nl_sci_dispatch`, lines 107-117; flag `268435648 = 1`, set at
+   `scripts/nelisp-standalone-build.el:13899`): it bit-copies the 32-byte
+   Sexp header (including the raw `char*` at `+16`) without deep-copying
+   the underlying byte buffer. Shipped in
+   `docs/design/149-str-clone-aliasing.org` (2026-06-10, default ON) as a
+   perf fix, on the explicit soundness argument that "the tracing GC
+   keeps shared buffers alive via reachability" -- i.e. soundness is
+   entirely contingent on complete GC/reachability root coverage for
+   every occurrence of a pointer into that shared buffer.
+3. That root-coverage completeness is already a known, open gap.
+   `docs/design/152-sound-form-boundary-gc.org` documents (sections
+   11.13-11.20) a real, previously-crashing root-coverage gap in the
+   env/function "mirror" (hash-table) walk -- crash signature
+   `nelisp_mirror_walk_bucket <- nelisp_env_set_value` / `nl_kw_is_keyword
+   (NULL)` -- the *exact same signature* `dev/nelisp-emacs-lib`'s own
+   bisect independently hit and attributed to "a dev/nelisp reader/GC
+   defect, not a nelisp-emacs-lib substrate gap" (see
+   `dev/nelisp-emacs-lib/tmp-diag/e2e-regression-bisect.md`, first bad
+   commit `a6868f72`). Section 11.21 closed *one* instance of this gap
+   (conservative native-stack scan, flag `268436464=1`, for GC
+   mark/sweep) but left it open for anything the conservative scan
+   doesn't cover; section 11.25 tried extending root coverage to mid-eval
+   collection and found it **unsound** (reverted).
+4. The image dump/relocation path (`bf_arena_dump_image_stream`,
+   `scripts/nelisp-standalone-build.el:4321`) performs its own,
+   independent reachability walk (`nl_fa_roots`, called at line ~4374)
+   that records a *word-position relocation table*: every live pointer
+   *field* it finds gets one table entry, rewritten to the new base
+   address on `--cold-load-from`. This is architecturally the same kind
+   of root-enumeration problem as GC mark/sweep -- and the warm-vs-cold
+   experiment above proves the corruption is specific to *this* walk (or
+   the swizzle/restore step around it), not to ordinary in-process
+   eval/GC, which ran the identical workload cleanly.
+   `docs/design/156-flat-arena-boot-install.org` (the dump/reload format's
+   design doc) has **zero mentions of "alias", "149", "shared buffer", or
+   "dedup"** -- the multi-chunk dump/relocation design was never audited
+   against Doc 149's later invariant that many distinct Symbol/Str Sexp
+   headers can now hold independent *copies* of the same raw buffer
+   address.
+
+**Mechanism**: if `nl_fa_roots`'s walk has the same env-mirror/hash-bucket
+blind spot already documented for GC (item 3), a Symbol reachable only
+through an under-walked mirror bucket has its `ptr@16` field left
+un-rebased in the relocation table. On `--cold-load-from`, that field
+still holds the pre-dump process's absolute address -- meaningless in the
+new process's address space. Dereferencing it during
+`nl_stash_void_variable`'s clone-and-print path either faults immediately
+if the stale address is unmapped in the new process (the SIGSEGV
+reproduced 3/3 without a debugger -- a different ASLR layout makes an old
+absolute pointer almost certain to be unmapped), or happens to land inside
+the new mapping and read whatever unrelated data now occupies that
+address (a legible-but-wrong printed name, e.g. the task's
+`LULF\0\0\0...`, or the `void-function: (org-mode)` captured once under
+gdb -- gdb's ptrace attach measurably perturbs the process's memory layout
+even with `disable-randomization` toggled either way, consistent with
+producing yet a third outcome rather than reproducing the plain-run
+SIGSEGV).
+
+This "same static image, wildly different symptom depending on
+debugger/layout" behavior is independently already named a "slippery
+heisenbug" for an unrelated single-long-form workload in
+`docs/design/152-sound-form-boundary-gc.org` section 11.24; this report's
+evidence points at the *dump/relocation-specific* instance of the same
+root family, discriminated from that unrelated in-process case by the
+warm-vs-cold experiment above: the in-process/single-long-form gap does
+**not** reproduce here (warm run was clean), but the dump/reload path
+does.
+
+### What this is *not*
+
+- Not the easymenu conversion cache aliasing bug (already fixed at
+  `be3d139b`; e2e faithfulness conjuncts are clean on this image).
+- Not the unrelated, already-bisected full-vendor-load (319-file) SEGV
+  from `docs/design/149-str-clone-aliasing.org` section P3 (bisects to
+  `7e6b0dcc`, confirmed independent of the aliasing flag via A/B test) --
+  different workload, different trigger.
+- Not a nelisp-emacs-lib substrate gap. The warm-process run surfaced
+  plenty of *real* missing-substrate symbols with perfectly legible names
+  -- legitimate, separate substrate-completeness items, not this bug.
+
+### Image bloat (secondary, noted per task instructions)
+
+979 MiB (pre-`a6868f72` baseline) -> 1.19-1.22 GiB now. Given item 4
+above, a plausible contributor is that shared/aliased buffers (Doc 149)
+may be written into the dumped image more than once, or their
+live/reachable status double-counted, if `nl_fa_roots` doesn't dedupe
+against the same mirror-walk gap -- consistent with, but not proven by,
+this investigation. Not chased further per task scope (budget).
+
+### Recommended fix (for follow-up implementation)
+
+1. Audit `nl_fa_roots` (`scripts/nelisp-standalone-build.el`, called from
+   `bf_arena_dump_image_stream` ~line 4321) against the same env-mirror
+   hash-bucket coverage gap already fixed for ordinary GC mark/sweep in
+   section 11.21 (conservative native-stack scan, flag `268436464`).
+   Determine whether the dump path shares that root-enumeration code or
+   has its own, staler copy; if staler, bring it up to the same coverage.
+2. Cheap A/B to confirm scope before implementing: rebuild with flag
+   `268435648` (Doc 149 aliasing) forced to `0` (legacy per-Symbol/Str
+   deep copy) and re-run this exact cold-image + probe. If the corruption
+   disappears with aliasing off, that pins the fix squarely on "make Doc
+   149's aliasing survive dump/relocate" (either fix root coverage per
+   (1), or have the dumper explicitly dedupe-and-relocate shared buffers
+   instead of relying on generic per-field root coverage). If it still
+   reproduces with aliasing off, the gap is more general than Doc 149 and
+   (1) alone is the fix.
+3. Do not chase individual corrupted bytes/instructions further by
+   breakpoint-hunting under gdb -- section 11.24 already found that
+   unproductive for this defect family (manifestation shifts with every
+   debugger perturbation, as reconfirmed here). Fix the root-coverage
+   gap, then re-run this report's exact repro (image + probe, both
+   preserved reproducibly by this document) as the acceptance test.
+
+### Cleanup
+
+One image workdir was created (`dev/nelisp.clone-capture`'s
+`/tmp/cold-image-org-e2e.5EV2sH`, via `NELISP_E2E_KEEP=1`) and was deleted
+at the end of this session. `dev/nelisp-emacs-lib`'s
+`build/nemacs-bootstrap.{el,repl}` were regenerated (gitignored
+artifacts, not committed); working tree there remains clean/unmodified
+otherwise. `dev/nelisp.clone-capture`'s `target/nelisp` was never
+rebuilt (read/run only). No source files were modified in any of the
+three repos this session; only this `FINDINGS.md` entry (branch
+`garbage-symbol-diag`, base `main` @ `b4f4b4b5`).
+## The last remaining silent-abort class: `nl_eval_source_all` discards any top-level form whose `form_rc != 0` while the M6 stash flag is still 0 -- confirmed live for `(with-temp-buffer (org-mode) ...)`, root cause inside `org-mode`'s body not yet pinned (branch `diag/eval-call-formrc-swallow`, base `main` @ `9e41de3c` / this worktree @ `f8238049`)
+
+### Task and setup
+
+All previously-classified abort classes (uncaught signals, uncaught
+throws, `unwind-protect` cleanup-error swallowing) now report correctly
+to stderr (`440cdfb7`/`6020ca18` REPL-visibility fix; `596cf204`
+cleanup-error fix; `f8238049` throw-preservation-through-cleanup fix).
+Despite that, this session's own fresh probe against a cold-loaded
+image still shows `(with-temp-buffer (org-mode) ...)` aborting
+mid-form with **no** diagnostic, **no** file write, `rc=0`, and the REPL
+silently continuing to the next top-level form.
+
+Binary/image sanity per this session's own instructions: `target/nelisp`
+(4,360,976 bytes, mtime prior to session start) was NOT rebuilt.
+`--eval '(prin1 (+ 40 3))'` prints `4343` (not a bare `43`) -- traced
+this to expected, unrelated behavior: this CLI's `--eval`/`--load` both
+auto-print the form's return value in addition to any explicit `prin1`
+the form itself performs (confirmed: `--eval '(+ 40 3)'` alone, no
+`prin1`, prints exactly `43`; two explicit `--eval` args each
+independently double). Not a build defect -- sanity for "binary
+executes committed HEAD's arithmetic correctly" holds, so per the
+task's own instruction ("rebuild only if sanity fails") no rebuild was
+performed. The existing cold image
+`/tmp/cold-image-org-e2e.0lsr0K/org-run1.img` (1,222,788,008 bytes,
+`t_load_done_run1`/`t_dump_done_run1` markers present) was reused as-is.
+
+### Reproducing the fresh evidence
+
+```
+$ cat probe_org3.txt
+(prin1 'S1)
+(with-temp-buffer (org-mode) (prin1 'AFTER-ORG) (nl-write-file "/tmp/.../ol2.txt" "org-mode-done"))
+(prin1 'S2)
+
+$ ./target/nelisp --cold-load-from /tmp/cold-image-org-e2e.0lsr0K/org-run1.img --no-prompt \
+    < probe_org3.txt
+stdout: "S1S1\nS2S2\n"     (S1/S2 each doubled: own prin1 + REPL's own value-echo)
+stderr: (empty)
+rc=0
+file /tmp/.../ol2.txt: never created
+```
+
+`AFTER-ORG` never prints and the file is never written -- the
+`with-temp-buffer` form aborts somewhere between `(org-mode)` starting
+and `(prin1 'AFTER-ORG)` running, with zero diagnostic and the REPL
+loop falling straight through to the next top-level form (`S2`).
+`(with-temp-buffer (outline-mode) (nl-write-file ...))` (this session's
+own quick control, not re-run here since already established as working
+in the task's own fresh-evidence notes) is unaffected -- the
+differentiator is `org-mode`'s own body, not `with-temp-buffer` or the
+probe harness.
+
+### H1-H4 verdict up front
+
+**H2 holds, in a generalized form not anticipated by the original
+phrasing.** It is not "a rc value treated as benign" in some special
+inline-substrate-loading sense -- it is the *general, permanent,
+by-design* contract of the top-level driver: `nl_eval_source_all` only
+ever reports/aborts when the M6 stash flag is non-zero; **any** nonzero
+`form_rc` returned with the flag still at 0 is unconditionally treated
+as "nothing happened, keep going," for both `--repl` (`REPORT_ERRORS=0`)
+and `--eval`/`--load`/embedded-file evaluation (`REPORT_ERRORS=1`) alike
+-- the flag check happens *before* the `REPORT_ERRORS` branch, so this
+swallow is not REPL-specific. H1 (a catch tag coincidentally matching
+the driver's own machinery) and H4 (quit-flag/keyboard-quit
+misclassification) do not apply -- no `catch` is involved anywhere in
+this call chain, and the QUIT_FLAG (268435464) is untouched throughout
+(confirmed below). H3 (an unprintable stashed value silently crashing
+the printer) does not apply either, because nothing is ever stashed in
+the first place -- there is no value for a printer to choke on.
+
+### gdb: locating the M6 region (it has moved off the historical `0x10000000`)
+
+Every `268435472`/`268435480`/`268435512`/`268435464`-style literal in
+`scripts/nelisp-standalone-build.el` source reads as an absolute address,
+but as of Doc 140 Stage 8 (`nelisp-standalone--linux-arena-init-form`,
+`scripts/nelisp-standalone-build.el:1268-1288`) **there is no fixed/
+`MAP_FIXED` arena base any more** -- the compile-time rewrite pass
+(`nelisp-standalone--chunk-arena-rewrite`) turns every one of these
+literals into a load of the runtime-computed `nl_arena_base` (a fixed
+`.bss` slot, `nm` address `0x818000` in this binary) plus the same
+offset (e.g. `268435472 - 268435456 = 16` -> flag is at
+`*(long*)0x818000 + 16`). Confirmed empirically: `x/1gx 0x10000000` (the
+literal address) is unmapped in a live process (`info proc mappings`
+shows no region anywhere near it); the real arena for a given run lands
+at a kernel-chosen high address (observed `0x7fffa7e00000` in one run,
+`0x7fff97e00000`-ish region size in another -- genuinely ASLR'd, changes
+per run). All M6 reads below go through `*(long*)0x818000` (indirected
+through `nl_arena_base`), not the raw literal.
+
+### gdb: minimal, fully deterministic non-org-mode repro of the exact swallow mechanism
+
+`nelisp_eval_call` (the universal per-eval recursion-guard entry,
+`scripts/nelisp-standalone-build.el:2992-3011`) is:
+
+```elisp
+(defun nelisp_eval_call (form_ptr env out)
+  (let* ((rec_cur_addr (+ env 96)) (rec_max_addr (+ env 104)))
+    (let* ((rec_cur (ptr-read-u64 rec_cur_addr 0)) (rec_max (ptr-read-u64 rec_max_addr 0)))
+      (if (>= rec_cur rec_max) 1          ; <-- bare 1, NO stash write
+        (nl_seq2 (ptr-write-u64 rec_cur_addr 0 (+ rec_cur 1))
+          ...(nl_eval_inner form_ptr env out 0)...)))))
+```
+
+`rec_max` is 300000 (`driver`'s `ctx+104` init,
+`scripts/nelisp-standalone-build.el:10199-10203`/`13922-13927`: "300000
+is ~74% of that ceiling, so deep recursion ... errors at the guard --
+never SIGSEGV"). When the guard trips it returns `1` with **no** call
+into `bf_signal`/`bf_error`/`nl_stash_void_variable`/
+`nl_cons_stash_void_function` -- the M6 stash is left completely
+untouched.
+
+Minimal repro (`--repl --no-prompt`, this session's own freshly-built,
+unmodified `target/nelisp`, no cold image needed):
+
+```
+(prin1 'S1)
+(defun rec-deep (n) (if (= n 0) 0 (+ 1 (rec-deep (- n 1)))))
+(prin1 (rec-deep 250000))
+(prin1 'S2)
+```
+->
+```
+stdout: S1S1\nrec-deep\nS2S2\n      (rec-deep's own prin1 line: MISSING)
+stderr: (empty)
+rc=0
+```
+
+gdb, unconditional breakpoint at the disassembled address of the
+guard's true-branch (`nelisp_eval_call+182` = `0x7b41c1`, reached only
+when `rec_cur >= rec_max`, so this hits once total instead of needing a
+conditional breakpoint evaluated on every one of ~150,000 nested calls):
+
+```
+Breakpoint 1, 0x00000000007b41c1 in nelisp_eval_call ()
+GUARD TRIPPED: rec_cur=300000 rec_max=300000
+arena base=0x7fffa7e00000
+M6 flag(base+16)=0 TAG(base+24)=0 QUIT(base+8)=0
+#0  nelisp_eval_call ()      (the guard itself)
+#1  nl_eval_arg_list_walk ()
+#2  nl_eval_arg_list ()
+#3  nl_eval_inner_cons ()
+#4  nl_ei_cons_tail ()
+#5  nl_ei_cons_dispatch ()
+#6  nl_eval_inner ()
+#7  nelisp_eval_call ()      (caller one level up)
+[continue] -> S2S2 printed, process exits normally, breakpoint never
+              fires again
+```
+
+Confirms: flag/tag are 0 at the exact moment the guard fires, the
+`rc=1` propagates cleanly up through the whole recursive call chain in
+one shot with nothing else touching the stash, and the top-level driver
+silently absorbs it.
+
+### gdb: confirming `nl_eval_source_all`'s swallow branch, and that the org-mode probe hits it identically
+
+Disassembly of `nl_eval_source_all` (`scripts/nelisp-standalone-build.el:
+10818-10886`, source lines ~10852-10870) pins the exact machine
+addresses of the two outcomes after `form_rc` is computed:
+
+- `0x8074c3` -- `form_rc != 0` **and** M6 flag == 0 -> `mov $0,%rax` ->
+  silently return 0 (this is the swallow).
+- `0x8074cf` -- `form_rc != 0` **and** M6 flag != 0 -> proceed to the
+  `report_errors` check -> `nl_eval_source_report_error`/
+  `nl_eval_source_print_error`.
+
+Both are ordinary per-top-level-form branch targets inside a single
+non-recursive loop (hit at most once per line of REPL input), so
+unconditional breakpoints on both are cheap and unambiguous -- no
+conditional-breakpoint-on-every-nested-call overhead needed (unlike a
+naive break on `nl_driver_eval_with_recorded_roots`, which is also
+called recursively from `bf_load_eval_loop`/`bf_eval_source_string_loop`
+and gives misleading `finish` results).
+
+Running the exact `probe_org3.txt` above against the cold image with
+both breakpoints armed:
+
+```
+Breakpoint 1 at 0x8074c3
+Breakpoint 2 at 0x8074cf
+S1S1
+
+Breakpoint 1, 0x00000000008074c3 in nl_eval_source_all ()
+HIT bp at pc=0x8074c3  form_rc=1
+S2S2
+[Inferior 1 exited normally]
+```
+
+Breakpoint 1 (the swallow) fires **exactly once**, immediately after the
+first form (`S1`) finishes and before `S2` -- i.e. on the org-mode
+form -- with `form_rc=1`. Breakpoint 2 (the "genuine stash present"
+branch) **never** fires. This is the same signature, at the same
+driver-level decision point, as the synthetic recursion-guard repro
+above: `nl_eval_source_all` sees `form_rc=1`, checks the M6 flag, finds
+it 0, and returns 0 -- exactly the observed symptom (no diagnostic,
+`rc=0`, loop continues to `S2`).
+
+### Ruling out the two leading candidates for org-mode's specific origin
+
+1. **The recursion-depth guard itself** -- ruled out. The unconditional
+   breakpoint at `0x7b41c1` (the guard's true-branch, confirmed above to
+   fire reliably for the synthetic 250,000-deep-recursion repro) **never
+   fires** during the org-mode probe. Whatever aborts inside
+   `with-temp-buffer`'s `(org-mode)` call is not native-recursion-depth
+   exhaustion.
+
+2. **`nl_eval_inner_cons`'s void-function-miss path** (calling an
+   undefined function symbol -- structurally the same "bare rc=1, no
+   stash" shape) -- ruled out as *already fixed* in the binary this
+   session used, via source archaeology:
+   - `lisp/nelisp-cc-evalport-combiner-cons.el`'s own `nl_eval_inner_cons`
+     (the on-disk "canonical" AOT source snapshot) *does* have this bug
+     verbatim: the `(if (= rc_lu 0) ... 1)` miss arm returns bare `1`
+     with no stash call, and `nelisp_env_lookup_function`
+     (`lisp/nelisp-cc-env-lookup-function.el:63-66`) documents its own
+     miss return as "1 = unbound-fn sentinel" with no stash either. This
+     file, in isolation, exhibits exactly this session's swallow class
+     for any `(some-undefined-fn ...)` call.
+   - But `scripts/nelisp-standalone-build.el` (the actual build driver)
+     patches this at compile time:
+     `nelisp-standalone--patch-void-function-miss` (line 9614) rewrites
+     that exact `(if (= rc_lu 0) ... 1)` arm to
+     `(nl_cons_stash_void_function env head_ptr)`, and the version
+     actually linked into `target/nelisp`,
+     `nelisp-standalone--mxcache-eval-inner-cons` (line 9722-9763, wired
+     via `nelisp-standalone--patch-combiner-cons-mxcache`), carries this
+     fix forward unchanged (line 9750:
+     `(nl_cons_stash_void_function env head_ptr)`). The docstring at line
+     9668 even names the exact prior incident this fixed: "a call to an
+     undefined function is an UNCATCHABLE process exit ... blocked the
+     anvil-pkg ERT suite." The stale, unpatched copy only still exists on
+     disk in `lisp/nelisp-cc-evalport-combiner-cons.el` because that file
+     is a source snapshot the build-time `nelisp-standalone--patch-*`
+     passes rewrite in memory before compilation, not the literal input
+     to the compiler -- it is not what is actually running.
+   - (This drift -- the *canonical* per-unit `.el` file exhibiting a bug
+     that a build-time patch pass silently corrects downstream, with no
+     comment in the canonical file itself pointing at the patch -- is
+     itself worth a follow-up naming audit, separate from this item.)
+
+### What remains open
+
+This session could **not**, within its time budget, single-step from the
+`nl_eval_source_all` swallow point (0x8074c3, C stack already unwound by
+that point) back down to the exact originating "bare non-zero return, no
+stash" instruction inside `org-mode`'s own expansion/body. Two attempts
+at doing this cheaply both failed to finish in time:
+
+- A conditional breakpoint scanning every recursive
+  `nelisp_eval_call`/`nl_eval_inner_cons` invocation for the shape "returns
+  1 without an intervening stash call" is not tractable this way -- these
+  are hit far too many times per top-level form for gdb's per-hit
+  ptrace/condition-eval overhead (the earlier synthetic-recursion
+  experiment already showed a *conditional* breakpoint over ~150,000 hits
+  timing out at 60s; org-mode's own body, while much shallower, still
+  evaluates enough sub-forms that a similar blanket conditional approach
+  did not complete in this session's remaining budget).
+- `record full` (process record, to reverse-step from the swallow point
+  back to the origin) was attempted, scoped to start only at the
+  beginning of the org-mode top-level form's evaluation (bracketed
+  between the two hits of the outer per-form call site,
+  `nl_eval_source_all+671` = `0x807422`) -- this also did not complete
+  within a 100s budget, most likely because `org-mode`'s
+  `define-derived-mode`-generated body and mode-hook running still
+  execute enough native instructions that full instruction-level
+  recording is too slow for this session's remaining time, even bounded
+  to just that one form.
+
+### Recommended fix, ranked (scoped for codex)
+
+1. **Primary, structural, closes the whole class at once (not just
+   org-mode's specific trigger) -- `scripts/nelisp-standalone-build.el`,
+   `nl_eval_source_all` (~line 10850-10870):** the comment at
+   10854-10865 already documents *why* the flag==0 fallback exists ("an
+   INLINE-embedded substrate load ... can return a transient non-zero
+   rc ... with nothing actually stashed"), but the fallback as written is
+   global and silent for *every* caller, not just that one documented
+   inline-substrate-loading case. Any current or future "bare non-zero
+   rc, no stash" return anywhere in the eval/apply/arg-list/frame chain
+   (the recursion guard demonstrated above being one live, still-present
+   instance; there may be others not yet audited) is invisible by
+   construction. Two non-exclusive options: (a) audit and fix each
+   remaining "rc!=0 without stash" call site to always stash (as was
+   already done for void-function-miss and unwind-protect-cleanup), so
+   the flag==0 fallback becomes truly unreachable outside its one
+   documented case and can be tightened to check for that case
+   specifically rather than "anything at all"; or (b), lower-effort and
+   defense-in-depth, have `nl_eval_source_all` at least print a distinct,
+   clearly-labeled diagnostic (e.g. `nelisp: internal: form aborted with
+   unrecorded error (rc=<n>)`) for the *undocumented* shape of this
+   case -- i.e. keep silently continuing (preserve current behavior for
+   the one legitimate documented transient-rc case) but only once that
+   case is narrowed to something more specific than "flag == 0", so a
+   genuine future regression like this one is loud instead of silent.
+2. **Regression test, self-contained, no org-mode/cold-image needed** (the
+   minimal repro above): `(defun rec-deep (n) (if (= n 0) 0 (+ 1
+   (rec-deep (- n 1))))) (rec-deep 250000)` via `--load`/`--eval` should
+   not exit 0 with the recursion silently truncated -- it should either
+   report a distinct "recursion guard" diagnostic (preferred; mirrors
+   real Emacs's `max-lisp-eval-depth` -> `(error "Lisp nesting exceeds
+   ...")`, which real Emacs *does* signal audibly) or at minimum the new
+   diagnostic from recommendation 1(b).
+3. **Follow-up, not scoped for this session:** finish the bisection this
+   session could not complete in time -- either budget a longer,
+   dedicated gdb/record session against just the org-mode probe (the two
+   ruled-out candidates above narrow the search meaningfully: it is
+   neither the recursion guard nor the void-function-miss path, so the
+   next places to check are `nl_eval_arg_list`/`nl_apply_function`/
+   `nl_apply_lambda_inner`'s own less-common branches -- e.g. arity
+   mismatch, a macro-expansion edge case, or a hash-table/obarray growth
+   path exercised specifically by `define-derived-mode`'s keymap/abbrev-
+   table/syntax-table setup or org-mode's hook-running -- for a similar
+   "bare non-zero return, no stash" shape), or apply recommendation 1(b)
+   first and let the now-loud diagnostic name the culprit directly on
+   the very next run.
+
+### Artifacts (not committed, scratch only)
+
+All under this session's scratchpad
+(`/tmp/claude-1000/.../scratchpad/`): `probe_org3.txt`,
+`probe_recdeep.txt`, `gdb_org_swallow.cmds`, `gdb_recguard2.cmds`, and
+related one-off `gdb_*.cmds`/`*.out`/`*.err` files. Cold image
+`/tmp/cold-image-org-e2e.0lsr0K/` (pre-existing from a concurrent/prior
+session, reused read-only, NOT deleted by this session per the task's
+own "delete image workdirs (max ONE)" instruction -- this session
+created zero new image workdirs, so there was nothing of this session's
+own to delete). No repo source files were modified this session; only
+this `FINDINGS.md` entry (branch `diag/eval-call-formrc-swallow`, base
+`main` @ `9e41de3c`, this worktree's checked-out content @ `f8238049`).
+
+================================================================================
+
+## 2026-07-05 follow-up: bisected the last unexplained `rc=1` swallow to `add-function`, and from there to an un-stripped `(declare ...)` clause in `defmacro`/`defun`'s elisp-level expansion (branch `diag/eval-call-formrc-swallow`, base `main` @ `38e76c71`)
+
+### Setup and sanity
+
+Verified per this task's own instructions before touching anything:
+
+- `nelisp.clone-capture` was already on `diag/eval-call-formrc-swallow` @
+  `6ade37fb`, matching `main` @ `38e76c71`'s content (`git log --oneline`
+  confirmed `6ade37fb` = "fix(reader): report flagless form aborts" is the
+  tip, one merge behind `main`'s own merge commit of the same work).
+  `target/nelisp` (4,361,160 bytes) was newer than the last source commit;
+  not rebuilt.
+- Cold image sanity per the task's own probe: `(with-temp-buffer
+  (outline-mode) (prin1 'AFTER-OUTLINE) (nl-write-file ...))` against
+  `/tmp/cold-image-org-e2e.qWJDyd/org-run1.img` printed `AFTER-OUTLINEt` and
+  wrote its file -- image usable, not rebuilt.
+- Reconfirmed the target symptom fresh on this binary/image, deterministic
+  across 3 repeats: `(with-temp-buffer (org-mode) (prin1 'AFTER-ORG)
+  (nl-write-file ...))` prints exactly `nelisp: form aborted without signal
+  (rc=1)` to stderr, `AFTER-ORG` never prints, the file is never written,
+  and the overall process exit is `rc=0` (the REPL loop absorbs it and
+  moves on to the next top-level form) -- this is precisely the "State"
+  this task's brief describes, now produced by the generic
+  `nl_eval_source_print_bare_abort` reporter added in `6ade37fb` rather
+  than silently.
+
+### Bisection method note: a literal copy of org-mode's body text does NOT reproduce the abort
+
+Following the task's suggested method, `org-mode`'s `define-derived-mode`
+body (vendor `org/org.el:4945-5114`, 55 top-level forms, mechanically
+split with a small paren-depth-aware Python script) was replayed as
+`(with-temp-buffer (outline-mode) FORM0 (prin1 'OK0) FORM1 (prin1 'OK1)
+... FORM54 (prin1 'OK54))` against the same cold image. This did **not**
+reproduce the target: with only `org-load-modules-maybe` (form index 2)
+replaced by a harmless stub -- needed because calling the *real*
+`org-load-modules-maybe` this early, as the literal first substantial
+form after cold-load, deterministically **segfaults** (`rc=139`, ~2s,
+reproduced 2/2) even though the *real* `(org-mode)` activation calls the
+real `org-load-modules-maybe` without crashing (confirmed by stubbing it
+inside a real `(org-mode)` call and observing the stub fire, then the
+normal `rc=1` abort later) -- all 55 markers printed and the buffer form
+completed cleanly, `rc=0`, no abort at all. This looks like a distinct,
+tangential, cold-start-order-dependent defect (a function that is safe
+once other allocator/state warm-up has occurred via preceding real
+`define-derived-mode` machinery, but crashes if it is the very first
+heavy call after `--cold-load-from`) -- flagged for awareness, not chased
+further; **not** the target of this session. The practical lesson: a bare
+textual replica of a `define-derived-mode` body, run outside the real
+macro-generated activation preamble (`kill-all-local-variables`,
+keymap/syntax-table install, `delay-mode-hooks`/`run-mode-hooks`, the real
+parent-mode chain), is not a faithful stand-in for this reader -- real
+activation must be used for bisection, with individual helper functions
+stubbed instead of the whole body replaced.
+
+### Bisection via real `(org-mode)` + selective function stubbing
+
+Real `(with-temp-buffer (org-mode) ...)` was kept intact; each body
+helper function was individually shadowed with a `(defun NAME (&rest _)
+(prin1 'MARKER) nil)` stub to localize which *real* call reintroduces the
+abort:
+
+1. Stubbing **all 18** body helper calls (`org-load-modules-maybe`,
+   `org-install-agenda-files-menu`, `org-element-cache-reset`,
+   `org-persist-load`, `org-set-regexps-and-options`,
+   `org-fold-initialize`, `org-set-font-lock-defaults`,
+   `org-set-tag-faces`, `org-fold--advice-edit-commands`,
+   `org-macro-initialize-templates`, `org-update-radio-target-regexp`,
+   `org-setup-filling`, `org-setup-comments-handling`,
+   `org-table-map-tables`, `org-table-header-line-mode`,
+   `org-find-invisible-foreground`, `org--set-faces-extend`,
+   `org-setup-yank-dnd-handlers`) made the whole probe pass cleanly:
+   `AFTER-ORG` printed, file written, `rc=0`. Confirms the culprit is one
+   of these 18 (or a function they call), not the auto-generated
+   `define-derived-mode` preamble.
+2. Binary search by leaving a shrinking prefix real and stubbing the
+   rest (in body order) isolated the culprit to **`org-fold-initialize`**:
+   real-first-9 + stub-last-9 still aborted; real-first-9 with
+   `org-fold-initialize` *also* stubbed (i.e. only the first 2:
+   `org-load-modules-maybe`, plus 6 more up to but excluding
+   `org-fold-initialize`, real) passed cleanly; real-only-`org-fold-initialize`
+   in isolation (everything else, including `org-set-font-lock-defaults`
+   and `org-fold--advice-edit-commands`, stubbed) reproduced an abort again
+   (this time a **segfault**, `rc=139`, not the graceful `rc=1` -- the
+   same "manifests differently depending on how much real prior state
+   exists" pattern noted above for `org-load-modules-maybe`; not chased,
+   `org-fold-initialize` is real either way).
+
+### Drilling into `org-fold-initialize` without org-mode at all
+
+`(with-temp-buffer (org-fold-initialize "..."))`, run completely
+standalone (no `org-mode`, no cold-image dependency beyond org.el/org-fold
+already being loaded), reproduces the exact target symptom on its own:
+`nelisp: form aborted without signal (rc=1)`, `rc=0` overall, deterministic.
+
+`org-fold-initialize` (`org/org-fold.el:241-281`) is two `setq-local`s
+plus one call to `org-fold-core-initialize` with a backquoted 3-entry
+spec list. `(org-fold-core-initialize (list (cons 'outline (list (cons
+:ellipsis "...") ...))))`, called directly with a **hand-built, backquote-free**
+single-entry spec list, reproduces the same abort -- ruling out the
+backquote/unquote machinery in `org-fold-initialize`'s call site entirely.
+
+`org-fold-core-initialize` (`org/org-fold-core.el:738-757`) does, in
+order: `org-fold-core-add-folding-spec` (in a `dolist`), two `add-hook`
+calls, one `setq-local`, then `org-fold-core--isearch-setup` (branch
+picked by `(and (boundp 'isearch-opened-regions) (eq org-fold-core-style
+'text-properties))` -- confirmed `isearch-opened-regions` is unbound and
+`org-fold-core-style` is `text-properties` in this image, so the `overlays`
+branch is taken). Testing each piece standalone:
+
+- `(org-fold-core-add-folding-spec 'outline (list (cons :ellipsis "...")
+  (cons :fragile #'ignore) (cons :isearch-open t) (cons :font-lock t)
+  (cons :front-sticky t) (cons :rear-sticky nil) (cons :alias
+  '(headline))))` -- **passes**, `AFTER-ADDSPEC` prints.
+- Both `add-hook` calls plus the `filter-buffer-substring-function`
+  `setq-local` -- **all pass**, `H1`/`H2`/`H3` all print. (A stray,
+  unrelated `nelisp: uncaught error: void-variable: (v)` was also
+  observed on stderr right after `H3` in this same run without aborting
+  anything -- see "A second, distinct swallow-adjacent class" below.)
+- `(org-fold-core--isearch-setup 'overlays)` -- **reproduces the target
+  abort** on its own: `nelisp: form aborted without signal (rc=1)`,
+  standalone, no org-mode, no org-fold-initialize.
+
+`org-fold-core--isearch-setup` (`org/org-fold-core.el:1180-1199`), for
+`type = 'overlays` with `org-fold-core-style = 'text-properties`, runs:
+
+```elisp
+(add-function :before (local 'isearch-filter-predicate)
+              #'org-fold-core--create-isearch-overlays)
+(advice-add 'isearch-clean-overlays :after
+            #'org-fold-core--clear-isearch-overlays
+            '((name . isearch-clean-overlays@org-fold-core)))
+```
+
+`(add-function :before (default-value 'SOME-VAR) #'ignore)`, tested as
+its **own bare top-level form** (no org anything, just a `defvar` first),
+reproduces the abort in complete isolation: it prints nothing itself and
+the REPL silently moves on to the next top-level form (confirming it is
+this exact single form that returns the swallowed `rc=1`, not something
+downstream). A parallel `(advice-add 'ignore :after #'ignore '((name .
+test)))` top-level form was *not* independently proven safe in this
+session -- since a silently-swallowed top-level form and a genuinely
+successful one are indistinguishable from the next form's success alone,
+this needs the same isolated-return-value check `add-function` got before
+it can be ruled in or out; flagged as an open loose end, not asserted
+either way here.
+
+### Root-cause candidate: `defmacro`/`defun` never strip a leading `(declare ...)` clause
+
+`add-function` is defined in vendor `emacs-lisp/nadvice.el:346-388` as
+exactly this shape:
+
+```elisp
+(defmacro add-function (how place function &optional props)
+  "...five-paragraph docstring..."
+  (declare (debug (form [&or symbolp ("local" form) ("var" sexp) gv-place]
+                        form &optional form)))
+  `(advice--add-function ,how (gv-ref ,(advice--normalize-place place))
+                         ,function ,props))
+```
+
+`(macroexpand-1 '(add-function :before (default-value 'v) #'ignore))`
+against the live image evaluates to plain `nil` (not the expected
+`(advice--add-function ...)` expansion, and not an error) -- so the
+*macro itself* has already been defined with a degenerate/wrong body by
+the time this session's cold image was built (the `advice--add-function`
+backquote form is never reached). Calling the macro's stored closure
+directly via `(funcall (cdr (symbol-function 'add-function)) :before
+'(default-value 'v) '(function ignore))` also just returns `nil`,
+cleanly, no abort -- confirming the *bare-funcall* path through this
+degenerate closure is not itself where the `rc=1` fires; only genuine
+`(add-function ...)` *macro-call* evaluation aborts.
+
+This repo's own elisp-level `defmacro`/`defun` (`lisp/nelisp-stdlib-eval-special.el:365-406`)
+only strips a **leading docstring** from `BODY` before splicing it into
+the produced `(lambda ARGS BODY...)`:
+
+```elisp
+(let* ((real-body (if (and body (stringp (car body))) (cdr body) body))
+       (lambda-form (cons 'lambda (cons args real-body)))
+       ...)
+```
+
+It does **not** strip a leading `(declare ...)` clause the way this same
+codebase's own reference helper already does correctly one file over,
+`macroexp-parse-body` (`lisp/nelisp-stdlib.el:259-272`, used by other
+macro-writing helpers, not by `defmacro`/`defun` themselves). The
+practical effect: any `defmacro`/`defun` whose body begins with
+`(declare ...)` -- `add-function` is exactly this shape, matching real
+Emacs's own `nadvice.el` verbatim -- gets a *live, unstripped*
+`(declare ...)` form as the literal first element of its stored
+`(lambda ...)` / macro-closure body, rather than having it discarded at
+definition time as real Emacs does.
+
+A **fully self-contained, org/nadvice-free minimal reproduction** of the
+next-level effect, run fresh with no cold image (`--repl --no-prompt` on
+an unmodified `target/nelisp`):
+
+```elisp
+(defmacro my-decl-min (x)
+  (declare (debug (form)))
+  (list 'quote x))
+```
+
+produces, on stderr, at *definition* time (before the macro is ever
+called): `nelisp: uncaught error: void-variable: (x)` immediately followed
+by `nelisp: uncaught error: void-variable: (v)` -- `x` here is the
+macro's *own parameter symbol*, referenced somewhere it should never be
+evaluated, and `v` does not appear anywhere in this 3-line repro at all,
+implicating an internal helper variable in whatever native/elisp
+machinery is walking the still-unstripped `(declare ...)` clause. After
+this, `(fboundp 'my-decl-min)` is `nil` -- the macro was never actually
+installed -- and calling it correctly (properly, per the `6ade37fb` fix)
+reports `void-function: (my-decl-min)`. The same 2-line
+`void-variable: (PARAM)` / `void-variable: (v)` pair reproduces with a
+mixed required+`&optional` parameter list too (`(a b c &optional d)`,
+matching `add-function`'s own `(how place function &optional props)`
+shape) -- while the *identical* macro shape **without** a `(declare ...)`
+clause defines and calls correctly with no errors at all (confirmed both
+with and without `&optional`). So the differentiator is unambiguously
+the presence of an un-stripped `(declare ...)` clause, not `&optional`
+handling, arity, or anything else about the parameter list.
+
+The natural suspect for *where* this stray evaluation happens is the
+lexical-capture-narrowing machinery every `lambda`/`closure`
+evaluation goes through: `nl_env_capture_lexical_filtered` (native
+extern, wired through `lisp/nelisp-cc-sf-lambda.el`), whose job is to
+scan a lambda's raw body for free-variable references so it only
+captures what is actually used. Handing it a body whose first element is
+a live, unstripped `(declare (debug ...))` form -- content that should
+never be walked as executable/referential code at all -- is a highly
+plausible way for a free-variable scanner to spuriously "find" the
+macro's own parameter names (and some internal scratch variable `v`) as
+if they were real variable references, and, if that scanner *resolves*
+rather than merely *pattern-matches* what it finds, to trip a
+`void-variable` condition during closure construction, before the macro
+is ever invoked. **This session did not get to single-step
+`nl_env_capture_lexical_filtered` (or wherever this scan actually lives)
+under gdb to name the exact bare-return/no-stash instruction** -- see
+"What remains open" below.
+
+### Important gap: the minimal `declare` repro's *symptom* is not byte-identical to the real `add-function` abort
+
+This is the honest boundary of this session's evidence. The minimal
+`my-decl-min`/`add-function`-shape repro above **reports** two
+`void-variable` errors to stderr (the properly-stashed, `6ade37fb`-fixed
+path) and does not itself print `nelisp: form aborted without signal
+(rc=1)`. The real `(add-function :before (default-value 'v) #'ignore)`
+top-level form, by contrast, prints **nothing** and silently swallows --
+the bare, unstashed `rc=1` path this task is chasing. Both symptoms are
+downstream of the same root defect (an un-stripped `(declare ...)` clause
+reaching code that was never meant to execute/resolve it), and both
+disappear once the `declare` clause is absent, but this session did not
+close the loop proving they are literally the *same* internal bare-return
+site rather than two different manifestations of "declare content leaks
+into places it shouldn't" (e.g. the definition-time free-var scan for a
+*freshly defined* macro vs. whatever repeat/replay-time path
+`add-function`'s *already-defined-with-a-degenerate-body* closure goes
+through when macro-invoked). This distinction matters for the fix and is
+this session's single biggest recommended follow-up (see below).
+
+### A second, distinct swallow-adjacent class, noted but not chased
+
+During the `org-fold-core-initialize` piecewise testing above, and again
+during the full-52-form hand-replica run earlier, this session observed
+repeated `nelisp: uncaught error: nelisp-ec-no-current-buffer: nil` /
+`wrong-type-argument: (nelisp-ec-buffer-p nil)` / `void-variable: (v)`
+lines on stderr **in the middle of otherwise-successful runs** (all
+markers still printed, `rc=0`, no data loss observed) -- i.e. errors that
+get *reported* (unlike the fully silent `rc=1` swallow) but also do not
+abort or even seem to affect the enclosing form's outcome. This looks like
+a third reporting tier, distinct from both "properly propagates as a
+catchable Elisp condition" and "silently swallowed at the top-level
+driver": some native extern-call or GC-safepoint boundary appears to
+report-and-locally-recover *below* the Lisp condition-case/throw layer.
+Not investigated further (out of this session's scope and budget); flagged
+for a future dedicated session, since it may share machinery with the
+`declare`-scan defect above (the recurring `void-variable: (v)` line is
+common to both) or may be entirely unrelated.
+
+### What remains open
+
+1. **Primary, scoped for codex, low-risk, high-confidence:** strip a
+   leading `(declare ...)` clause (in addition to the existing leading
+   docstring) from `BODY` in both `defmacro` and `defun`
+   (`lisp/nelisp-stdlib-eval-special.el:365-406`), mirroring the logic
+   this codebase already has correct in `macroexp-parse-body`
+   (`lisp/nelisp-stdlib.el:259-272`) -- e.g. loop while `(and real-body
+   (consp (car real-body)) (eq (car (car real-body)) 'declare))`, popping
+   each one, before building `lambda-form`. This should make
+   `add-function` (and any other vendor macro with a leading `declare`,
+   which is idiomatic and common in real Emacs Lisp source) expand
+   correctly, and should make the `my-decl-min`-style minimal repro define
+   and call cleanly with no stray `void-variable` reports.
+2. **Regression tests, self-contained, no org-mode/cold-image needed:**
+   - `(defmacro rt1 (x) (declare (debug (form))) (list 'quote x)) (prin1
+     (fboundp 'rt1)) (prin1 (rt1 5))` via `--load` should print `t5`
+     (currently: definition-time `void-variable` noise, `fboundp` `nil`,
+     then `void-function`).
+   - `(defun rt2 (x) (declare (indent 1)) (+ x 1)) (prin1 (rt2 41))`
+     should print `42` with no stderr noise (same class, `defun` side).
+   - The real vendor shape: load-equivalent of `add-function`'s exact
+     definition text, then `(add-function :before (default-value 'rt3)
+     #'ignore)` on a fresh `defvar rt3 nil`, should complete with no
+     abort and should actually install the advice
+     (`(functionp (default-value 'rt3))` true afterward), not just "not
+     crash."
+3. **Follow-up, not scoped for this session:** once (1) lands, re-run this
+   session's exact `(with-temp-buffer (org-mode) ...)` probe against a
+   fresh cold image; the expected, correct outcome is `AFTER-ORG` printing
+   and the file being written (this fix directly targets the mechanism
+   this session traced all the way from `org-mode`'s body down to this
+   one `declare`-handling gap, so this is the natural verification, not a
+   coincidence).
+4. **Follow-up, not scoped for this session:** finish the single-step gdb
+   trace this session did not have time for -- start from
+   `nl_env_capture_lexical_filtered` (`lisp/nelisp-cc-sf-lambda.el`) and/or
+   wherever `declare`/leading-body-form handling actually executes at the
+   C-DSL level, using the fully self-contained `my-decl-min` repro (no
+   cold image needed, sub-second cold boots), to (a) name the exact
+   bare-return-without-stash instruction definitively and confirm it is
+   the same site the real `add-function` abort hits, and (b) resolve the
+   "important gap" noted above between the reporting minimal repro and
+   the silent real-world one. Also worth a look while there: the
+   recurring, unexplained `void-variable: (v)` and the separate
+   `nelisp-ec-no-current-buffer`/report-and-continue class noted above,
+   in case they share a root cause.
+
+### Artifacts (not committed, scratch only)
+
+All under this session's scratchpad
+(`/tmp/claude-1000/.../scratchpad/`): `org-body-raw.el`, `split_forms.py`,
+`org-body-forms.tsv`, `probe_org_full.txt`, `probe_bisect_full.txt`,
+`probe_bisect_full2.txt`, `probe_org_stuball.txt`,
+`probe_org_half2stub.txt`, `probe_org_narrow1.txt`,
+`probe_org_narrow2.txt`, `probe_org_isolate_fi.txt`, `probe_fi_direct.txt`,
+`probe_fcore_direct.txt`, `probe_addspec.txt`, `probe_addhooks.txt`,
+`probe_isearch_setup.txt`, `probe_addfn.txt`, `probe_addfn_plain.txt`,
+`probe_advadd.txt`, `probe_local_alone.txt`, `probe_macroexp.txt`,
+`probe_macrofn.txt`, `probe_minimal_macro.txt`, `probe_minimal_macro2.txt`,
+`probe_declare_macro.txt`, `probe_declare_min.txt`, `probe_declare_bound.txt`,
+`probe_min_addfn.txt`, `gdb_addfn.cmds`/`gdb_addfn2.cmds`/`gdb_addfn3.cmds`
+and their `.out` files. Cold image `/tmp/cold-image-org-e2e.qWJDyd/`
+(pre-existing per this task's brief, reused read-only, not deleted -- this
+session created zero new image workdirs). No `nelisp` process left running
+(`ps aux` checked clean at end of session). No repo source files were
+modified this session; only this `FINDINGS.md` entry (branch
+`diag/eval-call-formrc-swallow`, base/tip `main` @ `38e76c71`).

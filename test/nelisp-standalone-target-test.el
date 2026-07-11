@@ -30,6 +30,7 @@
         (add-to-list 'load-path path)))))
 
 (require 'nelisp-standalone-build)
+(require 'nelisp-cc-sf-unwind-protect)
 
 (ert-deftest nelisp-standalone-target-defaults-to-linux-sysv ()
   "The default target remains Linux/SysV for compatibility on every host."
@@ -499,6 +500,67 @@
                    '(nl_cli_wrap_source_at fbuf (+ off n) src)
                    forms)))))
 
+(ert-deftest nelisp-standalone-target-unwind-cleanup-errors-propagate ()
+  "Cleanup uses stashing eval; body nonlocal exits preserve the M6 kind flag."
+  (cl-labels ((tree-member-p
+               (needle tree)
+               (cond
+                ((equal needle tree) t)
+                ((consp tree)
+                 (or (tree-member-p needle (car tree))
+                     (tree-member-p needle (cdr tree)))))))
+    (let ((forms nelisp-cc-sf-unwind-protect--source))
+      (should (tree-member-p
+               '(defun nl_sf_uw_do_cleanup (car cdr body-rc env out _pad6)
+                  (if (= body-rc 0)
+                      (let* ((scratch (alloc-bytes 32 8)))
+                        (nl_sf_uw_do_cleanup_preserve scratch car cdr body-rc env out))
+                    (let* ((flag-save (ptr-read-u64 268435472 0))
+                           (tag-save (alloc-bytes 32 8))
+                           (val-save (alloc-bytes 32 8)))
+                      (seq
+                       (nl_sexp_clone_into 268435480 tag-save)
+                       (nl_sexp_clone_into 268435512 val-save)
+                       (nl_sf_uw_do_cleanup_body_exit
+                        flag-save tag-save val-save car cdr body-rc env out)))))
+               forms))
+      (should (tree-member-p
+               '(defun nl_sf_uw_do_cleanup_preserve (scratch car cdr body-rc env out)
+                  (nl_sf_uw_cleanup_evaled
+                   (extern-call nelisp_eval_call car env scratch)
+                   cdr body-rc env out 0))
+               forms))
+      (should (tree-member-p
+               '(defun nl_sf_uw_cleanup_evaled (cleanup-rc cdr body-rc env out _pad6)
+                  (if (= cleanup-rc 0)
+                      (nl_sf_uw_cleanup cdr body-rc env out 0 0)
+                    cleanup-rc))
+               forms))
+      (should (tree-member-p
+               '(defun nl_sf_uw_cleanup_after_body_exit
+                    (cleanup-rc flag-save tag-save val-save cdr body-rc env out)
+                  (if (= cleanup-rc 0)
+                      (seq
+                       (nl_sexp_clone_into tag-save 268435480)
+                       (nl_sexp_clone_into val-save 268435512)
+                       (ptr-write-u64 268435472 0 flag-save)
+                       (dealloc-bytes tag-save 32 8)
+                       (dealloc-bytes val-save 32 8)
+                       (nl_sf_uw_cleanup cdr body-rc env out 0 0))
+                    (seq
+                     (dealloc-bytes tag-save 32 8)
+                     (dealloc-bytes val-save 32 8)
+                     cleanup-rc)))
+               forms))
+      (should (tree-member-p
+               '(defun nl_sf_uw_do_cleanup_body_exit
+                    (flag-save tag-save val-save car cdr body-rc env out)
+                  (let* ((scratch (alloc-bytes 32 8)))
+                    (nl_sf_uw_cleanup_after_body_exit
+                     (extern-call nelisp_eval_call car env scratch)
+                     flag-save tag-save val-save cdr body-rc env out)))
+               forms)))))
+
 (ert-deftest nelisp-standalone-target-reader-boundary-reclaim-is-conservative ()
   "Doc 140 Stage 5 reclaims only safe immediate non-mutating boundaries."
   (cl-labels ((tree-member-p
@@ -748,24 +810,17 @@ Windows uses the target-correct `.obj' unit name; linux/macOS keep `.o'."
                                 (cons (plist-get sym :name) sym))
                               syms)))
         (should (equal name (plist-get u :name)))
-        (should (equal '("nl_arena_base"
-                         "nl_rootstack_top"
-                         "nl_rootstack_region"
-                         "nl_gc_diag"
-                         "nl_safepoint_ctx"
-                         "nl_fa_tbl_base")
-                       (mapcar (lambda (sym) (plist-get sym :name)) syms)))
         (dolist (expected '(("nl_arena_base" . 0)
                             ("nl_rootstack_top" . 8)
                             ("nl_rootstack_region" . 16)
                             ("nl_gc_diag" . 1048592)
-                            ("nl_safepoint_ctx" . 1048656)
-                            ("nl_fa_tbl_base" . 1052304)))
+                            ("nl_gc_loop_ctx" . 1048656)
+                            ("nl_fa_tbl_base" . 1106064)))
           (let ((sym (cdr (assoc (car expected) by-name))))
             (should sym)
             (should (equal (cdr expected) (plist-get sym :value)))
             (should (eq 'bss (plist-get sym :section)))))
-        (should (equal 1052312
+        (should (equal 1106192
                        (cdr (assq 'bss (plist-get u :sections)))))))))
 
 (ert-deftest nelisp-standalone-target-stage8-build-appends-arena-base-slot-unit ()

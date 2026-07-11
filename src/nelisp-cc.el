@@ -607,9 +607,10 @@ extend it to cover loops; the scaffold leaves the field mutable so
 later passes do not have to allocate a fresh struct.
 
 CROSSES-CALL is t when the interval is *live* across at least one
-`:call' or `:call-indirect' instruction (i.e. some call-position P
-satisfies START < P <= END *and* P is also < END or there is a
-later use).  T63 Phase 7.5.7 — the linear-scan allocator forces such
+call-like instruction (`:call', `:call-indirect' or
+`:ssa-call-primitive'; i.e. some call-position P satisfies START < P
+<= END *and* P is also < END or there is a later use).  T63 Phase
+7.5.7 — the linear-scan allocator forces such
 intervals to a stack slot rather than a caller-saved register, so
 the value survives the System V / AAPCS64 caller-saved clobber that
 every CALL / BL inflicts.  The default register pool maps r0..r7 to
@@ -646,6 +647,10 @@ allocator itself stays ABI-agnostic and operates on these symbolic
 names.  Callers wanting a different pool (e.g. an 8-register
 floating-point bank, or a 4-register pressure stress test) pass an
 explicit REGISTERS list to `nelisp-cc--linear-scan'.")
+
+(defconst nelisp-cc--call-like-opcodes
+  '(call call-indirect ssa-call-primitive)
+  "SSA opcodes that lower to a native call and clobber caller-saved regs.")
 
 ;;; Linearisation ----------------------------------------------------
 
@@ -717,13 +722,13 @@ section commentary above."
     ;; First pass: assign linear positions to every instruction in the
     ;; reverse-postorder block stream, and seed an interval for every
     ;; def value at its def position.  T63 Phase 7.5.7 also collects
-    ;; the linear position of each `:call' / `:call-indirect' so a
-    ;; second pass can flag intervals that span any of them.
+    ;; the linear position of each native call boundary so a second
+    ;; pass can flag intervals that span any of them.
     (dolist (blk rpo)
       (dolist (instr (nelisp-cc--ssa-block-instrs blk))
         (puthash instr pos instr-pos)
         (when (memq (nelisp-cc--ssa-instr-opcode instr)
-                    '(call call-indirect))
+                    nelisp-cc--call-like-opcodes)
           (push pos call-positions))
         (let ((def (nelisp-cc--ssa-instr-def instr)))
           (when def
@@ -886,7 +891,7 @@ Algorithm (Poletto-Sarkar 1999, fig.\\ 1):
 
 T63 Phase 7.5.7 call-aware spill — the default pool maps r0..r7 to
 caller-saved physical registers (rdi..r11 / x0..x7), so any value
-live across a `:call' / `:call-indirect' would be silently clobbered
+live across a call-like opcode would be silently clobbered
 by the callee's prologue.  We force such intervals to a stack slot
 where the bits survive the call.  This was the direct root cause of
 the T49 audit critical #3 + T50 letrec self-recursion SIGSEGV — the

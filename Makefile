@@ -6,7 +6,8 @@
         standalone-tarball standalone-tarball-verify \
         verify-elisp-fixtures \
         standalone-eval standalone-eval-clean standalone-eval-test standalone-eval-j \
-        standalone-reader standalone-reader-test standalone-reader-load-smoke standalone-reader-fmt-smoke standalone-reader-prelude-equal-reload-smoke standalone-reader-nested-backquote-macro-smoke standalone-reader-derived-mode-shape-smoke standalone-reader-ffi-smoke standalone-reader-tls-smoke standalone-reader-process-smoke standalone-reader-realrt-smoke standalone-reader-repl-smoke standalone-reader-prelude-test standalone-selfhost-test standalone-selfhost-mt-test standalone-parallel-compile-test standalone-chunk-growth-test \
+        standalone-reader standalone-reader-test standalone-reader-load-smoke standalone-reader-fmt-smoke standalone-reader-prelude-equal-reload-smoke standalone-reader-declare-strip-smoke standalone-reader-nested-backquote-macro-smoke standalone-reader-derived-mode-shape-smoke standalone-reader-pcase-quote-literal-smoke standalone-reader-catch-throw-tag-smoke standalone-reader-cond-let-shape-smoke standalone-reader-ffi-smoke standalone-reader-tls-smoke standalone-reader-process-smoke standalone-reader-realrt-smoke standalone-reader-repl-smoke standalone-reader-prelude-test standalone-reader-intern-soft-smoke standalone-reader-intern-soft-loop-smoke standalone-selfhost-test standalone-selfhost-mt-test standalone-parallel-compile-test standalone-chunk-growth-test \
+        standalone-reader-mod-float-smoke standalone-reader-match-data-smoke standalone-reader-current-time-smoke \
         nelisp-performance-gate nelisp-nelix-command-gate nelisp-native-artifact-gate nelisp-nelix-native-hot-gate \
         nelisp-nelix-operational-gate \
         nelisp-runtime-image-cache-gate nelisp-source-command-substrate-gate
@@ -189,6 +190,63 @@ standalone-reader-load-smoke: standalone-reader
 	  exit 1; \
 	fi
 
+# Doc 163 Phase C regression: `intern-soft' real soft-fail semantics.
+# The base reader image has no stdlib prelude auto-loaded (plain --load
+# only has the ~175 natively-dispatched builtins; `intern-soft' is a
+# regular elisp function defined in lisp/nelisp-stdlib-misc.el), so the
+# script `load's that file itself first -- same pattern
+# `standalone-reader-prelude-equal-reload-smoke' uses for the stdlib
+# prelude.  Asserts, in one --load: (1) a never-interned name misses
+# (nil) BEFORE anything interns it; (2) once `intern' actually interns
+# that same name, `intern-soft' now HITS and returns the (interned)
+# symbol; (3) a DIFFERENT, still-never-interned name misses on TWO
+# CONSECUTIVE `intern-soft' calls -- proving `intern-soft' itself has no
+# interning side effect (a bug in `nl_intern_lookup' that accidentally
+# inserted on a miss would turn the second nil into a symbol).
+standalone-reader-intern-soft-smoke: standalone-reader
+	@mkdir -p target
+	@printf '%s\n' \
+	  '(load "lisp/nelisp-stdlib-misc.el")' \
+	  '(list (intern-soft "nelisp-doc163-fresh-a") (progn (intern "nelisp-doc163-fresh-a") (intern-soft "nelisp-doc163-fresh-a")) (intern-soft "nelisp-doc163-fresh-b") (intern-soft "nelisp-doc163-fresh-b"))' \
+	  > target/standalone-reader-intern-soft-smoke.el
+	@out="$$(ulimit -v 4194304; timeout 30 ./target/nelisp --load target/standalone-reader-intern-soft-smoke.el)"; \
+	if [ "$$out" = "(nil nelisp-doc163-fresh-a nil nil)" ]; then \
+	  echo "[standalone-reader-intern-soft-smoke] PASS: -> $$out"; \
+	else \
+	  echo "[standalone-reader-intern-soft-smoke] FAIL: -> $$out (expected (nil nelisp-doc163-fresh-a nil nil))"; \
+	  exit 1; \
+	fi
+
+# Doc 163 Phase C regression: the EXACT Gnus message.el `cited-text-face'
+# discovery-loop shape that hung before this fix (see docs/design/163-
+# magit-bundle-intern-soft-hang.org).  Pre-interns levels 1-4 (mirroring
+# message.el defining `message-cited-text-1' .. `-4' a few lines above
+# `message-font-lock-keywords' in the real bundle), then runs the loop
+# unmodified.  Before the fix `intern-soft' never soft-failed, so this
+# looped forever allocating a fresh interned name every iteration until
+# `ulimit -v' was exhausted (rc=88, ~40s in the full-bundle repro).  After
+# the fix the loop terminates the moment level 5 (never interned) is
+# probed, exactly matching real Emacs (`maxlevel' ends at 5).  Bounded by
+# both `ulimit -v' (4 GiB) and `timeout' so a regression fails loudly and
+# quickly instead of hanging the test suite.
+standalone-reader-intern-soft-loop-smoke: standalone-reader
+	@mkdir -p target
+	@printf '%s\n' \
+	  '(load "lisp/nelisp-stdlib-misc.el")' \
+	  '(intern "message-cited-text-1")' \
+	  '(intern "message-cited-text-2")' \
+	  '(intern "message-cited-text-3")' \
+	  '(intern "message-cited-text-4")' \
+	  '(let ((maxlevel 1) (cited-text-face t)) (while (setq cited-text-face (intern-soft (format "message-cited-text-%d" maxlevel))) (setq maxlevel (1+ maxlevel))) maxlevel)' \
+	  > target/standalone-reader-intern-soft-loop-smoke.el
+	@out="$$(ulimit -v 4194304; timeout 30 ./target/nelisp --load target/standalone-reader-intern-soft-loop-smoke.el)"; \
+	if [ "$$out" = "5" ]; then \
+	  echo "[standalone-reader-intern-soft-loop-smoke] PASS: -> $$out"; \
+	else \
+	  echo "[standalone-reader-intern-soft-loop-smoke] FAIL: -> $$out (expected 5)"; \
+	  exit 1; \
+	fi
+
 # Regression smoke for the native `format' directive arms in the reader's
 # m5_fmt_loop (scripts/nelisp-standalone-build.el).  Before the Doc147 fix,
 # %i/%X/%o/%c fell through to the default arm: emitting "%X" literally AND
@@ -227,6 +285,24 @@ standalone-reader-prelude-equal-reload-smoke: standalone-reader
 	  echo "[standalone-reader-prelude-equal-reload-smoke] PASS: -> $$out"; \
 	else \
 	  echo "[standalone-reader-prelude-equal-reload-smoke] FAIL: -> $$out (expected (t nil t t))"; \
+	  exit 1; \
+	fi
+
+standalone-reader-declare-strip-smoke: standalone-reader
+	@mkdir -p target
+	@printf '%s\n' \
+	  '(defmacro ds-m1 (x) (declare (debug (form))) (list (quote quote) x))' \
+	  '(defmacro ds-m2 (x) "doc" (declare (debug (form))) (declare (indent 1)) (list (quote quote) x))' \
+	  '(defmacro ds-m3 (x) (declare (debug (form))) "doc" (list (quote quote) x))' \
+	  '(defun ds-f1 () "doc" (declare (indent 0)) (interactive) (+ 41 1))' \
+	  '(defun ds-f2 () (declare (indent 0)))' \
+	  '(let ((fn (symbol-function (quote ds-f1)))) (list (ds-m1 foo) (ds-m2 bar) (ds-m3 baz) (ds-f1) (equal (car (cdr (cdr (cdr fn)))) (quote (interactive))) (ds-f2)))' \
+	  > target/standalone-reader-declare-strip-smoke.el
+	@out="$$(./target/nelisp --repl --no-prompt < target/standalone-reader-declare-strip-smoke.el | tail -1)"; \
+	if [ "$$out" = "(foo bar baz 42 t nil)" ]; then \
+	  echo "[standalone-reader-declare-strip-smoke] PASS: -> $$out"; \
+	else \
+	  echo "[standalone-reader-declare-strip-smoke] FAIL: -> $$out (expected (foo bar baz 42 t nil))"; \
 	  exit 1; \
 	fi
 
@@ -304,6 +380,169 @@ standalone-reader-derived-mode-shape-smoke: standalone-reader
 	  echo "[standalone-reader-derived-mode-shape-smoke] PASS: -> $$out"; \
 	else \
 	  echo "[standalone-reader-derived-mode-shape-smoke] FAIL: -> $$out (expected (t t))"; \
+	  exit 1; \
+	fi
+
+# Regression for the `pcase' root cause behind the fix/reader-backquote-macro
+# investigation (magit #17 M2 blocker, nelisp-emacs-lib Doc 33 item 239): a
+# `(quote DATUM)' pcase pattern holding a COMPOUND datum (here a 2-element
+# list) must match by `equal' (structural), not `eq' (identity).  `eq' only
+# happens to work for quoted symbols/keywords (interned, so `eq'-comparable);
+# a freshly-consed runtime list is never `eq' to an equal-shaped quoted
+# literal, so a clause like `('(t t) ...)' silently never wins and pcase
+# falls through to the next, less-specific clause instead -- exactly the
+# defect vendor cond-let.el's `cond-let--prepare-clauses' hits when its
+# `(pcase (list ...) ('(t t) 'cond-let--when-let*) (`(t ,_) 'cond-let--when-let)
+# ...)' dispatch picks the wrong helper macro and produces `void-variable: x'
+# (see the fuller end-to-end shape in
+# standalone-reader-cond-let-shape-smoke below).
+standalone-reader-pcase-quote-literal-smoke: standalone-reader
+	@mkdir -p target
+	@printf '%s\n' \
+	  '(list (pcase (list t t) ((quote (t t)) (quote AA)) (`(t ,_) (quote AB)) (`(nil ,_) (quote BB))) (pcase (list nil t) ((quote (nil t)) (quote BA)) (`(t ,_) (quote AB)) (`(nil ,_) (quote BB))))' \
+	  > target/standalone-reader-pcase-quote-literal-smoke.el
+	@out="$$(./target/nelisp --load target/standalone-reader-pcase-quote-literal-smoke.el)"; \
+	if [ "$$out" = "(AA BA)" ]; then \
+	  echo "[standalone-reader-pcase-quote-literal-smoke] PASS: -> $$out"; \
+	else \
+	  echo "[standalone-reader-pcase-quote-literal-smoke] FAIL: -> $$out (expected (AA BA))"; \
+	  exit 1; \
+	fi
+
+# Regression for the M6 catch/throw tag-match bug (magit #17 M2 blocker):
+# `nl_ct_catch_check_tag' (scripts/nelisp-standalone-build.el) used to reuse
+# `nelisp_eq_symbol' for the catch/throw tag comparison, but that primitive
+# tag-checks BOTH operands as `Sexp::Symbol' (tag 4) and returns "not equal"
+# whenever either side isn't a Symbol box.  `t' and `nil' self-evaluate to
+# the dedicated `Sexp::T' (tag 1) / `Sexp::Nil' (tag 0) singletons, NOT
+# Symbol boxes, so `(catch t (throw t ...))' / `(catch nil (throw nil
+# ...))' always mismatched and fell through to `no-catch' -- exactly the
+# control-flow idiom vendor llama.el's `llama--collect'/`llama--fontify'
+# use internally (reached from magit/transient via the `##' macro).  Covers
+# t tag, nil tag, an ordinary symbol tag (pre-existing-working baseline),
+# throw-less catch, a same-tag nested catch, and a mismatched-tag nested
+# catch (inner `t' catch must NOT swallow an outer-bound `nil' throw).
+standalone-reader-catch-throw-tag-smoke: standalone-reader
+	@mkdir -p target
+	@printf '%s\n' \
+	  '(list (catch t (throw t (quote a))) (catch nil (throw nil (quote b))) (catch (quote tag) (throw (quote tag) (quote c))) (catch t 42) (catch nil (catch t (throw t (quote inner)))) (catch nil (catch t (throw nil (quote outer)))))' \
+	  > target/standalone-reader-catch-throw-tag-smoke.el
+	@out="$$(./target/nelisp --load target/standalone-reader-catch-throw-tag-smoke.el)"; \
+	if [ "$$out" = "(a b c 42 inner outer)" ]; then \
+	  echo "[standalone-reader-catch-throw-tag-smoke] PASS: -> $$out"; \
+	else \
+	  echo "[standalone-reader-catch-throw-tag-smoke] FAIL: -> $$out (expected (a b c 42 inner outer))"; \
+	  exit 1; \
+	fi
+
+# End-to-end regression for the same root cause, shaped exactly like vendor
+# cond-let.el's `cond-let--prepare-clauses' / `cond-let--when-let*' /
+# `cond-let--when-let' (magit #17 M2 blocker; nelisp-emacs-lib Doc 33 item
+# 239's minimal repro `(cond-let* ([x 1] [x (+ x 1)] x) (t 99))' raised
+# `void-variable: x' against the pre-fix reader).  Self-contained (does NOT
+# load vendor/cond-let.el or anything from nelisp-emacs-lib): re-derives just
+# enough of the same two-part mechanism using only what this reader's own
+# baked-in prelude already provides (`pcase' / `pcase-let' / backquote /
+# `catch'+`throw') --
+#   (1) a clause-preparation helper that builds its expansion via nested
+#       backquote/`,@'-splicing and dispatches between two sibling
+#       backquote-bodied macros through a `pcase' whose patterns mix a
+#       quoted-list literal (`'(t 2)') with backquote patterns (`` `(t ,_)'');
+#   (2) `my-when-let*' (sequential, `let*'-based -- correct for chained
+#       bindings that reference an earlier binding of the SAME name) versus
+#       `my-when-let' (parallel, `let'-based -- wrong for that shape, and
+#       will itself raise `void-variable' if ever mis-selected again).
+# Before the fix, the quote-literal clause never matched (silently, `eq'
+# instead of `equal'), so the dispatch always picked `my-when-let' and the
+# second binding's `(+ x 1)' referenced `x' before it was bound ->
+# `void-variable: x'.  After the fix, `my-when-let*' is correctly selected
+# and the whole thing evaluates to 2 (1, then (and 1 (+ 1 1)) = 2), matching
+# real Emacs's actual `cond-let*' semantics for the same shape.
+standalone-reader-cond-let-shape-smoke: standalone-reader
+	@mkdir -p target
+	@printf '%s\n' \
+	  '(defun my-macroexp-progn (forms) (if (cdr forms) (cons (quote progn) forms) (car forms)))' \
+	  '(defun my-prepare-varlist (varlist) (let (prevvar) (list (mapcar (lambda (binding) (pcase-let ((`(,var ,form) binding)) (prog1 (if prevvar `(,var (and ,prevvar ,form)) (list var form)) (setq prevvar var)))) varlist) prevvar)))' \
+	  '(defmacro my-when-let* (varlist bodyform) (let* ((res (my-prepare-varlist varlist)) (newvarlist (nth 0 res)) (lastvar (nth 1 res))) `(let* ,newvarlist (when ,lastvar ,bodyform))))' \
+	  '(defmacro my-when-let (varlist bodyform) `(let ,varlist (when ,(car (car (last varlist))) ,bodyform)))' \
+	  '(defun my-prepare-clauses (sequential clauses) (let (body) (dolist (clause (reverse clauses)) (let (varlist) (while (vectorp (car clause)) (push (append (pop clause) nil) varlist)) (push (if varlist (let ((macro-sym (pcase (list (and body t) (and sequential (length (reverse varlist)))) ((quote (t 2)) (quote my-when-let*)) (`(t ,_) (quote my-when-let)) ((quote (nil 2)) (quote my-when-let*)) (`(nil ,_) (quote my-when-let))))) `(,macro-sym ,(reverse varlist) ,(if body `(throw (quote my-cond-let-tag) ,(my-macroexp-progn clause)) (my-macroexp-progn clause)))) (my-macroexp-progn clause)) body))) body))' \
+	  '(defmacro my-cond-let* (&rest clauses) `(catch (quote my-cond-let-tag) ,@(my-prepare-clauses t clauses)))' \
+	  '(my-cond-let* ([x 1] [x (+ x 1)] x) (t 99))' \
+	  > target/standalone-reader-cond-let-shape-smoke.el
+	@out="$$(./target/nelisp --load target/standalone-reader-cond-let-shape-smoke.el)"; \
+	if [ "$$out" = "2" ]; then \
+	  echo "[standalone-reader-cond-let-shape-smoke] PASS: -> $$out"; \
+	else \
+	  echo "[standalone-reader-cond-let-shape-smoke] FAIL: -> $$out (expected 2)"; \
+	  exit 1; \
+	fi
+
+# fix/small-primitives-parity: `mod' silently returned 0 for any float
+# operand pair (e.g. `(mod 5.5 2)' => 0.0 instead of 1.5) because the
+# quotient it computed the remainder from (`scripts/nelisp-stdlib-prelude.el')
+# used this reader's TRUE (non-truncating) float `/', so `b * (a/b)'
+# collapsed back to exactly `a'.  Covers all 4 sign combinations for
+# float/float and mixed int/float, the pre-existing (and intentionally
+# unchanged) all-integer floor-mod path, and zero-divisor semantics: NaN
+# (via `floatp') when a float operand is involved vs. a caught `error' when
+# both operands are integers -- matching host Emacs on both counts.
+#
+# Each check reduces to a boolean rather than returning the raw `mod'
+# result directly: the `--load' value printer mis-renders a Float nested
+# inside a list as `#<object>' (a separate, pre-existing printer quirk,
+# unrelated to this fix -- `--eval' on the same expressions prints the
+# floats correctly), so comparing with `=' and collecting `t'/`nil' side-
+# steps that entirely.
+standalone-reader-mod-float-smoke: standalone-reader
+	@mkdir -p target
+	@printf '%s\n' \
+	  '(list (= (mod 5.5 2) 1.5) (= (mod -5.5 2) 0.5) (= (mod 5.5 -2) -0.5) (= (mod -5.5 -2) -1.5) (= (mod 5 2.0) 1.0) (= (mod -5 2.0) 1.0) (= (mod 5 -2.0) -1.0) (= (mod -5 -2.0) -1.0) (= (mod 5.5 2.5) 0.5) (= (mod -5.5 2.5) 2.0) (= (mod 5.5 -2.5) -2.0) (= (mod -5.5 -2.5) -0.5) (= (mod 7 -3) -2) (= (mod -7 3) 2) (= (mod 7 3) 1) (= (mod -7 -3) -1) (= (mod 10 3) 1) (floatp (mod 5.5 0.0)) (floatp (mod 5.0 0)) (eq (condition-case nil (progn (mod 5 0) (quote no-error)) (error (quote caught-error))) (quote caught-error)))' \
+	  > target/standalone-reader-mod-float-smoke.el
+	@out="$$(./target/nelisp --load target/standalone-reader-mod-float-smoke.el)"; \
+	if [ "$$out" = "(t t t t t t t t t t t t t t t t t t t t)" ]; then \
+	  echo "[standalone-reader-mod-float-smoke] PASS: -> $$out"; \
+	else \
+	  echo "[standalone-reader-mod-float-smoke] FAIL: -> $$out"; \
+	  exit 1; \
+	fi
+
+# fix/small-primitives-parity: `match-data' / `save-match-data' were
+# entirely unimplemented (`fboundp' nil) even though `match-beginning' /
+# `match-end' / `match-string' already worked off the same `nlre--last-caps'
+# vector (Doc 143's pure-elisp regexp matcher).  Covers: `match-data'
+# flattening to the host (BEG0 END0 BEG1 END1 ...) shape with `nil nil' for
+# a non-participating group, and `save-match-data' isolating a nested
+# `string-match' from the caller's match state -- including when the body
+# signals an error, via `unwind-protect'.
+standalone-reader-match-data-smoke: standalone-reader
+	@mkdir -p target
+	@printf '%s\n' \
+	  '(list (progn (string-match "\\(a\\)\\(b\\)" "xabZ") (match-data)) (progn (string-match "a" "xaZ") (save-match-data (string-match "Z" "xaZ")) (match-beginning 0)) (progn (string-match "a" "xaZ") (condition-case nil (save-match-data (string-match "Z" "xaZ") (error "boom")) (error nil)) (match-beginning 0)))' \
+	  > target/standalone-reader-match-data-smoke.el
+	@out="$$(./target/nelisp --load target/standalone-reader-match-data-smoke.el)"; \
+	if [ "$$out" = "((1 3 1 2 2 3) 1 1)" ]; then \
+	  echo "[standalone-reader-match-data-smoke] PASS: -> $$out"; \
+	else \
+	  echo "[standalone-reader-match-data-smoke] FAIL: -> $$out"; \
+	  exit 1; \
+	fi
+
+# fix/small-primitives-parity: `current-time' was void-function.  Minimal
+# polyfill derived from the already-working `float-time': decomposes the
+# epoch-seconds double into host Emacs's (HIGH LOW USEC PSEC) shape (PSEC
+# always 0, see the defun's comment for why).  Asserts HIGH*65536+LOW
+# reconstructs the same whole-second count `(floor (float-time))' gives,
+# and that USEC/PSEC are in-range.
+standalone-reader-current-time-smoke: standalone-reader
+	@mkdir -p target
+	@printf '%s\n' \
+	  '(let* ((tm (current-time)) (hi (nth 0 tm)) (lo (nth 1 tm)) (us (nth 2 tm)) (ps (nth 3 tm))) (list (= (length tm) 4) (= (+ (* hi 65536) lo) (floor (float-time))) (and (>= us 0) (< us 1000000)) (= ps 0)))' \
+	  > target/standalone-reader-current-time-smoke.el
+	@out="$$(./target/nelisp --load target/standalone-reader-current-time-smoke.el)"; \
+	if [ "$$out" = "(t t t t)" ]; then \
+	  echo "[standalone-reader-current-time-smoke] PASS: -> $$out"; \
+	else \
+	  echo "[standalone-reader-current-time-smoke] FAIL: -> $$out"; \
 	  exit 1; \
 	fi
 
@@ -422,13 +661,17 @@ standalone-reader-tls-smoke:
 standalone-reader-process-smoke: standalone-reader
 	@mkdir -p target
 	@printf '%s\n' '(nelisp-process-call-process "/bin/sh" nil nil nil "-c" "exit 7")' > target/standalone-reader-process-smoke-cp.el
-	@printf '%s\n' '(let ((p (nelisp-process-start "/bin/sh" "-c" "printf process-smoke-ok"))) (nelisp-process-wait p) (nelisp-process-read-output p 64))' > target/standalone-reader-process-smoke-async.el
+	@printf '%s\n' '(let* ((p (nelisp-process-start "/bin/sh" "-c" "printf process-smoke-ok"))) (nelisp-process-wait p) (nelisp-process-read-output p 64))' > target/standalone-reader-process-smoke-async.el
+	@printf '%s\n' '(let* ((p (nelisp-process-start "/bin/cat")) (w (nelisp-process-write p "cat-roundtrip"))) (nelisp-process-close-stdin p) (nelisp-process-wait p) (let* ((out (nelisp-process-read-output p 64)) (ev (nelisp-process-poll p)) (ready (aref ev 0)) (exited (aref ev 1)) (code (aref ev 2))) (list w out ready exited code)))' > target/standalone-reader-process-smoke-cat.el
+	@printf '%s\n' '(let* ((p (nelisp-process-start "/bin/sh" "-c" "sleep 1; printf sleepy")) (ev0 (nelisp-process-poll p)) (r0 (aref ev0 0)) (e0 (aref ev0 1))) (nelisp-process-wait p) (let* ((ev1 (nelisp-process-poll p)) (r1 (aref ev1 0)) (e1 (aref ev1 1)) (out (nelisp-process-read-output p 64))) (list r0 e0 r1 e1 out)))' > target/standalone-reader-process-smoke-poll.el
 	@set +e; ./target/nelisp target/standalone-reader-process-smoke-cp.el; cp_rc=$$?; set -e; \
 	out="$$(./target/nelisp --load target/standalone-reader-process-smoke-async.el)"; \
-	if [ "$$cp_rc" = "7" ] && [ "$$out" = '"process-smoke-ok"' ]; then \
-	  echo "[standalone-reader-process-smoke] PASS: call-process exit=$$cp_rc, read-output -> $$out"; \
+	cat_out="$$(./target/nelisp --load target/standalone-reader-process-smoke-cat.el)"; \
+	poll_out="$$(./target/nelisp --load target/standalone-reader-process-smoke-poll.el)"; \
+	if [ "$$cp_rc" = "7" ] && [ "$$out" = '"process-smoke-ok"' ] && [ "$$cat_out" = '(13 "cat-roundtrip" 1 1 0)' ] && [ "$$poll_out" = '(0 0 1 1 "sleepy")' ]; then \
+	  echo "[standalone-reader-process-smoke] PASS: call-process exit=$$cp_rc, read-output -> $$out, cat -> $$cat_out, poll -> $$poll_out"; \
 	else \
-	  echo "[standalone-reader-process-smoke] FAIL: call-process exit=$$cp_rc, read-output -> $$out"; \
+	  echo "[standalone-reader-process-smoke] FAIL: call-process exit=$$cp_rc, read-output -> $$out, cat -> $$cat_out, poll -> $$poll_out"; \
 	  exit 1; \
 	fi
 

@@ -1351,10 +1351,10 @@
     ;; `build-tool/src/eval/special_forms.rs'; AOT-compiled elisp
     ;; `.o' replaces it.  8 defuns (seq form) walk `(BODYFORM CLEANUP...)'
     ;; args: eval body via `nelisp_eval_call', then eval each cleanup form
-    ;; via `nl_eval_is_truthy' (errors silently discarded — does NOT touch
-    ;; `nelisp--last-signal-data').  Final rc = body-rc; body error stash
-    ;; survives all cleanup steps.  Linux-x86_64 only — same arch gate
-    ;; as the other sf_* migrations above.
+    ;; via `nelisp_eval_call' so cleanup non-local exits stay visible and can
+    ;; override the protected body's exit.  If cleanup returns normally after a
+    ;; body exit, the saved M6 FLAG/TAG/VAL stash is restored.
+    ;; Linux-x86_64 only — same arch gate as the other sf_* migrations above.
     (nelisp-cc-sf-unwind-protect
      :source-var nelisp-cc-sf-unwind-protect--source
      :output "nl_sf_unwind_protect.o"
@@ -1536,9 +1536,11 @@
     ;; words pass through; immediates materialise into SCRATCH32 via
     ;; `nl_sci_store_imm').  `nl_val_clone_into(src_slot, dst_word_ptr)'
     ;; turns a 32B-slot SRC into an 8B tagged WORD stored at DST
-    ;; (immediate passthrough; boxed/string clone into a FRESH 32B box
-    ;; via `nl_sexp_clone_into', never a transient scratch slot).
-    ;; Four-entry seq: nl_vl_prog2 / nl_val_load / nl_vci_box /
+    ;; (immediate passthrough; post-boot arena Symbol/String values
+    ;; shallow-rebox into a FRESH 32B box by default; non-arena/boot/
+    ;; forced-legacy/mutable boxed values clone via `nl_sexp_clone_into',
+    ;; never a transient scratch slot).  Six-entry seq: nl_vl_prog2 /
+    ;; nl_val_load / nl_vci_box / nl_vci_copy32 / nl_vci_rebox /
     ;; nl_val_clone_into.  Linux-x86_64 only.
     (nelisp-cc-val-load
      :source-var nelisp-cc-val-load--source

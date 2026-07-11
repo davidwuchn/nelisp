@@ -27,6 +27,45 @@
 
 (defvar nlre--gcount 0 "Group counter during a parse.")
 
+(defvar nlre--compiled-cache (make-hash-table :test 'equal)
+  "Cache from regexp pattern strings to (AST . GROUP-COUNT).")
+(defvar nlre--compiled-cache-count 0
+  "Number of entries currently tracked in `nlre--compiled-cache'.")
+(defvar nlre--compiled-cache-limit 512
+  "Maximum compiled regexp patterns kept before clearing the cache.")
+(defvar nlre--compiled-cache-hits 0
+  "Number of compiled regexp cache hits.")
+(defvar nlre--compiled-cache-misses 0
+  "Number of compiled regexp cache misses.")
+(defvar nlre--string-match-calls 0
+  "Number of calls to `nlre-string-match'.")
+(defvar nlre--string-match-counter-file nil
+  "When non-nil, file path receiving periodic `nlre-string-match' call counts.")
+(defvar nlre--string-match-counter-interval 1000
+  "Call interval for `nlre--string-match-counter-file' updates.")
+
+(defun nlre--compiled-cache-clear ()
+  "Clear the compiled regexp cache and its entry count."
+  (clrhash nlre--compiled-cache)
+  (setq nlre--compiled-cache-count 0))
+
+(defun nlre--compiled-pattern (pat)
+  "Return cached compiled representation for PAT.
+The result is (AST . GROUP-COUNT), where GROUP-COUNT includes match group 0."
+  (let ((compiled (gethash pat nlre--compiled-cache)))
+    (if compiled
+        (progn
+          (setq nlre--compiled-cache-hits (1+ nlre--compiled-cache-hits))
+          compiled)
+      (setq nlre--compiled-cache-misses (1+ nlre--compiled-cache-misses))
+      (when (>= nlre--compiled-cache-count nlre--compiled-cache-limit)
+        (nlre--compiled-cache-clear))
+      (let ((ast (nlre--parse pat)))
+        (setq compiled (cons ast (1+ nlre--gcount)))
+        (puthash pat compiled nlre--compiled-cache)
+        (setq nlre--compiled-cache-count (1+ nlre--compiled-cache-count))
+        compiled))))
+
 (defun nlre--parse (pat)
   "Parse PAT into a top-level node (a :seq or :alt). Sets group count."
   (setq nlre--gcount 0)
@@ -287,11 +326,18 @@ Return end-pos or nil."
 (defun nlre-string-match (regexp string &optional start)
   "Pure-elisp `string-match'.  Return match start index, or nil.
 Sets `nlre--match-data' (and host match-data when available via set-match-data)."
-  (let* ((ast (nlre--parse regexp))
+  (setq nlre--string-match-calls (1+ nlre--string-match-calls))
+  (when (and nlre--string-match-counter-file
+             (= (mod nlre--string-match-calls nlre--string-match-counter-interval) 0)
+             (fboundp 'nl-write-file))
+    (nl-write-file nlre--string-match-counter-file
+                   (format "%d" nlre--string-match-calls)))
+  (let* ((compiled (nlre--compiled-pattern regexp))
+         (ast (car compiled))
          (top (nlre--seq-nodes ast))
          (n (length string))
          (i (or start 0))
-         (ng (1+ nlre--gcount))
+         (ng (cdr compiled))
          (hit nil))
     (while (and (not hit) (<= i n))
       (setq nlre--caps (make-vector ng nil))

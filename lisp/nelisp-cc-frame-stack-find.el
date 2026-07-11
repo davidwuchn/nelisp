@@ -77,7 +77,7 @@
       (if (= cell-ptr 0)
           0
         (if (= (sexp-tag cell-ptr) 7)
-            (let ((pair-view (extern-call nl_cons_car_ptr cell-ptr)))
+            (let* ((pair-view (extern-call nl_cons_car_ptr cell-ptr)))
               (if (= (str-eq (extern-call nl_cons_car_ptr pair-view) name-ptr) 1)
                   (extern-call nl_cons_cdr_ptr pair-view)
                 (nelisp_frame_stack_find_walk_bucket
@@ -129,19 +129,35 @@
       ;; full hash+walk per successful frame lookup.
       (if (< i 0)
           0
-        (let ((found (nelisp_frame_stack_find_in_frame
-                      (vector-ref-ptr backing-ptr i)
-                      name-ptr)))
+        (let* ((found (nelisp_frame_stack_find_in_frame
+                       (vector-ref-ptr backing-ptr i)
+                       name-ptr)))
           (if (= found 0)
               (nelisp_frame_stack_find_descend backing-ptr (- i 1) name-ptr)
             found))))
+    (defun nelisp_frame_stack_find_valid_key (name-ptr)
+      ;; Same cold-load hardening as `nelisp_mirror_lookup_entry_valid_key'
+      ;; (`lisp/nelisp-cc-mirror-lookup-entry.el') — NAME-PTR must be a
+      ;; live Sexp::Symbol / Sexp::Str before any hash/compare touches
+      ;; it.  Reproduced crash: once the mirror lookup path is guarded, a
+      ;; malformed `nl_env_set_value' NAME-PTR (observed tag 7 / Cons)
+      ;; reaches this SEPARATE lexical-frame lookup next and crashes
+      ;; `nelisp_fnv1a_step4' the same way.  A sound "not found" here is
+      ;; safe: a genuinely malformed key was never a valid lexical
+      ;; binding to begin with.
+      (if (= (extern-call nl_gc_in_arena name-ptr) 0)
+          0
+        (if (= (sexp-tag name-ptr) 4)
+            1
+          (if (= (sexp-tag name-ptr) 5) 1 0))))
     (defun nelisp_frame_stack_find (frames-ptr name-ptr)
       ;; frames-ptr: *const Sexp pointing at Env::frames_record (=
       ;;             Sexp::Record(`nelisp-lexframe-stack')).
       ;; name-ptr:   *const Sexp pointing at Sexp::Str / Sexp::Symbol.
       ;;
       ;; Returns: i64 — the `*const Sexp' of the matching (NAME . CELL)
-      ;; pair's CDR slot (= the cell), or 0 on miss / empty stack.
+      ;; pair's CDR slot (= the cell), or 0 on miss / empty stack /
+      ;; malformed NAME-PTR.
       ;; The returned pointer borrows the bucket-pair's slot owned by
       ;; `*frames-ptr'; callers must not outlive that ownership (= same
       ;; contract as `nelisp_mirror_lookup_entry').
@@ -154,10 +170,12 @@
       ;; the dispatcher rewires, so no tag-check here.  Empty stack
       ;; (= depth 0) yields i = -1 which hits the `(< i 0)' base case
       ;; immediately and returns 0.
-      (nelisp_frame_stack_find_descend
-       (record-slot-ref-ptr frames-ptr 0)
-       (- (sexp-int-unwrap (record-slot-ref-ptr frames-ptr 1)) 1)
-       name-ptr))
+      (if (= (nelisp_frame_stack_find_valid_key name-ptr) 0)
+          0
+        (nelisp_frame_stack_find_descend
+         (record-slot-ref-ptr frames-ptr 0)
+         (- (sexp-int-unwrap (record-slot-ref-ptr frames-ptr 1)) 1)
+         name-ptr)))
 
     ;; ============================================================
     ;; Doc 49 Wave 10.1d-retry — capture-to-depth AOT native
@@ -238,10 +256,38 @@
            (cons-make-with-clone pair-slot out out)
            1))
 
-    (defun nl_capture_walk_bucket (cell-ptr pair-slot out)
+    (defun nl_capture_filter_contains (filter-ptr name-ptr)
+      (if (= (sexp-tag filter-ptr) 7)
+          (let* ((sym-ptr (extern-call nl_cons_car_ptr filter-ptr)))
+            (if (= (str-eq sym-ptr name-ptr) 1)
+                1
+              (nl_capture_filter_contains
+               (extern-call nl_cons_cdr_ptr filter-ptr)
+               name-ptr)))
+        0))
+
+    (defun nl_capture_name_allowed (filtered filter-ptr name-ptr)
+      (if (= filtered 0)
+          1
+        (nl_capture_filter_contains filter-ptr name-ptr)))
+
+    (defun nl_capture_walk_filter_symbols (frame-ptr filter-ptr pair-slot out)
+      (if (= (sexp-tag filter-ptr) 7)
+          (let* ((sym-ptr (extern-call nl_cons_car_ptr filter-ptr))
+                 (rest-ptr (extern-call nl_cons_cdr_ptr filter-ptr))
+                 (cell-ptr (nelisp_frame_stack_find_in_frame frame-ptr sym-ptr)))
+            (and (if (= cell-ptr 0)
+                     1
+                   (nl_capture_emit_one sym-ptr cell-ptr pair-slot out))
+                 (nl_capture_walk_filter_symbols
+                  frame-ptr rest-ptr pair-slot out)))
+        1))
+
+    (defun nl_capture_walk_bucket (cell-ptr pair-slot out filtered filter-ptr)
       ;; Walk one bucket's cons chain emitting each entry.  Mirrors
       ;; `nelisp_frame_stack_find_walk_bucket' above but emits instead of
-      ;; comparing.
+      ;; comparing.  When FILTERED is non-zero, emit only names present in
+      ;; FILTER-PTR, a lambda-body symbol list.
       ;;
       ;; Doc 147 Phase 3 — the NlConsBox car / cdr are now 8-byte tagged
       ;; WORDS, so the walk carries the bucket cell's 32B-slot Sexp VIEW
@@ -261,17 +307,18 @@
       (if (= cell-ptr 0)
           1
         (if (= (sexp-tag cell-ptr) 7)
-            (let ((pair-view (extern-call nl_cons_car_ptr cell-ptr)))
-              (and (nl_capture_emit_one
-                    (extern-call nl_cons_car_ptr pair-view)
-                    (extern-call nl_cons_cdr_ptr pair-view)
-                    pair-slot out)
+            (let* ((pair-view (extern-call nl_cons_car_ptr cell-ptr))
+                   (name-ptr (extern-call nl_cons_car_ptr pair-view))
+                   (cell-view (extern-call nl_cons_cdr_ptr pair-view)))
+              (and (if (= (nl_capture_name_allowed filtered filter-ptr name-ptr) 1)
+                       (nl_capture_emit_one name-ptr cell-view pair-slot out)
+                     1)
                    (nl_capture_walk_bucket
                     (extern-call nl_cons_cdr_ptr cell-ptr)
-                    pair-slot out)))
+                    pair-slot out filtered filter-ptr)))
           1)))
 
-    (defun nl_capture_walk_buckets (buckets-ptr j bc pair-slot out)
+    (defun nl_capture_walk_buckets (buckets-ptr j bc pair-slot out filtered filter-ptr)
       ;; Iterate the bucket array slots j = 0..bc-1.  buckets-ptr is a
       ;; `*const Sexp' to the buckets-vector slot inside the
       ;; `fast-hash-table' record (= obtained via
@@ -291,11 +338,11 @@
               ;; (`vector-ref-ptr'); empty buckets yield a Nil view that
               ;; the walker's non-Cons base case handles.
               (vector-ref-ptr buckets-ptr j)
-              pair-slot out)
+              pair-slot out filtered filter-ptr)
              (nl_capture_walk_buckets buckets-ptr (+ j 1) bc
-                                      pair-slot out))))
+                                      pair-slot out filtered filter-ptr))))
 
-    (defun nl_capture_walk_frame (frame-ptr pair-slot out)
+    (defun nl_capture_walk_frame (frame-ptr pair-slot out filtered filter-ptr)
       ;; Walk one `nelisp-lexframe' record by reading its inner
       ;; `fast-hash-table' (= slot 0) then iterating every bucket.
       ;;
@@ -306,14 +353,16 @@
       ;;     ht-record.slots[2] = Sexp::Int (live entry count — unused
       ;;                                      here; we walk every bucket
       ;;                                      regardless of population).
-      (let ((ht-ptr (record-slot-ref-ptr frame-ptr 0)))
-        (nl_capture_walk_buckets
-         (record-slot-ref-ptr ht-ptr 1)
-         0
-         (sexp-int-unwrap (record-slot-ref-ptr ht-ptr 0))
-         pair-slot out)))
+      (if (= filtered 0)
+          (let* ((ht-ptr (record-slot-ref-ptr frame-ptr 0)))
+            (nl_capture_walk_buckets
+             (record-slot-ref-ptr ht-ptr 1)
+             0
+             (sexp-int-unwrap (record-slot-ref-ptr ht-ptr 0))
+             pair-slot out filtered filter-ptr))
+        (nl_capture_walk_filter_symbols frame-ptr filter-ptr pair-slot out)))
 
-    (defun nl_capture_walk_frames (backing-ptr i pair-slot out)
+    (defun nl_capture_walk_frames (backing-ptr i pair-slot out filtered filter-ptr)
       ;; Innermost-first descent: walk i = depth-1 down to 0.  Each
       ;; iteration's frame entries get PREPENDED to *out, so the final
       ;; alist has OUTER entries at the head end and INNER entries
@@ -330,9 +379,9 @@
       (if (< i 0)
           1
         (and (nl_capture_walk_frame (vector-ref-ptr backing-ptr i)
-                                    pair-slot out)
+                                    pair-slot out filtered filter-ptr)
              (nl_capture_walk_frames backing-ptr (- i 1)
-                                     pair-slot out))))
+                                     pair-slot out filtered filter-ptr))))
 
     (defun nl_capture_descend_native (in-vec out)
       ;; Public entry, dispatched from elisp via:
@@ -341,10 +390,12 @@
       ;;   extern \"C\" fn(*const Sexp, *mut Sexp) -> i64
       ;; with `out' pre-initialised to `Sexp::Nil' (per `out_call!').
       ;;
-      ;; in-vec is a 3-slot caller-owned `Sexp::Vector':
+      ;; in-vec is a 5-slot caller-owned `Sexp::Vector':
       ;;   [0] = stack record (lexframe-stack)
       ;;   [1] = max-depth Sexp::Int
       ;;   [2] = pair-slot scratch (Sexp::Nil on entry — reused inside)
+      ;;   [3] = filter symbol list
+      ;;   [4] = filtered flag Sexp::Int (0 = capture all, non-zero = filter)
       ;;
       ;; max-depth = 0 → early return; `out' stays `Sexp::Nil', mirroring
       ;; the elisp `(cond ((= max-depth 0) nil) ...)' fast path.
@@ -352,16 +403,20 @@
       ;; Returns i64 0 = TRAMPOLINE_OK so the `out_call!' bridge yields
       ;; the populated `*out' Sexp value back to the elisp caller.
       ;; AOT `let' is single-binding only; nest each var.
-      (let ((depth (sexp-int-unwrap (vector-ref-ptr in-vec 1))))
+      (let* ((depth (sexp-int-unwrap (vector-ref-ptr in-vec 1))))
         (if (= depth 0)
             0
-          (let ((stack-ptr (vector-ref-ptr in-vec 0)))
-            (let ((pair-slot (vector-ref-ptr in-vec 2)))
+          (let* ((stack-ptr (vector-ref-ptr in-vec 0)))
+            (let* ((pair-slot (vector-ref-ptr in-vec 2))
+                   (filter-ptr (vector-ref-ptr in-vec 3))
+                   (filtered (sexp-int-unwrap (vector-ref-ptr in-vec 4))))
               (and (nl_capture_walk_frames
                     (record-slot-ref-ptr stack-ptr 0)
                     (- depth 1)
                     pair-slot
-                    out)
+                    out
+                    filtered
+                    filter-ptr)
                    0)))))))
   "AOT source for Doc 111 §111.E #24 / Doc 115 §115.6
 `frame_stack_find_rust_direct' + folded `lookup_in_frame'.
