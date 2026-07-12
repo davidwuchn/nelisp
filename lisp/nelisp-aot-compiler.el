@@ -766,6 +766,11 @@ at its kind-fixed offset since per-kind layout is constant."
     (f64-bits . 100)
     (frame-alloc . 101)
     (va-list-init . 103)
+    (wasi-call . 104)
+    (wasm-throw . 105)
+    (wasm-catch . 106)
+    (wasm-unwind-protect . 107)
+    (wasm-condition-case . 108)
     (if . 29)
     (imm . 30)
     (let . 31)
@@ -4758,6 +4763,91 @@ values are forwarded as ordinary value expressions."
       (list :landing-expr landing-form
             :prefix nil))))
 
+(defun nelisp-aot-compiler--parse-wasm-throw
+    (sexp env fenv defuns)
+  "Lower `(throw TAG VALUE)' directly to wasm EH IR."
+  (unless (= (length sexp) 3)
+    (signal 'nelisp-aot-compiler-error
+            (list :wasm-throw-arity sexp)))
+  (nelisp-aot-compiler--make-ir
+   'wasm-throw
+   :tag (nelisp-aot-compiler--parse-value (nth 1 sexp) env fenv defuns)
+   :value (nelisp-aot-compiler--parse-value (nth 2 sexp) env fenv defuns)))
+
+(defun nelisp-aot-compiler--parse-wasm-catch
+    (sexp env fenv defuns)
+  "Lower `(catch TAG BODY...)' directly to wasm EH IR."
+  (unless (>= (length sexp) 3)
+    (signal 'nelisp-aot-compiler-error
+            (list :wasm-catch-arity sexp)))
+  (nelisp-aot-compiler--make-ir
+   'wasm-catch
+   :id (cl-incf nelisp-aot-compiler--label-counter)
+   :tag (nelisp-aot-compiler--parse-value (nth 1 sexp) env fenv defuns)
+   :body (nelisp-aot-compiler--parse-value
+          (if (= (length sexp) 3)
+              (nth 2 sexp)
+            (cons 'seq (cddr sexp)))
+          env fenv defuns)))
+
+(defun nelisp-aot-compiler--parse-wasm-unwind-protect
+    (sexp env fenv defuns)
+  "Lower `(unwind-protect BODY CLEANUP...)' directly to wasm EH IR."
+  (unless (>= (length sexp) 3)
+    (signal 'nelisp-aot-compiler-error
+            (list :wasm-unwind-protect-arity sexp)))
+  (nelisp-aot-compiler--make-ir
+   'wasm-unwind-protect
+   :body (nelisp-aot-compiler--parse-value (nth 1 sexp) env fenv defuns)
+   :cleanups (mapcar (lambda (form)
+                       (nelisp-aot-compiler--parse-value form env fenv defuns))
+                     (cddr sexp))))
+
+(defun nelisp-aot-compiler--parse-wasm-condition-case
+    (sexp env fenv defuns)
+  "Lower `(condition-case VAR BODY CLAUSES...)' directly to wasm EH IR."
+  (unless (>= (length sexp) 4)
+    (signal 'nelisp-aot-compiler-error
+            (list :wasm-condition-case-arity sexp)))
+  (let* ((var (nth 1 sexp))
+         (body-ir (nelisp-aot-compiler--parse-value (nth 2 sexp) env fenv defuns))
+         (clauses nil)
+         (var-slot nil)
+         (handler-fenv fenv))
+    (when var
+      (unless nelisp-aot-compiler--next-rt-let-slot
+        (signal 'nelisp-aot-compiler-error
+                (list :wasm-condition-case-requires-defun-context var)))
+      (setq var-slot (car nelisp-aot-compiler--next-rt-let-slot))
+      (setcar nelisp-aot-compiler--next-rt-let-slot (1+ var-slot))
+      (setq handler-fenv
+            (cons (cons var (list :slot var-slot :class 'gp :root-p nil))
+                  fenv)))
+    (dolist (clause (cdddr sexp))
+      (unless (and (consp clause) (>= (length clause) 2))
+        (signal 'nelisp-aot-compiler-error
+                (list :wasm-condition-case-bad-clause clause)))
+      (setq clauses
+            (append
+             clauses
+             (list
+              (list
+               :selector
+               (nelisp-aot-compiler--parse-value
+                (car clause) env fenv defuns)
+               :body
+               (nelisp-aot-compiler--parse-value
+                (if (= (length clause) 2)
+                    (nth 1 clause)
+                  (cons 'seq (cdr clause)))
+                env handler-fenv defuns))))))
+    (nelisp-aot-compiler--make-ir
+     'wasm-condition-case
+     :id (cl-incf nelisp-aot-compiler--label-counter)
+     :var-slot var-slot
+     :body body-ir
+     :clauses clauses)))
+
 (defun nelisp-aot-compiler--parse-aot-throw
     (sexp env fenv defuns)
   "Lower `(throw TAG VALUE)' through the Doc 129.8 throw bridge."
@@ -8177,13 +8267,20 @@ functions `((NAME . ARITY) ...)'."
    ((and (consp sexp)
          (eq (car sexp) 'throw)
          (not (assq 'throw defuns)))
-    (nelisp-aot-compiler--parse-aot-throw
-     sexp env fenv defuns))
+    (if (eq nelisp-aot-compiler--arch 'wasm32)
+        (nelisp-aot-compiler--parse-wasm-throw
+         sexp env fenv defuns)
+      (nelisp-aot-compiler--parse-aot-throw
+       sexp env fenv defuns)))
    ((and (consp sexp)
          (eq (car sexp) 'signal)
          (not (assq 'signal defuns)))
-    (nelisp-aot-compiler--parse-aot-signal
-     sexp env fenv defuns))
+    (if (eq nelisp-aot-compiler--arch 'wasm32)
+        (nelisp-aot-compiler--parse-wasm-throw
+         (list 'throw (nth 1 sexp) (nth 2 sexp))
+         env fenv defuns)
+      (nelisp-aot-compiler--parse-aot-signal
+       sexp env fenv defuns)))
    ;; Doc 129.8H/I — user-facing `error' is a specialised signal with
    ;; the standard `error' condition tag.  Multi-argument formatted
    ;; errors lower through the errorn bridge.
@@ -8199,22 +8296,31 @@ functions `((NAME . ARITY) ...)'."
    ((and (consp sexp)
          (eq (car sexp) 'catch)
          (not (assq 'catch defuns)))
-    (nelisp-aot-compiler--parse-aot-catch-normal-exit
-     sexp env fenv defuns))
+    (if (eq nelisp-aot-compiler--arch 'wasm32)
+        (nelisp-aot-compiler--parse-wasm-catch
+         sexp env fenv defuns)
+      (nelisp-aot-compiler--parse-aot-catch-normal-exit
+       sexp env fenv defuns)))
    ;; Doc 129.8F — source-level condition-case normal path.  Real
    ;; handler landing pads for signalled conditions remain pending.
    ((and (consp sexp)
          (eq (car sexp) 'condition-case)
          (not (assq 'condition-case defuns)))
-    (nelisp-aot-compiler--parse-aot-condition-case-normal-exit
-     sexp env fenv defuns))
+    (if (eq nelisp-aot-compiler--arch 'wasm32)
+        (nelisp-aot-compiler--parse-wasm-condition-case
+         sexp env fenv defuns)
+      (nelisp-aot-compiler--parse-aot-condition-case-normal-exit
+       sexp env fenv defuns)))
    ;; Doc 129.8G — source-level unwind-protect normal path.  Cleanup
    ;; forms run after BODY and the saved BODY value remains the result.
    ((and (consp sexp)
          (eq (car sexp) 'unwind-protect)
          (not (assq 'unwind-protect defuns)))
-    (nelisp-aot-compiler--parse-aot-unwind-protect-normal-exit
-     sexp env fenv defuns))
+    (if (eq nelisp-aot-compiler--arch 'wasm32)
+        (nelisp-aot-compiler--parse-wasm-unwind-protect
+         sexp env fenv defuns)
+      (nelisp-aot-compiler--parse-aot-unwind-protect-normal-exit
+       sexp env fenv defuns)))
    ;; Doc 129.8C — explicit bridge forms for installing handler-stack
    ;; records.  These are internal AOT forms used to make the native
    ;; handler ABI visible before full catch/condition-case/unwind-protect
@@ -9306,7 +9412,7 @@ functions `((NAME . ARITY) ...)'."
     (unless (= (length sexp) 8)
       (signal 'nelisp-aot-compiler-error
               (list :syscall-direct-arity sexp)))
-    (nelisp-aot-compiler--make-ir 'syscall-direct
+   (nelisp-aot-compiler--make-ir 'syscall-direct
           :nr   (nelisp-aot-compiler--parse-value
                  (nth 1 sexp) env fenv defuns)
           :a0   (nelisp-aot-compiler--parse-value
@@ -9321,6 +9427,21 @@ functions `((NAME . ARITY) ...)'."
                  (nth 6 sexp) env fenv defuns)
           :a5   (nelisp-aot-compiler--parse-value
                  (nth 7 sexp) env fenv defuns)))
+   ((and (consp sexp) (eq (car sexp) 'wasi-call))
+    (when (< (length sexp) 2)
+      (signal 'nelisp-aot-compiler-error
+              (list :wasi-call-needs-name sexp)))
+    (let ((name (nth 1 sexp))
+          (args (nthcdr 2 sexp)))
+      (unless (symbolp name)
+        (signal 'nelisp-aot-compiler-error
+                (list :wasi-call-name-not-symbol name)))
+      (nelisp-aot-compiler--make-ir
+       'wasi-call
+       :name name
+       :args (mapcar (lambda (arg)
+                       (nelisp-aot-compiler--parse-value arg env fenv defuns))
+                     args))))
    ;; `(syscall-direct-store-x1 NR A0 A1 A2 A3 A4 A5 PTR OFFSET)' — like
    ;; `syscall-direct', but stores the second arm64 kernel return register
    ;; into *(u64*)(PTR+OFFSET) before returning x0.  Darwin fork(2) uses
@@ -16785,6 +16906,36 @@ drift (= a Doc 92 emitter invariant violation)."
 ;; ---- Doc 164 §6 P1: wasm32 object emit path ----
 
 (defconst nelisp-aot-compiler--wasm-i64-type #x7e)
+(defconst nelisp-aot-compiler--wasm-f64-type #x7c)
+(defconst nelisp-aot-compiler--wasm-i32-type #x7f)
+(defconst nelisp-aot-compiler--wasm-unwind-tag-index 0)
+(defconst nelisp-aot-compiler--wasm-scratch-iov-buf 1024)
+(defconst nelisp-aot-compiler--wasm-scratch-iov-len 1028)
+(defconst nelisp-aot-compiler--wasm-scratch-out-a 1032)
+(defconst nelisp-aot-compiler--wasm-scratch-out-b 1040)
+(defconst nelisp-aot-compiler--wasm-scratch-path-stage 1048)
+
+(defconst nelisp-aot-compiler--wasm-wasi-import-specs
+  '((fd_write :field "fd_write" :params (#x7f #x7f #x7f #x7f) :results (#x7f))
+    (fd_read :field "fd_read" :params (#x7f #x7f #x7f #x7f) :results (#x7f))
+    (path_open :field "path_open"
+               :params (#x7f #x7f #x7f #x7f #x7f #x7e #x7e #x7f #x7f)
+               :results (#x7f))
+    (fd_close :field "fd_close" :params (#x7f) :results (#x7f))
+    (clock_time_get :field "clock_time_get" :params (#x7f #x7e #x7f) :results (#x7f))
+    (proc_exit :field "proc_exit" :params (#x7f) :results nil)
+    (random_get :field "random_get" :params (#x7f #x7f) :results (#x7f)))
+  "WASI preview1 imports supported by the wasm P2 backend.")
+
+(defconst nelisp-aot-compiler--wasm-linux-nr-to-wasi
+  '((0 . fd_read)
+    (1 . fd_write)
+    (3 . fd_close)
+    (228 . clock_time_get)
+    (231 . proc_exit)
+    (257 . path_open)
+    (318 . random_get))
+  "Linux x86_64 syscall numbers lowered to WASI imports in wasm P2.")
 
 (defun nelisp-aot-compiler--wasm-function-type-key (defun-ir)
   "Return the wasm signature key for DEFUN-IR."
@@ -16798,6 +16949,59 @@ drift (= a Doc 92 emitter invariant violation)."
   "Return the wasm signature key for an i64 ARITY call."
   (list :params (make-list arity nelisp-aot-compiler--wasm-i64-type)
         :results (list nelisp-aot-compiler--wasm-i64-type)))
+
+(defun nelisp-aot-compiler--wasm-f64-call-type-key (arity)
+  "Return the wasm signature key for an f64-returning ARITY call."
+  (list :params (make-list arity nelisp-aot-compiler--wasm-i64-type)
+        :results (list nelisp-aot-compiler--wasm-f64-type)))
+
+(defun nelisp-aot-compiler--wasm-exception-type-key ()
+  "Return the wasm tag signature key for the P2 unwind tag."
+  (list :params (list nelisp-aot-compiler--wasm-i64-type
+                      nelisp-aot-compiler--wasm-i64-type)
+        :results nil))
+
+(defun nelisp-aot-compiler--wasm-register-type (type-key type-map-box type-keys-box)
+  "Ensure TYPE-KEY exists in TYPE-MAP-BOX/TYPE-KEYS-BOX and return its index."
+  (or (cdr (assoc type-key (car type-map-box)))
+      (let ((index (length (car type-map-box))))
+        (setcar type-map-box
+                (append (car type-map-box) (list (cons type-key index))))
+        (setcar type-keys-box
+                (append (car type-keys-box) (list type-key)))
+        index)))
+
+(defun nelisp-aot-compiler--wasm-register-import
+    (module field type-key imports-box import-map-box type-map-box type-keys-box)
+  "Intern a wasm import and return its function index."
+  (let ((key (list module field type-key)))
+    (or (cdr (assoc key (car import-map-box)))
+        (let* ((type-index
+                (nelisp-aot-compiler--wasm-register-type
+                 type-key type-map-box type-keys-box))
+               (index (length (car imports-box))))
+          (setcar imports-box
+                  (append (car imports-box)
+                          (list (list :module module
+                                      :field field
+                                      :type-index type-index))))
+          (setcar import-map-box
+                  (append (car import-map-box) (list (cons key index))))
+          index))))
+
+(defun nelisp-aot-compiler--wasm-register-wasi-import
+    (name imports-box import-map-box type-map-box type-keys-box)
+  "Register the WASI import NAME and return its function index."
+  (let ((spec (cdr (assq name nelisp-aot-compiler--wasm-wasi-import-specs))))
+    (unless spec
+      (signal 'nelisp-aot-compiler-error
+              (list :wasm-unknown-wasi-import name)))
+    (nelisp-aot-compiler--wasm-register-import
+     "wasi_snapshot_preview1"
+     (plist-get spec :field)
+     (list :params (plist-get spec :params)
+           :results (plist-get spec :results))
+     imports-box import-map-box type-map-box type-keys-box)))
 
 (defun nelisp-aot-compiler--wasm-context-get (ctx key)
   "Return KEY from wasm emission CTX or signal."
@@ -16814,6 +17018,37 @@ drift (= a Doc 92 emitter invariant violation)."
   (cdr (assq name
              (nelisp-aot-compiler--wasm-context-get
               ctx :function-indices))))
+
+(defun nelisp-aot-compiler--wasm-import-index (ctx key)
+  "Return wasm import index for KEY from CTX, or nil when unresolved."
+  (cdr (assoc key (nelisp-aot-compiler--wasm-context-get ctx :import-indices))))
+
+(defun nelisp-aot-compiler--wasm-handler-local-pair (ctx id)
+  "Return the local pair plist for handler site ID from CTX."
+  (or (cdr (assq id (nelisp-aot-compiler--wasm-context-get ctx :handler-locals)))
+      (signal 'nelisp-aot-compiler-error
+              (list :wasm-handler-locals-missing id))))
+
+(defun nelisp-aot-compiler--wasm-emit-i32-store-abs (addr value-node buf ctx)
+  "Store VALUE-NODE at absolute i32 ADDR in BUF under CTX."
+  (nelisp-asm-wasm-op-i32-const buf addr)
+  (nelisp-aot-compiler--wasm-emit-value value-node buf ctx)
+  (nelisp-asm-wasm-op-i32-wrap-i64 buf)
+  (nelisp-asm-wasm-op-i32-store buf))
+
+(defun nelisp-aot-compiler--wasm-emit-i32-load-abs-as-i64 (addr buf)
+  "Load i32 at absolute ADDR into an i64 result in BUF."
+  (nelisp-asm-wasm-op-i32-const buf addr)
+  (nelisp-asm-wasm-op-i32-load buf)
+  (nelisp-asm-wasm-op-i64-extend-i32-u buf))
+
+(defun nelisp-aot-compiler--wasm-emit-call-import (ctx key buf)
+  "Emit `call' for import KEY from CTX into BUF."
+  (let ((index (nelisp-aot-compiler--wasm-import-index ctx key)))
+    (unless (integerp index)
+      (signal 'nelisp-aot-compiler-error
+              (list :wasm-import-missing key)))
+    (nelisp-asm-wasm-op-call buf index)))
 
 (defun nelisp-aot-compiler--wasm-emit-bool-to-i64 (buf op)
   "Emit boolean OP into BUF, then zero-extend it to i64."
@@ -16868,6 +17103,418 @@ drift (= a Doc 92 emitter invariant violation)."
   (nelisp-aot-compiler--wasm-emit-value offset buf ctx)
   (nelisp-asm-wasm-op-i64-add buf)
   (nelisp-asm-wasm-op-i32-wrap-i64 buf))
+
+(defun nelisp-aot-compiler--wasm-register-ir-imports
+    (node imports-box import-map-box type-map-box type-keys-box
+          module-defun-names)
+  "Walk NODE and register every wasm P2 host import it needs."
+  (when node
+    (let ((tag (nelisp-aot-compiler--ir-kind-tag node)))
+      (cond
+       ((= tag 23)
+        (let ((fn-value (nelisp-aot-compiler--ir-get node :fn-value)))
+          (unless fn-value
+            (let ((name (nelisp-aot-compiler--ir-get node :name))
+                  (ret-class (or (nelisp-aot-compiler--ir-get node :ret-class) 'gp))
+                  (arity (length (nelisp-aot-compiler--ir-get node :args))))
+              (unless (member name module-defun-names)
+                (unless (assoc name (car type-map-box))
+                  (ignore ret-class))
+                (nelisp-aot-compiler--wasm-register-import
+                 "env"
+                 (symbol-name name)
+                 (if (eq ret-class 'f64)
+                     (nelisp-aot-compiler--wasm-f64-call-type-key arity)
+                   (nelisp-aot-compiler--wasm-call-type-key arity))
+                 imports-box import-map-box type-map-box type-keys-box)))))
+        (dolist (arg (nelisp-aot-compiler--ir-get node :args))
+          (nelisp-aot-compiler--wasm-register-ir-imports
+           arg imports-box import-map-box type-map-box type-keys-box
+           module-defun-names)))
+       ((= tag 104)
+        (nelisp-aot-compiler--wasm-register-wasi-import
+         (nelisp-aot-compiler--ir-get node :name)
+         imports-box import-map-box type-map-box type-keys-box)
+        (dolist (arg (nelisp-aot-compiler--ir-get node :args))
+          (nelisp-aot-compiler--wasm-register-ir-imports
+           arg imports-box import-map-box type-map-box type-keys-box
+           module-defun-names)))
+       ((= tag 78)
+        (let* ((nr-node (nelisp-aot-compiler--ir-get node :nr))
+               (nr (and (= (nelisp-aot-compiler--ir-kind-tag nr-node) 30)
+                        (nelisp-aot-compiler--ir-get nr-node :value)))
+               (name (cdr (assq nr nelisp-aot-compiler--wasm-linux-nr-to-wasi))))
+          (when name
+            (nelisp-aot-compiler--wasm-register-wasi-import
+             name imports-box import-map-box type-map-box type-keys-box)))
+        (dolist (field '(:nr :a0 :a1 :a2 :a3 :a4 :a5))
+          (nelisp-aot-compiler--wasm-register-ir-imports
+           (nelisp-aot-compiler--ir-get node field)
+           imports-box import-map-box type-map-box type-keys-box
+           module-defun-names)))
+       ((memq tag '(105 106))
+        (nelisp-aot-compiler--wasm-register-type
+         (nelisp-aot-compiler--wasm-exception-type-key)
+         type-map-box type-keys-box)
+        (nelisp-aot-compiler--wasm-register-ir-imports
+         (nelisp-aot-compiler--ir-get node :tag)
+         imports-box import-map-box type-map-box type-keys-box
+         module-defun-names)
+        (when (nelisp-aot-compiler--ir-get node :value)
+          (nelisp-aot-compiler--wasm-register-ir-imports
+           (nelisp-aot-compiler--ir-get node :value)
+           imports-box import-map-box type-map-box type-keys-box
+           module-defun-names))
+        (when (nelisp-aot-compiler--ir-get node :body)
+          (nelisp-aot-compiler--wasm-register-ir-imports
+           (nelisp-aot-compiler--ir-get node :body)
+           imports-box import-map-box type-map-box type-keys-box
+           module-defun-names)))
+       ((= tag 107)
+        (nelisp-aot-compiler--wasm-register-type
+         (nelisp-aot-compiler--wasm-exception-type-key)
+         type-map-box type-keys-box)
+        (nelisp-aot-compiler--wasm-register-ir-imports
+         (nelisp-aot-compiler--ir-get node :body)
+         imports-box import-map-box type-map-box type-keys-box
+         module-defun-names)
+        (dolist (cleanup (nelisp-aot-compiler--ir-get node :cleanups))
+          (nelisp-aot-compiler--wasm-register-ir-imports
+           cleanup imports-box import-map-box type-map-box type-keys-box
+           module-defun-names)))
+       ((= tag 108)
+        (nelisp-aot-compiler--wasm-register-type
+         (nelisp-aot-compiler--wasm-exception-type-key)
+         type-map-box type-keys-box)
+        (nelisp-aot-compiler--wasm-register-ir-imports
+         (nelisp-aot-compiler--ir-get node :body)
+         imports-box import-map-box type-map-box type-keys-box
+         module-defun-names)
+        (dolist (clause (nelisp-aot-compiler--ir-get node :clauses))
+          (nelisp-aot-compiler--wasm-register-ir-imports
+           (plist-get clause :selector)
+           imports-box import-map-box type-map-box type-keys-box
+           module-defun-names)
+          (nelisp-aot-compiler--wasm-register-ir-imports
+           (plist-get clause :body)
+           imports-box import-map-box type-map-box type-keys-box
+           module-defun-names)))
+       ((memq tag '(54 88 33))
+        (dolist (child (nelisp-aot-compiler--ir-get node :forms))
+          (nelisp-aot-compiler--wasm-register-ir-imports
+           child imports-box import-map-box type-map-box type-keys-box
+           module-defun-names)))
+       ((memq tag '(31 32 89))
+        (when (nelisp-aot-compiler--ir-get node :value-ir)
+          (nelisp-aot-compiler--wasm-register-ir-imports
+           (nelisp-aot-compiler--ir-get node :value-ir)
+           imports-box import-map-box type-map-box type-keys-box
+           module-defun-names))
+        (dolist (binding (or (nelisp-aot-compiler--ir-get node :bindings) nil))
+          (nelisp-aot-compiler--wasm-register-ir-imports
+           (nth 2 binding)
+           imports-box import-map-box type-map-box type-keys-box
+           module-defun-names))
+        (nelisp-aot-compiler--wasm-register-ir-imports
+         (nelisp-aot-compiler--ir-get node :body)
+         imports-box import-map-box type-map-box type-keys-box
+         module-defun-names))
+       ((memq tag '(1 10))
+        (nelisp-aot-compiler--wasm-register-ir-imports
+         (nelisp-aot-compiler--ir-get node :a)
+         imports-box import-map-box type-map-box type-keys-box
+         module-defun-names)
+        (nelisp-aot-compiler--wasm-register-ir-imports
+         (nelisp-aot-compiler--ir-get node :b)
+         imports-box import-map-box type-map-box type-keys-box
+         module-defun-names))
+       ((= tag 29)
+        (dolist (field '(:test :then :else))
+          (nelisp-aot-compiler--wasm-register-ir-imports
+           (nelisp-aot-compiler--ir-get node field)
+           imports-box import-map-box type-map-box type-keys-box
+           module-defun-names)))
+       ((= tag 86)
+        (nelisp-aot-compiler--wasm-register-ir-imports
+         (nelisp-aot-compiler--ir-get node :test)
+         imports-box import-map-box type-map-box type-keys-box
+         module-defun-names)
+        (dolist (body-node (nelisp-aot-compiler--ir-get node :body))
+          (nelisp-aot-compiler--wasm-register-ir-imports
+           body-node imports-box import-map-box type-map-box type-keys-box
+           module-defun-names)))
+       ((= tag 11)
+        (dolist (clause (nelisp-aot-compiler--ir-get node :clauses))
+          (unless (eq (car clause) 'always)
+            (nelisp-aot-compiler--wasm-register-ir-imports
+             (car clause) imports-box import-map-box type-map-box type-keys-box
+             module-defun-names))
+          (nelisp-aot-compiler--wasm-register-ir-imports
+           (cdr clause) imports-box import-map-box type-map-box type-keys-box
+           module-defun-names)))
+       ((= tag 5)
+        (when (nelisp-aot-compiler--ir-get node :fn-value)
+          (nelisp-aot-compiler--wasm-register-ir-imports
+           (nelisp-aot-compiler--ir-get node :fn-value)
+           imports-box import-map-box type-map-box type-keys-box
+           module-defun-names))
+        (dolist (arg (nelisp-aot-compiler--ir-get node :args))
+          (nelisp-aot-compiler--wasm-register-ir-imports
+           arg imports-box import-map-box type-map-box type-keys-box
+           module-defun-names)))
+       ((memq tag '(39 40 41 42 43 44 45 46))
+        (dolist (field '(:ptr :offset :val))
+          (when (nelisp-aot-compiler--ir-get node field)
+            (nelisp-aot-compiler--wasm-register-ir-imports
+             (nelisp-aot-compiler--ir-get node field)
+             imports-box import-map-box type-map-box type-keys-box
+             module-defun-names))))
+       ((= tag 4)
+        (nelisp-aot-compiler--wasm-register-ir-imports
+         (nelisp-aot-compiler--ir-get node :int-expr)
+         imports-box import-map-box type-map-box type-keys-box
+         module-defun-names))
+       ((= tag 100)
+        (nelisp-aot-compiler--wasm-register-ir-imports
+         (nelisp-aot-compiler--ir-get node :f64-expr)
+         imports-box import-map-box type-map-box type-keys-box
+         module-defun-names))
+       ((= tag 25)
+        (nelisp-aot-compiler--wasm-register-ir-imports
+         (nelisp-aot-compiler--ir-get node :arg)
+         imports-box import-map-box type-map-box type-keys-box
+         module-defun-names))))))
+
+(defun nelisp-aot-compiler--wasm-collect-handler-local-ids (node)
+  "Return handler-site IDs nested in NODE."
+  (let ((acc nil))
+    (cl-labels ((walk (n)
+                  (when n
+                    (let ((tag (nelisp-aot-compiler--ir-kind-tag n)))
+                      (cond
+                       ((= tag 106)
+                        (push (nelisp-aot-compiler--ir-get n :id) acc)
+                        (walk (nelisp-aot-compiler--ir-get n :tag))
+                        (walk (nelisp-aot-compiler--ir-get n :body)))
+                       ((= tag 108)
+                        (push (nelisp-aot-compiler--ir-get n :id) acc)
+                        (walk (nelisp-aot-compiler--ir-get n :body))
+                        (dolist (clause (nelisp-aot-compiler--ir-get n :clauses))
+                          (walk (plist-get clause :selector))
+                          (walk (plist-get clause :body))))
+                       ((memq tag '(54 88 33))
+                        (mapc #'walk (nelisp-aot-compiler--ir-get n :forms)))
+                       ((memq tag '(31 32 89))
+                        (when (nelisp-aot-compiler--ir-get n :value-ir)
+                          (walk (nelisp-aot-compiler--ir-get n :value-ir)))
+                        (dolist (binding (or (nelisp-aot-compiler--ir-get n :bindings) nil))
+                          (walk (nth 2 binding)))
+                        (walk (nelisp-aot-compiler--ir-get n :body)))
+                       ((memq tag '(1 10))
+                        (walk (nelisp-aot-compiler--ir-get n :a))
+                        (walk (nelisp-aot-compiler--ir-get n :b)))
+                       ((= tag 29)
+                        (walk (nelisp-aot-compiler--ir-get n :test))
+                        (walk (nelisp-aot-compiler--ir-get n :then))
+                        (walk (nelisp-aot-compiler--ir-get n :else)))
+                       ((= tag 86)
+                        (walk (nelisp-aot-compiler--ir-get n :test))
+                        (mapc #'walk (nelisp-aot-compiler--ir-get n :body)))
+                       ((= tag 11)
+                        (dolist (clause (nelisp-aot-compiler--ir-get n :clauses))
+                          (unless (eq (car clause) 'always)
+                            (walk (car clause)))
+                          (walk (cdr clause))))
+                       ((= tag 5)
+                        (walk (nelisp-aot-compiler--ir-get n :fn-value))
+                        (mapc #'walk (nelisp-aot-compiler--ir-get n :args)))
+                       ((= tag 23)
+                        (mapc #'walk (nelisp-aot-compiler--ir-get n :args)))
+                       ((= tag 104)
+                        (mapc #'walk (nelisp-aot-compiler--ir-get n :args)))
+                       ((= tag 78)
+                        (dolist (field '(:nr :a0 :a1 :a2 :a3 :a4 :a5))
+                          (walk (nelisp-aot-compiler--ir-get n field))))
+                       ((memq tag '(105 107))
+                        (when (nelisp-aot-compiler--ir-get n :tag)
+                          (walk (nelisp-aot-compiler--ir-get n :tag)))
+                        (when (nelisp-aot-compiler--ir-get n :value)
+                          (walk (nelisp-aot-compiler--ir-get n :value)))
+                        (when (nelisp-aot-compiler--ir-get n :body)
+                          (walk (nelisp-aot-compiler--ir-get n :body)))
+                        (dolist (cleanup (or (nelisp-aot-compiler--ir-get n :cleanups) nil))
+                          (walk cleanup))))))))
+      (walk node))
+    (nreverse (delete-dups (nreverse acc)))))
+
+(defun nelisp-aot-compiler--wasm-emit-errno-or-output
+    (scratch-local success-thunk buf)
+  "Return SUCCESS-THUNK or `-errno' using SCRATCH-LOCAL in BUF."
+  (nelisp-asm-wasm-op-i64-extend-i32-u buf)
+  (nelisp-asm-wasm-op-local-tee buf scratch-local)
+  (nelisp-asm-wasm-op-i64-eqz buf)
+  (nelisp-asm-wasm-op-if buf nelisp-aot-compiler--wasm-i64-type)
+  (funcall success-thunk)
+  (nelisp-asm-wasm-op-else buf)
+  (nelisp-asm-wasm-op-i64-const buf 0)
+  (nelisp-asm-wasm-op-local-get buf scratch-local)
+  (nelisp-asm-wasm-op-i64-sub buf)
+  (nelisp-asm-wasm-op-end buf))
+
+(defun nelisp-aot-compiler--wasm-emit-wasi-arg (arg param-type buf ctx)
+  "Emit ARG for a WASI PARAM-TYPE into BUF under CTX."
+  (nelisp-aot-compiler--wasm-emit-value arg buf ctx)
+  (when (= param-type #x7f)
+    (nelisp-asm-wasm-op-i32-wrap-i64 buf)))
+
+(defun nelisp-aot-compiler--wasm-emit-wasi-call-node (node buf ctx)
+  "Emit a direct `wasi-call' NODE into BUF under CTX."
+  (let* ((name (nelisp-aot-compiler--ir-get node :name))
+         (args (nelisp-aot-compiler--ir-get node :args))
+         (spec (cdr (assq name nelisp-aot-compiler--wasm-wasi-import-specs)))
+         (params (plist-get spec :params))
+         (key (list "wasi_snapshot_preview1"
+                    (plist-get spec :field)
+                    (list :params params
+                          :results (plist-get spec :results)))))
+    (unless (= (length args) (length params))
+      (signal 'nelisp-aot-compiler-error
+              (list :wasm-wasi-arity-mismatch name
+                    :args (length args)
+                    :params (length params))))
+    (cl-mapc
+     (lambda (arg param-type)
+       (nelisp-aot-compiler--wasm-emit-wasi-arg arg param-type buf ctx))
+     args params)
+    (nelisp-aot-compiler--wasm-emit-call-import ctx key buf)
+    (if (eq name 'proc_exit)
+        (nelisp-asm-wasm-op-unreachable buf)
+      (nelisp-asm-wasm-op-i64-extend-i32-u buf))))
+
+(defun nelisp-aot-compiler--wasm-emit-syscall-direct-node (node buf ctx)
+  "Emit syscall-direct NODE through the WASI scratch lowering into BUF."
+  (let* ((nr-node (nelisp-aot-compiler--ir-get node :nr))
+         (nr (and (= (nelisp-aot-compiler--ir-kind-tag nr-node) 30)
+                  (nelisp-aot-compiler--ir-get nr-node :value)))
+         (a0 (nelisp-aot-compiler--ir-get node :a0))
+         (a1 (nelisp-aot-compiler--ir-get node :a1))
+         (a2 (nelisp-aot-compiler--ir-get node :a2))
+         (a3 (nelisp-aot-compiler--ir-get node :a3))
+         (logic-scratch (nelisp-aot-compiler--wasm-logic-scratch-local ctx)))
+    (pcase nr
+      (0
+       (nelisp-aot-compiler--wasm-emit-i32-store-abs
+        nelisp-aot-compiler--wasm-scratch-iov-buf a1 buf ctx)
+       (nelisp-aot-compiler--wasm-emit-i32-store-abs
+        nelisp-aot-compiler--wasm-scratch-iov-len a2 buf ctx)
+       (nelisp-aot-compiler--wasm-emit-value a0 buf ctx)
+       (nelisp-asm-wasm-op-i32-wrap-i64 buf)
+       (nelisp-asm-wasm-op-i32-const buf nelisp-aot-compiler--wasm-scratch-iov-buf)
+       (nelisp-asm-wasm-op-i32-const buf 1)
+       (nelisp-asm-wasm-op-i32-const buf nelisp-aot-compiler--wasm-scratch-out-a)
+       (nelisp-aot-compiler--wasm-emit-call-import
+        ctx (list "wasi_snapshot_preview1" "fd_read"
+                  (list :params (plist-get (cdr (assq 'fd_read nelisp-aot-compiler--wasm-wasi-import-specs)) :params)
+                        :results (plist-get (cdr (assq 'fd_read nelisp-aot-compiler--wasm-wasi-import-specs)) :results)))
+        buf)
+       (nelisp-aot-compiler--wasm-emit-errno-or-output
+        logic-scratch
+        (lambda ()
+          (nelisp-aot-compiler--wasm-emit-i32-load-abs-as-i64
+           nelisp-aot-compiler--wasm-scratch-out-a buf))
+        buf))
+      (1
+       (nelisp-aot-compiler--wasm-emit-i32-store-abs
+        nelisp-aot-compiler--wasm-scratch-iov-buf a1 buf ctx)
+       (nelisp-aot-compiler--wasm-emit-i32-store-abs
+        nelisp-aot-compiler--wasm-scratch-iov-len a2 buf ctx)
+       (nelisp-aot-compiler--wasm-emit-value a0 buf ctx)
+       (nelisp-asm-wasm-op-i32-wrap-i64 buf)
+       (nelisp-asm-wasm-op-i32-const buf nelisp-aot-compiler--wasm-scratch-iov-buf)
+       (nelisp-asm-wasm-op-i32-const buf 1)
+       (nelisp-asm-wasm-op-i32-const buf nelisp-aot-compiler--wasm-scratch-out-a)
+       (nelisp-aot-compiler--wasm-emit-call-import
+        ctx (list "wasi_snapshot_preview1" "fd_write"
+                  (list :params (plist-get (cdr (assq 'fd_write nelisp-aot-compiler--wasm-wasi-import-specs)) :params)
+                        :results (plist-get (cdr (assq 'fd_write nelisp-aot-compiler--wasm-wasi-import-specs)) :results)))
+        buf)
+       (nelisp-aot-compiler--wasm-emit-errno-or-output
+        logic-scratch
+        (lambda ()
+          (nelisp-aot-compiler--wasm-emit-i32-load-abs-as-i64
+           nelisp-aot-compiler--wasm-scratch-out-a buf))
+        buf))
+      (3
+       (nelisp-aot-compiler--wasm-emit-value a0 buf ctx)
+       (nelisp-asm-wasm-op-i32-wrap-i64 buf)
+       (nelisp-aot-compiler--wasm-emit-call-import
+        ctx (list "wasi_snapshot_preview1" "fd_close"
+                  (list :params (plist-get (cdr (assq 'fd_close nelisp-aot-compiler--wasm-wasi-import-specs)) :params)
+                        :results (plist-get (cdr (assq 'fd_close nelisp-aot-compiler--wasm-wasi-import-specs)) :results)))
+        buf)
+       (nelisp-asm-wasm-op-i64-extend-i32-u buf))
+      (228
+       (nelisp-aot-compiler--wasm-emit-value a0 buf ctx)
+       (nelisp-asm-wasm-op-i32-wrap-i64 buf)
+       (nelisp-asm-wasm-op-i64-const buf 0)
+       (nelisp-asm-wasm-op-i32-const buf nelisp-aot-compiler--wasm-scratch-out-b)
+       (nelisp-aot-compiler--wasm-emit-call-import
+        ctx (list "wasi_snapshot_preview1" "clock_time_get"
+                  (list :params (plist-get (cdr (assq 'clock_time_get nelisp-aot-compiler--wasm-wasi-import-specs)) :params)
+                        :results (plist-get (cdr (assq 'clock_time_get nelisp-aot-compiler--wasm-wasi-import-specs)) :results)))
+        buf)
+       (nelisp-aot-compiler--wasm-emit-errno-or-output
+        logic-scratch
+        (lambda ()
+          (nelisp-asm-wasm-op-i32-const buf nelisp-aot-compiler--wasm-scratch-out-b)
+          (nelisp-asm-wasm-op-i64-load buf))
+        buf))
+      (231
+       (nelisp-aot-compiler--wasm-emit-value a0 buf ctx)
+       (nelisp-asm-wasm-op-i32-wrap-i64 buf)
+       (nelisp-aot-compiler--wasm-emit-call-import
+        ctx (list "wasi_snapshot_preview1" "proc_exit"
+                  (list :params (plist-get (cdr (assq 'proc_exit nelisp-aot-compiler--wasm-wasi-import-specs)) :params)
+                        :results nil))
+        buf)
+       (nelisp-asm-wasm-op-unreachable buf))
+      (257
+       (nelisp-aot-compiler--wasm-emit-value a0 buf ctx)
+       (nelisp-asm-wasm-op-i32-wrap-i64 buf)
+       (nelisp-asm-wasm-op-i32-const buf 0)
+       (nelisp-aot-compiler--wasm-emit-value a1 buf ctx)
+       (nelisp-asm-wasm-op-i32-wrap-i64 buf)
+       (nelisp-aot-compiler--wasm-emit-value a2 buf ctx)
+       (nelisp-asm-wasm-op-i32-wrap-i64 buf)
+       (nelisp-asm-wasm-op-i32-const buf 9)
+       (nelisp-asm-wasm-op-i64-const buf #x46)
+       (nelisp-asm-wasm-op-i64-const buf 0)
+       (nelisp-asm-wasm-op-i32-const buf 0)
+       (nelisp-asm-wasm-op-i32-const buf nelisp-aot-compiler--wasm-scratch-out-a)
+       (nelisp-aot-compiler--wasm-emit-call-import
+        ctx (list "wasi_snapshot_preview1" "path_open"
+                  (list :params (plist-get (cdr (assq 'path_open nelisp-aot-compiler--wasm-wasi-import-specs)) :params)
+                        :results (plist-get (cdr (assq 'path_open nelisp-aot-compiler--wasm-wasi-import-specs)) :results)))
+        buf)
+       (nelisp-aot-compiler--wasm-emit-errno-or-output
+        logic-scratch
+        (lambda ()
+          (nelisp-aot-compiler--wasm-emit-i32-load-abs-as-i64
+           nelisp-aot-compiler--wasm-scratch-out-a buf))
+        buf))
+      (318
+       (nelisp-aot-compiler--wasm-emit-value a0 buf ctx)
+       (nelisp-asm-wasm-op-i32-wrap-i64 buf)
+       (nelisp-aot-compiler--wasm-emit-value a1 buf ctx)
+       (nelisp-asm-wasm-op-i32-wrap-i64 buf)
+       (nelisp-aot-compiler--wasm-emit-call-import
+        ctx (list "wasi_snapshot_preview1" "random_get"
+                  (list :params (plist-get (cdr (assq 'random_get nelisp-aot-compiler--wasm-wasi-import-specs)) :params)
+                        :results (plist-get (cdr (assq 'random_get nelisp-aot-compiler--wasm-wasi-import-specs)) :results)))
+        buf)
+       (nelisp-asm-wasm-op-i64-extend-i32-u buf))
+      (_
+       (nelisp-asm-wasm-op-i64-const buf -38)))))
 
 (defun nelisp-aot-compiler--wasm-emit-value (node buf ctx)
   "Emit wasm P1 code for value NODE into BUF."
@@ -16995,7 +17642,8 @@ drift (= a Doc 92 emitter invariant violation)."
      ((= tag 23)
       (let ((fn-name (nelisp-aot-compiler--ir-get node :name))
             (fn-value (nelisp-aot-compiler--ir-get node :fn-value))
-            (args (nelisp-aot-compiler--ir-get node :args)))
+            (args (nelisp-aot-compiler--ir-get node :args))
+            (ret-class (or (nelisp-aot-compiler--ir-get node :ret-class) 'gp)))
         (when fn-value
           (signal 'nelisp-aot-compiler-error
                   (list :wasm-p1-extern-call-deferred
@@ -17005,10 +17653,97 @@ drift (= a Doc 92 emitter invariant violation)."
           (nelisp-aot-compiler--wasm-emit-value arg buf ctx))
         (let ((index (nelisp-aot-compiler--wasm-function-index
                       ctx fn-name)))
-          (unless (integerp index)
+          (cond
+           ((integerp index)
+            (nelisp-asm-wasm-op-call buf index))
+           ((eq ret-class 'f64)
             (signal 'nelisp-aot-compiler-error
-                    (list :wasm-p1-extern-call-deferred fn-name)))
-          (nelisp-asm-wasm-op-call buf index))))
+                    (list :wasm-extern-call-f64-import-pending fn-name)))
+           (t
+            (nelisp-aot-compiler--wasm-emit-call-import
+             ctx
+             (list "env"
+                   (symbol-name fn-name)
+                   (nelisp-aot-compiler--wasm-call-type-key (length args)))
+             buf))))))
+     ((= tag 104)
+      (nelisp-aot-compiler--wasm-emit-wasi-call-node node buf ctx))
+     ((= tag 105)
+      (nelisp-aot-compiler--wasm-emit-value
+       (nelisp-aot-compiler--ir-get node :tag) buf ctx)
+      (nelisp-aot-compiler--wasm-emit-value
+       (nelisp-aot-compiler--ir-get node :value) buf ctx)
+      (nelisp-asm-wasm-op-throw buf nelisp-aot-compiler--wasm-unwind-tag-index))
+     ((= tag 106)
+      (let* ((locals (nelisp-aot-compiler--wasm-handler-local-pair
+                      ctx (nelisp-aot-compiler--ir-get node :id)))
+             (tag-local (plist-get locals :tag))
+             (value-local (plist-get locals :value)))
+        (nelisp-asm-wasm-op-try buf nelisp-aot-compiler--wasm-i64-type)
+        (nelisp-aot-compiler--wasm-emit-value
+         (nelisp-aot-compiler--ir-get node :body) buf ctx)
+        (nelisp-asm-wasm-op-catch buf nelisp-aot-compiler--wasm-unwind-tag-index)
+        (nelisp-asm-wasm-op-local-set buf value-local)
+        (nelisp-asm-wasm-op-local-set buf tag-local)
+        (nelisp-asm-wasm-op-local-get buf tag-local)
+        (nelisp-aot-compiler--wasm-emit-value
+         (nelisp-aot-compiler--ir-get node :tag) buf ctx)
+        (nelisp-asm-wasm-op-i64-eq buf)
+        (nelisp-asm-wasm-op-if buf nelisp-aot-compiler--wasm-i64-type)
+        (nelisp-asm-wasm-op-local-get buf value-local)
+        (nelisp-asm-wasm-op-else buf)
+        (nelisp-asm-wasm-op-local-get buf tag-local)
+        (nelisp-asm-wasm-op-local-get buf value-local)
+        (nelisp-asm-wasm-op-throw buf nelisp-aot-compiler--wasm-unwind-tag-index)
+        (nelisp-asm-wasm-op-end buf)
+        (nelisp-asm-wasm-op-end buf)))
+     ((= tag 107)
+      (nelisp-asm-wasm-op-try buf nelisp-aot-compiler--wasm-i64-type)
+      (nelisp-aot-compiler--wasm-emit-value
+       (nelisp-aot-compiler--ir-get node :body) buf ctx)
+      (nelisp-asm-wasm-op-catch-all buf)
+      (dolist (cleanup (nelisp-aot-compiler--ir-get node :cleanups))
+        (nelisp-aot-compiler--wasm-emit-drop-value cleanup buf ctx))
+      (nelisp-asm-wasm-op-rethrow buf 0)
+      (nelisp-asm-wasm-op-end buf)
+      (dolist (cleanup (nelisp-aot-compiler--ir-get node :cleanups))
+        (nelisp-aot-compiler--wasm-emit-drop-value cleanup buf ctx)))
+     ((= tag 108)
+      (let* ((locals (nelisp-aot-compiler--wasm-handler-local-pair
+                      ctx (nelisp-aot-compiler--ir-get node :id)))
+             (tag-local (plist-get locals :tag))
+             (value-local (plist-get locals :value))
+             (var-slot (nelisp-aot-compiler--ir-get node :var-slot))
+             (clauses (nelisp-aot-compiler--ir-get node :clauses)))
+        (nelisp-asm-wasm-op-try buf nelisp-aot-compiler--wasm-i64-type)
+        (nelisp-aot-compiler--wasm-emit-value
+         (nelisp-aot-compiler--ir-get node :body) buf ctx)
+        (nelisp-asm-wasm-op-catch buf nelisp-aot-compiler--wasm-unwind-tag-index)
+        (nelisp-asm-wasm-op-local-set buf value-local)
+        (nelisp-asm-wasm-op-local-set buf tag-local)
+        (when var-slot
+          (nelisp-asm-wasm-op-local-get buf value-local)
+          (nelisp-asm-wasm-op-local-set buf var-slot))
+        (cl-labels
+            ((emit-clauses (rest)
+               (if (null rest)
+                   (progn
+                     (nelisp-asm-wasm-op-local-get buf tag-local)
+                     (nelisp-asm-wasm-op-local-get buf value-local)
+                     (nelisp-asm-wasm-op-throw buf nelisp-aot-compiler--wasm-unwind-tag-index))
+                 (let ((clause (car rest)))
+                   (nelisp-asm-wasm-op-local-get buf tag-local)
+                   (nelisp-aot-compiler--wasm-emit-value
+                    (plist-get clause :selector) buf ctx)
+                   (nelisp-asm-wasm-op-i64-eq buf)
+                   (nelisp-asm-wasm-op-if buf nelisp-aot-compiler--wasm-i64-type)
+                   (nelisp-aot-compiler--wasm-emit-value
+                    (plist-get clause :body) buf ctx)
+                   (nelisp-asm-wasm-op-else buf)
+                   (emit-clauses (cdr rest))
+                   (nelisp-asm-wasm-op-end buf)))))
+          (emit-clauses clauses))
+        (nelisp-asm-wasm-op-end buf)))
      ((= tag 31)
       (nelisp-aot-compiler--wasm-emit-value
        (nelisp-aot-compiler--ir-get node :body) buf ctx))
@@ -17101,89 +17836,148 @@ drift (= a Doc 92 emitter invariant violation)."
         (nelisp-aot-compiler--wasm-emit-value
          (nelisp-aot-compiler--ir-get node :arg) buf ctx)
         (nelisp-asm-wasm-op-f64-sqrt buf)))
+     ((= tag 78)
+      (nelisp-aot-compiler--wasm-emit-syscall-direct-node node buf ctx))
      (t
       (signal 'nelisp-aot-compiler-error
               (list :wasm-unsupported-ir
                     (nelisp-aot-compiler--ir-kind node)))))))
 
 (defun nelisp-aot-compiler--compile-to-wasm-unit (defuns)
-  "Compile DEFUNS into a P1 wasm link unit."
+  "Compile DEFUNS into a wasm link unit."
   (require 'nelisp-asm-wasm)
-  (let* ((type-keys nil)
-         (type-map nil)
+  (let* ((type-keys-box (list nil))
+         (type-map-box (list nil))
+         (imports-box (list nil))
+         (import-map-box (list nil))
+         (module-defun-names
+          (mapcar (lambda (defun-ir)
+                    (nelisp-aot-compiler--ir-get defun-ir :name))
+                  defuns))
          (function-indices nil)
          (table-indices nil)
-         (index 0))
+         (index 0)
+         (tag-type-index nil))
     (dolist (defun-ir defuns)
       (let ((name (nelisp-aot-compiler--ir-get defun-ir :name))
             (type-key
              (nelisp-aot-compiler--wasm-function-type-key defun-ir)))
-        (unless (assoc type-key type-map)
-          (setq type-map (append type-map
-                                 (list (cons type-key (length type-map)))))
-          (setq type-keys (append type-keys (list type-key))))
-        (setq function-indices (append function-indices (list (cons name index))))
-        (setq table-indices (append table-indices (list (cons name index))))
-        (setq index (1+ index))))
-    (let ((functions nil))
+        (nelisp-aot-compiler--wasm-register-type
+         type-key type-map-box type-keys-box)
+        (nelisp-aot-compiler--wasm-register-ir-imports
+         (nelisp-aot-compiler--ir-get defun-ir :body)
+         imports-box import-map-box type-map-box type-keys-box
+         module-defun-names)))
+    (when (or (assoc (nelisp-aot-compiler--wasm-exception-type-key) (car type-map-box))
+              (cl-some (lambda (defun-ir)
+                         (cl-some (lambda (id) id)
+                                  (nelisp-aot-compiler--wasm-collect-handler-local-ids
+                                   (nelisp-aot-compiler--ir-get defun-ir :body))))
+                       defuns))
+      (setq tag-type-index
+            (nelisp-aot-compiler--wasm-register-type
+             (nelisp-aot-compiler--wasm-exception-type-key)
+             type-map-box type-keys-box)))
+    (setq index (length (car imports-box)))
+    (let ((type-keys (car type-keys-box))
+          (type-map (car type-map-box))
+          (imports (car imports-box))
+          (import-map (car import-map-box)))
       (dolist (defun-ir defuns)
-        (let* ((name (nelisp-aot-compiler--ir-get defun-ir :name))
-               (name-str (if (stringp name) name (symbol-name name)))
-               (arity (length (or (nelisp-aot-compiler--ir-get defun-ir :params)
-                                  nil)))
-               (rt-slot-count
-                (or (nelisp-aot-compiler--ir-get defun-ir :rt-slot-count) 0))
-               (logic-scratch-local (+ arity rt-slot-count))
-               (locals (append (make-list rt-slot-count
-                                          nelisp-aot-compiler--wasm-i64-type)
-                               (list nelisp-aot-compiler--wasm-i64-type)))
-               (ctx (list :function-indices function-indices
-                          :table-indices table-indices
-                          :type-map type-map
-                          :logic-scratch-local logic-scratch-local))
-               (expr (nelisp-asm-wasm-make-buffer)))
-          (nelisp-aot-compiler--wasm-emit-value
-           (nelisp-aot-compiler--ir-get defun-ir :body)
-           expr ctx)
-          (nelisp-asm-wasm-op-return expr)
-          (nelisp-asm-wasm-op-end expr)
-          (setq functions
-                (append
-                 functions
-                 (list
-                  (list :name name-str
-                        :type-index
-                        (cdr (assoc
-                              (nelisp-aot-compiler--wasm-function-type-key defun-ir)
-                              type-map))
-                        :params (make-list arity nelisp-aot-compiler--wasm-i64-type)
-                        :locals locals
-                        :body
-                        (nelisp-asm-wasm-make-function-body
-                         locals
-                         (nelisp-asm-wasm-buffer-bytes expr))))))))
-      (list :text (unibyte-string)
-            :rodata (unibyte-string)
-            :data (unibyte-string)
-            :bss-size 0
-            :symbols nil
-            :relocs nil
-            :machine 'wasm32
-            :defuns
-            (mapcar (lambda (fn) (list :name (plist-get fn :name)))
-                    functions)
-            :extern-symbols nil
-            :wasm-types
-            (mapcar (lambda (key)
-                      (list :params (plist-get key :params)
-                            :results (plist-get key :results)))
-                    type-keys)
-            :wasm-table-size (length functions)
-            :wasm-element-indices
-            (if functions
-                (number-sequence 0 (1- (length functions)))
-              nil)
-            :wasm-functions functions))))
+        (let ((name (nelisp-aot-compiler--ir-get defun-ir :name)))
+          (setq function-indices (append function-indices (list (cons name index))))
+          (setq table-indices (append table-indices (list (cons name index))))
+          (setq index (1+ index))))
+      (let ((functions nil))
+        (dolist (defun-ir defuns)
+          (let* ((name (nelisp-aot-compiler--ir-get defun-ir :name))
+                 (name-str (if (stringp name) name (symbol-name name)))
+                 (arity (length (or (nelisp-aot-compiler--ir-get defun-ir :params)
+                                    nil)))
+                 (rt-slot-count
+                  (or (nelisp-aot-compiler--ir-get defun-ir :rt-slot-count) 0))
+                 (handler-ids
+                  (nelisp-aot-compiler--wasm-collect-handler-local-ids
+                   (nelisp-aot-compiler--ir-get defun-ir :body)))
+                 (handler-locals nil)
+                 (next-local (+ arity rt-slot-count)))
+            (dolist (id handler-ids)
+              (setq handler-locals
+                    (append handler-locals
+                            (list (cons id (list :tag next-local
+                                                 :value (1+ next-local))))))
+              (setq next-local (+ next-local 2)))
+            (let* ((logic-scratch-local next-local)
+                   (locals (append (make-list rt-slot-count
+                                              nelisp-aot-compiler--wasm-i64-type)
+                                   (make-list (* 2 (length handler-ids))
+                                              nelisp-aot-compiler--wasm-i64-type)
+                                   (list nelisp-aot-compiler--wasm-i64-type)))
+                   (ctx (list :function-indices function-indices
+                              :import-indices import-map
+                              :table-indices table-indices
+                              :type-map type-map
+                              :handler-locals handler-locals
+                              :logic-scratch-local logic-scratch-local))
+                   (expr (nelisp-asm-wasm-make-buffer)))
+              (nelisp-aot-compiler--wasm-emit-value
+               (nelisp-aot-compiler--ir-get defun-ir :body)
+               expr ctx)
+              (nelisp-asm-wasm-op-return expr)
+              (nelisp-asm-wasm-op-end expr)
+              (setq functions
+                    (append
+                     functions
+                     (list
+                      (list :name name-str
+                            :type-index
+                            (cdr (assoc
+                                  (nelisp-aot-compiler--wasm-function-type-key defun-ir)
+                                  type-map))
+                            :params (make-list arity nelisp-aot-compiler--wasm-i64-type)
+                            :locals locals
+                            :body
+                            (nelisp-asm-wasm-make-function-body
+                             locals
+                             (nelisp-asm-wasm-buffer-bytes expr)))))))))
+        (list :text (unibyte-string)
+              :rodata (unibyte-string)
+              :data (unibyte-string)
+              :bss-size 0
+              :symbols nil
+              :relocs nil
+              :machine 'wasm32
+              :defuns
+              (mapcar (lambda (fn) (list :name (plist-get fn :name)))
+                      functions)
+              :extern-symbols nil
+              :wasm-imports imports
+              :wasm-types
+              (mapcar (lambda (key)
+                        (list :params (plist-get key :params)
+                              :results (plist-get key :results)))
+                      type-keys)
+              :wasm-tag-type-index tag-type-index
+              :wasm-table-size (length functions)
+              :wasm-element-indices
+              (if functions
+                  (number-sequence (length imports)
+                                   (+ (length imports) (1- (length functions))))
+                nil)
+              :wasm-exports
+              (append
+               (if (or imports tag-type-index)
+                   (list (list :name "memory"
+                               :kind nelisp-asm-wasm--mem-kind
+                               :index 0))
+                 nil)
+               (cl-loop
+                for fn in functions
+                for export-index from (length imports)
+                collect (list :name (plist-get fn :name)
+                              :kind nelisp-asm-wasm--extern-func-kind
+                              :index export-index)))
+              :wasm-functions functions)))))
 
 ;; ---- Doc 99 §99.B: ET_REL emit path (= elisp → .o for C linkage) ----
 ;;

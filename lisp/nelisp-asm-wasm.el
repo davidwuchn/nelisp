@@ -25,6 +25,13 @@
 (defconst nelisp-asm-wasm--func #x60)
 (defconst nelisp-asm-wasm--funcref #x70)
 (defconst nelisp-asm-wasm--empty-block-type #x40)
+(defconst nelisp-asm-wasm--extern-func-kind #x00)
+(defconst nelisp-asm-wasm--table-kind #x01)
+(defconst nelisp-asm-wasm--mem-kind #x02)
+(defconst nelisp-asm-wasm--global-kind #x03)
+
+(defvar nelisp-asm-wasm--eh-dialect 'legacy
+  "WebAssembly exception-handling dialect to encode.")
 
 (defun nelisp-asm-wasm-make-buffer ()
   "Return a fresh wasm byte buffer."
@@ -191,6 +198,10 @@
   (nelisp-asm-wasm-emit-byte buf #x10)
   (nelisp-asm-wasm-emit-uleb128 buf index))
 
+(defun nelisp-asm-wasm-op-unreachable (buf)
+  "Emit `unreachable'."
+  (nelisp-asm-wasm-emit-byte buf #x00))
+
 (defun nelisp-asm-wasm-op-call-indirect (buf type-index &optional table-index)
   "Emit `call_indirect TYPE-INDEX TABLE-INDEX'."
   (nelisp-asm-wasm-emit-byte buf #x11)
@@ -219,6 +230,31 @@
   (nelisp-asm-wasm-emit-byte
    buf (or result-type nelisp-asm-wasm--empty-block-type)))
 
+(defun nelisp-asm-wasm-op-try (buf &optional result-type)
+  "Emit legacy `try' with RESULT-TYPE or empty block type."
+  (nelisp-asm-wasm-emit-byte buf #x06)
+  (nelisp-asm-wasm-emit-byte
+   buf (or result-type nelisp-asm-wasm--empty-block-type)))
+
+(defun nelisp-asm-wasm-op-catch (buf tag-index)
+  "Emit legacy `catch TAG-INDEX'."
+  (nelisp-asm-wasm-emit-byte buf #x07)
+  (nelisp-asm-wasm-emit-uleb128 buf tag-index))
+
+(defun nelisp-asm-wasm-op-throw (buf tag-index)
+  "Emit legacy `throw TAG-INDEX'."
+  (nelisp-asm-wasm-emit-byte buf #x08)
+  (nelisp-asm-wasm-emit-uleb128 buf tag-index))
+
+(defun nelisp-asm-wasm-op-rethrow (buf depth)
+  "Emit legacy `rethrow DEPTH'."
+  (nelisp-asm-wasm-emit-byte buf #x09)
+  (nelisp-asm-wasm-emit-uleb128 buf depth))
+
+(defun nelisp-asm-wasm-op-throw-ref (buf)
+  "Emit standardized `throw_ref'."
+  (nelisp-asm-wasm-emit-byte buf #x0a))
+
 (defun nelisp-asm-wasm-op-else (buf)
   "Emit `else'."
   (nelisp-asm-wasm-emit-byte buf #x05))
@@ -233,13 +269,49 @@
   (nelisp-asm-wasm-emit-byte buf #x0d)
   (nelisp-asm-wasm-emit-uleb128 buf depth))
 
+(defun nelisp-asm-wasm-op-try-table (buf &optional result-type catches)
+  "Emit standardized `try_table' with RESULT-TYPE and CATCHES."
+  (nelisp-asm-wasm-emit-byte buf #x1f)
+  (nelisp-asm-wasm-emit-byte
+   buf (or result-type nelisp-asm-wasm--empty-block-type))
+  (nelisp-asm-wasm-emit-uleb128 buf (length catches))
+  (dolist (clause catches)
+    (nelisp-asm-wasm-emit-byte buf (plist-get clause :kind))
+    (when (plist-member clause :tag-index)
+      (nelisp-asm-wasm-emit-uleb128 buf (plist-get clause :tag-index)))
+    (nelisp-asm-wasm-emit-uleb128 buf (plist-get clause :label-depth))))
+
 (defun nelisp-asm-wasm-op-return (buf)
   "Emit `return'."
   (nelisp-asm-wasm-emit-byte buf #x0f))
 
+(defun nelisp-asm-wasm-op-delegate (buf depth)
+  "Emit legacy `delegate DEPTH'."
+  (nelisp-asm-wasm-emit-byte buf #x18)
+  (nelisp-asm-wasm-emit-uleb128 buf depth))
+
+(defun nelisp-asm-wasm-op-catch-all (buf)
+  "Emit legacy `catch_all'."
+  (nelisp-asm-wasm-emit-byte buf #x19))
+
 (defun nelisp-asm-wasm-op-i32-wrap-i64 (buf)
   "Emit `i32.wrap_i64'."
   (nelisp-asm-wasm-emit-byte buf #xa7))
+
+(defun nelisp-asm-wasm-op-i32-const (buf value)
+  "Emit `i32.const VALUE'."
+  (nelisp-asm-wasm-emit-byte buf #x41)
+  (nelisp-asm-wasm-emit-sleb128 buf value))
+
+(defun nelisp-asm-wasm-op-global-get (buf index)
+  "Emit `global.get INDEX'."
+  (nelisp-asm-wasm-emit-byte buf #x23)
+  (nelisp-asm-wasm-emit-uleb128 buf index))
+
+(defun nelisp-asm-wasm-op-global-set (buf index)
+  "Emit `global.set INDEX'."
+  (nelisp-asm-wasm-emit-byte buf #x24)
+  (nelisp-asm-wasm-emit-uleb128 buf index))
 
 (defun nelisp-asm-wasm-op-i64-extend-i32-u (buf)
   "Emit `i64.extend_i32_u'."
@@ -291,6 +363,12 @@
   (nelisp-asm-wasm-emit-uleb128 buf (or align 3))
   (nelisp-asm-wasm-emit-uleb128 buf (or offset 0)))
 
+(defun nelisp-asm-wasm-op-i32-load (buf &optional align offset)
+  "Emit `i32.load' with ALIGN and OFFSET."
+  (nelisp-asm-wasm-emit-byte buf #x28)
+  (nelisp-asm-wasm-emit-uleb128 buf (or align 2))
+  (nelisp-asm-wasm-emit-uleb128 buf (or offset 0)))
+
 (defun nelisp-asm-wasm-op-i64-load8-u (buf &optional align offset)
   "Emit `i64.load8_u' with ALIGN and OFFSET."
   (nelisp-asm-wasm-emit-byte buf #x31)
@@ -313,6 +391,12 @@
   "Emit `i64.store' with ALIGN and OFFSET."
   (nelisp-asm-wasm-emit-byte buf #x37)
   (nelisp-asm-wasm-emit-uleb128 buf (or align 3))
+  (nelisp-asm-wasm-emit-uleb128 buf (or offset 0)))
+
+(defun nelisp-asm-wasm-op-i32-store (buf &optional align offset)
+  "Emit `i32.store' with ALIGN and OFFSET."
+  (nelisp-asm-wasm-emit-byte buf #x36)
+  (nelisp-asm-wasm-emit-uleb128 buf (or align 2))
   (nelisp-asm-wasm-emit-uleb128 buf (or offset 0)))
 
 (defun nelisp-asm-wasm-op-i64-store8 (buf &optional align offset)
