@@ -45,6 +45,16 @@
 (defconst nelisp-mach-o--x86-64-reloc-got-load     4 "X86_64_RELOC_GOT_LOAD.")
 (defconst nelisp-mach-o--x86-64-reloc-got          5 "X86_64_RELOC_GOT.")
 
+;; arm64 relocation type constants (Doc: mach-o/arm64/reloc.h).
+(defconst nelisp-mach-o--arm64-reloc-unsigned   0 "ARM64_RELOC_UNSIGNED.")
+(defconst nelisp-mach-o--arm64-reloc-branch26   2 "ARM64_RELOC_BRANCH26.")
+(defconst nelisp-mach-o--arm64-reloc-page21     3 "ARM64_RELOC_PAGE21.")
+(defconst nelisp-mach-o--arm64-reloc-pageoff12  4 "ARM64_RELOC_PAGEOFF12.")
+(defconst nelisp-mach-o--arm64-reloc-addend    10 "ARM64_RELOC_ADDEND.")
+
+(defconst nelisp-mach-o--relocation-info-size 8
+  "sizeof(struct relocation_info).")
+
 (defconst nelisp-mach-o--header-size 32 "sizeof(struct mach_header_64).")
 (defconst nelisp-mach-o--segment-command-size 72 "sizeof(struct segment_command_64).")
 (defconst nelisp-mach-o--section-size 80 "sizeof(struct section_64).")
@@ -116,15 +126,85 @@
     (concat "_" name)))
 
 (defun nelisp-mach-o--symbol-type (sym)
-  "Return Mach-O n_type byte for SYM."
+  "Return Mach-O n_type byte for SYM.
+`text' symbols map to N_SECT (plus N_EXT when global); `undef'
+symbols map to N_UNDF | N_EXT (an import resolved at link time)."
   (let ((bind (or (plist-get sym :bind) 'local))
         (section (plist-get sym :section)))
-    (unless (eq section 'text)
-      (signal 'error (list "nelisp-mach-o: unsupported symbol section" section)))
     (cond
+     ((eq section 'undef) nelisp-mach-o--n-ext)
+     ((not (eq section 'text))
+      (signal 'error
+              (list "nelisp-mach-o: unsupported symbol section" section)))
      ((eq bind 'global) (logior nelisp-mach-o--n-ext nelisp-mach-o--n-sect))
      ((eq bind 'local) nelisp-mach-o--n-sect)
      (t (signal 'error (list "nelisp-mach-o: unsupported symbol bind" bind))))))
+
+(defun nelisp-mach-o--symbol-sect (sym)
+  "Return the nlist_64 n_sect byte for SYM (0 = NO_SECT for undef)."
+  (if (eq (plist-get sym :section) 'undef) 0 1))
+
+(defun nelisp-mach-o--reloc-spec (machine type)
+  "Return (R_TYPE PCREL LENGTH) for a portable reloc TYPE on MACHINE.
+TYPE uses the assembler/linker vocabulary (`b26-pc' / `abs64' /
+`adr-prel-pg-hi21' / `add-abs-lo12-nc').  Only aarch64 is supported —
+x86_64 Mach-O relocs use inline addend conventions this writer does
+not implement yet."
+  (unless (eq machine 'aarch64)
+    (signal 'error (list :mach-o-reloc-unsupported-machine machine type)))
+  (pcase type
+    ('b26-pc            (list nelisp-mach-o--arm64-reloc-branch26 1 2))
+    ('adr-prel-pg-hi21  (list nelisp-mach-o--arm64-reloc-page21 1 2))
+    ('add-abs-lo12-nc   (list nelisp-mach-o--arm64-reloc-pageoff12 0 2))
+    ('abs64             (list nelisp-mach-o--arm64-reloc-unsigned 0 3))
+    (_ (signal 'error (list :mach-o-reloc-unsupported-type type)))))
+
+(defun nelisp-mach-o--write-relocation-info
+    (buf r-address r-symbolnum pcrel length extern r-type)
+  "Append one packed struct relocation_info to BUF."
+  (nelisp-mach-o--write-le32 buf r-address)
+  (nelisp-mach-o--write-le32
+   buf
+   (logior (logand r-symbolnum #xFFFFFF)
+           (ash (logand pcrel 1) 24)
+           (ash (logand length 3) 25)
+           (ash (logand extern 1) 27)
+           (ash (logand r-type #xF) 28))))
+
+(defun nelisp-mach-o--write-relocs (buf relocs machine symbol-index)
+  "Write RELOCS as relocation_info records into BUF.
+SYMBOL-INDEX is an alist mapping mangled symbol names to their nlist
+index.  A reloc with a non-zero addend is expanded to two records —
+an ARM64_RELOC_ADDEND immediately followed by the target record, the
+adjacency ld64 requires.  Returns the number of records written."
+  (let ((n 0))
+    (dolist (reloc relocs n)
+      (let* ((type (plist-get reloc :type))
+             (offset (or (plist-get reloc :offset) 0))
+             (addend (or (plist-get reloc :addend) 0))
+             (name (nelisp-mach-o--normalize-symbol-name
+                    (or (plist-get reloc :symbol) (plist-get reloc :sym))))
+             (index (or (cdr (assoc name symbol-index))
+                        (signal 'error
+                                (list :mach-o-reloc-unknown-symbol name))))
+             (spec (nelisp-mach-o--reloc-spec machine type))
+             (r-type (nth 0 spec))
+             (pcrel (nth 1 spec))
+             (length (nth 2 spec)))
+        (unless (zerop addend)
+          (if (= r-type nelisp-mach-o--arm64-reloc-unsigned)
+              ;; UNSIGNED addends live inline in the section bytes;
+              ;; the AOT lane emits RELA-style zero fields, so a
+              ;; non-zero addend here would be silently dropped.
+              (signal 'error
+                      (list :mach-o-unsigned-addend-unsupported reloc))
+            (nelisp-mach-o--write-relocation-info
+             buf offset (logand addend #xFFFFFF) 0 2 0
+             nelisp-mach-o--arm64-reloc-addend)
+            (setq n (1+ n))))
+        (nelisp-mach-o--write-relocation-info
+         buf offset index pcrel length 1 r-type)
+        (setq n (1+ n))))))
 
 (defun nelisp-mach-o--validate-machine (machine)
   "Validate MACHINE and return a cons (CPUTYPE . CPUSUBTYPE)."
@@ -145,6 +225,17 @@
               (throw 'found t))))
       (signal 'error (list "nelisp-mach-o: :entry-sym not found" entry-sym)))))
 
+(defun nelisp-mach-o--count-reloc-records (relocs)
+  "Return the number of relocation_info records RELOCS expands to.
+A non-zero addend on a non-UNSIGNED reloc adds one ARM64_RELOC_ADDEND
+record in front of its target record."
+  (let ((n 0))
+    (dolist (reloc relocs n)
+      (setq n (1+ n))
+      (when (and (not (eq (plist-get reloc :type) 'abs64))
+                 (not (zerop (or (plist-get reloc :addend) 0))))
+        (setq n (1+ n))))))
+
 (defun nelisp-mach-o--build-bytes (sections)
   "Build a minimal Mach-O MH_OBJECT byte image from SECTIONS."
   (let* ((text (or (plist-get sections :text)
@@ -153,6 +244,7 @@
                       (error "nelisp-mach-o: :symbols is required")))
          (machine (or (plist-get sections :machine)
                       (error "nelisp-mach-o: :machine is required")))
+         (relocs (plist-get sections :relocs))
          (cpu-pair (nelisp-mach-o--validate-machine machine))
          (cpu-type    (car cpu-pair))
          (cpu-subtype (cdr cpu-pair))
@@ -163,11 +255,19 @@
                         nelisp-mach-o--symtab-command-size))
          (text-size (length text))
          (text-off (+ nelisp-mach-o--header-size sizeofcmds))
-         (symoff (nelisp-mach-o--align-up (+ text-off text-size) 8))
+         (nreloc (nelisp-mach-o--count-reloc-records relocs))
+         (reloff (if relocs
+                     (nelisp-mach-o--align-up (+ text-off text-size) 8)
+                   0))
+         (symoff (if relocs
+                     (+ reloff (* nreloc nelisp-mach-o--relocation-info-size))
+                   (nelisp-mach-o--align-up (+ text-off text-size) 8)))
          (nsyms (length symbols))
          (stroff (+ symoff (* nsyms nelisp-mach-o--nlist-64-size)))
          (strtab-entries (cons (cons "" 0) nil))
          (strx-alist nil)
+         (symbol-index nil)
+         (sym-i 0)
          (strsize 1))
     (nelisp-mach-o--verify-entry-symbol symbols entry-sym)
     (dolist (sym symbols)
@@ -178,6 +278,8 @@
       (let* ((name (or (plist-get sym :name)
                        (error "nelisp-mach-o: symbol missing :name")))
              (mangled (nelisp-mach-o--normalize-symbol-name name)))
+        (push (cons mangled sym-i) symbol-index)
+        (setq sym-i (1+ sym-i))
         (unless (assoc mangled strx-alist)
           (push (cons mangled strsize) strx-alist)
           (setq strsize (+ strsize (length (encode-coding-string mangled 'utf-8 t)) 1))
@@ -213,8 +315,8 @@
       (nelisp-mach-o--write-le64 (current-buffer) text-size)
       (nelisp-mach-o--write-le32 (current-buffer) text-off)
       (nelisp-mach-o--write-le32 (current-buffer) 2)
-      (nelisp-mach-o--write-le32 (current-buffer) 0)
-      (nelisp-mach-o--write-le32 (current-buffer) 0)
+      (nelisp-mach-o--write-le32 (current-buffer) reloff)
+      (nelisp-mach-o--write-le32 (current-buffer) nreloc)
       (nelisp-mach-o--write-le32 (current-buffer) nelisp-mach-o--section-text-flags)
       (nelisp-mach-o--write-le32 (current-buffer) 0)
       (nelisp-mach-o--write-le32 (current-buffer) 0)
@@ -228,9 +330,16 @@
       (nelisp-mach-o--write-le32 (current-buffer) strsize)
       ;; __text
       (nelisp-mach-o--write-bytes (current-buffer) text)
-      (let ((pad (- symoff (buffer-size))))
+      (let ((pad (- (if relocs reloff symoff) (buffer-size))))
         (when (> pad 0)
           (nelisp-mach-o--write-pad (current-buffer) pad)))
+      ;; relocation_info[] (section-ordered, ADDEND records adjacent)
+      (when relocs
+        (let ((written (nelisp-mach-o--write-relocs
+                        (current-buffer) relocs machine symbol-index)))
+          (unless (= written nreloc)
+            (signal 'error
+                    (list :mach-o-reloc-count-drift written nreloc)))))
       ;; nlist_64[]
       (dolist (sym symbols)
         (let* ((name (plist-get sym :name))
@@ -239,7 +348,7 @@
                (value (or (plist-get sym :value) 0)))
           (nelisp-mach-o--write-le32 (current-buffer) strx)
           (insert (unibyte-string (nelisp-mach-o--symbol-type sym)))
-          (insert (unibyte-string 1))
+          (insert (unibyte-string (nelisp-mach-o--symbol-sect sym)))
           (nelisp-mach-o--write-le16 (current-buffer) 0)
           (nelisp-mach-o--write-le64 (current-buffer) value)))
       ;; string table
@@ -635,7 +744,11 @@ executable writer)."
   "Emit a Mach-O 64-bit MH_OBJECT file to FILE-PATH from SECTIONS.
 SECTIONS matches the ELF writer's plist contract for the ET_REL case:
   :text       unibyte instruction bytes (required)
-  :symbols    list of symbol plists (required)
+  :symbols    list of symbol plists (required); `:section undef'
+              entries become N_UNDF|N_EXT imports
+  :relocs     optional list of reloc plists (:offset :type :symbol
+              :addend) in the assembler/linker vocabulary; emitted
+              as __text relocation_info records (aarch64 only)
   :machine    `aarch64' or `x86_64' (required)
   :entry-sym  optional symbol name used only for verification"
   (let ((bytes (nelisp-mach-o--build-bytes sections))

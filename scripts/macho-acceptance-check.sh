@@ -47,4 +47,14 @@ clang -o "$dir/link_harness" "$dir/main.c" "$dir/add_macho.o"
 "$dir/link_harness"
 echo "PASS: linked binary computed add(2,3) == 5"
 
+echo "== object v2: ld64 resolves ARM64_RELOC_BRANCH26 against a C-provided symbol =="
+cat > "$dir/reloc_main.c" <<'EOF'
+extern long inc2(long x);
+long inc(long x) { return x + 1; }
+int main(void) { return inc2(3) == 5 ? 0 : 1; }
+EOF
+clang -o "$dir/reloc_harness" "$dir/reloc_main.c" "$dir/caller_macho.o"
+"$dir/reloc_harness"
+echo "PASS: BRANCH26 relocs resolved; inc2(3) == 5 via C-provided inc"
+
 echo "macho-acceptance: ALL REQUIRED CHECKS PASSED"

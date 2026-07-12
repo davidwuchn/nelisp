@@ -126,4 +126,105 @@
     (should (= text-size (length nelisp-mach-o-write-test--sample-text)))
     (should (equal raw nelisp-mach-o-write-test--sample-text))))
 
+;;; ---- v2: relocation records + undefined imports ----
+
+(defconst nelisp-mach-o-write-test--reloc-sections
+  (list :text (unibyte-string
+               #x00 #x00 #x00 #x94   ; bl 0 (placeholder)
+               #xC0 #x03 #x5F #xD6)  ; ret
+        :symbols (list (list :name "caller" :value 0 :size 8
+                             :section 'text :bind 'global :type 'func)
+                       (list :name "callee" :value 0 :size 0
+                             :section 'undef :bind 'global :type 'notype))
+        :relocs (list (list :offset 0 :type 'b26-pc
+                            :symbol "callee" :addend 0))
+        :machine 'aarch64)
+  "Sample input carrying one BRANCH26 reloc against an undef import.")
+
+(defun nelisp-mach-o-write-test--emit (sections)
+  "Emit SECTIONS and return the object's raw bytes."
+  (let ((path (make-temp-file "nelisp-mach-o-test-" nil ".o")))
+    (unwind-protect
+        (progn
+          (nelisp-mach-o-write-binary path sections)
+          (nelisp-mach-o-write-test--read-file-bytes path))
+      (ignore-errors (delete-file path)))))
+
+(defun nelisp-mach-o-write-test--reloc-record (bytes index)
+  "Decode relocation_info INDEX via the __text section header in BYTES.
+Returns (ADDR SYMBOLNUM PCREL LENGTH EXTERN TYPE)."
+  (let* ((section-off 104)
+         (reloff (nelisp-mach-o-write-test--read-le32 bytes (+ section-off 56)))
+         (ro (+ reloff (* index 8)))
+         (addr (nelisp-mach-o-write-test--read-le32 bytes ro))
+         (packed (nelisp-mach-o-write-test--read-le32 bytes (+ ro 4))))
+    (list addr
+          (logand packed #xFFFFFF)
+          (logand (ash packed -24) 1)
+          (logand (ash packed -25) 3)
+          (logand (ash packed -27) 1)
+          (logand (ash packed -28) #xF))))
+
+(ert-deftest nelisp-mach-o-write-binary-reloc-header-fields ()
+  "reloff / nreloc land in the __text section_64 header."
+  (let* ((bytes (nelisp-mach-o-write-test--emit
+                 nelisp-mach-o-write-test--reloc-sections))
+         (section-off 104)
+         (reloff (nelisp-mach-o-write-test--read-le32 bytes (+ section-off 56)))
+         (nreloc (nelisp-mach-o-write-test--read-le32 bytes (+ section-off 60)))
+         (symoff (nelisp-mach-o-write-test--read-le32 bytes 192)))
+    (should (= nreloc 1))
+    (should (> reloff 0))
+    ;; The symtab sits directly after the reloc records.
+    (should (= symoff (+ reloff 8)))))
+
+(ert-deftest nelisp-mach-o-write-binary-reloc-branch26-record ()
+  "A b26-pc reloc becomes an extern pcrel ARM64_RELOC_BRANCH26."
+  (let ((bytes (nelisp-mach-o-write-test--emit
+                nelisp-mach-o-write-test--reloc-sections)))
+    ;; symbolnum 1 = the undef `callee' nlist index.
+    (should (equal (nelisp-mach-o-write-test--reloc-record bytes 0)
+                   '(0 1 1 2 1 2)))))
+
+(ert-deftest nelisp-mach-o-write-binary-undef-symbol-nlist ()
+  "An `undef' symbol is written as N_UNDF|N_EXT with n_sect 0."
+  (let* ((bytes (nelisp-mach-o-write-test--emit
+                 nelisp-mach-o-write-test--reloc-sections))
+         (symoff (nelisp-mach-o-write-test--read-le32 bytes 192))
+         (undef-off (+ symoff 16)))
+    (should (= (nelisp-mach-o-write-test--read-le32 bytes 196) 2))
+    (should (= (aref bytes (+ undef-off 4)) #x01))
+    (should (= (aref bytes (+ undef-off 5)) 0))
+    (should (= (nelisp-mach-o-write-test--read-le64 bytes (+ undef-off 8)) 0))))
+
+(ert-deftest nelisp-mach-o-write-binary-reloc-addend-record-pair ()
+  "A non-zero addend expands into ADDEND + target record adjacency."
+  (let* ((sections (copy-sequence nelisp-mach-o-write-test--reloc-sections))
+         (sections (plist-put sections :relocs
+                              (list (list :offset 0 :type 'b26-pc
+                                          :symbol "callee" :addend 8))))
+         (bytes (nelisp-mach-o-write-test--emit sections))
+         (section-off 104)
+         (nreloc (nelisp-mach-o-write-test--read-le32 bytes (+ section-off 60))))
+    (should (= nreloc 2))
+    ;; ARM64_RELOC_ADDEND: symbolnum carries the addend, extern 0, type 10.
+    (should (equal (nelisp-mach-o-write-test--reloc-record bytes 0)
+                   '(0 8 0 2 0 10)))
+    (should (equal (nelisp-mach-o-write-test--reloc-record bytes 1)
+                   '(0 1 1 2 1 2)))))
+
+(ert-deftest nelisp-mach-o-write-binary-reloc-rejects-x86-64 ()
+  "x86_64 reloc emission is not implemented and must signal."
+  (let* ((sections (copy-sequence nelisp-mach-o-write-test--reloc-sections))
+         (sections (plist-put sections :machine 'x86_64)))
+    (should-error (nelisp-mach-o-write-test--emit sections))))
+
+(ert-deftest nelisp-mach-o-write-binary-reloc-rejects-unknown-symbol ()
+  "A reloc whose symbol is absent from :symbols must signal."
+  (let* ((sections (copy-sequence nelisp-mach-o-write-test--reloc-sections))
+         (sections (plist-put sections :relocs
+                              (list (list :offset 0 :type 'b26-pc
+                                          :symbol "nosuch" :addend 0)))))
+    (should-error (nelisp-mach-o-write-test--emit sections))))
+
 ;;; nelisp-mach-o-write-test.el ends here

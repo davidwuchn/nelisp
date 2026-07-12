@@ -11,13 +11,19 @@
 ;; Emits the Mach-O artifact set consumed by
 ;; scripts/macho-acceptance-check.sh (the CI macOS acceptance step):
 ;;
-;;   dist/macho-acceptance/exit42       MH_EXECUTE — exit(42) via raw
-;;                                      Darwin syscall (SVC #0x80)
-;;   dist/macho-acceptance/add5         MH_EXECUTE — exit(add(2,3)) = 5,
-;;                                      exercises the defun call path
-;;   dist/macho-acceptance/add_macho.o  MH_OBJECT — global `_add',
-;;                                      linked against a C harness by
-;;                                      clang/ld64 on the runner
+;;   dist/macho-acceptance/exit42        MH_EXECUTE — exit(42) via raw
+;;                                       Darwin syscall (SVC #0x80)
+;;   dist/macho-acceptance/add5          MH_EXECUTE — exit(add(2,3)) = 5,
+;;                                       exercises the defun call path
+;;   dist/macho-acceptance/add_macho.o   MH_OBJECT — global `_add',
+;;                                       linked against a C harness by
+;;                                       clang/ld64 on the runner
+;;   dist/macho-acceptance/caller_macho.o MH_OBJECT — `_inc2' calling an
+;;                                       UNDEFINED `_inc' through
+;;                                       ARM64_RELOC_BRANCH26 records
+;;                                       (writer v2 reloc lane); the C
+;;                                       harness provides `inc' and
+;;                                       ld64 must resolve the branch
 ;;
 ;; Emission is host-agnostic (the writers are pure elisp), so this
 ;; runs on any CI OS; only the checks require macOS.  The executables
@@ -47,6 +53,10 @@
     (nelisp-aot-compile-to-object
      '(defun add (a b) (+ a b))
      (concat dir "add_macho.o")
+     :arch 'aarch64 :format 'mach-o)
+    (nelisp-aot-compile-to-object
+     '(defun inc2 (x) (inc (inc x)))
+     (concat dir "caller_macho.o")
      :arch 'aarch64 :format 'mach-o)
     (message "macho-acceptance: artifact set written under %s" dir)))
 

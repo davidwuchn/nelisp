@@ -18699,19 +18699,27 @@ drift (= a Doc 92 emitter invariant violation)."
               :machine arch)))
       ('mach-o
        ;; Doc 100 §100.D Stage 3: macOS uses Mach-O instead of ELF.
-       ;; Reloc surface trimmed because Mach-O writer v1 does not emit
-       ;; relocation entries.
+       ;; v2 forwards text relocations (ARM64_RELOC_* records) so ld64
+       ;; can resolve cross-object calls.  The writer still emits a
+       ;; single __text section, so units carrying rodata/data/bss are
+       ;; rejected instead of silently dropping those sections.
        (unless (memq arch '(aarch64 x86_64))
          (signal 'nelisp-aot-compiler-error
                  (list :mach-o-unsupported-arch arch)))
-       (when relocs
+       (when (or (> (length (or rodata-bytes "")) 0)
+                 (> (length (or data-bytes "")) 0)
+                 (> (or bss-size 0) 0))
          (signal 'nelisp-aot-compiler-error
-                 (list :mach-o-no-reloc-support relocs)))
+                 (list :mach-o-non-text-sections-unsupported
+                       :rodata (length (or rodata-bytes ""))
+                       :data (length (or data-bytes ""))
+                       :bss (or bss-size 0))))
        (require 'nelisp-mach-o-write)
        (nelisp-mach-o-write-binary
         file-path
         (list :text text-bytes
               :symbols symbols
+              :relocs relocs
               :machine arch)))
       ('coff
        ;; Doc 101 §101.A: Windows uses PE32+/COFF instead of ELF.
