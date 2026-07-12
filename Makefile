@@ -1,4 +1,4 @@
-.PHONY: test test-fast test-parallel test-one compile clean all bench gc-bench actor-bench soak soak-1h soak-full soak-worker \
+.PHONY: test test-fast test-parallel test-one wasm-smoke compile clean all bench gc-bench actor-bench soak soak-1h soak-full soak-worker \
         sqlite-module sqlite-module-clean \
         release-artifact release-checksum soak-blocker soak-post-ship \
         bench-actual bench-allocator bench-allocator-heavy \
@@ -93,6 +93,25 @@ test-one:
 	  -l ert \
 	  $(addprefix -l ,$(FILE)) \
 	  -f ert-run-tests-batch-and-exit
+
+wasm-smoke:
+	mkdir -p target/wasm-smoke
+	HOME="$(CURDIR)" XDG_CONFIG_HOME="$(CURDIR)" $(EMACS) --batch -Q -L lisp -L src \
+	  --eval '(setq load-prefer-newer t)' \
+	  --eval "(progn \
+	    (require 'nelisp-aot-compiler) \
+	    (nelisp-aot-compile-to-object \
+	     '(defun f () (+ (* 6 7) 0)) \
+	     \"target/wasm-smoke/f.wasm\" \
+	     :arch 'wasm32 :format 'wasm) \
+	    (nelisp-aot-compile-to-object \
+	     '(seq \
+	       (defun g (y) (+ y 1)) \
+	       (defun f () (let ((x (+ (g 3) 4))) (g x)))) \
+	     \"target/wasm-smoke/f-locals.wasm\" \
+	     :arch 'wasm32 :format 'wasm))"
+	node tools/wasm-driver.mjs target/wasm-smoke/f.wasm f 42
+	node tools/wasm-driver.mjs target/wasm-smoke/f-locals.wasm f 9
 
 compile:
 	$(EMACS) --batch -Q -L src \

@@ -97,6 +97,22 @@
 (require 'nelisp-elf-write)
 (require 'nelisp-sexp-layout)
 
+(declare-function nelisp-asm-wasm-make-buffer "nelisp-asm-wasm")
+(declare-function nelisp-asm-wasm-buffer-bytes "nelisp-asm-wasm" (buf))
+(declare-function nelisp-asm-wasm-make-function-body "nelisp-asm-wasm"
+                  (local-types expr-bytes))
+(declare-function nelisp-asm-wasm-op-call "nelisp-asm-wasm" (buf index))
+(declare-function nelisp-asm-wasm-op-end "nelisp-asm-wasm" (buf))
+(declare-function nelisp-asm-wasm-op-i64-add "nelisp-asm-wasm" (buf))
+(declare-function nelisp-asm-wasm-op-i64-const "nelisp-asm-wasm" (buf value))
+(declare-function nelisp-asm-wasm-op-i64-mul "nelisp-asm-wasm" (buf))
+(declare-function nelisp-asm-wasm-op-i64-sub "nelisp-asm-wasm" (buf))
+(declare-function nelisp-asm-wasm-op-local-get "nelisp-asm-wasm" (buf index))
+(declare-function nelisp-asm-wasm-op-local-set "nelisp-asm-wasm" (buf index))
+(declare-function nelisp-asm-wasm-op-return "nelisp-asm-wasm" (buf))
+(declare-function nelisp-wasm-write-binary "nelisp-wasm-write"
+                  (file-path unit))
+
 (define-error 'nelisp-aot-compiler-error
   "Doc 97 AOT Sexp compiler error")
 
@@ -16766,6 +16782,141 @@ drift (= a Doc 92 emitter invariant violation)."
       (nelisp-elf-write-binary file-path sections))
     file-path))
 
+;; ---- Doc 164 §6 P0: wasm32 object emit path ----
+
+(defconst nelisp-aot-compiler--wasm-i64-type #x7e)
+
+(defun nelisp-aot-compiler--wasm-function-type-key (defun-ir)
+  "Return the P0 wasm signature key for DEFUN-IR."
+  (list :params
+        (make-list (length (or (nelisp-aot-compiler--ir-get defun-ir :params)
+                               nil))
+                   nelisp-aot-compiler--wasm-i64-type)
+        :results (list nelisp-aot-compiler--wasm-i64-type)))
+
+(defun nelisp-aot-compiler--wasm-emit-value (node buf function-indices)
+  "Emit wasm P0 code for value NODE into BUF."
+  (let ((tag (nelisp-aot-compiler--ir-kind-tag node)))
+    (cond
+     ((= tag 30)
+      (nelisp-asm-wasm-op-i64-const
+       buf
+       (nelisp-aot-compiler--ir-get node :value)))
+     ((= tag 53)
+      (unless (eq (or (nelisp-aot-compiler--ir-get node :class) 'gp) 'gp)
+        (signal 'nelisp-aot-compiler-error
+                (list :wasm-p0-unsupported-ref-class
+                      (nelisp-aot-compiler--ir-get node :class))))
+      (nelisp-asm-wasm-op-local-get
+       buf
+       (nelisp-aot-compiler--ir-get node :slot)))
+     ((= tag 1)
+      (let ((op (nelisp-aot-compiler--ir-get node :op)))
+        (unless (memq op '(+ - *))
+          (signal 'nelisp-aot-compiler-error
+                  (list :wasm-p0-unsupported-arith op))))
+      (nelisp-aot-compiler--wasm-emit-value
+       (nelisp-aot-compiler--ir-get node :a) buf function-indices)
+      (nelisp-aot-compiler--wasm-emit-value
+       (nelisp-aot-compiler--ir-get node :b) buf function-indices)
+      (pcase (nelisp-aot-compiler--ir-get node :op)
+        ('+ (nelisp-asm-wasm-op-i64-add buf))
+        ('- (nelisp-asm-wasm-op-i64-sub buf))
+        ('* (nelisp-asm-wasm-op-i64-mul buf))))
+     ((= tag 5)
+      (let ((fn-name (nelisp-aot-compiler--ir-get node :name))
+            (fn-value (nelisp-aot-compiler--ir-get node :fn-value))
+            (args (nelisp-aot-compiler--ir-get node :args)))
+        (when fn-value
+          (signal 'nelisp-aot-compiler-error
+                  (list :wasm-p0-no-indirect-call fn-value)))
+        (dolist (arg args)
+          (nelisp-aot-compiler--wasm-emit-value arg buf function-indices))
+        (let ((index (cdr (assq fn-name function-indices))))
+          (unless (integerp index)
+            (signal 'nelisp-aot-compiler-error
+                    (list :wasm-p0-unknown-function fn-name)))
+          (nelisp-asm-wasm-op-call buf index))))
+     ((= tag 31)
+      (nelisp-aot-compiler--wasm-emit-value
+       (nelisp-aot-compiler--ir-get node :body) buf function-indices))
+     ((= tag 32)
+      (let ((slot (nelisp-aot-compiler--ir-get node :slot)))
+        (nelisp-aot-compiler--wasm-emit-value
+         (nelisp-aot-compiler--ir-get node :value-ir) buf function-indices)
+        (nelisp-asm-wasm-op-local-set buf slot)
+        (nelisp-aot-compiler--wasm-emit-value
+         (nelisp-aot-compiler--ir-get node :body) buf function-indices)))
+     (t
+      (signal 'nelisp-aot-compiler-error
+              (list :wasm-p0-unsupported-ir
+                    (nelisp-aot-compiler--ir-kind node)))))))
+
+(defun nelisp-aot-compiler--compile-to-wasm-unit (defuns)
+  "Compile DEFUNS into a P0 wasm link unit."
+  (require 'nelisp-asm-wasm)
+  (let* ((type-keys nil)
+         (type-map nil)
+         (function-indices nil)
+         (index 0))
+    (dolist (defun-ir defuns)
+      (let ((name (nelisp-aot-compiler--ir-get defun-ir :name))
+            (type-key
+             (nelisp-aot-compiler--wasm-function-type-key defun-ir)))
+        (unless (assoc type-key type-map)
+          (setq type-map (append type-map (list (cons type-key (length type-map)))))
+          (setq type-keys (append type-keys (list type-key))))
+        (setq function-indices (append function-indices (list (cons name index))))
+        (setq index (1+ index))))
+    (let ((functions nil))
+      (dolist (defun-ir defuns)
+        (let* ((name (nelisp-aot-compiler--ir-get defun-ir :name))
+               (name-str (if (stringp name) name (symbol-name name)))
+               (arity (length (or (nelisp-aot-compiler--ir-get defun-ir :params)
+                                  nil)))
+               (rt-slot-count
+                (or (nelisp-aot-compiler--ir-get defun-ir :rt-slot-count) 0))
+               (expr (nelisp-asm-wasm-make-buffer)))
+          (nelisp-aot-compiler--wasm-emit-value
+           (nelisp-aot-compiler--ir-get defun-ir :body)
+           expr function-indices)
+          (nelisp-asm-wasm-op-return expr)
+          (nelisp-asm-wasm-op-end expr)
+          (setq functions
+                (append
+                 functions
+                 (list
+                  (list :name name-str
+                        :type-index
+                        (cdr (assoc
+                              (nelisp-aot-compiler--wasm-function-type-key defun-ir)
+                              type-map))
+                        :params (make-list arity nelisp-aot-compiler--wasm-i64-type)
+                        :locals (make-list rt-slot-count
+                                           nelisp-aot-compiler--wasm-i64-type)
+                        :body
+                        (nelisp-asm-wasm-make-function-body
+                         (make-list rt-slot-count
+                                    nelisp-aot-compiler--wasm-i64-type)
+                         (nelisp-asm-wasm-buffer-bytes expr))))))))
+      (list :text (unibyte-string)
+            :rodata (unibyte-string)
+            :data (unibyte-string)
+            :bss-size 0
+            :symbols nil
+            :relocs nil
+            :machine 'wasm32
+            :defuns
+            (mapcar (lambda (fn) (list :name (plist-get fn :name)))
+                    functions)
+            :extern-symbols nil
+            :wasm-types
+            (mapcar (lambda (key)
+                      (list :params (plist-get key :params)
+                            :results (plist-get key :results)))
+                    type-keys)
+            :wasm-functions functions))))
+
 ;; ---- Doc 99 §99.B: ET_REL emit path (= elisp → .o for C linkage) ----
 ;;
 ;; `nelisp-aot-compile-to-object' is the sibling of `-compile-sexp'
@@ -16798,7 +16949,8 @@ symbol/relocation metadata for one relocatable object:
 FORMAT is consulted only for ABI-sensitive parse/emit setup (not for the
 returned plist shape), so callers that later write COFF still get Win64
 register budgeting while ELF/Mach-O keep SysV."
-  (unless (memq arch '(x86_64 aarch64))
+  (unless (or (memq arch '(x86_64 aarch64))
+              (and (eq arch 'wasm32) (eq format 'wasm)))
     (signal 'nelisp-aot-compiler-error
             (list :unsupported-arch arch)))
   (let* ((nelisp-aot-compiler--label-counter 0)
@@ -16807,7 +16959,12 @@ register budgeting while ELF/Mach-O keep SysV."
          ;; 'win64 before parsing, so arity validation and emission both
          ;; see Win64 register budgets.
          (nelisp-aot-compiler--abi
-          (if (and (eq arch 'x86_64) (eq format 'coff)) 'win64 'sysv))
+          (cond
+           ((eq arch 'wasm32) 'wasm)
+           ((and (eq arch 'x86_64) (eq format 'coff)) 'win64)
+           (t 'sysv)))
+         (nelisp-aot-compiler--os
+          (if (eq arch 'wasm32) 'wasi nelisp-aot-compiler--os))
          (nelisp-aot-compiler--allow-external-user-calls t)
          (source (if auto-frame-roots
                      (nelisp-aot-compiler--select-auto-frame-roots
@@ -16871,6 +17028,9 @@ register budgeting while ELF/Mach-O keep SysV."
     ;;
     ;; Doc 101 §101.B Wave 5: COFF/Windows targets use the parse-time ABI
     ;; binding above for Win64 register conventions.
+    (when (eq arch 'wasm32)
+      (cl-return-from nelisp-aot-compile-to-link-unit
+        (nelisp-aot-compiler--compile-to-wasm-unit defuns)))
     (let* ((nelisp-aot-compiler--rsp-temp-depth 0)
            (buf (if (eq arch 'aarch64)
                     (nelisp-asm-arm64-make-buffer)
@@ -17132,9 +17292,8 @@ a `(seq (defun ...) ...)' wrapping multiple defuns.  Each defun
 becomes a GLOBAL STT_FUNC symbol named after the defun (= symbol-name
 of the elisp identifier, with underscores preserved for C linkage).
 
-ARCH defaults to `x86_64'.  v1 signals
-`nelisp-aot-compiler-error' for any other ARCH outside
-`(x86_64 aarch64)'.
+ARCH defaults to `x86_64'.  Object output supports `x86_64', `aarch64',
+and Doc 164 P0's `wasm32' (with `:format 'wasm').
 
 Spike scope: defun bodies must not reference strings.  Signals
 `nelisp-aot-compiler-error' with `:object-mode-no-strings' if
@@ -17207,6 +17366,12 @@ drift (= a Doc 92 emitter invariant violation)."
               :symbols symbols
               :relocs relocs
               :machine arch)))
+      ('wasm
+       (unless (eq arch 'wasm32)
+         (signal 'nelisp-aot-compiler-error
+                 (list :wasm-only-supports-wasm32 arch)))
+       (require 'nelisp-wasm-write)
+       (nelisp-wasm-write-binary file-path unit))
       (other
        (signal 'nelisp-aot-compiler-error
                (list :unknown-output-format other))))
