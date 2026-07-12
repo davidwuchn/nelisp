@@ -18349,8 +18349,11 @@ register budgeting while ELF/Mach-O keep SysV."
          (collected (and ir (nelisp-aot-compiler--collect-strings ir)))
          (rodata-bytes (cdr collected))
          (object-metadata
+          ;; Module-init metadata originally shipped ELF-only
+          ;; (Doc 129.7AI); the Mach-O writer grew __const support in
+          ;; v3, so both relocatable-object formats now embed it.
           (and (not empty-source-p)
-               (eq format 'elf)
+               (memq format '(elf mach-o))
                (nelisp-aot-compiler--object-module-init-metadata source)))
          (defuns (and ir (nelisp-aot-compiler--collect-defuns ir)))
          (data-blobs (and ir (nelisp-aot-compiler--collect-data-blobs ir))))
@@ -18407,6 +18410,13 @@ register budgeting while ELF/Mach-O keep SysV."
                    nelisp-aot-compiler--abi))))
       (dolist (d defuns)
         (nelisp-aot-compiler--emit-defun d buf))
+      ;; Runtime-helper BLs (nl_alloc_str etc.) are emitted as in-buffer
+      ;; labels on arm64 so the executable/self-host path can resolve
+      ;; them locally.  In a standalone link unit those labels dangle —
+      ;; externalize them into CALL26 relocs, mirroring the plt32
+      ;; entries the x86_64 emitters record directly.
+      (when (eq arch 'aarch64)
+        (nelisp-asm-arm64-externalize-dangling-bl26 buf))
       (let* ((text-bytes (if (eq arch 'aarch64)
                              (nelisp-asm-arm64-resolve-fixups buf)
                            (nelisp-asm-x86_64-resolve-fixups buf)))

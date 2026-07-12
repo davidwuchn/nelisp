@@ -75,4 +75,14 @@ clang -o "$dir/rodata_harness" "$dir/rodata_main.c" "$dir/rodata_macho.o"
 "$dir/rodata_harness"
 echo "PASS: PAGE21/PAGEOFF12 patched; getmagic() == 42 from __const"
 
+echo "== object v5: ld64 -r accepts a compiler-emitted defvar module =="
+# Running the module needs the NeLisp runtime (nl_alloc_symbol etc.),
+# so this lane checks structural acceptance: a relocatable merge must
+# succeed and preserve the init helper, the CALL26 imports, and the
+# module-init metadata object.
+ld -r "$dir/defvar_macho.o" -o "$dir/defvar_merged.o"
+nm "$dir/defvar_merged.o" | grep -q "T _nelisp_aot_var_0_counter"
+nm "$dir/defvar_merged.o" | grep -q "U _nl_alloc_symbol"
+echo "PASS: ld64 -r merged the defvar module (init helper + imports intact)"
+
 echo "macho-acceptance: ALL REQUIRED CHECKS PASSED"

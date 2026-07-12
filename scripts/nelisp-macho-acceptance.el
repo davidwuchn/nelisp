@@ -113,6 +113,15 @@ to ARM64_RELOC_PAGE21 / PAGEOFF12."
      :arch 'aarch64 :format 'mach-o)
     (nelisp-macho-acceptance--emit-rodata-object
      (concat dir "rodata_macho.o"))
+    ;; Compiler-emitted user module: defvar lowers to an init helper
+    ;; calling nl_alloc_symbol etc. — BLs the arm64 lane externalizes
+    ;; into CALL26 imports — plus the module-init metadata in __const.
+    ;; The check script verifies ld64 accepts the full shape via a
+    ;; relocatable merge (running it would need the NeLisp runtime).
+    (nelisp-aot-compile-to-object
+     '(seq (defvar counter 7))
+     (concat dir "defvar_macho.o")
+     :arch 'aarch64 :format 'mach-o)
     (message "macho-acceptance: artifact set written under %s" dir)))
 
 (provide 'nelisp-macho-acceptance)
