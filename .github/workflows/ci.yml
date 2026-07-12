@@ -37,13 +37,16 @@ jobs:
         shell: bash
         run: make compile
 
-      - name: Run smoke tests
-        shell: bash
-        run: make test
+      # Placed before the ERT suite so a pre-existing test failure does
+      # not skip the Mach-O toolchain-acceptance signal.
       - name: Mach-O acceptance (NeLisp-emitted arm64 exec + MH_OBJECT vs codesign/clang/ld64; macOS)
         if: runner.os == 'macOS'
         shell: bash
         run: make macho-acceptance-test
+
+      - name: Run smoke tests
+        shell: bash
+        run: make test
       - name: Standalone NeLisp eval (pure-elisp AOT, zero Rust; x86_64 Linux)
         if: runner.os == 'Linux'
         shell: bash
