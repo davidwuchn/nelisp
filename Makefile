@@ -1,4 +1,4 @@
-.PHONY: test test-fast test-parallel test-one wasm-smoke compile clean all bench gc-bench actor-bench soak soak-1h soak-full soak-worker \
+.PHONY: test test-fast test-parallel test-one wasm-smoke wasm-runtime-image-smoke compile clean all bench gc-bench actor-bench soak soak-1h soak-full soak-worker \
         sqlite-module sqlite-module-clean \
         release-artifact release-checksum soak-blocker soak-post-ship \
         bench-actual bench-allocator bench-allocator-heavy \
@@ -112,6 +112,19 @@ wasm-smoke:
 	     :arch 'wasm32 :format 'wasm))"
 	node tools/wasm-driver.mjs target/wasm-smoke/f.wasm f 42
 	node tools/wasm-driver.mjs target/wasm-smoke/f-locals.wasm f 9
+
+wasm-runtime-image-smoke:
+	mkdir -p target/wasm-runtime-image
+	HOME="$(CURDIR)" XDG_CONFIG_HOME="$(CURDIR)" $(EMACS) --batch -Q -L lisp -L src \
+	  --eval '(setq load-prefer-newer t)' \
+	  --eval "(progn \
+	    (require 'nelisp-artifact) \
+	    (compile-runtime-image \
+	     '(\"compile-runtime-image\" \"--kind\" \"neln\" \
+	       \"--target\" \"wasm32-wasi\" \
+	       \"--input\" \"tools/wasm-runtime-image-p3c.nlri\" \
+	       \"--output\" \"target/wasm-runtime-image/runtime-image.wasm\")))"
+	node tools/wasm-driver.mjs target/wasm-runtime-image/runtime-image.wasm _start 3
 
 compile:
 	$(EMACS) --batch -Q -L src \
