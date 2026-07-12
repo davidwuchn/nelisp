@@ -16,8 +16,20 @@ const rgba = (n) => `rgba(${(n >>> 24) & 255},${(n >>> 16) & 255},${(n >>> 8) & 
 function tile(id, name) {                               // offscreen "image" per buffer id
   const c = document.createElement('canvas');
   const g = c.getContext('2d');
-  if (id === 5 || name === 'map') { c.width = c.height = 340; for (let y = 0; y < 340; y += 20) for (let x = 0; x < 340; x += 20) { g.fillStyle = ((x + y) / 20) % 2 ? '#1f6f43' : '#2a8a55'; g.fillRect(x, y, 20, 20); } }
-  else { c.width = 160; c.height = 40; const cols = ['#e23', '#f52', '#e23', '#c41']; for (let i = 0; i < 4; i++) { g.fillStyle = cols[i]; g.fillRect(i * 40 + 6, 4, 28, 32); g.fillStyle = '#fff'; g.fillRect(i * 40 + 14, 12, 5, 5); g.fillRect(i * 40 + 22, 12, 5, 5); } }
+  if (id === 5 || name === 'map') {
+    // The real slice samples a TILESET: src rects like (sx, 600, 40, 40).
+    // Build a big sheet where every 40x40 cell gets a distinct earthy color,
+    // so any sampled cell is visible (the old 340x340 "map" placeholder made
+    // every src rect fall outside the image => nothing drawn => black canvas).
+    c.width = c.height = 1280;
+    for (let y = 0; y < c.height; y += 40) for (let x = 0; x < c.width; x += 40) {
+      const h = ((x * 7 + y * 13) / 40) % 360;
+      g.fillStyle = `hsl(${h},35%,${y === 600 ? 42 : 30}%)`;
+      g.fillRect(x, y, 40, 40);
+      g.strokeStyle = 'rgba(0,0,0,0.25)'; g.strokeRect(x + 0.5, y + 0.5, 39, 39);
+    }
+  }
+  else { c.width = 640; c.height = 40; const cols = ['#e23', '#f52', '#e23', '#c41']; for (let i = 0; i < 16; i++) { g.fillStyle = cols[i % 4]; g.fillRect(i * 40 + 6, 4, 28, 32); g.fillStyle = '#fff'; g.fillRect(i * 40 + 14, 12, 5, 5); g.fillRect(i * 40 + 22, 12, 5, 5); } }
   return c;
 }
 const images = {};
@@ -42,9 +54,20 @@ function drain(ptr, count) {
 }
 const imports = { env: { key_state: (c) => BigInt(keys.has(Number(c)) ? 1 : 0), now_ms: () => performance.now(), frame_out: (p, n) => { drain(Number(p), Number(n)); return 0n; } } };
 
-WebAssembly.instantiateStreaming(fetch('dtw.wasm'), imports).then(({ instance }) => {
-  mem = instance.exports.memory;
-  instance.exports.init();
-  const loop = () => { instance.exports.step(); requestAnimationFrame(loop); };
-  requestAnimationFrame(loop);
-});
+function fail(msg) {
+  ctx.fillStyle = '#000'; ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.fillStyle = '#f66'; ctx.font = '12px monospace'; ctx.textBaseline = 'top';
+  String(msg).match(/.{1,48}/g).forEach((line, i) => ctx.fillText(line, 8, 8 + i * 16));
+}
+// fetch+instantiate instead of instantiateStreaming: python -m http.server may
+// serve .wasm without the application/wasm MIME type, which streaming rejects.
+fetch('dtw.wasm')
+  .then((r) => { if (!r.ok) throw new Error(`fetch dtw.wasm: ${r.status}`); return r.arrayBuffer(); })
+  .then((bytes) => WebAssembly.instantiate(bytes, imports))
+  .then(({ instance }) => {
+    mem = instance.exports.memory;
+    instance.exports.init();
+    const loop = () => { try { instance.exports.step(); } catch (e) { fail(e); throw e; } requestAnimationFrame(loop); };
+    requestAnimationFrame(loop);
+  })
+  .catch((e) => fail(e));

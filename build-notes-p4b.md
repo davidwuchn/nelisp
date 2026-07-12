@@ -126,11 +126,11 @@ Or:
 make wasm-dtw-skeleton-smoke
 ```
 
-Then copy the compiled `target/wasm-dtw/dtw.wasm` into `tools/wasm-proofs/p4-www/dtw.wasm`, serve that directory over HTTP, and open it in a browser:
+For the canonical static-host bundle, build `site/dtw/` and serve that directory instead:
 
 ```powershell
-Copy-Item target/wasm-dtw/dtw.wasm tools/wasm-proofs/p4-www/dtw.wasm -Force
-cd tools/wasm-proofs/p4-www
+make wasm-dtw-site
+cd site/dtw
 python -m http.server 8000
 ```
 
@@ -140,6 +140,8 @@ Expected browser behavior:
 - placeholder `map` and `player` buffers are created from the wasm manifest;
 - one `ArrowRight` press advances the player one tile;
 - holding the key does not repeat until release and press again.
+
+The older `tools/wasm-proofs/p4-www/` directory remains a proof fixture only. Its `p4-06` rebuild is intentionally isolated from the deployable `site/dtw/` bundle.
 
 ## 5. Scope notes
 

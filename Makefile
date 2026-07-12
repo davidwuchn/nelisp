@@ -1,4 +1,4 @@
-.PHONY: test test-fast test-parallel test-one wasm-smoke wasm-runtime-image-smoke wasm-dtw-skeleton-smoke wasm-dtw-transpile wasm-dtw-compile wasm-dtw-smoke compile clean all bench gc-bench actor-bench soak soak-1h soak-full soak-worker \
+.PHONY: test test-fast test-parallel test-one wasm-smoke wasm-runtime-image-smoke wasm-dtw-skeleton-smoke wasm-dtw-transpile wasm-dtw-compile wasm-dtw-smoke wasm-dtw-site wasm-dtw-site-smoke compile clean all bench gc-bench actor-bench soak soak-1h soak-full soak-worker \
         sqlite-module sqlite-module-clean \
         release-artifact release-checksum soak-blocker soak-post-ship \
         bench-actual bench-allocator bench-allocator-heavy \
@@ -146,6 +146,12 @@ wasm-dtw-compile: wasm-dtw-transpile
 
 wasm-dtw-smoke: wasm-dtw-compile
 	node tools/wasm-dtw-p4b/smoke.mjs target/wasm-dtw/dtw.wasm
+
+wasm-dtw-site: wasm-dtw-compile
+	node tools/wasm-dtw-p4b/build-site.mjs
+
+wasm-dtw-site-smoke: wasm-dtw-site
+	node tools/wasm-dtw-p4b/site-smoke.mjs site/dtw
 
 compile:
 	$(EMACS) --batch -Q -L src \

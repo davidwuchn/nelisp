@@ -1,11 +1,12 @@
-// Proof 4-06 — the Pages BUNDLE is self-consistent and the ON-DISK dtw.wasm runs.
+// Proof 4-06 — the proof-fixture browser bundle is self-consistent and the
+// ON-DISK dtw.wasm runs.
 // (1) rebuild dtw.wasm, write it, re-read the bytes FROM DISK (what GitHub Pages
 //     serves), validate + instantiate them, drive init()+step() with stub imports
 //     and confirm frame_out fired with a full frame -> the served binary is live.
 // (2) assert index.html <-> dtw.js <-> dtw.wasm wiring + the import/export contract
 //     names match the ABI (frame_out/key_state/now_ms ; memory/init/step).
-// This is the P4c "static bundle serves" gate in headless form; the browser eyeball
-// (open index.html) is the only remaining manual check.
+// This covers the proof fixture under tools/wasm-proofs/p4-www only.  The
+// deployable P4c bundle now lives under site/dtw and is built/smoked separately.
 import { readFileSync, writeFileSync, existsSync, statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
