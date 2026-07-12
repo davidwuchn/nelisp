@@ -57,4 +57,13 @@ clang -o "$dir/reloc_harness" "$dir/reloc_main.c" "$dir/caller_macho.o"
 "$dir/reloc_harness"
 echo "PASS: BRANCH26 relocs resolved; inc2(3) == 5 via C-provided inc"
 
+echo "== object v3: dyld binds a libSystem import from a NeLisp extern-call =="
+cat > "$dir/libc_main.c" <<'EOF'
+extern long myabs(long x);
+int main(void) { return myabs(-5) == 5 ? 0 : 1; }
+EOF
+clang -o "$dir/libc_harness" "$dir/libc_main.c" "$dir/libc_macho.o"
+"$dir/libc_harness"
+echo "PASS: libSystem abs() bound by dyld; myabs(-5) == 5"
+
 echo "macho-acceptance: ALL REQUIRED CHECKS PASSED"

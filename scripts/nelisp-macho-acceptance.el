@@ -24,6 +24,12 @@
 ;;                                       (writer v2 reloc lane); the C
 ;;                                       harness provides `inc' and
 ;;                                       ld64 must resolve the branch
+;;   dist/macho-acceptance/libc_macho.o  MH_OBJECT — `_myabs' calling
+;;                                       libSystem's `_abs' via
+;;                                       extern-call; dyld binds the
+;;                                       import in the linked binary,
+;;                                       proving the libSystem lane
+;;                                       needs no bespoke dyld writer
 ;;
 ;; Emission is host-agnostic (the writers are pure elisp), so this
 ;; runs on any CI OS; only the checks require macOS.  The executables
@@ -57,6 +63,10 @@
     (nelisp-aot-compile-to-object
      '(defun inc2 (x) (inc (inc x)))
      (concat dir "caller_macho.o")
+     :arch 'aarch64 :format 'mach-o)
+    (nelisp-aot-compile-to-object
+     '(defun myabs (x) (extern-call abs x))
+     (concat dir "libc_macho.o")
      :arch 'aarch64 :format 'mach-o)
     (message "macho-acceptance: artifact set written under %s" dir)))
 
