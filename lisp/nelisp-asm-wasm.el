@@ -298,10 +298,44 @@
   "Emit `i32.wrap_i64'."
   (nelisp-asm-wasm-emit-byte buf #xa7))
 
+(defun nelisp-asm-wasm-op-memory-size (buf)
+  "Emit `memory.size'."
+  (nelisp-asm-wasm-emit-byte buf #x3f)
+  (nelisp-asm-wasm-emit-byte buf 0))
+
+(defun nelisp-asm-wasm-op-memory-grow (buf)
+  "Emit `memory.grow'."
+  (nelisp-asm-wasm-emit-byte buf #x40)
+  (nelisp-asm-wasm-emit-byte buf 0))
+
 (defun nelisp-asm-wasm-op-i32-const (buf value)
   "Emit `i32.const VALUE'."
   (nelisp-asm-wasm-emit-byte buf #x41)
   (nelisp-asm-wasm-emit-sleb128 buf value))
+
+(defun nelisp-asm-wasm-op-i32-eq (buf)
+  "Emit `i32.eq'."
+  (nelisp-asm-wasm-emit-byte buf #x46))
+
+(defun nelisp-asm-wasm-op-i32-gt-u (buf)
+  "Emit `i32.gt_u'."
+  (nelisp-asm-wasm-emit-byte buf #x4b))
+
+(defun nelisp-asm-wasm-op-i32-add (buf)
+  "Emit `i32.add'."
+  (nelisp-asm-wasm-emit-byte buf #x6a))
+
+(defun nelisp-asm-wasm-op-i32-sub (buf)
+  "Emit `i32.sub'."
+  (nelisp-asm-wasm-emit-byte buf #x6b))
+
+(defun nelisp-asm-wasm-op-i32-and (buf)
+  "Emit `i32.and'."
+  (nelisp-asm-wasm-emit-byte buf #x71))
+
+(defun nelisp-asm-wasm-op-i32-shl (buf)
+  "Emit `i32.shl'."
+  (nelisp-asm-wasm-emit-byte buf #x74))
 
 (defun nelisp-asm-wasm-op-global-get (buf index)
   "Emit `global.get INDEX'."

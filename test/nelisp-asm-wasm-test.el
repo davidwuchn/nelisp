@@ -108,6 +108,20 @@
                    (unibyte-string
                     #x41 #x80 #x08 #x28 #x02 #x00 #x36 #x02 #x00 #x23 #x01 #x24 #x02)))))
 
+(ert-deftest nelisp-asm-wasm/op-p3-memory-and-i32-encodes ()
+  (let ((buf (nelisp-asm-wasm-make-buffer)))
+    (nelisp-asm-wasm-op-memory-size buf)
+    (nelisp-asm-wasm-op-memory-grow buf)
+    (nelisp-asm-wasm-op-i32-eq buf)
+    (nelisp-asm-wasm-op-i32-gt-u buf)
+    (nelisp-asm-wasm-op-i32-add buf)
+    (nelisp-asm-wasm-op-i32-sub buf)
+    (nelisp-asm-wasm-op-i32-and buf)
+    (nelisp-asm-wasm-op-i32-shl buf)
+    (should (equal (nelisp-asm-wasm-buffer-bytes buf)
+                   (unibyte-string
+                    #x3f #x00 #x40 #x00 #x46 #x4b #x6a #x6b #x71 #x74)))))
+
 (ert-deftest nelisp-asm-wasm/op-f64-sqrt-bits-round-trip-encodes ()
   (let ((buf (nelisp-asm-wasm-make-buffer)))
     (nelisp-asm-wasm-op-f64-reinterpret-i64 buf)
@@ -173,6 +187,42 @@
             (should (search-forward (string #x0d) nil t))
             (goto-char 1)
             (should (search-forward (string #x0b) nil t))))
+      (when (file-exists-p path)
+        (delete-file path)))))
+
+(ert-deftest nelisp-asm-wasm/writer-emits-global-section-and-memory-max ()
+  (let ((path (make-temp-file "nelisp-wasm-p3-" nil ".wasm")))
+    (unwind-protect
+        (progn
+          (nelisp-wasm-write-binary
+           path
+           (list :wasm-types (list (list :params nil :results (list #x7e)))
+                 :wasm-mem-min 2
+                 :wasm-mem-max 4
+                 :wasm-globals
+                 (list (list :type nelisp-aot-compiler--wasm-i32-type
+                             :mut t
+                             :init-i32 66000))
+                 :wasm-exports
+                 (list (list :name "memory" :kind nelisp-asm-wasm--mem-kind :index 0)
+                       (list :name "heap_ptr" :kind nelisp-asm-wasm--global-kind :index 0)
+                       (list :name "f" :kind nelisp-asm-wasm--extern-func-kind :index 0))
+                 :wasm-functions
+                 (list (list :name "f"
+                             :type-index 0
+                             :body (nelisp-asm-wasm-make-function-body
+                                    nil
+                                    (unibyte-string #x42 #x00 #x0f #x0b))))))
+          (with-temp-buffer
+            (set-buffer-multibyte nil)
+            (insert-file-contents-literally path)
+            (goto-char 1)
+            (should (search-forward (string #x06) nil t))
+            (goto-char 1)
+            ;; Memory section layout: id=5, size=4, count=1, flags=1, min=2, max=4.
+            (should (search-forward
+                     (unibyte-string #x05 #x04 #x01 #x01 #x02 #x04)
+                     nil t))))
       (when (file-exists-p path)
         (delete-file path)))))
 

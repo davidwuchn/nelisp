@@ -16909,6 +16909,9 @@ drift (= a Doc 92 emitter invariant violation)."
 (defconst nelisp-aot-compiler--wasm-f64-type #x7c)
 (defconst nelisp-aot-compiler--wasm-i32-type #x7f)
 (defconst nelisp-aot-compiler--wasm-unwind-tag-index 0)
+(defconst nelisp-aot-compiler--wasm-heap-ptr-global 0)
+(defconst nelisp-aot-compiler--wasm-page-bytes 65536)
+(defconst nelisp-aot-compiler--wasm-static-data-base 4096)
 (defconst nelisp-aot-compiler--wasm-scratch-iov-buf 1024)
 (defconst nelisp-aot-compiler--wasm-scratch-iov-len 1028)
 (defconst nelisp-aot-compiler--wasm-scratch-out-a 1032)
@@ -17013,6 +17016,10 @@ drift (= a Doc 92 emitter invariant violation)."
   "Return CTX's scratch i64 local."
   (nelisp-aot-compiler--wasm-context-get ctx :logic-scratch-local))
 
+(defun nelisp-aot-compiler--wasm-alloc-scratch-local (ctx)
+  "Return CTX's scratch i32 local used by alloc-bytes."
+  (nelisp-aot-compiler--wasm-context-get ctx :alloc-scratch-local))
+
 (defun nelisp-aot-compiler--wasm-function-index (ctx name)
   "Return wasm function index for NAME from CTX, or nil when unresolved."
   (cdr (assq name
@@ -17028,6 +17035,229 @@ drift (= a Doc 92 emitter invariant violation)."
   (or (cdr (assq id (nelisp-aot-compiler--wasm-context-get ctx :handler-locals)))
       (signal 'nelisp-aot-compiler-error
               (list :wasm-handler-locals-missing id))))
+
+(defun nelisp-aot-compiler--wasm-data-symbol-address (ctx name)
+  "Return local wasm linear-memory address for data symbol NAME from CTX."
+  (let ((name-str (if (stringp name) name (symbol-name name))))
+    (or (cdr (assoc name-str
+                    (nelisp-aot-compiler--wasm-context-get
+                     ctx :data-symbol-addrs)))
+        (signal 'nelisp-aot-compiler-error
+                (list :wasm-p3-external-data-addr name-str)))))
+
+(defun nelisp-aot-compiler--wasm-ir-contains-tag-p (node tag)
+  "Return non-nil when NODE contains IR kind TAG."
+  (let (found)
+    (cl-labels
+        ((walk (n)
+           (when (and n (not found))
+             (cond
+              ((and (vectorp n) (> (length n) 0))
+               (when (= (nelisp-aot-compiler--ir-kind-tag n) tag)
+                 (setq found t))
+               (mapc #'walk (append n nil)))
+              ((consp n)
+               (walk (car n))
+               (walk (cdr n)))))))
+      (walk node))
+    found))
+
+(defun nelisp-aot-compiler--wasm-align-up (value align)
+  "Round integer VALUE up to ALIGN bytes."
+  (let ((mask (1- align)))
+    (logand (+ value mask) (lognot mask))))
+
+(defun nelisp-aot-compiler--wasm-pages-for-size (size)
+  "Return the minimum wasm page count required to cover SIZE bytes."
+  (max 1
+       (/ (+ size (1- nelisp-aot-compiler--wasm-page-bytes))
+          nelisp-aot-compiler--wasm-page-bytes)))
+
+(defun nelisp-aot-compiler--wasm-u64-bytes (value)
+  "Return VALUE encoded as little-endian 64-bit bytes."
+  (apply #'unibyte-string
+         (cl-loop for shift from 0 below 64 by 8
+                  collect (logand (ash value (- shift)) #xff))))
+
+(defun nelisp-aot-compiler--wasm-patch-u64 (bytes offset value)
+  "Patch BYTES at OFFSET with little-endian 64-bit VALUE."
+  (let ((slot (nelisp-aot-compiler--wasm-u64-bytes value)))
+    (dotimes (i 8)
+      (aset bytes (+ offset i) (aref slot i))))
+  bytes)
+
+(defun nelisp-aot-compiler--wasm-emit-heap-growth-loop (buf)
+  "Emit the allocator's memory-growth loop into BUF."
+  (nelisp-asm-wasm-op-global-get buf nelisp-aot-compiler--wasm-heap-ptr-global)
+  (nelisp-asm-wasm-op-memory-size buf)
+  (nelisp-asm-wasm-op-i32-const buf 16)
+  (nelisp-asm-wasm-op-i32-shl buf)
+  (nelisp-asm-wasm-op-i32-gt-u buf)
+  (nelisp-asm-wasm-op-if buf)
+  (nelisp-asm-wasm-op-block buf)
+  (nelisp-asm-wasm-op-loop buf)
+  (nelisp-asm-wasm-op-i32-const buf 1)
+  (nelisp-asm-wasm-op-memory-grow buf)
+  (nelisp-asm-wasm-op-i32-const buf -1)
+  (nelisp-asm-wasm-op-i32-eq buf)
+  (nelisp-asm-wasm-op-if buf)
+  (nelisp-asm-wasm-op-unreachable buf)
+  (nelisp-asm-wasm-op-end buf)
+  (nelisp-asm-wasm-op-global-get buf nelisp-aot-compiler--wasm-heap-ptr-global)
+  (nelisp-asm-wasm-op-memory-size buf)
+  (nelisp-asm-wasm-op-i32-const buf 16)
+  (nelisp-asm-wasm-op-i32-shl buf)
+  (nelisp-asm-wasm-op-i32-gt-u buf)
+  (nelisp-asm-wasm-op-br-if buf 0)
+  (nelisp-asm-wasm-op-end buf)
+  (nelisp-asm-wasm-op-end buf)
+  (nelisp-asm-wasm-op-end buf))
+
+(defun nelisp-aot-compiler--wasm-emit-alloc-bytes (node buf ctx)
+  "Emit wasm alloc-bytes NODE into BUF under CTX."
+  (let ((scratch (nelisp-aot-compiler--wasm-alloc-scratch-local ctx)))
+    (nelisp-asm-wasm-op-global-get buf nelisp-aot-compiler--wasm-heap-ptr-global)
+    (nelisp-aot-compiler--wasm-emit-value
+     (nelisp-aot-compiler--ir-get node :align) buf ctx)
+    (nelisp-asm-wasm-op-i32-wrap-i64 buf)
+    (nelisp-asm-wasm-op-i32-add buf)
+    (nelisp-asm-wasm-op-i32-const buf 1)
+    (nelisp-asm-wasm-op-i32-sub buf)
+    (nelisp-asm-wasm-op-i32-const buf 0)
+    (nelisp-aot-compiler--wasm-emit-value
+     (nelisp-aot-compiler--ir-get node :align) buf ctx)
+    (nelisp-asm-wasm-op-i32-wrap-i64 buf)
+    (nelisp-asm-wasm-op-i32-sub buf)
+    (nelisp-asm-wasm-op-i32-and buf)
+    (nelisp-asm-wasm-op-local-tee buf scratch)
+    (nelisp-aot-compiler--wasm-emit-value
+     (nelisp-aot-compiler--ir-get node :size) buf ctx)
+    (nelisp-asm-wasm-op-i32-wrap-i64 buf)
+    (nelisp-asm-wasm-op-i32-add buf)
+    (nelisp-asm-wasm-op-global-set buf nelisp-aot-compiler--wasm-heap-ptr-global)
+    (nelisp-aot-compiler--wasm-emit-heap-growth-loop buf)
+    (nelisp-asm-wasm-op-local-get buf scratch)
+    (nelisp-asm-wasm-op-i64-extend-i32-u buf)))
+
+(defun nelisp-aot-compiler--wasm-emit-dealloc-bytes (node buf ctx)
+  "Emit wasm dealloc-bytes NODE into BUF under CTX."
+  (dolist (field '(:ptr :size :align))
+    (nelisp-aot-compiler--wasm-emit-drop-value
+     (nelisp-aot-compiler--ir-get node field) buf ctx))
+  (nelisp-asm-wasm-op-i64-const buf 1))
+
+(defun nelisp-aot-compiler--wasm-layout-data-blobs (data-blobs)
+  "Lay out DATA-BLOBS in wasm linear memory."
+  (let* ((base nelisp-aot-compiler--wasm-static-data-base)
+         (rodata-blobs
+          (cl-remove-if-not
+           (lambda (b) (eq (or (plist-get b :section) 'rodata) 'rodata))
+           data-blobs))
+         (data-blobs-rw
+          (cl-remove-if-not
+           (lambda (b) (eq (plist-get b :section) 'data))
+           data-blobs))
+         (bss-blobs
+          (cl-remove-if-not
+           (lambda (b) (eq (plist-get b :section) 'bss))
+           data-blobs))
+         (ro-cur 0)
+         (ro-layout nil)
+         (rw-cur 0)
+         (rw-layout nil)
+         (bss-cur 0)
+         (bss-layout nil))
+    (dolist (blob rodata-blobs)
+      (push (list :name (plist-get blob :name)
+                  :offset ro-cur
+                  :len (length (plist-get blob :bytes))
+                  :section 'rodata
+                  :blob blob)
+            ro-layout)
+      (setq ro-cur (+ ro-cur (length (plist-get blob :bytes)))))
+    (setq ro-layout (nreverse ro-layout))
+    (let ((rw-base (nelisp-aot-compiler--wasm-align-up (+ base ro-cur) 8)))
+      (dolist (blob data-blobs-rw)
+        (push (list :name (plist-get blob :name)
+                    :offset rw-cur
+                    :len (length (plist-get blob :bytes))
+                    :section 'data
+                    :blob blob)
+              rw-layout)
+        (setq rw-cur (+ rw-cur (length (plist-get blob :bytes)))))
+      (setq rw-layout (nreverse rw-layout))
+      (let ((bss-base (nelisp-aot-compiler--wasm-align-up (+ rw-base rw-cur) 8)))
+        (dolist (blob bss-blobs)
+          (push (list :name (plist-get blob :name)
+                      :offset bss-cur
+                      :len (length (plist-get blob :bytes))
+                      :section 'bss
+                      :blob blob)
+                bss-layout)
+          (setq bss-cur (+ bss-cur (length (plist-get blob :bytes)))))
+        (setq bss-layout (nreverse bss-layout))
+        (let* ((stack-top (nelisp-aot-compiler--wasm-align-up (+ bss-base bss-cur) 8))
+               (symbol-addrs nil)
+               (ro-bytes (apply #'concat
+                                (mapcar (lambda (blob) (plist-get blob :bytes))
+                                        rodata-blobs)))
+               (rw-bytes (apply #'concat
+                                (mapcar (lambda (blob) (plist-get blob :bytes))
+                                        data-blobs-rw))))
+          (dolist (entry ro-layout)
+            (push (cons (plist-get entry :name)
+                        (+ base (plist-get entry :offset)))
+                  symbol-addrs))
+          (dolist (entry rw-layout)
+            (push (cons (plist-get entry :name)
+                        (+ rw-base (plist-get entry :offset)))
+                  symbol-addrs))
+          (dolist (entry bss-layout)
+            (push (cons (plist-get entry :name)
+                        (+ bss-base (plist-get entry :offset)))
+                  symbol-addrs))
+          (list :ro-base base
+                :rw-base rw-base
+                :bss-base bss-base
+                :stack-top stack-top
+                :ro-layout ro-layout
+                :rw-layout rw-layout
+                :bss-layout bss-layout
+                :symbol-addrs (nreverse symbol-addrs)
+                :ro-bytes ro-bytes
+                :rw-bytes rw-bytes))))))
+
+(defun nelisp-aot-compiler--wasm-patch-data-relocs
+    (layout function-indices)
+  "Patch local wasm data relocations in LAYOUT."
+  (let* ((symbol-addrs (plist-get layout :symbol-addrs))
+         (ro-bytes (copy-sequence (or (plist-get layout :ro-bytes) (unibyte-string))))
+         (rw-bytes (copy-sequence (or (plist-get layout :rw-bytes) (unibyte-string)))))
+    (dolist (entry (append (plist-get layout :ro-layout)
+                           (plist-get layout :rw-layout)))
+      (let* ((blob (plist-get entry :blob))
+             (section (plist-get entry :section))
+             (section-bytes (if (eq section 'rodata) ro-bytes rw-bytes))
+             (base-offset (plist-get entry :offset)))
+        (dolist (reloc (plist-get blob :relocs))
+          (let* ((symbol (plist-get reloc :symbol))
+                 (addr (cdr (assoc symbol symbol-addrs)))
+                 (fn-index (cdr (assoc symbol function-indices)))
+                 (offset (+ base-offset (plist-get reloc :offset)))
+                 (addend (or (plist-get reloc :addend) 0)))
+            (cond
+             (addr
+              (nelisp-aot-compiler--wasm-patch-u64
+               section-bytes offset (+ addr addend)))
+             (fn-index
+              (signal 'nelisp-aot-compiler-error
+                      (list :wasm-p3-code-pointer-in-data symbol)))
+             (t
+              (signal 'nelisp-aot-compiler-error
+                      (list :wasm-p3-extern-pointer-in-data symbol))))))))
+    (plist-put layout :ro-bytes ro-bytes)
+    (plist-put layout :rw-bytes rw-bytes)
+    layout))
 
 (defun nelisp-aot-compiler--wasm-emit-i32-store-abs (addr value-node buf ctx)
   "Store VALUE-NODE at absolute i32 ADDR in BUF under CTX."
@@ -17765,6 +17995,10 @@ drift (= a Doc 92 emitter invariant violation)."
         (nelisp-aot-compiler--wasm-emit-value
          (nelisp-aot-compiler--ir-get node :value-ir) buf ctx)
         (nelisp-asm-wasm-op-local-tee buf slot)))
+     ((= tag 0)
+      (nelisp-aot-compiler--wasm-emit-alloc-bytes node buf ctx))
+     ((= tag 20)
+      (nelisp-aot-compiler--wasm-emit-dealloc-bytes node buf ctx))
      ((= tag 41)
       (nelisp-aot-compiler--wasm-emit-memory-address
        (nelisp-aot-compiler--ir-get node :ptr)
@@ -17838,13 +18072,18 @@ drift (= a Doc 92 emitter invariant violation)."
         (nelisp-asm-wasm-op-f64-sqrt buf)))
      ((= tag 78)
       (nelisp-aot-compiler--wasm-emit-syscall-direct-node node buf ctx))
+     ((= tag 99)
+      (nelisp-asm-wasm-op-i64-const
+       buf
+       (nelisp-aot-compiler--wasm-data-symbol-address
+        ctx (nelisp-aot-compiler--ir-get node :name))))
      (t
       (signal 'nelisp-aot-compiler-error
               (list :wasm-unsupported-ir
                     (nelisp-aot-compiler--ir-kind node)))))))
 
-(defun nelisp-aot-compiler--compile-to-wasm-unit (defuns)
-  "Compile DEFUNS into a wasm link unit."
+(defun nelisp-aot-compiler--compile-to-wasm-unit (defuns &optional data-blobs)
+  "Compile DEFUNS and DATA-BLOBS into a wasm link unit."
   (require 'nelisp-asm-wasm)
   (let* ((type-keys-box (list nil))
          (type-map-box (list nil))
@@ -17855,9 +18094,16 @@ drift (= a Doc 92 emitter invariant violation)."
                     (nelisp-aot-compiler--ir-get defun-ir :name))
                   defuns))
          (function-indices nil)
+         (function-index-names nil)
          (table-indices nil)
          (index 0)
-         (tag-type-index nil))
+         (tag-type-index nil)
+         (need-heap-ptr
+          (or data-blobs
+              (cl-some (lambda (defun-ir)
+                         (nelisp-aot-compiler--wasm-ir-contains-tag-p
+                          (nelisp-aot-compiler--ir-get defun-ir :body) 0))
+                       defuns))))
     (dolist (defun-ir defuns)
       (let ((name (nelisp-aot-compiler--ir-get defun-ir :name))
             (type-key
@@ -17886,9 +18132,37 @@ drift (= a Doc 92 emitter invariant violation)."
       (dolist (defun-ir defuns)
         (let ((name (nelisp-aot-compiler--ir-get defun-ir :name)))
           (setq function-indices (append function-indices (list (cons name index))))
+          (setq function-index-names
+                (append function-index-names
+                        (list (cons (if (stringp name) name (symbol-name name))
+                                    index))))
           (setq table-indices (append table-indices (list (cons name index))))
           (setq index (1+ index))))
-      (let ((functions nil))
+      (let* ((layout (and data-blobs
+                          (nelisp-aot-compiler--wasm-patch-data-relocs
+                           (nelisp-aot-compiler--wasm-layout-data-blobs data-blobs)
+                           function-index-names)))
+             (globals
+              (and need-heap-ptr
+                   (list (list :type nelisp-aot-compiler--wasm-i32-type
+                               :mut t
+                               :init-i32 (if layout
+                                             (plist-get layout :stack-top)
+                                           nelisp-aot-compiler--wasm-page-bytes)))))
+             (mem-min (if layout
+                          (nelisp-aot-compiler--wasm-pages-for-size
+                           (plist-get layout :stack-top))
+                        1))
+             (wasm-data
+              (delq nil
+                    (list
+                     (let ((bytes (and layout (plist-get layout :ro-bytes))))
+                       (when (> (length (or bytes "")) 0)
+                         (list :addr (plist-get layout :ro-base) :bytes bytes)))
+                     (let ((bytes (and layout (plist-get layout :rw-bytes))))
+                       (when (> (length (or bytes "")) 0)
+                         (list :addr (plist-get layout :rw-base) :bytes bytes))))))
+             (functions nil))
         (dolist (defun-ir defuns)
           (let* ((name (nelisp-aot-compiler--ir-get defun-ir :name))
                  (name-str (if (stringp name) name (symbol-name name)))
@@ -17908,17 +18182,22 @@ drift (= a Doc 92 emitter invariant violation)."
                                                  :value (1+ next-local))))))
               (setq next-local (+ next-local 2)))
             (let* ((logic-scratch-local next-local)
+                   (alloc-scratch-local (1+ logic-scratch-local))
                    (locals (append (make-list rt-slot-count
                                               nelisp-aot-compiler--wasm-i64-type)
                                    (make-list (* 2 (length handler-ids))
                                               nelisp-aot-compiler--wasm-i64-type)
-                                   (list nelisp-aot-compiler--wasm-i64-type)))
+                                   (list nelisp-aot-compiler--wasm-i64-type
+                                         nelisp-aot-compiler--wasm-i32-type)))
                    (ctx (list :function-indices function-indices
                               :import-indices import-map
                               :table-indices table-indices
                               :type-map type-map
                               :handler-locals handler-locals
-                              :logic-scratch-local logic-scratch-local))
+                              :logic-scratch-local logic-scratch-local
+                              :alloc-scratch-local alloc-scratch-local
+                              :data-symbol-addrs (and layout
+                                                      (plist-get layout :symbol-addrs))))
                    (expr (nelisp-asm-wasm-make-buffer)))
               (nelisp-aot-compiler--wasm-emit-value
                (nelisp-aot-compiler--ir-get defun-ir :body)
@@ -17951,6 +18230,9 @@ drift (= a Doc 92 emitter invariant violation)."
               (mapcar (lambda (fn) (list :name (plist-get fn :name)))
                       functions)
               :extern-symbols nil
+              :wasm-globals globals
+              :wasm-mem-min mem-min
+              :wasm-mem-max nil
               :wasm-imports imports
               :wasm-types
               (mapcar (lambda (key)
@@ -17964,12 +18246,18 @@ drift (= a Doc 92 emitter invariant violation)."
                   (number-sequence (length imports)
                                    (+ (length imports) (1- (length functions))))
                 nil)
+              :wasm-data wasm-data
               :wasm-exports
               (append
-               (if (or imports tag-type-index)
+               (if (or imports tag-type-index globals data-blobs)
                    (list (list :name "memory"
                                :kind nelisp-asm-wasm--mem-kind
                                :index 0))
+                 nil)
+               (if globals
+                   (list (list :name "heap_ptr"
+                               :kind nelisp-asm-wasm--global-kind
+                               :index nelisp-aot-compiler--wasm-heap-ptr-global))
                  nil)
                (cl-loop
                 for fn in functions
@@ -18092,7 +18380,7 @@ register budgeting while ELF/Mach-O keep SysV."
     ;; binding above for Win64 register conventions.
     (when (eq arch 'wasm32)
       (cl-return-from nelisp-aot-compile-to-link-unit
-        (nelisp-aot-compiler--compile-to-wasm-unit defuns)))
+        (nelisp-aot-compiler--compile-to-wasm-unit defuns data-blobs)))
     (let* ((nelisp-aot-compiler--rsp-temp-depth 0)
            (buf (if (eq arch 'aarch64)
                     (nelisp-asm-arm64-make-buffer)

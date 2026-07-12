@@ -49,12 +49,19 @@
       (nelisp-asm-wasm-emit-uleb128 buf (plist-get import :type-index)))
     (nelisp-asm-wasm-buffer-bytes buf)))
 
-(defun nelisp-wasm-write--payload-memory ()
-  "Build the wasm Memory section payload."
-  (let ((buf (nelisp-asm-wasm-make-buffer)))
+(defun nelisp-wasm-write--payload-memory (unit)
+  "Build the wasm Memory section payload for UNIT."
+  (let ((min (or (plist-get unit :wasm-mem-min) 1))
+        (max (plist-get unit :wasm-mem-max))
+        (buf (nelisp-asm-wasm-make-buffer)))
     (nelisp-asm-wasm-emit-uleb128 buf 1)
-    (nelisp-asm-wasm-emit-byte buf 0)
-    (nelisp-asm-wasm-emit-uleb128 buf 1)
+    (if max
+        (progn
+          (nelisp-asm-wasm-emit-byte buf 1)
+          (nelisp-asm-wasm-emit-uleb128 buf min)
+          (nelisp-asm-wasm-emit-uleb128 buf max))
+      (nelisp-asm-wasm-emit-byte buf 0)
+      (nelisp-asm-wasm-emit-uleb128 buf min))
     (nelisp-asm-wasm-buffer-bytes buf)))
 
 (defun nelisp-wasm-write--payload-table (unit)
@@ -95,6 +102,17 @@
     (nelisp-asm-wasm-emit-uleb128 buf tag-type-index)
     (nelisp-asm-wasm-buffer-bytes buf)))
 
+(defun nelisp-wasm-write--payload-globals (globals)
+  "Build the Global section payload for GLOBALS."
+  (let ((buf (nelisp-asm-wasm-make-buffer)))
+    (nelisp-asm-wasm-emit-uleb128 buf (length globals))
+    (dolist (global globals)
+      (nelisp-asm-wasm-emit-byte buf (plist-get global :type))
+      (nelisp-asm-wasm-emit-byte buf (if (plist-get global :mut) 1 0))
+      (nelisp-wasm-write--emit-const-i32-expr
+       buf (plist-get global :init-i32)))
+    (nelisp-asm-wasm-buffer-bytes buf)))
+
 (defun nelisp-wasm-write--payload-exports (exports)
   "Build the Export section payload for EXPORTS."
   (let ((buf (nelisp-asm-wasm-make-buffer)))
@@ -133,6 +151,7 @@
          (table (nelisp-wasm-write--payload-table unit))
          (element (nelisp-wasm-write--payload-element unit))
          (tag-type-index (plist-get unit :wasm-tag-type-index))
+         (globals (plist-get unit :wasm-globals))
          (exports (or (plist-get unit :wasm-exports)
                       (cl-loop
                        for fn in functions
@@ -153,10 +172,13 @@
     (when table
       (nelisp-asm-wasm-emit-section buf 4 table))
     (nelisp-asm-wasm-emit-section
-     buf 5 (nelisp-wasm-write--payload-memory))
+     buf 5 (nelisp-wasm-write--payload-memory unit))
     (when tag-type-index
       (nelisp-asm-wasm-emit-section
        buf 13 (nelisp-wasm-write--payload-tags tag-type-index)))
+    (when globals
+      (nelisp-asm-wasm-emit-section
+       buf 6 (nelisp-wasm-write--payload-globals globals)))
     (nelisp-asm-wasm-emit-section
      buf 7 (nelisp-wasm-write--payload-exports exports))
     (when element
