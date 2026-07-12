@@ -621,10 +621,13 @@ needs an ad-hoc code signature (`codesign -s -') before it will run."
   "Emit an UNSIGNED native macOS MH_EXECUTE to FILE-PATH.
 SECTIONS keys: :text (unibyte code, required), :machine (`aarch64' or
 `x86_64'), :entry-sym (optional).  Sign arm64 output with `codesign -s -'
-on macOS before running.  See `nelisp-mach-o--build-executable'."
+on macOS before running.  See `nelisp-mach-o--build-executable'.
+The file is written with mode #o755 (= +x bit set, mirroring the ELF
+executable writer)."
   (let ((bytes (nelisp-mach-o--build-executable sections))
         (coding-system-for-write 'no-conversion))
     (write-region bytes nil file-path nil 'silent)
+    (set-file-modes file-path #o755)
     file-path))
 
 ;;;###autoload
