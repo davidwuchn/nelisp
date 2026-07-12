@@ -188,6 +188,18 @@ standalone-eval-test:
 	  --eval '(setq load-prefer-newer t)' \
 	  -l nelisp-standalone-build -f nelisp-standalone-test
 
+# macOS Mach-O acceptance (CI macos runner): emit arm64 MH_EXECUTE x2 +
+# MH_OBJECT via the pure-elisp writers, then codesign/run/clang-link
+# them on the Darwin side.  Emission is host-agnostic; the check
+# script requires macOS (arm64) and fails the job on any regression.
+macho-acceptance-emit:
+	$(EMACS) --batch -Q -L lisp -L src -L scripts \
+	  --eval '(setq load-prefer-newer t)' \
+	  -l nelisp-macho-acceptance -f nelisp-macho-acceptance-emit
+
+macho-acceptance-test: macho-acceptance-emit
+	sh scripts/macho-acceptance-check.sh dist/macho-acceptance
+
 standalone-eval-clean:
 	$(EMACS) --batch -Q -L lisp -L src -L scripts \
 	  --eval '(setq load-prefer-newer t)' \

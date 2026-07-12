@@ -1,0 +1,50 @@
+#!/bin/sh
+# macOS-side acceptance checks for NeLisp-emitted Mach-O artifacts.
+# Consumes the artifact set produced by scripts/nelisp-macho-acceptance.el
+# (make macho-acceptance-emit).  Every check here is REQUIRED — a failure
+# fails the CI job.  Run on an arm64 macOS runner.
+set -eu
+
+dir="${1:-dist/macho-acceptance}"
+
+if [ "$(uname -s)" != "Darwin" ]; then
+  echo "macho-acceptance: checks require macOS (got $(uname -s))" >&2
+  exit 2
+fi
+
+echo "== host =="
+uname -m
+sw_vers || true
+
+echo "== file(1) =="
+file "$dir/exit42" "$dir/add5" "$dir/add_macho.o"
+
+echo "== exec: ad-hoc codesign (Apple Silicon mandates a signature) =="
+codesign -f -s - "$dir/exit42" "$dir/add5"
+
+echo "== exec: run exit42 (expect status 42) =="
+st=0; "$dir/exit42" || st=$?
+if [ "$st" -ne 42 ]; then
+  echo "FAIL: exit42 exited with status $st (expected 42)" >&2
+  exit 1
+fi
+echo "PASS: exit42"
+
+echo "== exec: run add5 (expect status 5 = add(2,3)) =="
+st=0; "$dir/add5" || st=$?
+if [ "$st" -ne 5 ]; then
+  echo "FAIL: add5 exited with status $st (expected 5)" >&2
+  exit 1
+fi
+echo "PASS: add5"
+
+echo "== object: clang/ld64 accepts the NeLisp-emitted MH_OBJECT =="
+cat > "$dir/main.c" <<'EOF'
+extern long add(long a, long b);
+int main(void) { return add(2, 3) == 5 ? 0 : 1; }
+EOF
+clang -o "$dir/link_harness" "$dir/main.c" "$dir/add_macho.o"
+"$dir/link_harness"
+echo "PASS: linked binary computed add(2,3) == 5"
+
+echo "macho-acceptance: ALL REQUIRED CHECKS PASSED"
