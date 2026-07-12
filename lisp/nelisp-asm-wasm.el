@@ -20,7 +20,11 @@
   "nelisp-asm-wasm invariant violated")
 
 (defconst nelisp-asm-wasm--i64 #x7e)
+(defconst nelisp-asm-wasm--f64 #x7c)
+(defconst nelisp-asm-wasm--i32 #x7f)
 (defconst nelisp-asm-wasm--func #x60)
+(defconst nelisp-asm-wasm--funcref #x70)
+(defconst nelisp-asm-wasm--empty-block-type #x40)
 
 (defun nelisp-asm-wasm-make-buffer ()
   "Return a fresh wasm byte buffer."
@@ -177,14 +181,169 @@
   (nelisp-asm-wasm-emit-byte buf #x21)
   (nelisp-asm-wasm-emit-uleb128 buf index))
 
+(defun nelisp-asm-wasm-op-local-tee (buf index)
+  "Emit `local.tee INDEX'."
+  (nelisp-asm-wasm-emit-byte buf #x22)
+  (nelisp-asm-wasm-emit-uleb128 buf index))
+
 (defun nelisp-asm-wasm-op-call (buf index)
   "Emit `call INDEX'."
   (nelisp-asm-wasm-emit-byte buf #x10)
   (nelisp-asm-wasm-emit-uleb128 buf index))
 
+(defun nelisp-asm-wasm-op-call-indirect (buf type-index &optional table-index)
+  "Emit `call_indirect TYPE-INDEX TABLE-INDEX'."
+  (nelisp-asm-wasm-emit-byte buf #x11)
+  (nelisp-asm-wasm-emit-uleb128 buf type-index)
+  (nelisp-asm-wasm-emit-uleb128 buf (or table-index 0)))
+
+(defun nelisp-asm-wasm-op-drop (buf)
+  "Emit `drop'."
+  (nelisp-asm-wasm-emit-byte buf #x1a))
+
+(defun nelisp-asm-wasm-op-block (buf &optional result-type)
+  "Emit `block' with RESULT-TYPE or empty block type."
+  (nelisp-asm-wasm-emit-byte buf #x02)
+  (nelisp-asm-wasm-emit-byte
+   buf (or result-type nelisp-asm-wasm--empty-block-type)))
+
+(defun nelisp-asm-wasm-op-loop (buf &optional result-type)
+  "Emit `loop' with RESULT-TYPE or empty block type."
+  (nelisp-asm-wasm-emit-byte buf #x03)
+  (nelisp-asm-wasm-emit-byte
+   buf (or result-type nelisp-asm-wasm--empty-block-type)))
+
+(defun nelisp-asm-wasm-op-if (buf &optional result-type)
+  "Emit `if' with RESULT-TYPE or empty block type."
+  (nelisp-asm-wasm-emit-byte buf #x04)
+  (nelisp-asm-wasm-emit-byte
+   buf (or result-type nelisp-asm-wasm--empty-block-type)))
+
+(defun nelisp-asm-wasm-op-else (buf)
+  "Emit `else'."
+  (nelisp-asm-wasm-emit-byte buf #x05))
+
+(defun nelisp-asm-wasm-op-br (buf depth)
+  "Emit `br DEPTH'."
+  (nelisp-asm-wasm-emit-byte buf #x0c)
+  (nelisp-asm-wasm-emit-uleb128 buf depth))
+
+(defun nelisp-asm-wasm-op-br-if (buf depth)
+  "Emit `br_if DEPTH'."
+  (nelisp-asm-wasm-emit-byte buf #x0d)
+  (nelisp-asm-wasm-emit-uleb128 buf depth))
+
 (defun nelisp-asm-wasm-op-return (buf)
   "Emit `return'."
   (nelisp-asm-wasm-emit-byte buf #x0f))
+
+(defun nelisp-asm-wasm-op-i32-wrap-i64 (buf)
+  "Emit `i32.wrap_i64'."
+  (nelisp-asm-wasm-emit-byte buf #xa7))
+
+(defun nelisp-asm-wasm-op-i64-extend-i32-u (buf)
+  "Emit `i64.extend_i32_u'."
+  (nelisp-asm-wasm-emit-byte buf #xad))
+
+(defun nelisp-asm-wasm-op-i64-eqz (buf)
+  "Emit `i64.eqz'."
+  (nelisp-asm-wasm-emit-byte buf #x50))
+
+(defun nelisp-asm-wasm-op-i64-eq (buf)
+  "Emit `i64.eq'."
+  (nelisp-asm-wasm-emit-byte buf #x51))
+
+(defun nelisp-asm-wasm-op-i64-ne (buf)
+  "Emit `i64.ne'."
+  (nelisp-asm-wasm-emit-byte buf #x52))
+
+(defun nelisp-asm-wasm-op-i64-lt-s (buf)
+  "Emit `i64.lt_s'."
+  (nelisp-asm-wasm-emit-byte buf #x53))
+
+(defun nelisp-asm-wasm-op-i64-gt-s (buf)
+  "Emit `i64.gt_s'."
+  (nelisp-asm-wasm-emit-byte buf #x55))
+
+(defun nelisp-asm-wasm-op-i64-le-s (buf)
+  "Emit `i64.le_s'."
+  (nelisp-asm-wasm-emit-byte buf #x57))
+
+(defun nelisp-asm-wasm-op-i64-ge-s (buf)
+  "Emit `i64.ge_s'."
+  (nelisp-asm-wasm-emit-byte buf #x59))
+
+(defun nelisp-asm-wasm-op-i64-div-s (buf)
+  "Emit `i64.div_s'."
+  (nelisp-asm-wasm-emit-byte buf #x7f))
+
+(defun nelisp-asm-wasm-op-i64-rem-s (buf)
+  "Emit `i64.rem_s'."
+  (nelisp-asm-wasm-emit-byte buf #x81))
+
+(defun nelisp-asm-wasm-op-select (buf)
+  "Emit `select'."
+  (nelisp-asm-wasm-emit-byte buf #x1b))
+
+(defun nelisp-asm-wasm-op-i64-load (buf &optional align offset)
+  "Emit `i64.load' with ALIGN and OFFSET."
+  (nelisp-asm-wasm-emit-byte buf #x29)
+  (nelisp-asm-wasm-emit-uleb128 buf (or align 3))
+  (nelisp-asm-wasm-emit-uleb128 buf (or offset 0)))
+
+(defun nelisp-asm-wasm-op-i64-load8-u (buf &optional align offset)
+  "Emit `i64.load8_u' with ALIGN and OFFSET."
+  (nelisp-asm-wasm-emit-byte buf #x31)
+  (nelisp-asm-wasm-emit-uleb128 buf (or align 0))
+  (nelisp-asm-wasm-emit-uleb128 buf (or offset 0)))
+
+(defun nelisp-asm-wasm-op-i64-load16-u (buf &optional align offset)
+  "Emit `i64.load16_u' with ALIGN and OFFSET."
+  (nelisp-asm-wasm-emit-byte buf #x33)
+  (nelisp-asm-wasm-emit-uleb128 buf (or align 1))
+  (nelisp-asm-wasm-emit-uleb128 buf (or offset 0)))
+
+(defun nelisp-asm-wasm-op-i64-load32-u (buf &optional align offset)
+  "Emit `i64.load32_u' with ALIGN and OFFSET."
+  (nelisp-asm-wasm-emit-byte buf #x35)
+  (nelisp-asm-wasm-emit-uleb128 buf (or align 2))
+  (nelisp-asm-wasm-emit-uleb128 buf (or offset 0)))
+
+(defun nelisp-asm-wasm-op-i64-store (buf &optional align offset)
+  "Emit `i64.store' with ALIGN and OFFSET."
+  (nelisp-asm-wasm-emit-byte buf #x37)
+  (nelisp-asm-wasm-emit-uleb128 buf (or align 3))
+  (nelisp-asm-wasm-emit-uleb128 buf (or offset 0)))
+
+(defun nelisp-asm-wasm-op-i64-store8 (buf &optional align offset)
+  "Emit `i64.store8' with ALIGN and OFFSET."
+  (nelisp-asm-wasm-emit-byte buf #x3c)
+  (nelisp-asm-wasm-emit-uleb128 buf (or align 0))
+  (nelisp-asm-wasm-emit-uleb128 buf (or offset 0)))
+
+(defun nelisp-asm-wasm-op-i64-store16 (buf &optional align offset)
+  "Emit `i64.store16' with ALIGN and OFFSET."
+  (nelisp-asm-wasm-emit-byte buf #x3d)
+  (nelisp-asm-wasm-emit-uleb128 buf (or align 1))
+  (nelisp-asm-wasm-emit-uleb128 buf (or offset 0)))
+
+(defun nelisp-asm-wasm-op-i64-store32 (buf &optional align offset)
+  "Emit `i64.store32' with ALIGN and OFFSET."
+  (nelisp-asm-wasm-emit-byte buf #x3e)
+  (nelisp-asm-wasm-emit-uleb128 buf (or align 2))
+  (nelisp-asm-wasm-emit-uleb128 buf (or offset 0)))
+
+(defun nelisp-asm-wasm-op-f64-sqrt (buf)
+  "Emit `f64.sqrt'."
+  (nelisp-asm-wasm-emit-byte buf #x9f))
+
+(defun nelisp-asm-wasm-op-f64-reinterpret-i64 (buf)
+  "Emit `f64.reinterpret_i64'."
+  (nelisp-asm-wasm-emit-byte buf #xbf))
+
+(defun nelisp-asm-wasm-op-i64-reinterpret-f64 (buf)
+  "Emit `i64.reinterpret_f64'."
+  (nelisp-asm-wasm-emit-byte buf #xbd))
 
 (defun nelisp-asm-wasm-op-end (buf)
   "Emit `end'."
