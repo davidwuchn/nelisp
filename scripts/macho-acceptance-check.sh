@@ -66,4 +66,13 @@ clang -o "$dir/libc_harness" "$dir/libc_main.c" "$dir/libc_macho.o"
 "$dir/libc_harness"
 echo "PASS: libSystem abs() bound by dyld; myabs(-5) == 5"
 
+echo "== object v4: ld64 patches PAGE21/PAGEOFF12 against a __const payload =="
+cat > "$dir/rodata_main.c" <<'EOF'
+extern long getmagic(void);
+int main(void) { return getmagic() == 42 ? 0 : 1; }
+EOF
+clang -o "$dir/rodata_harness" "$dir/rodata_main.c" "$dir/rodata_macho.o"
+"$dir/rodata_harness"
+echo "PASS: PAGE21/PAGEOFF12 patched; getmagic() == 42 from __const"
+
 echo "macho-acceptance: ALL REQUIRED CHECKS PASSED"

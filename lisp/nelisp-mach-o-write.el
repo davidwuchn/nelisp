@@ -127,22 +127,39 @@
 
 (defun nelisp-mach-o--symbol-type (sym)
   "Return Mach-O n_type byte for SYM.
-`text' symbols map to N_SECT (plus N_EXT when global); `undef'
-symbols map to N_UNDF | N_EXT (an import resolved at link time)."
+Section symbols (`text' / `rodata' / `data' / `bss') map to N_SECT
+(plus N_EXT when global); `undef' symbols map to N_UNDF | N_EXT (an
+import resolved at link time)."
   (let ((bind (or (plist-get sym :bind) 'local))
         (section (plist-get sym :section)))
     (cond
      ((eq section 'undef) nelisp-mach-o--n-ext)
-     ((not (eq section 'text))
+     ((not (memq section '(text rodata data bss)))
       (signal 'error
               (list "nelisp-mach-o: unsupported symbol section" section)))
      ((eq bind 'global) (logior nelisp-mach-o--n-ext nelisp-mach-o--n-sect))
      ((eq bind 'local) nelisp-mach-o--n-sect)
      (t (signal 'error (list "nelisp-mach-o: unsupported symbol bind" bind))))))
 
-(defun nelisp-mach-o--symbol-sect (sym)
-  "Return the nlist_64 n_sect byte for SYM (0 = NO_SECT for undef)."
-  (if (eq (plist-get sym :section) 'undef) 0 1))
+(defun nelisp-mach-o--section-desc (descs key)
+  "Return the section descriptor with KEY from DESCS, or nil."
+  (let (found)
+    (dolist (desc descs found)
+      (when (and (null found) (eq (plist-get desc :key) key))
+        (setq found desc)))))
+
+(defun nelisp-mach-o--symbol-sect (sym descs)
+  "Return the nlist_64 n_sect ordinal for SYM (0 = NO_SECT for undef).
+DESCS is the ordered section-descriptor list of the emitted image."
+  (let ((section (plist-get sym :section)))
+    (if (eq section 'undef)
+        0
+      (let ((desc (nelisp-mach-o--section-desc descs section)))
+        (unless desc
+          (signal 'error
+                  (list :mach-o-symbol-section-missing section
+                        (plist-get sym :name))))
+        (plist-get desc :ordinal)))))
 
 (defun nelisp-mach-o--reloc-spec (machine type)
   "Return (R_TYPE PCREL LENGTH) for a portable reloc TYPE on MACHINE.
@@ -236,11 +253,59 @@ record in front of its target record."
                  (not (zerop (or (plist-get reloc :addend) 0))))
         (setq n (1+ n))))))
 
-(defun nelisp-mach-o--build-bytes (sections)
-  "Build a minimal Mach-O MH_OBJECT byte image from SECTIONS."
+(defconst nelisp-mach-o--s-zerofill #x1 "S_ZEROFILL.")
+
+(defun nelisp-mach-o--collect-section-descs (sections)
+  "Return the ordered section-descriptor list for a SECTIONS plist.
+Each descriptor is a plist with :key (`text' / `rodata' / `data' /
+`bss'), :sectname, :segname, :bytes (nil for zerofill), :size, :addr
+(assigned in a contiguous object address space), :flags, :align-log2,
+:zerofill, and 1-based :ordinal.  Empty sections are omitted; __text
+is always present."
   (let* ((text (or (plist-get sections :text)
                    (error "nelisp-mach-o: :text is required")))
-         (symbols (or (plist-get sections :symbols)
+         (rodata (plist-get sections :rodata))
+         (data (plist-get sections :data))
+         (bss-size (or (plist-get sections :bss-size) 0))
+         (descs nil)
+         (addr 0)
+         (ordinal 0))
+    (let ((add (lambda (key sectname segname bytes size flags
+                            align-bytes align-log2 zerofill)
+                 (setq addr (nelisp-mach-o--align-up addr align-bytes))
+                 (setq ordinal (1+ ordinal))
+                 (push (list :key key :sectname sectname :segname segname
+                             :bytes bytes :size size :addr addr
+                             :flags flags :align-log2 align-log2
+                             :zerofill zerofill :ordinal ordinal)
+                       descs)
+                 (setq addr (+ addr size)))))
+      (funcall add 'text "__text" "__TEXT" text (length text)
+               nelisp-mach-o--section-text-flags 4 2 nil)
+      (when (> (length (or rodata "")) 0)
+        (funcall add 'rodata "__const" "__TEXT" rodata (length rodata)
+                 0 8 3 nil))
+      (when (> (length (or data "")) 0)
+        (funcall add 'data "__data" "__DATA" data (length data)
+                 0 8 3 nil))
+      (when (> bss-size 0)
+        (funcall add 'bss "__bss" "__DATA" nil bss-size
+                 nelisp-mach-o--s-zerofill 8 3 t)))
+    (nreverse descs)))
+
+(defun nelisp-mach-o--relocs-for-key (relocs key)
+  "Return the RELOCS whose :section (default `text') equals KEY."
+  (let (out)
+    (dolist (reloc relocs (nreverse out))
+      (when (eq (or (plist-get reloc :section) 'text) key)
+        (push reloc out)))))
+
+(defun nelisp-mach-o--build-bytes (sections)
+  "Build a Mach-O MH_OBJECT byte image from SECTIONS.
+Emits one LC_SEGMENT_64 whose section list covers __text plus any
+non-empty __const / __data / __bss payloads, per-section relocation
+tables, and the symtab/strtab pair."
+  (let* ((symbols (or (plist-get sections :symbols)
                       (error "nelisp-mach-o: :symbols is required")))
          (machine (or (plist-get sections :machine)
                       (error "nelisp-mach-o: :machine is required")))
@@ -249,29 +314,61 @@ record in front of its target record."
          (cpu-type    (car cpu-pair))
          (cpu-subtype (cdr cpu-pair))
          (entry-sym (plist-get sections :entry-sym))
+         (descs (nelisp-mach-o--collect-section-descs sections))
+         (nsects (length descs))
          (ncmds 2)
          (sizeofcmds (+ nelisp-mach-o--segment-command-size
-                        nelisp-mach-o--section-size
+                        (* nsects nelisp-mach-o--section-size)
                         nelisp-mach-o--symtab-command-size))
-         (text-size (length text))
-         (text-off (+ nelisp-mach-o--header-size sizeofcmds))
-         (nreloc (nelisp-mach-o--count-reloc-records relocs))
-         (reloff (if relocs
-                     (nelisp-mach-o--align-up (+ text-off text-size) 8)
-                   0))
-         (symoff (if relocs
-                     (+ reloff (* nreloc nelisp-mach-o--relocation-info-size))
-                   (nelisp-mach-o--align-up (+ text-off text-size) 8)))
+         (content-base (+ nelisp-mach-o--header-size sizeofcmds))
+         ;; Reject relocs against sections absent from the image.
+         (_ (dolist (reloc relocs)
+              (let ((key (or (plist-get reloc :section) 'text)))
+                (unless (and (memq key '(text rodata data))
+                             (nelisp-mach-o--section-desc descs key))
+                  (signal 'error
+                          (list :mach-o-reloc-bad-section key reloc))))))
+         ;; Address-space end over file-backed sections = file content end.
+         (file-content-size
+          (let ((end 0))
+            (dolist (desc descs end)
+              (unless (plist-get desc :zerofill)
+                (setq end (max end (+ (plist-get desc :addr)
+                                      (plist-get desc :size))))))))
+         (vm-size
+          (let ((end 0))
+            (dolist (desc descs end)
+              (setq end (max end (+ (plist-get desc :addr)
+                                    (plist-get desc :size)))))))
+         (reloc-base (nelisp-mach-o--align-up
+                      (+ content-base file-content-size) 8))
+         ;; Assign per-section reloff/nreloc, laid out contiguously.
+         (reloc-plan
+          (let ((cursor reloc-base)
+                (plan nil))
+            (dolist (desc descs (nreverse plan))
+              (let* ((key (plist-get desc :key))
+                     (group (nelisp-mach-o--relocs-for-key relocs key))
+                     (n (nelisp-mach-o--count-reloc-records group)))
+                (push (list :key key :group group :n n
+                            :reloff (if group cursor 0))
+                      plan)
+                (setq cursor (+ cursor
+                                (* n nelisp-mach-o--relocation-info-size)))))))
+         (nreloc-total (apply #'+ (mapcar (lambda (p) (plist-get p :n))
+                                          reloc-plan)))
+         (symoff (+ reloc-base
+                    (* nreloc-total nelisp-mach-o--relocation-info-size)))
          (nsyms (length symbols))
          (stroff (+ symoff (* nsyms nelisp-mach-o--nlist-64-size)))
-         (strtab-entries (cons (cons "" 0) nil))
          (strx-alist nil)
          (symbol-index nil)
          (sym-i 0)
          (strsize 1))
     (nelisp-mach-o--verify-entry-symbol symbols entry-sym)
     (dolist (sym symbols)
-      (unless (memq (or (plist-get sym :type) 'notype) '(func notype))
+      (unless (memq (or (plist-get sym :type) 'notype)
+                    '(func notype object))
         (signal 'error
                 (list "nelisp-mach-o: unsupported symbol type"
                       (plist-get sym :type))))
@@ -282,8 +379,7 @@ record in front of its target record."
         (setq sym-i (1+ sym-i))
         (unless (assoc mangled strx-alist)
           (push (cons mangled strsize) strx-alist)
-          (setq strsize (+ strsize (length (encode-coding-string mangled 'utf-8 t)) 1))
-          (setq strtab-entries (append strtab-entries (list (cons mangled nil)))))))
+          (setq strsize (+ strsize (length (encode-coding-string mangled 'utf-8 t)) 1)))))
     (with-temp-buffer
       (set-buffer-multibyte nil)
       ;; mach_header_64
@@ -295,32 +391,47 @@ record in front of its target record."
       (nelisp-mach-o--write-le32 (current-buffer) sizeofcmds)
       (nelisp-mach-o--write-le32 (current-buffer) 0)
       (nelisp-mach-o--write-le32 (current-buffer) 0)
-      ;; LC_SEGMENT_64 + section_64
+      ;; LC_SEGMENT_64 + section_64[]
       (nelisp-mach-o--write-le32 (current-buffer) nelisp-mach-o--lc-segment-64)
       (nelisp-mach-o--write-le32
        (current-buffer)
-       (+ nelisp-mach-o--segment-command-size nelisp-mach-o--section-size))
+       (+ nelisp-mach-o--segment-command-size
+          (* nsects nelisp-mach-o--section-size)))
       (nelisp-mach-o--write-pad (current-buffer) 16)
       (nelisp-mach-o--write-le64 (current-buffer) 0)
-      (nelisp-mach-o--write-le64 (current-buffer) text-size)
-      (nelisp-mach-o--write-le64 (current-buffer) text-off)
-      (nelisp-mach-o--write-le64 (current-buffer) text-size)
+      (nelisp-mach-o--write-le64 (current-buffer) vm-size)
+      (nelisp-mach-o--write-le64 (current-buffer) content-base)
+      (nelisp-mach-o--write-le64 (current-buffer) file-content-size)
       (nelisp-mach-o--write-le32 (current-buffer) nelisp-mach-o--vm-prot-rwx)
       (nelisp-mach-o--write-le32 (current-buffer) nelisp-mach-o--vm-prot-rwx)
-      (nelisp-mach-o--write-le32 (current-buffer) 1)
+      (nelisp-mach-o--write-le32 (current-buffer) nsects)
       (nelisp-mach-o--write-le32 (current-buffer) 0)
-      (nelisp-mach-o--write-fixed-string (current-buffer) "__text" 16)
-      (nelisp-mach-o--write-fixed-string (current-buffer) "__TEXT" 16)
-      (nelisp-mach-o--write-le64 (current-buffer) 0)
-      (nelisp-mach-o--write-le64 (current-buffer) text-size)
-      (nelisp-mach-o--write-le32 (current-buffer) text-off)
-      (nelisp-mach-o--write-le32 (current-buffer) 2)
-      (nelisp-mach-o--write-le32 (current-buffer) reloff)
-      (nelisp-mach-o--write-le32 (current-buffer) nreloc)
-      (nelisp-mach-o--write-le32 (current-buffer) nelisp-mach-o--section-text-flags)
-      (nelisp-mach-o--write-le32 (current-buffer) 0)
-      (nelisp-mach-o--write-le32 (current-buffer) 0)
-      (nelisp-mach-o--write-le32 (current-buffer) 0)
+      (dolist (desc descs)
+        (let* ((key (plist-get desc :key))
+               (plan (let (found)
+                       (dolist (p reloc-plan found)
+                         (when (and (null found)
+                                    (eq (plist-get p :key) key))
+                           (setq found p))))))
+          (nelisp-mach-o--write-fixed-string
+           (current-buffer) (plist-get desc :sectname) 16)
+          (nelisp-mach-o--write-fixed-string
+           (current-buffer) (plist-get desc :segname) 16)
+          (nelisp-mach-o--write-le64 (current-buffer) (plist-get desc :addr))
+          (nelisp-mach-o--write-le64 (current-buffer) (plist-get desc :size))
+          (nelisp-mach-o--write-le32
+           (current-buffer)
+           (if (plist-get desc :zerofill)
+               0
+             (+ content-base (plist-get desc :addr))))
+          (nelisp-mach-o--write-le32 (current-buffer)
+                                     (plist-get desc :align-log2))
+          (nelisp-mach-o--write-le32 (current-buffer) (plist-get plan :reloff))
+          (nelisp-mach-o--write-le32 (current-buffer) (plist-get plan :n))
+          (nelisp-mach-o--write-le32 (current-buffer) (plist-get desc :flags))
+          (nelisp-mach-o--write-le32 (current-buffer) 0)
+          (nelisp-mach-o--write-le32 (current-buffer) 0)
+          (nelisp-mach-o--write-le32 (current-buffer) 0)))
       ;; LC_SYMTAB
       (nelisp-mach-o--write-le32 (current-buffer) nelisp-mach-o--lc-symtab)
       (nelisp-mach-o--write-le32 (current-buffer) nelisp-mach-o--symtab-command-size)
@@ -328,27 +439,45 @@ record in front of its target record."
       (nelisp-mach-o--write-le32 (current-buffer) nsyms)
       (nelisp-mach-o--write-le32 (current-buffer) stroff)
       (nelisp-mach-o--write-le32 (current-buffer) strsize)
-      ;; __text
-      (nelisp-mach-o--write-bytes (current-buffer) text)
-      (let ((pad (- (if relocs reloff symoff) (buffer-size))))
+      ;; section payloads (file image mirrors the address layout)
+      (dolist (desc descs)
+        (unless (plist-get desc :zerofill)
+          (let ((pad (- (+ content-base (plist-get desc :addr))
+                        (buffer-size))))
+            (when (> pad 0)
+              (nelisp-mach-o--write-pad (current-buffer) pad)))
+          (nelisp-mach-o--write-bytes (current-buffer)
+                                      (plist-get desc :bytes))))
+      ;; relocation_info[] per section (ADDEND records adjacent)
+      (let ((pad (- reloc-base (buffer-size))))
         (when (> pad 0)
           (nelisp-mach-o--write-pad (current-buffer) pad)))
-      ;; relocation_info[] (section-ordered, ADDEND records adjacent)
-      (when relocs
-        (let ((written (nelisp-mach-o--write-relocs
-                        (current-buffer) relocs machine symbol-index)))
-          (unless (= written nreloc)
-            (signal 'error
-                    (list :mach-o-reloc-count-drift written nreloc)))))
-      ;; nlist_64[]
+      (dolist (plan reloc-plan)
+        (let ((group (plist-get plan :group)))
+          (when group
+            (let ((written (nelisp-mach-o--write-relocs
+                            (current-buffer) group machine symbol-index)))
+              (unless (= written (plist-get plan :n))
+                (signal 'error
+                        (list :mach-o-reloc-count-drift
+                              (plist-get plan :key)
+                              written (plist-get plan :n))))))))
+      ;; nlist_64[] — n_value is the object-space address (section addr
+      ;; + section-relative :value), n_sect the 1-based ordinal.
       (dolist (sym symbols)
         (let* ((name (plist-get sym :name))
                (mangled (nelisp-mach-o--normalize-symbol-name name))
                (strx (cdr (assoc mangled strx-alist)))
-               (value (or (plist-get sym :value) 0)))
+               (section (plist-get sym :section))
+               (desc (and (not (eq section 'undef))
+                          (nelisp-mach-o--section-desc descs section)))
+               (value (if desc
+                          (+ (plist-get desc :addr)
+                             (or (plist-get sym :value) 0))
+                        (or (plist-get sym :value) 0))))
           (nelisp-mach-o--write-le32 (current-buffer) strx)
           (insert (unibyte-string (nelisp-mach-o--symbol-type sym)))
-          (insert (unibyte-string (nelisp-mach-o--symbol-sect sym)))
+          (insert (unibyte-string (nelisp-mach-o--symbol-sect sym descs)))
           (nelisp-mach-o--write-le16 (current-buffer) 0)
           (nelisp-mach-o--write-le64 (current-buffer) value)))
       ;; string table

@@ -227,4 +227,110 @@ Returns (ADDR SYMBOLNUM PCREL LENGTH EXTERN TYPE)."
                                           :symbol "nosuch" :addend 0)))))
     (should-error (nelisp-mach-o-write-test--emit sections))))
 
+;;; ---- v3: multi-section (__const / __data / __bss) ----
+
+(defconst nelisp-mach-o-write-test--multi-sections
+  (list :text (unibyte-string #xC0 #x03 #x5F #xD6) ; ret
+        :rodata (unibyte-string #x2A 0 0 0 0 0 0 0) ; magic = 42
+        :data (unibyte-string 1 2 3 4)
+        :bss-size 16
+        :symbols (list (list :name "f" :value 0 :size 4
+                             :section 'text :bind 'global :type 'func)
+                       (list :name "magic" :value 0 :size 8
+                             :section 'rodata :bind 'global :type 'object)
+                       (list :name "state" :value 0 :size 4
+                             :section 'data :bind 'global :type 'object))
+        :machine 'aarch64)
+  "Sample input with all four section kinds populated.")
+
+(defun nelisp-mach-o-write-test--section-64 (bytes index)
+  "Decode section_64 INDEX (0-based) from BYTES.
+Returns (SECTNAME SEGNAME ADDR SIZE OFFSET RELOFF NRELOC FLAGS)."
+  (let* ((off (+ 104 (* index 80)))
+         (sectname (substring bytes off (+ off 16)))
+         (segname (substring bytes (+ off 16) (+ off 32))))
+    (list (substring sectname 0 (string-match "\0" sectname))
+          (substring segname 0 (string-match "\0" segname))
+          (nelisp-mach-o-write-test--read-le64 bytes (+ off 32))
+          (nelisp-mach-o-write-test--read-le64 bytes (+ off 40))
+          (nelisp-mach-o-write-test--read-le32 bytes (+ off 48))
+          (nelisp-mach-o-write-test--read-le32 bytes (+ off 56))
+          (nelisp-mach-o-write-test--read-le32 bytes (+ off 60))
+          (nelisp-mach-o-write-test--read-le32 bytes (+ off 64)))))
+
+(ert-deftest nelisp-mach-o-write-binary-multi-section-headers ()
+  "__text/__const/__data/__bss headers carry a contiguous address space."
+  (let* ((bytes (nelisp-mach-o-write-test--emit
+                 nelisp-mach-o-write-test--multi-sections))
+         (text (nelisp-mach-o-write-test--section-64 bytes 0))
+         (const (nelisp-mach-o-write-test--section-64 bytes 1))
+         (data (nelisp-mach-o-write-test--section-64 bytes 2))
+         (bss (nelisp-mach-o-write-test--section-64 bytes 3)))
+    ;; nsects = 4 in the segment header (offset 32+64 = 96).
+    (should (= (nelisp-mach-o-write-test--read-le32 bytes 96) 4))
+    (should (equal (car text) "__text"))
+    (should (equal (car const) "__const"))
+    (should (equal (cadr const) "__TEXT"))
+    (should (equal (car data) "__data"))
+    (should (equal (cadr data) "__DATA"))
+    (should (equal (car bss) "__bss"))
+    ;; text addr 0 size 4; const aligned to 8 -> addr 8; data addr 16;
+    ;; bss addr 24 with S_ZEROFILL and file offset 0.
+    (should (= (nth 2 text) 0))
+    (should (= (nth 2 const) 8))
+    (should (= (nth 2 data) 16))
+    (should (= (nth 2 bss) 24))
+    (should (= (nth 7 bss) #x1))
+    (should (= (nth 4 bss) 0))
+    ;; File offsets mirror addresses relative to the content base.
+    (let ((base (nth 4 text)))
+      (should (= (nth 4 const) (+ base 8)))
+      (should (= (nth 4 data) (+ base 16))))))
+
+(ert-deftest nelisp-mach-o-write-binary-multi-section-payloads ()
+  "__const / __data payload bytes land at their header offsets."
+  (let* ((bytes (nelisp-mach-o-write-test--emit
+                 nelisp-mach-o-write-test--multi-sections))
+         (const (nelisp-mach-o-write-test--section-64 bytes 1))
+         (data (nelisp-mach-o-write-test--section-64 bytes 2)))
+    (should (equal (substring bytes (nth 4 const) (+ (nth 4 const) 8))
+                   (unibyte-string #x2A 0 0 0 0 0 0 0)))
+    (should (equal (substring bytes (nth 4 data) (+ (nth 4 data) 4))
+                   (unibyte-string 1 2 3 4)))))
+
+(defun nelisp-mach-o-write-test--symoff (bytes)
+  "Read symoff from LC_SYMTAB, whose position depends on nsects."
+  (let* ((nsects (nelisp-mach-o-write-test--read-le32 bytes 96))
+         (symtab-cmd (+ 32 72 (* nsects 80))))
+    (nelisp-mach-o-write-test--read-le32 bytes (+ symtab-cmd 8))))
+
+(ert-deftest nelisp-mach-o-write-binary-multi-section-symbol-values ()
+  "Section symbols get ordinal n_sect and object-space n_value."
+  (let* ((bytes (nelisp-mach-o-write-test--emit
+                 nelisp-mach-o-write-test--multi-sections))
+         (symoff (nelisp-mach-o-write-test--symoff bytes))
+         (magic-off (+ symoff 16))
+         (state-off (+ symoff 32)))
+    ;; magic: n_sect 2 (__const), n_value 8.
+    (should (= (aref bytes (+ magic-off 5)) 2))
+    (should (= (nelisp-mach-o-write-test--read-le64 bytes (+ magic-off 8)) 8))
+    ;; state: n_sect 3 (__data), n_value 16.
+    (should (= (aref bytes (+ state-off 5)) 3))
+    (should (= (nelisp-mach-o-write-test--read-le64 bytes (+ state-off 8)) 16))))
+
+(ert-deftest nelisp-mach-o-write-binary-page-reloc-records ()
+  "PAGE21/PAGEOFF12 relocs against a rodata symbol are emitted."
+  (let* ((sections (copy-sequence nelisp-mach-o-write-test--multi-sections))
+         (sections (plist-put sections :relocs
+                              (list (list :offset 0 :type 'adr-prel-pg-hi21
+                                          :symbol "magic" :addend 0)
+                                    (list :offset 4 :type 'add-abs-lo12-nc
+                                          :symbol "magic" :addend 0))))
+         (bytes (nelisp-mach-o-write-test--emit sections)))
+    ;; magic is nlist index 1; PAGE21 pcrel, PAGEOFF12 not.
+    (should (equal (nelisp-mach-o-write-test--reloc-record bytes 0)
+                   '(0 1 1 2 1 3)))
+    (should (equal (nelisp-mach-o-write-test--reloc-record bytes 1)
+                   '(4 1 0 2 1 4)))))
+
 ;;; nelisp-mach-o-write-test.el ends here
