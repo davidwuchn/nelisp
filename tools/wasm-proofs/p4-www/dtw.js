@@ -12,15 +12,15 @@ const dec = new TextDecoder('utf-8');
 const keys = new Set();
 const rgba = (n) => `rgba(${(n >>> 24) & 255},${(n >>> 16) & 255},${(n >>> 8) & 255},${(n & 255) / 255})`;
 
-// ---- placeholder assets (P4b swaps these for real PNGs via the manifest) ------
-function tile(id) {                                     // offscreen "image" per buffer id
+// ---- placeholder assets (P4b keeps public-safe placeholders via the manifest) --
+function tile(id, name) {                               // offscreen "image" per buffer id
   const c = document.createElement('canvas');
   const g = c.getContext('2d');
-  if (id === 5) { c.width = c.height = 340; for (let y = 0; y < 340; y += 20) for (let x = 0; x < 340; x += 20) { g.fillStyle = ((x + y) / 20) % 2 ? '#1f6f43' : '#2a8a55'; g.fillRect(x, y, 20, 20); } }
+  if (id === 5 || name === 'map') { c.width = c.height = 340; for (let y = 0; y < 340; y += 20) for (let x = 0; x < 340; x += 20) { g.fillStyle = ((x + y) / 20) % 2 ? '#1f6f43' : '#2a8a55'; g.fillRect(x, y, 20, 20); } }
   else { c.width = 160; c.height = 40; const cols = ['#e23', '#f52', '#e23', '#c41']; for (let i = 0; i < 4; i++) { g.fillStyle = cols[i]; g.fillRect(i * 40 + 6, 4, 28, 32); g.fillStyle = '#fff'; g.fillRect(i * 40 + 14, 12, 5, 5); g.fillRect(i * 40 + 22, 12, 5, 5); } }
   return c;
 }
-const images = { 3: tile(3), 5: tile(5) };
+const images = {};
 const KEYMAP = { ArrowLeft: 37, ArrowUp: 38, ArrowRight: 39, ArrowDown: 40 };
 addEventListener('keydown', (e) => { if (KEYMAP[e.key] !== undefined) { keys.add(KEYMAP[e.key]); e.preventDefault(); } });
 addEventListener('keyup', (e) => { if (KEYMAP[e.key] !== undefined) { keys.delete(KEYMAP[e.key]); e.preventDefault(); } });
@@ -36,10 +36,11 @@ function drain(ptr, count) {
     if (op === OP.FILL_RECT) { ctx.fillStyle = rgba(a[4]); ctx.fillRect(a[0], a[1], a[2], a[3]); }
     else if (op === OP.DRAW_IMAGE) { const img = images[a[0]]; if (img) ctx.drawImage(img, a[5], a[6], a[7], a[8], a[1], a[2], a[3], a[4]); }
     else if (op === OP.DRAW_TEXT) { ctx.fillStyle = rgba(a[2]); ctx.font = '16px monospace'; ctx.textBaseline = 'top'; ctx.fillText(t, a[0], a[1]); }
-    // LOAD_IMAGE / PRESENT / SELECT_BUFFER are no-ops for this single-buffer skeleton
+    else if (op === OP.LOAD_IMAGE) { images[a[0]] = tile(a[0], t); }
+    // PRESENT / SELECT_BUFFER are no-ops for this single-buffer skeleton
   }
 }
-const imports = { env: { key_state: (c) => (keys.has(c) ? 1 : 0), now_ms: () => performance.now(), frame_out: (p, n) => drain(p, n) } };
+const imports = { env: { key_state: (c) => BigInt(keys.has(Number(c)) ? 1 : 0), now_ms: () => performance.now(), frame_out: (p, n) => { drain(Number(p), Number(n)); return 0n; } } };
 
 WebAssembly.instantiateStreaming(fetch('dtw.wasm'), imports).then(({ instance }) => {
   mem = instance.exports.memory;

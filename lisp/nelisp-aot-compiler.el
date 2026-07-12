@@ -568,7 +568,7 @@ Caller has already verified foldability via
        ((eq op 'mod) (mod a b)))))))
 
 (defconst nelisp-aot-compiler--cmp-ops
-  '(< > <= >= =)
+  '(< > <= >= = /=)
   "Doc 97.c comparison operators (= produce 0 or 1 in rax).")
 
 (defun nelisp-aot-compiler--parse-extern-call-args
@@ -8167,7 +8167,7 @@ functions `((NAME . ARITY) ...)'."
    ;; the boundary-available case (the boundary-free path already lowers
    ;; `(not raw-bool)' correctly), and only when the argument is a form
    ;; that is *also* raw-i64 in this same boundary-available context:
-   ;; comparison ops (`< > <= >= =') always emit a `cmp' raw bool, and
+   ;; comparison ops (`< > <= >= = /=') always emit a `cmp' raw bool, and
    ;; `(not ...)' over such a form (handled recursively here) likewise
    ;; stays raw.  Tag predicates like `(consp x)' are intentionally NOT
    ;; included: with the boundary available they delegate to builtin1 and
@@ -9693,11 +9693,15 @@ functions `((NAME . ARITY) ...)'."
                    signature))
            (args (cdr sexp)))
       (when (> arity
-               (if (or (and (eq nelisp-aot-compiler--arch 'x86_64)
-                            (memq nelisp-aot-compiler--abi '(sysv win64)))
-                       (eq nelisp-aot-compiler--arch 'aarch64))
-                   14
-                 (length (nelisp-aot-compiler--current-arg-regs))))
+               (cond
+                ((eq nelisp-aot-compiler--arch 'wasm32)
+                 32)
+                ((or (and (eq nelisp-aot-compiler--arch 'x86_64)
+                          (memq nelisp-aot-compiler--abi '(sysv win64)))
+                     (eq nelisp-aot-compiler--arch 'aarch64))
+                 14)
+                (t
+                 (length (nelisp-aot-compiler--current-arg-regs)))))
         (signal 'nelisp-aot-compiler-error
                 (list :too-many-args name arity)))
       (if (nelisp-aot-compiler--defun-signature-rest-p signature)
@@ -10055,6 +10059,11 @@ Returns one of:
                     (list :defun-mixed-param-classes name classes)))))
       (let* ((max-arity
               (cond
+               ((eq nelisp-aot-compiler--arch 'wasm32)
+                ;; Wasm params are function locals, not host ABI GP/XMM
+                ;; registers.  Keep a bounded parser cap so malformed
+                ;; generated defuns still fail loudly.
+                32)
                ((and (eq nelisp-aot-compiler--arch 'x86_64)
                      (eq nelisp-aot-compiler--abi 'win64))
                 ;; Win64 register args cover slots 0..3 and stack args
@@ -10076,10 +10085,14 @@ Returns one of:
                 ;; compiler-wide cap as the x86_64 extended GP surface.
                 14)
                (t
-                (length (nelisp-aot-compiler--current-arg-regs))))))
+                (length (nelisp-aot-compiler--current-arg-regs)))))
+             (too-many-params-tag
+              (if (eq nelisp-aot-compiler--arch 'wasm32)
+                  :wasm-defun-too-many-params
+                :defun-too-many-params)))
         (when (> arity max-arity)
           (signal 'nelisp-aot-compiler-error
-                  (list :defun-too-many-params name arity uniform-class))))
+                  (list too-many-params-tag name arity uniform-class))))
       (let* ((param-class (if mixed-win64-p 'mixed uniform-class))
              (reg-pool (if (eq uniform-class 'f64)
                            (nelisp-aot-compiler--current-xmm-arg-regs)
@@ -10087,6 +10100,10 @@ Returns one of:
              (reg-budget (length reg-pool))
              (param-regs
               (cond
+               ((eq nelisp-aot-compiler--arch 'wasm32)
+                ;; Wasm uses local indices directly; keep one parse-time
+                ;; placeholder per param so FENV slot mapping stays total.
+                (cl-loop for i below arity collect i))
                (mixed-win64-p
                 (cl-loop for cls in classes
                          for i from 0
@@ -15876,7 +15893,8 @@ original handle pointer in rax."
     (> . setg)
     (<= . setle)
     (>= . setge)
-    (= . sete))
+    (= . sete)
+    (/= . setne))
   "Map Doc 97.c comparison op -> setCC mnemonic for AL.
 Signed comparisons match SBCL/Elisp integer semantics; the
 underlying `cmp' instruction sets SF/OF/ZF and the setCC
@@ -15899,6 +15917,7 @@ movzx eax, al to materialise the boolean into rax.  Uses r10 to
         (let ((arm64-cc
                (pcase op
                  ('= 'eq)
+                 ('/= 'ne)
                  ('< 'lt)
                  ('> 'gt)
                  ('<= 'le)
@@ -17315,7 +17334,7 @@ drift (= a Doc 92 emitter invariant violation)."
     (let ((scratch (nelisp-aot-compiler--wasm-logic-scratch-local ctx)))
       (nelisp-aot-compiler--wasm-emit-value (car forms) buf ctx)
       (nelisp-asm-wasm-op-local-tee buf scratch)
-      (when (eq op 'and)
+      (when (memq op '(and or))
         (nelisp-asm-wasm-op-i64-eqz buf))
       (nelisp-asm-wasm-op-if buf nelisp-aot-compiler--wasm-i64-type)
       (if (eq op 'and)

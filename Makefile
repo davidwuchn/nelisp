@@ -1,4 +1,4 @@
-.PHONY: test test-fast test-parallel test-one wasm-smoke wasm-runtime-image-smoke compile clean all bench gc-bench actor-bench soak soak-1h soak-full soak-worker \
+.PHONY: test test-fast test-parallel test-one wasm-smoke wasm-runtime-image-smoke wasm-dtw-skeleton-smoke wasm-dtw-transpile wasm-dtw-compile wasm-dtw-smoke compile clean all bench gc-bench actor-bench soak soak-1h soak-full soak-worker \
         sqlite-module sqlite-module-clean \
         release-artifact release-checksum soak-blocker soak-post-ship \
         bench-actual bench-allocator bench-allocator-heavy \
@@ -125,6 +125,27 @@ wasm-runtime-image-smoke:
 	       \"--input\" \"tools/wasm-runtime-image-p3c.nlri\" \
 	       \"--output\" \"target/wasm-runtime-image/runtime-image.wasm\")))"
 	node tools/wasm-driver.mjs target/wasm-runtime-image/runtime-image.wasm _start 3
+
+wasm-dtw-skeleton-smoke:
+	node tools/wasm-proofs/p4-run-all.mjs
+
+wasm-dtw-transpile:
+	mkdir -p target/wasm-dtw
+	node tools/wasm-dtw-p4b/transpile-slice.mjs
+
+wasm-dtw-compile: wasm-dtw-transpile
+	HOME="$(CURDIR)" XDG_CONFIG_HOME="$(CURDIR)" $(EMACS) --batch -Q -L lisp -L src \
+	  --eval '(setq load-prefer-newer t)' \
+	  --eval "(progn \
+	    (require 'nelisp-artifact) \
+	    (compile-runtime-image \
+	     '(\"compile-runtime-image\" \"--kind\" \"neln\" \
+	       \"--target\" \"wasm32-wasi\" \
+	       \"--input\" \"target/wasm-dtw/dtw-p4b.nlri\" \
+	       \"--output\" \"target/wasm-dtw/dtw.wasm\")))"
+
+wasm-dtw-smoke: wasm-dtw-compile
+	node tools/wasm-dtw-p4b/smoke.mjs target/wasm-dtw/dtw.wasm
 
 compile:
 	$(EMACS) --batch -Q -L src \
