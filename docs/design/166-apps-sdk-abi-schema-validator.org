@@ -1,0 +1,185 @@
+#+TITLE: Doc 166 -- Apps SDK phase 1 ABI schema and static validator
+#+DATE: 2026-08-04
+#+STATUS: PROPOSAL
+
+* Status
+
+- *State*: PROPOSAL 2026-08-04.
+- *Scope*: static schema definition for app manifests and ABI declaration
+  records, plus validator behavior and diagnostics.
+- *Non-goals*: runtime sandbox enforcement, host API implementation,
+  =extern-call= wiring, app migration, or any Rust changes.
+
+* TL;DR
+
+Phase 1 of the apps SDK is a static contract only.
+
+- Apps ship a JSON manifest that declares identity, ABI version,
+  required permissions, and entrypoints.
+- Host-callable functions are described by a separate Elisp plist ABI
+  declaration.
+- A small validator package accepts or rejects those two shapes and
+  returns structured error plists instead of signaling on user-facing
+  manifest parse failures.
+
+This phase deliberately stops before any runtime policy.  It defines
+the shape that later phases will enforce.
+
+* Manifest schema
+
+The app manifest is a JSON object.  Required fields:
+
+| Field          | Type   | Meaning |
+|----------------+--------+---------|
+| =app-id=       | string | Stable app identifier. |
+| =name=         | string | Human-readable app name. |
+| =version=      | string | App version string. |
+| =abi-version=  | string | Version of the apps SDK manifest/ABI contract. |
+| =permissions=  | array  | List of permission tags from the fixed enum in §Permission enum. |
+| =entrypoints=  | object | Mapping from entrypoint name to function symbol name string. |
+
+Optional field:
+
+| Field          | Type   | Meaning |
+|----------------+--------+---------|
+| =description=  | string | Human-readable longer description. |
+
+Validation rules:
+
+- The top-level JSON value must be an object.
+- Each required field must be present.
+- =permissions= must be a JSON array whose members are strings.
+- Every permission string must be one of the tags defined in
+  §Permission enum.
+- =entrypoints= must be a JSON object.
+- Each =entrypoints= key must map to a string naming the Elisp function
+  symbol exported by the app.
+- Unknown top-level fields are tolerated in phase 1.  The validator is
+  strict about required fields and field types, not full closed-world
+  rejection.
+
+* Permission enum
+
+Phase 1 freezes a small permission vocabulary:
+
+- =time=
+- =storage=
+- =bytes-string=
+- =record=
+
+These tags are capability declarations only.  In this phase they do not
+grant behavior by themselves and they are not runtime-enforced.  Their
+purpose is to stabilize manifest shape before the later host API and
+sandbox phases land.
+
+* ABI declaration format
+
+An ABI declaration is an Elisp plist that describes one host function
+binding available to apps.
+
+Required fields:
+
+| Field         | Type   | Meaning |
+|---------------+--------+---------|
+| =:name=       | string | Host function name visible at the ABI boundary. |
+| =:args=       | list   | Argument type tags. |
+| =:return=     | symbol | Return type tag. |
+| =:permission= | symbol | Required permission tag for this host function. |
+
+Allowed ABI type tags:
+
+- =i64=
+- =f64=
+- =string=
+- =record=
+- =bool=
+
+Validation rules:
+
+- =:name= must be a string.
+- =:args= must be a proper list.
+- Every member of =:args= must be one of the allowed ABI type tags.
+- =:return= must be one allowed ABI type tag.
+- =:permission= must be one permission tag from §Permission enum.
+
+The ABI declaration is not JSON in this phase because the immediate
+consumer is host-side Elisp package code.  Only the app manifest crosses
+the JSON boundary.
+
+* Validator contract
+
+The package exports two validators.
+
+** =nelisp-apps-sdk-validate-manifest=
+
+Input: a JSON string.
+
+Output:
+
+- success: =(:valid t)=
+- failure: =(:valid nil :errors (LIST-OF-ERROR-STRINGS))=
+
+Behavior:
+
+- malformed JSON does not signal to callers;
+- malformed JSON returns one error string beginning with
+  =malformed JSON:=;
+- field errors are accumulated and returned together where practical;
+- each error names the offending field or value category.
+
+Representative diagnostics:
+
+- =missing required field: app-id=
+- =permissions must be a list=
+- =unknown permission tag: foo=
+- =entrypoints must map names to string values=
+
+** =nelisp-apps-sdk-validate-abi-decl=
+
+Input: one Elisp plist declaration.
+
+Output shape matches manifest validation:
+
+- success: =(:valid t)=
+- failure: =(:valid nil :errors (...))=
+
+Representative diagnostics:
+
+- =args must be a list=
+- =unknown ABI arg type tag: bytes=
+- =unknown ABI return type tag: bytes=
+- =unknown permission tag: network=
+
+* Design notes
+
+** Why JSON object + fixed enum
+
+The manifest should be easy to author outside Emacs Lisp and easy to
+inspect in later packaging flows.  A small fixed permission enum keeps
+phase 1 simple and creates a stable contract for later runtime
+enforcement.
+
+** Why separate manifest and ABI declaration validation
+
+The manifest describes what an app claims.  The ABI declaration
+describes what the host exposes.  They evolve together but are validated
+independently because they are produced by different sides of the
+boundary.
+
+** Why permissive unknown top-level manifest fields
+
+Phase 1 is the schema seed, not the final package format.  Rejecting
+every unknown key now would make additive metadata harder to stage later
+without improving current safety.
+
+* Verification
+
+Phase 1 implementation should ship with:
+
+- package README in =packages/nelisp-apps-sdk/README.org=;
+- validator implementation in
+  =packages/nelisp-apps-sdk/src/nelisp-apps-sdk-schema.el=;
+- ERT coverage in
+  =packages/nelisp-apps-sdk/test/nelisp-apps-sdk-schema-test.el=;
+- green =make compile= and targeted =make test-one= gates;
+- zero Rust file changes.

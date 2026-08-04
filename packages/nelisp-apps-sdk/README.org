@@ -1,0 +1,47 @@
+#+TITLE: nelisp-apps-sdk Package
+
+* Summary
+
+=nelisp-apps-sdk= provides the phase 1 static schema and validator for
+the NeLisp apps SDK.  It validates JSON app manifests and Elisp ABI
+declaration plists without implementing any runtime sandbox or host API.
+
+* Layout
+
+#+begin_src text
+packages/nelisp-apps-sdk/
+├── README.org
+├── src/
+│   └── nelisp-apps-sdk-schema.el
+└── test/
+    └── nelisp-apps-sdk-schema-test.el
+#+end_src
+
+* Public API
+
+- =nelisp-apps-sdk-validate-manifest=
+- =nelisp-apps-sdk-validate-abi-decl=
+
+* Dependencies
+
+- Runtime dependency: NeLisp core =nelisp= v1.0 load-path environment
+- Elisp dependency declared by the library: =cl-lib=
+- Elisp dependency declared by the library: =nelisp-json=
+
+* Extraction Notes
+
+- This package is phase 1 only: schema definition plus static
+  validation.
+- The manifest surface is JSON and is parsed through =nelisp-json=.
+- The ABI declaration surface is an Elisp plist validated in-memory.
+- Runtime permission enforcement, host function implementation, and app
+  launch/integration remain out of scope for this package.
+
+* Template Use
+
+Future apps SDK packages should keep this structure and document:
+
+- what the package provides
+- the exported feature name and public API
+- dependencies on the NeLisp core and sibling packages
+- any staging boundaries between schema, runtime, and tooling
