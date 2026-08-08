@@ -5186,11 +5186,16 @@ unresolved at link time."
                            (nl_ht_meta_set_count table_ptr (+ (nl_ht_meta_count table_ptr) 1))
                            (nl_ht_copy32 out val_ptr)
                            0))))
-                  (let* ((val_slot (nl_cons_cdr_ptr entry_ptr)))
-                    (seq
-                     (nl_ht_copy32 val_slot val_ptr)
-                     (nl_ht_copy32 out val_ptr)
-                     0))))
+                  ;; Overwrite an existing KEY through the cons mutator, the
+                  ;; way `setcdr' does.  `nl_cons_cdr_ptr' materialises a
+                  ;; FRESH 32B box when the cdr holds an immediate, so writing
+                  ;; the new value into that view updated a scratch copy and
+                  ;; the table kept the old value -- silently, since the entry
+                  ;; was found and the count stayed correct.
+                  (seq
+                   (cons-set-cdr entry_ptr val_ptr)
+                   (nl_ht_copy32 out val_ptr)
+                   0)))
             (wf_write_nil out)))))
     (defun nl_ht_get (args out)
       (let* ((key_ptr (wf_arg_ptr args 0)) (table_ptr (wf_arg_ptr args 1))
