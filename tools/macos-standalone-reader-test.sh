@@ -49,7 +49,9 @@ export NELISP_SRC="$SOURCE"
   -f nelisp-standalone-build-reader
 
 case "$TARGET" in
-  macos-aarch64) EXE="$REPO_ROOT/target/nelisp-macos-aarch64" ;;
+  # `nelisp-standalone--output-path' keeps the macOS arm64 reader at the short
+  # user-facing name; only the cross targets carry a suffix.
+  macos-aarch64) EXE="$REPO_ROOT/target/nelisp" ;;
   macos-x86_64) EXE="$REPO_ROOT/target/nelisp-macos-x86_64" ;;
   *) echo "[macos-standalone-reader] FAIL: unsupported target $TARGET" >&2; exit 2 ;;
 esac

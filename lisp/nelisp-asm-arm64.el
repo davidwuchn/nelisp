@@ -783,6 +783,23 @@ CSINC's `else' arm fires when COND is true."
     (nelisp-asm-arm64--emit-word
      buf (logior #x9A9F07E0 (ash (logand inv #xF) 12) d))))
 
+(defun nelisp-asm-arm64-csneg (buf dst lhs rhs cond-sym)
+  "Emit `CSNEG Xd, Xn, Xm, COND' — Xd = COND ? Xn : -Xm.
+Base 0xDA800400 | (Xm << 16) | (cond << 12) | (Xn << 5) | Xd.
+Used to fold a flag test and a negation into one fixed-width
+instruction, e.g. turning a Darwin syscall's carry-flag error
+signal into the negative-errno value the rest of the runtime reads."
+  (let* ((d (logand (nelisp-asm-arm64--reg-num dst) #x1F))
+         (n (logand (nelisp-asm-arm64--reg-num lhs) #x1F))
+         (m (logand (nelisp-asm-arm64--reg-num rhs) #x1F))
+         (c (nelisp-asm-arm64--cond-num cond-sym)))
+    (nelisp-asm-arm64--emit-word
+     buf (logior #xDA800400
+                 (ash m 16)
+                 (ash (logand c #xF) 12)
+                 (ash n 5)
+                 d))))
+
 (defun nelisp-asm-arm64-lslv (buf dst lhs rhs)
   "Emit `LSLV Xd, Xn, Xm' (= logical-left shift by register).
 Base 0x9AC02000 | (Xm << 16) | (Xn << 5) | Xd.  Only the low 6

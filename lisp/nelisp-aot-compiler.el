@@ -14727,7 +14727,15 @@ byte count is identical across pass-1 and pass-2."
     (nelisp-asm-arm64-ldr-post-sp-16 buf 'x1)
     (nelisp-asm-arm64-ldr-post-sp-16 buf 'x0)
     (nelisp-asm-arm64-ldr-post-sp-16 buf nr-reg)
-    (nelisp-asm-arm64-svc buf svc-imm)))
+    (nelisp-asm-arm64-svc buf svc-imm)
+    ;; Darwin reports failure by setting the carry flag and returning a
+    ;; POSITIVE errno, where Linux returns a negative one.  Every shared
+    ;; runtime path tests the result with `(< r 0)', so an unconverted
+    ;; Darwin error reads as a successful small return value — a failed
+    ;; open(2) becomes "file descriptor 2".  Fold the carry test into the
+    ;; result: on success (carry clear) keep x0, otherwise negate it.
+    (when darwin
+      (nelisp-asm-arm64-csneg buf 'x0 'x0 'x0 'cc))))
 
 (defun nelisp-aot-compiler--emit-syscall-direct-store-x1-arm64 (node buf)
   "Emit `syscall-direct-store-x1' for aarch64.
