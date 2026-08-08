@@ -922,22 +922,27 @@ Phase47 `extern-call' direct rel32 calls can target Windows IAT entries."
            :heap-commit (plist-get options :heap-commit)))
     file-path))
 
-(defun nelisp-link--macho-exec-layout (combined)
-  "Return absolute section layout for the current arm64 Mach-O executable writer.
-The writer places code at `nelisp-mach-o--exe-text-vmaddr' plus
-`nelisp-mach-o--exe-code-off'.  Its executable path currently has one
-__TEXT payload, so .rodata is linked immediately after .text and appended to
-the emitted :text bytes."
+(defun nelisp-link--macho-exec-layout (combined &optional machine)
+  "Return absolute section layout for the arm64 Mach-O executable writer.
+The writer's executable path has one __TEXT payload, so .rodata is linked
+immediately after .text and appended to the emitted :text bytes.  .data and
+.bss land in the writable __DATA segment that follows __TEXT.  Both sides
+read the placement from `nelisp-mach-o-exe-layout', so a section can never
+be relocated against an address the writer does not emit.  MACHINE selects
+the page size and defaults to `aarch64'."
   (require 'nelisp-mach-o-write)
-  (let* ((text-va (+ nelisp-mach-o--exe-text-vmaddr
-                    nelisp-mach-o--exe-code-off))
-         (text-size (nelisp-link--section-len combined 'text))
-         (rodata-va (+ text-va text-size))
-         (rodata-size (nelisp-link--section-len combined 'rodata)))
+  (let* ((text-size (nelisp-link--section-len combined 'text))
+         (rodata-size (nelisp-link--section-len combined 'rodata))
+         (layout (nelisp-mach-o-exe-layout
+                  (+ text-size rodata-size)
+                  (nelisp-link--section-len combined 'data)
+                  (nelisp-link--section-len combined 'bss)
+                  (or machine 'aarch64)))
+         (text-va (plist-get layout :text-vmaddr)))
     (list (cons 'text text-va)
-          (cons 'rodata rodata-va)
-          (cons 'data (+ rodata-va rodata-size))
-          (cons 'bss (+ rodata-va rodata-size)))))
+          (cons 'rodata (+ text-va text-size))
+          (cons 'data (plist-get layout :data-vmaddr))
+          (cons 'bss (plist-get layout :bss-vmaddr)))))
 
 (defun nelisp-link-units-macho-exec (file-path units
                                                &optional entry-sym machine)
@@ -945,27 +950,23 @@ the emitted :text bytes."
 This is the Mach-O sibling of `nelisp-link-units' / `nelisp-link-units-pe32'
 for the standalone pure-Elisp pipeline.  The current executable writer supports
 one __TEXT payload; therefore .text and .rodata are concatenated after all
-relocations are resolved.  .data/.bss are rejected until the Mach-O writer grows
-a writable segment."
+relocations are resolved.  .data and .bss are emitted as the __data and __bss
+sections of a writable __DATA segment."
   (require 'nelisp-mach-o-write)
   (let* ((entry (or entry-sym "_main"))
          (mach (or machine 'aarch64))
          (combined (nelisp-link-combine-sections units mach))
-         (data-size (nelisp-link--section-len combined 'data))
          (bss-size (nelisp-link--section-len combined 'bss))
-         (layout (nelisp-link--macho-exec-layout combined))
+         (layout (nelisp-link--macho-exec-layout combined mach))
          (link-result (nelisp-link-units-2pass units layout mach))
          (bytes (plist-get link-result :bytes))
          (symtab (plist-get link-result :symtab))
          (text (nelisp-link--bytes-or-empty bytes 'text))
          (rodata (nelisp-link--bytes-or-empty bytes 'rodata))
+         (data (nelisp-link--bytes-or-empty bytes 'data))
          (entry-symtab (nelisp-link-symtab-lookup symtab entry)))
     (unless (eq mach 'aarch64)
       (signal 'nelisp-link-error (list :mach-o-exec-only-aarch64 mach)))
-    (when (or (> data-size 0) (> bss-size 0))
-      (signal 'nelisp-link-error
-              (list :mach-o-exec-rw-sections-unsupported
-                    :data data-size :bss bss-size)))
     (unless entry-symtab
       (signal 'nelisp-link--unresolved-symbol (list entry :entry)))
     (unless (zerop (- (plist-get entry-symtab :value)
@@ -976,6 +977,8 @@ a writable segment."
     (nelisp-mach-o-write-executable
      file-path
      (list :text (concat text rodata)
+           :data data
+           :bss-size bss-size
            :machine mach
            :entry-sym entry))
     file-path))

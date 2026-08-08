@@ -17,10 +17,10 @@ uname -m
 sw_vers || true
 
 echo "== file(1) =="
-file "$dir/exit42" "$dir/add5" "$dir/add_macho.o"
+file "$dir/exit42" "$dir/add5" "$dir/rwdata" "$dir/add_macho.o"
 
 echo "== exec: ad-hoc codesign (Apple Silicon mandates a signature) =="
-codesign -f -s - "$dir/exit42" "$dir/add5"
+codesign -f -s - "$dir/exit42" "$dir/add5" "$dir/rwdata"
 
 echo "== exec: run exit42 (expect status 42) =="
 st=0; "$dir/exit42" || st=$?
@@ -37,6 +37,14 @@ if [ "$st" -ne 5 ]; then
   exit 1
 fi
 echo "PASS: add5"
+
+echo "== exec: run rwdata (expect status 42 carried __data -> __bss) =="
+st=0; "$dir/rwdata" || st=$?
+if [ "$st" -ne 42 ]; then
+  echo "FAIL: rwdata exited with status $st (expected 42)" >&2
+  exit 1
+fi
+echo "PASS: rwdata — writable __DATA segment mapped where the linker placed it"
 
 echo "== object: clang/ld64 accepts the NeLisp-emitted MH_OBJECT =="
 cat > "$dir/main.c" <<'EOF'
