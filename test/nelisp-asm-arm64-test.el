@@ -244,6 +244,20 @@
                     (nelisp-asm-arm64-mov-reg-reg b 'x29 'x30)))
                  (nelisp-asm-arm64-test--word #xAA1E03FD))))
 
+(ert-deftest nelisp-asm-arm64-mov-reg-reg-from-sp-uses-add ()
+  ;; MOV x0, sp must be ADD x0, sp, #0 = 0x910003E0.  The ORR alias reads
+  ;; register 31 as XZR, so it would silently produce `mov x0, xzr' and
+  ;; hand the callee a zero where a stack pointer was meant.
+  (should (equal (nelisp-asm-arm64-test--bytes
+                  (lambda (b) (nelisp-asm-arm64-mov-reg-reg b 'x0 'sp)))
+                 (nelisp-asm-arm64-test--word #x910003E0))))
+
+(ert-deftest nelisp-asm-arm64-mov-reg-reg-to-sp-uses-add ()
+  ;; MOV sp, x9 = ADD sp, x9, #0 = 0x91000000 | (9 << 5) | 31 = 0x9100013F.
+  (should (equal (nelisp-asm-arm64-test--bytes
+                  (lambda (b) (nelisp-asm-arm64-mov-reg-reg b 'sp 'x9)))
+                 (nelisp-asm-arm64-test--word #x9100013F))))
+
 ;; ---- ADD / SUB / CMP imm12 ----
 
 (ert-deftest nelisp-asm-arm64-add-imm-sp-sp-16 ()

@@ -491,7 +491,19 @@ pattern."
 
 (defun nelisp-asm-arm64-mov-reg-reg (buf dst src)
   "Emit `MOV Xd, Xm' (= alias for ORR Xd, XZR, Xm).
-Base 0xAA0003E0 | (Xm << 16) | Xd."
+Base 0xAA0003E0 | (Xm << 16) | Xd.
+
+Register number 31 means XZR to ORR but SP to ADD-immediate, so a MOV
+naming `sp' on either side is emitted as `ADD Xd, Xn, #0' instead.  The
+ORR alias would assemble to the zero register without any diagnostic —
+observed as `mov x0, sp' becoming `mov x0, xzr' and handing a NULL
+argv block to the macOS entry trampoline's callee."
+  (if (or (eq dst 'sp) (eq src 'sp))
+      (nelisp-asm-arm64-add-imm buf dst src 0)
+    (nelisp-asm-arm64--mov-reg-reg-orr buf dst src)))
+
+(defun nelisp-asm-arm64--mov-reg-reg-orr (buf dst src)
+  "Emit `MOV Xd, Xm' through the ORR alias.  DST and SRC must not be `sp'."
   (let* ((d (logand (nelisp-asm-arm64--reg-num dst) #x1F))
          (m (logand (nelisp-asm-arm64--reg-num src) #x1F))
          (word (logior #xAA0003E0
