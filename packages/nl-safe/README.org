@@ -1,0 +1,198 @@
+#+TITLE: nl-safe — dynamic borrow cells and fat pointers for NeLisp
+
+* Motivation
+
+Doc 170 Stage 1.  NeLisp's ordinary Lisp layer is already memory-safe
+(it is a GC'd dynamic language); the danger lives in the *runtime
+implementation layer*: raw pointers, =syscall-direct=, arenas, mmap
+regions.  =nl-safe= gives that layer Rust-style discipline in three
+pieces:
+
+1. *Aliasing safety* — =nl-cell= borrow cells enforce
+   "sharing XOR mutation" with runtime counters (the =RefCell=
+   strategy: dynamic checks first, static checks later, Doc 168
+   section 3.2).
+2. *Memory safety* — fat pointers =[nl--ptr BASE LEN GENERATION]=
+   bounds-check every access and detect use-after-free through
+   allocation generations.
+3. *An unsafe boundary* — the only places allowed to mint raw
+   pointers are =nl-unsafe= blocks, and the unsafe-primitive
+   inventory is a named, CI-capped list (<= 20 entries).
+
+This is an *opt-in* extension library (Doc 168 section 2): loading it
+changes nothing about plain Elisp semantics.  It depends only on
+=nl-prelude= (error hierarchy, =nl-strict=).
+
+* Borrow cells
+
+#+begin_src elisp
+(nl-defcell buf (make-vector 1024 0))
+
+(nl-with-borrow (b buf)          ; shared borrow, any number may coexist
+  (aref b 0))
+
+(nl-with-borrow-mut (b buf)      ; exclusive borrow
+  (aset b 0 42))
+#+end_src
+
+- Representation: =[nl--cell VALUE STATE]= with STATE = 0 free,
+  n > 0 shared borrows, -1 exclusive.
+- =nl-with-borrow= signals =nl-borrow-error= when the cell is
+  exclusively borrowed; =nl-with-borrow-mut= signals unless the cell
+  is completely free.  A failed acquire changes no state.
+- The borrow is released by =unwind-protect=, so STATE is restored on
+  =signal= and =throw= as well as on normal exit.
+- =nl-cell= constructs an anonymous cell; =nl-cell-p= tests for one.
+
+Concurrency note: the =clone(2)= shared-address-space path needs
+atomic STATE updates (Doc 170 section 3.4) — not wired yet, see
+Follow-ups.
+
+* Violation log (Doc 168 Phase 6 gate data source)
+
+Set =nl-safe-log-violations= non-nil and every violation (borrow,
+bounds, generation) is also pushed onto =nl-safe--violation-log=,
+newest first, as a plist:
+
+#+begin_src elisp
+(:kind borrow     :cell NAME :existing shared|exclusive
+ :existing-shared-count N :requested shared|exclusive)
+(:kind bounds     :op OP :offset O :size S :len L)
+(:kind generation :op OP :expected G :actual A)
+#+end_src
+
+The Phase 6 go/no-go decision (build a static checker only if > 50%
+of dynamically caught violations were statically decidable) reads
+this log, so records deliberately keep the full context the call site
+has.
+
+* Fat pointers
+
+#+begin_src elisp
+(nl-unsafe
+  (setq p (nl-ptr-make base len generation)))  ; [nl--ptr BASE LEN GEN]
+
+(nl-ptr-ref-u8  p 3)        ; bounds + generation checked
+(nl-ptr-set-u8  p 3 255)
+(nl-ptr-ref-u64 p 0)        ; little-endian
+(nl-ptr-slice   p 4 8)      ; derived pointer, clamped to the parent
+#+end_src
+
+Every checked access enforces =0 <= OFFSET=, =0 <= SIZE=, and
+=OFFSET + SIZE <= LEN= (=nl-ptr-bounds-error=), then compares the
+pointer's GENERATION with the allocator's current one
+(=nl-ptr-generation-error= — use-after-free detection).  A slice can
+only narrow the range, never widen it, and inherits the parent's
+generation, so freeing the parent invalidates every slice.
+
+** Raw-memory backend (the integration point)
+
+Host Emacs has no raw memory, so *all* actual memory access is routed
+through the funcall'able =nl-safe-ptr-backend=:
+
+| op           | args              | meaning                              |
+|--------------+-------------------+--------------------------------------|
+| =ref-u8=     | BASE OFFSET       | read one byte                        |
+| =set-u8=     | BASE OFFSET VALUE | write one byte                       |
+| =ref-u64=    | BASE OFFSET       | read little-endian u64               |
+| =sub-base=   | BASE DELTA        | derived base for =nl-ptr-slice=      |
+| =generation= | BASE              | current generation, nil = skip check |
+
+The default backend is a pure-Lisp mock (vector-backed stores with a
+generation counter and =nl-safe-mock-alloc= / =nl-safe-mock-free= /
+=nl-safe-mock-ptr= helpers), which makes the whole checking layer
+testable on host Emacs *and* on the standalone binary.  Wiring a real
+backend onto the standalone's raw-memory primitives (=alloc-bytes=,
+=ptr-read-u8=, =ptr-write-u8=, =ptr-read-u64=, pointer arithmetic,
+allocator generations from the checked allocator of Doc 170
+section 5) is follow-up work; this variable is the single seam.
+
+* Unsafe boundary
+
+=nl-ptr-make= is the package's only pointer-minting primitive.  Under
+=(nl-strict t)= (nl-prelude's load-unit-scoped flag) using it outside
+an =nl-unsafe= block is an *expansion-time* error:
+
+#+begin_src elisp
+(nl-strict t)
+
+(nl-ptr-make raw len gen)          ; expansion error
+
+(nl-unsafe
+  (nl-ptr-make raw len gen))       ; allowed
+#+end_src
+
+=nl-safe-unsafe-primitives= is the named inventory of everything that
+may mint or dereference raw memory (currently 15 entries; an ERT
+asserts the <= 20 cap, Doc 170 section 4.3).  Only =nl-ptr-make= is
+expansion-gated by this package: the rest are standalone runtime
+primitives, and auditing *their* call sites (plus counting
+=nl-unsafe= blocks in CI) is the =nl-check= inventory report's job
+(Doc 170 section 10).
+
+* Disabling the checks (Doc 170 section 9)
+
+=nl-safe--enabled= (default t) is read at *macro-expansion time*.
+When nil, =nl-with-borrow= / =nl-with-borrow-mut= expand to a plain
+=let= over the cell value and the =nl-ptr-*= accessors expand to the
+bare backend access — zero checking residue.  ERT compares these
+expansions against the hand-written plain forms (expansion-identity
+gate), which is what keeps "the flag can compile the checks away"
+true.
+
+Same caveat as =nl-strict=: the flag only affects expansions
+performed after it flips — set it at top level
+(=(eval-and-compile (setq nl-safe--enabled nil))=) or around an
+explicit =eval= / =macroexpand=, never inside an already-expanded
+body.
+
+* Errors
+
+| Symbol                    | Parent         | Signaled by                         |
+|---------------------------+----------------+-------------------------------------|
+| =nl-borrow-error=         | =nl-error=     | borrow rule violations              |
+| =nl-ptr-error=            | =nl-error=     | (never directly — common parent)    |
+| =nl-ptr-bounds-error=     | =nl-ptr-error= | out-of-range pointer access         |
+| =nl-ptr-generation-error= | =nl-ptr-error= | stale generation (use-after-free)   |
+| =nl-type-error=           | =nl-error=     | non-cell / non-pointer / bad byte   |
+
+(=nl-type-error= is nl-prelude's.)
+
+* Non-goals
+
+- No static borrow checking — that is Doc 168 Phase 6, gated on the
+  violation-log data this package collects.
+- No resource / Drop tracking (=nl-defresource=) — Doc 170 Stage 3.
+- No contracts — Doc 170 Stage 4 (=nl-contract=).
+- No change to plain Elisp semantics; nothing is advised or globally
+  modified.
+
+* Testing
+
+Host Emacs (part of =make test= at the repo root; the root Makefile
+globs =packages/*/test/nl-*-test.el=):
+
+#+begin_src sh
+emacs --batch -Q -L packages/nl-prelude/src -L packages/nl-safe/src \
+  -L packages/nl-safe/test \
+  -l ert -l nl-safe-test -f ert-run-tests-batch-and-exit
+#+end_src
+
+Standalone NeLisp (no Emacs, no ert — a minimal shim runs the same
+test bodies; dependencies are loaded by explicit path because the
+standalone's =require= silently succeeds on missing files):
+
+#+begin_src sh
+./target/nelisp --load packages/nl-safe/test/nl-safe-standalone-smoke.el
+#+end_src
+
+* Follow-ups
+
+- bench/ measurement of the enabled-checks overhead against the
+  Doc 170 section 9 budget (borrow <= 15%, fat pointer <= 20%).
+- Real raw-memory backend for =nl-safe-ptr-backend= on the standalone
+  (and, once the Doc 170 section 5 checked allocator exists, real
+  generation numbers).
+- Atomic STATE updates for the =clone(2)= path (Doc 170 section 3.4).
+- =nl-check= unsafe-surface report: count and locate =nl-unsafe=
+  blocks and non-gated unsafe-primitive call sites in CI.
