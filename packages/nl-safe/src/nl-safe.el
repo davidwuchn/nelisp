@@ -306,7 +306,7 @@ Unsafe kernel entry; user code goes through `nl-ptr-make' inside
   "Construct a fat pointer over BASE with LEN and GENERATION.
 Unsafe primitive: under (nl-strict t), using it outside an
 `nl-unsafe' block is an expansion-time error (Doc 170 section 4.3)."
-  (if nl--strict
+  (if (nl-strict-p)
       (error "nl-ptr-make: only allowed inside `nl-unsafe' under (nl-strict t)")
     `(nl-safe--ptr-make ,base ,len ,generation)))
 

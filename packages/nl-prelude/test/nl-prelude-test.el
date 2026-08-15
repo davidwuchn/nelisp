@@ -537,6 +537,18 @@ dispatch on the variant tag at runtime."
                (should-not nl--strict))
       (setq nl--strict old))))
 
+(ert-deftest nl-prelude-strict-p-accessor-roundtrip ()
+  "`nl-strict-p' reflects the flag set by eval'd (nl-strict ...) forms."
+  (let ((old nl--strict))
+    (unwind-protect
+        ;; nl-strict is a top-level declaration; `eval' models that
+        ;; (see nl-prelude-strict-flag-roundtrip above).
+        (progn (eval '(nl-strict t))
+               (should (nl-strict-p))
+               (eval '(nl-strict nil))
+               (should-not (nl-strict-p)))
+      (setq nl--strict old))))
+
 ;;; Review-fix regressions (2026-08-15 code review) --------------------
 
 (ert-deftest nl-prelude-loop-shadowed-variable-still-advances ()
