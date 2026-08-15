@@ -1955,11 +1955,23 @@ arm64 Linux has no legacy x86 numbering)."
     ;; non-canonical sentinel so any use-after-free read via a stale (unrooted)
     ;; pointer faults immediately -- pinpoints a missed root during Stage 3b+.
     ;; Header (hdr+0) and freelist next-link (hdr+8) are preserved.
+    ;; ITERATIVE fill (was 8-bytes-per-recursive-call, mirroring the old
+    ;; `nl_alloc_zero_fill'): the recursive version burned one native frame
+    ;; per 8 poisoned bytes, so poisoning a single large dead block -- e.g.
+    ;; `bf_load's parse pool (4 x source-bytes slots x 32B, ~30 MB for the
+    ;; full stdlib prelude) -- recursed millions of frames deep and blew
+    ;; the reserved native stack (measured ceiling ~2.48M frames on the
+    ;; windows-x86_64 1 GiB stack reserve; blocks >= ~20 MB crashed the
+    ;; sweep with a silent rc=127 access violation whenever poison-on-free
+    ;; was armed, while the same sweep with poison OFF was fine).  The
+    ;; while/setq shape matches `nl_alloc_zero_fill' exactly.
     (defun nl_gc_poison_fill (hdr off bt)
-      (if (< off bt)
-          (nl_seq2 (ptr-write-u64 (+ hdr off) 0 16045481047390945280)
-                   (nl_gc_poison_fill hdr (+ off 8) bt))
-        0))
+      (let* ((o off))
+        (seq
+         (while (< o bt)
+           (nl_seq2 (ptr-write-u64 (+ hdr o) 0 16045481047390945280)
+                    (setq o (+ o 8))))
+         0)))
     ;; Doc 170 Stage 2: `nl_alloc_check_verify' (arena unit) runs FIRST
     ;; so the redzone guard is checked before the free-list next-link
     ;; write and before poison-on-free overwrites the block suffix.
