@@ -9,9 +9,9 @@
 ;;; Commentary:
 
 ;; Host-side guard for `tools/macos-selfhost-test.sh --emit-only'.
-;; The script's normal path still needs Apple Silicon + codesign; this
-;; test locks the pre-execution invariant that every smoke program can
-;; be compiled to a Mach-O image on any host running Emacs.
+;; The script's normal path still needs Apple Silicon + codesign, and
+;; emit-only compilation requires the Darwin toolchain.  The smoke
+;; invocations therefore run only on Darwin hosts.
 
 ;;; Code:
 
@@ -108,6 +108,7 @@
 
 (ert-deftest nelisp-macos-selfhost/darwin-fd-regression-smokes-emit-only ()
   "The M1 fd/process regression smokes compile to Mach-O images."
+  (skip-unless (eq system-type 'darwin))
   (let* ((root (nelisp-macos-selfhost-test--repo-root))
          (script (expand-file-name "tools/macos-selfhost-test.sh" root))
          (out-dir (nelisp-macos-selfhost-test--out-dir root "fd-regressions"))
@@ -145,6 +146,7 @@
 
 (ert-deftest nelisp-macos-selfhost/emit-only-script-builds-all-smokes ()
   "The macOS self-host smoke harness builds every case in emit-only mode."
+  (skip-unless (eq system-type 'darwin))
   (let* ((root (nelisp-macos-selfhost-test--repo-root))
          (script (expand-file-name "tools/macos-selfhost-test.sh" root))
          (out-dir (nelisp-macos-selfhost-test--out-dir root "emit-only-all"))
@@ -177,6 +179,7 @@
 
 (ert-deftest nelisp-macos-selfhost/list-and-single-smoke ()
   "The macOS self-host harness can list and run one selected smoke."
+  (skip-unless (eq system-type 'darwin))
   (let* ((root (nelisp-macos-selfhost-test--repo-root))
          (script (expand-file-name "tools/macos-selfhost-test.sh" root))
          (out-dir (nelisp-macos-selfhost-test--out-dir root "select"))
@@ -232,6 +235,7 @@
 
 (ert-deftest nelisp-macos-selfhost/all-smoke-alias ()
   "The macOS self-host harness accepts `--smoke all' like Windows."
+  (skip-unless (eq system-type 'darwin))
   (let* ((root (nelisp-macos-selfhost-test--repo-root))
          (script (expand-file-name "tools/macos-selfhost-test.sh" root))
          (out-dir (nelisp-macos-selfhost-test--out-dir root "all-alias"))

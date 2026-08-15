@@ -677,11 +677,11 @@ Said plainly so expectations are calibrated:
   parallel build, and tarball smokes.
 - Linux arm64 remains best-effort.
 
-** Test status (HEAD, 2026-05-14)
+** Test status (HEAD, 2026-08-15)
 
-- =make test= = *3604 tests / 3562 expected / 5 unexpected (all
-  pre-existing flake) / 37 skipped* on linux-x86_64.  See
-  =Pure-Elisp Migration Progress= section above for the flake breakdown.
+- =make test= = *4865 tests / 4519 expected / 0 unexpected / 346 skipped*
+  on the Windows host.  The skipped tests require unavailable standalone
+  primitives, platform capabilities, or platform-specific toolchains.
 - *Standalone self-host gates* (2026-06, all green, zero-Emacs):
   =standalone-{reader,eval,reader-prelude,selfhost,selfhost-mt,parallel-compile}-test=
   — the standalone =target/nelisp= binary self-hosts

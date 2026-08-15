@@ -329,37 +329,37 @@
     ;; env-inherit branch and broke CI for every later commit.
     (should (tree-member-p
              '(setq envp (ptr-read-u64 268435600 0))
-             nelisp-standalone--fileio-source))
+             (nelisp-standalone--fileio-source)))
     (should (tree-member-p
              '(nl_os_process_execve path argv envp)
-             nelisp-standalone--fileio-source))
+             (nelisp-standalone--fileio-source)))
     (should (tree-member-p
              '(wf_write_int out (nl_bi_process_wait_exit_code pid))
-             nelisp-standalone--fileio-source))
+             (nelisp-standalone--fileio-source)))
     (should (tree-member-p
-             '(defun nl_bi_process_make_object (pid outfd out)
+             '(defun nl_bi_process_make_object (pid outfd infd out)
                 (seq
-                 (vector-make 5 out)
+                 (vector-make 6 out)
                  (nl_bi_process_set_int out 0 1886547811)
                  (nl_bi_process_set_int out 1 pid)
                  (nl_bi_process_set_int out 2 outfd)
                  (nl_bi_process_set_int out 3 0)
                  (nl_bi_process_set_int out 4 -1)
+                 (nl_bi_process_set_int out 5 infd)
                  0))
-             nelisp-standalone--fileio-source))
+             (nelisp-standalone--fileio-source)))
     ;; Same stale-literal note as call-process above: assert the
     ;; load-bearing shapes, not the full defun (the 41ea76d7 env-inherit
     ;; branch invalidated the old exact literal).
     (should (tree-member-p
              '(setq pipe_rc (nl_os_process_pipe pipev))
-             nelisp-standalone--fileio-source))
+             (nelisp-standalone--fileio-source)))
     (should (tree-member-p
              '(nl_os_process_set_nonblock readfd)
-             nelisp-standalone--fileio-source))
+             (nelisp-standalone--fileio-source)))
     (should (tree-member-p
-             '(nl_bi_process_make_object pid readfd
-                                         out)
-             nelisp-standalone--fileio-source))))
+             '(nl_bi_process_make_object pid readfd stdin_writefd out)
+             (nelisp-standalone--fileio-source)))))
 
 (ert-deftest nelisp-standalone-target-reader-process-syscalls-are-targeted ()
   "Process helper syscall numbers stay target-specific."
@@ -926,7 +926,7 @@ scratch chunks have their cursor reset."
     (should (= 3 (logior 1 nelisp-standalone--arena-chunk-flag-persistent)))))
 
 (ert-deftest nelisp-standalone-target-gc-walks-chunk-descriptors ()
-  "Doc 140 Stage 3 makes GC membership and sweep chunk-aware."
+  "GC membership uses the current-chunk fast path and chunk-list fallback."
   (cl-labels ((tree-member-p
                (needle tree)
                (cond
@@ -938,11 +938,12 @@ scratch chunks have their cursor reset."
       (should (memq 'nl_gc_chunk_contains_any flat))
       (should (memq 'nl_gc_sweep_chunks flat))
       (should (member 268436160 flat))
-      (should (tree-member-p
-               '(defun nl_gc_in_arena
-                    (addr)
-                  (nl_gc_chunk_contains_any (ptr-read-u64 268436160 0) addr))
-               nelisp-standalone--gc-source))
+      ;; `nl_gc_in_arena' probes the current chunk before walking the list.
+      ;; This superseded the old recursive helper-only implementation.
+      (should (tree-member-p '(ptr-read-u64 268436168 0)
+                             nelisp-standalone--gc-source))
+      (should (tree-member-p '(setq chunk (ptr-read-u64 (+ chunk 48) 0))
+                             nelisp-standalone--gc-source))
       (should-not
        (tree-member-p
         '(defun nl_gc_sweep

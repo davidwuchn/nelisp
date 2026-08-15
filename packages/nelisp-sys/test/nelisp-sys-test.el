@@ -223,6 +223,21 @@ Skipped on standalone: getcwd is deferred (M0 increment 2)."
 Skipped on standalone: symlink is deferred (M0 increment 2)."
   ;; symlink signals on standalone until a 2-path syscall builtin is wired.
   (skip-unless (not (fboundp 'nelisp--syscall-path-int)))
+  ;; Windows permits symbolic links only when the current token has the
+  ;; required privilege or Developer Mode grants the unprivileged capability.
+  (skip-unless
+   (or (not (eq system-type 'windows-nt))
+       (let* ((probe-dir (make-temp-file "nelisp-sys-symlink-probe-" t))
+              (probe-target (expand-file-name "target" probe-dir))
+              (probe-link (expand-file-name "link" probe-dir)))
+         (unwind-protect
+             (condition-case nil
+                 (progn
+                   (write-region "" nil probe-target nil 'silent)
+                   (make-symbolic-link probe-target probe-link)
+                   (file-symlink-p probe-link))
+               (file-error nil))
+           (delete-directory probe-dir t)))))
   (let* ((tmp (make-temp-file "nelisp-sys-sl-" t))
          (target (expand-file-name "target.txt" tmp))
          (link   (expand-file-name "link.txt" tmp)))
