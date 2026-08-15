@@ -179,3 +179,40 @@ exists.
   =ns-undeclared-dependency= becomes precise enough to gate.
 - Optional shorter-name tier (=names.el=-style rewriting) if it is ever
   wanted, documented with the debugger caveats above.
+
+* Writing inside a namespace
+
+=nl-ns-in.el= is the optional writing half of this package.  It turns
+the short names in a block into ordinary qualified global names; it does
+not replace the checker in =nl-ns.el=.
+
+#+begin_src elisp
+(require 'nl-ns-in)
+(nl-ns-define text)                  ; default prefix: "text-"
+(nl-ns-members text external-helper) ; members from another block/file
+
+(nl-ns-in text
+  (defvar limit 80)
+  (defun wrap (s) (external-helper (chunk s limit)))
+  (defun chunk (s n) (substring s 0 n)))
+;; Defines text-limit, text-wrap, and text-chunk.
+#+end_src
+
+=nl-ns-define= declares a namespace (and accepts =:prefix= for an
+explicit prefix).  =nl-ns-members= declares short member names before
+or outside a block.  =nl-ns-in= rewrites and evaluates its body;
+=nl-ns-expand= returns its rewritten forms for inspection or tests;
+and =nl-ns-qualify= returns one qualified symbol.
+
+The resolution rule is exact: a symbol is rewritten if and only if it
+is defined by a top-level definition in the =nl-ns-in= block, or was
+declared through =nl-ns-members=, and it is not lexically bound at that
+point.  Foreign names remain untouched.  Quoted data is never
+rewritten: ='chunk= stays =chunk=.  A function reference is different:
+=#'chunk= is rewritten to =#'text-chunk=.
+
+This is only a convenient spelling for ordinary globals.  There is no
+isolation: another file can still collide with =text-wrap=, which is
+exactly what this package's checker half detects.  There is no privacy.
+The debugger, backtrace, and =M-.= show qualified names, because those
+are the real global names.
