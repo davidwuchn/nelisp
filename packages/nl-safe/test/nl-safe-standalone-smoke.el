@@ -5,10 +5,11 @@
 ;;; Commentary:
 
 ;; Standalone acceptance gate for Doc 170 Stage 1: run the exact ERT
-;; test bodies from `nl-safe-test.el' on `target/nelisp', which has no
-;; ert.  A minimal ert shim (`ert-deftest' / `should' / `should-not' /
-;; `should-error') is installed first, then the real test file is
-;; loaded and every registered test body is executed.
+;; test bodies from `nl-safe-test.el' and `nl-safe-report-test.el' on
+;; `target/nelisp', which has no ert.  A minimal ert shim
+;; (`ert-deftest' / `should' / `should-not' / `should-error') is
+;; installed first, then the real test files are loaded and every
+;; registered test body is executed.
 ;;
 ;; Run from the repository root:
 ;;
@@ -70,7 +71,9 @@ KEYS supports `:type SYMBOL' for condition matching like ert."
 
 (load "packages/nl-prelude/src/nl-prelude.el")
 (load "packages/nl-safe/src/nl-safe.el")
+(load "packages/nl-safe/src/nl-safe-report.el")
 (load "packages/nl-safe/test/nl-safe-test.el")
+(load "packages/nl-safe/test/nl-safe-report-test.el")
 
 (let ((tests (reverse nl-smoke--tests))
       (ran 0)
@@ -92,8 +95,8 @@ KEYS supports `:type SYMBOL' for condition matching like ert."
         (setq all (cdr all))))
     (error "nl-safe-standalone-smoke: %d failure(s), %d passed"
            (length failures) ran))
-  (when (< ran 60)
-    (error "nl-safe-standalone-smoke: only %d tests ran (expected >= 60)"
+  (when (< ran 95)
+    (error "nl-safe-standalone-smoke: only %d tests ran (expected >= 95)"
            ran))
   (princ (format "nl-safe-standalone-smoke: PASS (%d tests)\n" ran)))
 

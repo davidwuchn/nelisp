@@ -66,6 +66,63 @@ of dynamically caught violations were statically decidable) reads
 this log, so records deliberately keep the full context the call site
 has.
 
+* Phase 6 gate data collection
+
+=nl-safe-report.el= plus the repo-root =make alloc-check-collect=
+target are the wiring that feeds the Doc 168 Phase 6 gate ("start
+static checking only if > 50% of dynamically caught violations are
+statically decidable").  The flow:
+
+1. *Collect (nl-safe side)* — enable =nl-safe-log-violations= in dev
+   sessions, then dump the accumulated log to a file:
+
+   #+begin_src elisp
+   (require 'nl-safe-report)
+   (setq nl-safe-log-violations t)
+   ;; ... work; violations accumulate in nl-safe--violation-log ...
+   (nl-safe-report-dump "~/nl-safe-violations.log" t)  ; append + clear
+   #+end_src
+
+   One printable sexp per line, oldest first, append mode — safe to
+   dump into the same file across many sessions.  Each record gets a
+   =:static unknown= placeholder field.  =nl-safe-report-clear=
+   empties the in-process log without dumping.
+
+2. *Collect (allocator side)* — from the repo root:
+
+   #+begin_src sh
+   make alloc-check-collect NELISP_STANDALONE_TARGET=windows-x86_64
+   #+end_src
+
+   runs the checked-allocator workloads (the
+   =standalone-reader-checked= stress script, a heavier churn script,
+   and a full stdlib-prelude load) with =NELISP_ALLOC_CHECK=1= and
+   appends one =<UTC timestamp> <workload>
+   <(nelisp--alloc-check-report)>= line per workload to
+   =.alloc-check/reports.log=.  The directory is gitignored — the
+   data stays local, like =.anvil-worklog=.  A prebuilt
+   =target/nelisp[.exe]= is used as-is; nothing is rebuilt.
+
+3. *Classify* — a human edits the dump file, flipping each record's
+   =:static unknown= to =yes= (a static checker could have caught it)
+   or =no=.
+
+4. *Decide* — summarize and read the numbers:
+
+   #+begin_src elisp
+   (nl-safe-report-summarize-file "~/nl-safe-violations.log")
+   ;; => (:total N :by-kind ((borrow . …) …) :by-cell ((buf . …) …)
+   ;;     :static (:yes Y :no N :unknown U))
+   #+end_src
+
+   If yes / (yes + no) exceeds 50% (with unknowns driven down far
+   enough to trust the ratio), Phase 6 (=nl-check= static linearity
+   checking) is a go; otherwise it is dropped (Doc 168 section 5).
+
+All report functions run unchanged on host Emacs and on the
+standalone binary (file I/O dispatches between =write-region= /
+=insert-file-contents= and the standalone's =wrf= / =rdf= builtins).
+
 * Fat pointers
 
 #+begin_src elisp

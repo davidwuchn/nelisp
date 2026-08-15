@@ -23,6 +23,10 @@ target/
 /coverage/
 *.lcov
 
+# Checked-allocator collection data (Doc 168 Phase 6 gate; developer-local
+# like .anvil-worklog -- appended by `make alloc-check-collect`)
+/.alloc-check/
+
 # macOS / editors
 .DS_Store
 .idea/

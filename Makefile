@@ -8,6 +8,7 @@
         standalone-eval standalone-eval-clean standalone-eval-test standalone-eval-j \
         standalone-reader standalone-reader-test standalone-reader-load-smoke standalone-reader-checked standalone-reader-fmt-smoke standalone-reader-prelude-equal-reload-smoke standalone-reader-declare-strip-smoke standalone-reader-nested-backquote-macro-smoke standalone-reader-derived-mode-shape-smoke standalone-reader-pcase-quote-literal-smoke standalone-reader-catch-throw-tag-smoke standalone-reader-cond-let-shape-smoke standalone-reader-ffi-smoke standalone-reader-tls-smoke standalone-reader-process-smoke standalone-reader-realrt-smoke standalone-reader-repl-smoke standalone-reader-prelude-test standalone-reader-intern-soft-smoke standalone-reader-intern-soft-loop-smoke standalone-selfhost-test standalone-selfhost-mt-test standalone-parallel-compile-test standalone-chunk-growth-test \
         standalone-reader-mod-float-smoke standalone-reader-match-data-smoke standalone-reader-current-time-smoke \
+        alloc-check-collect \
         nelisp-performance-gate nelisp-nelix-command-gate nelisp-native-artifact-gate nelisp-nelix-native-hot-gate \
         nelisp-nelix-operational-gate \
         nelisp-runtime-image-cache-gate nelisp-source-command-substrate-gate
@@ -319,6 +320,67 @@ standalone-reader-checked: standalone-reader
 	  echo "[standalone-reader-checked] FAIL: $$rep"; \
 	  exit 1; \
 	fi
+
+# Doc 168 Phase 6 gate data collection (Doc 170 sections 3.3 / 5).  Runs
+# the checked-allocator workloads with NELISP_ALLOC_CHECK=1 and appends
+# one timestamped line per workload -- `<UTC-ISO8601> <workload>
+# <(nelisp--alloc-check-report)>` -- to .alloc-check/reports.log.  The
+# log is developer-local (gitignored, like .anvil-worklog): the Phase 6
+# go/no-go gate ("start static checking only if > 50% of dynamically
+# caught violations are statically decidable") is computed by a human
+# from this data plus the nl-safe violation dumps
+# (packages/nl-safe/src/nl-safe-report.el).  Workloads (alloc-site ids
+# stamped via debug-switch 21 for provenance):
+#   churn   (42) -- the standalone-reader-checked stress script
+#   heavy   (43) -- larger cons/string/vector churn across several
+#                   top-level form boundaries + explicit GCs
+#   prelude (44) -- full scripts/nelisp-stdlib-prelude.el load
+# A prebuilt target/nelisp[.exe] is used as-is (no rebuild); only when
+# no binary exists does the standalone-reader build run.
+#   make alloc-check-collect NELISP_STANDALONE_TARGET=windows-x86_64
+alloc-check-collect: $(if $(wildcard target/nelisp target/nelisp.exe),,standalone-reader)
+	@mkdir -p target .alloc-check
+	@printf '%s\n' \
+	  '(nelisp--debug-switch 21 42)' \
+	  '(let* ((i 0) (acc nil)) (while (< i 200) (setq acc (cons i acc)) (setq i (+ i 1))) 0)' \
+	  '(garbage-collect)' \
+	  '(nelisp--alloc-check-report)' \
+	  > target/alloc-check-collect-churn.el
+	@printf '%s\n' \
+	  '(nelisp--debug-switch 21 43)' \
+	  '(let* ((i 0) (acc nil)) (while (< i 5000) (setq acc (cons i acc)) (setq i (+ i 1))) 0)' \
+	  '(let* ((i 0) (acc nil)) (while (< i 5000) (setq acc (cons (make-string 64 65) acc)) (setq i (+ i 1))) 0)' \
+	  '(garbage-collect)' \
+	  '(let* ((i 0) (acc nil)) (while (< i 2000) (setq acc (cons (make-vector 16 i) acc)) (setq i (+ i 1))) 0)' \
+	  '(let* ((i 0) (acc nil)) (while (< i 5000) (setq acc (cons (cons i i) acc)) (setq i (+ i 1))) 0)' \
+	  '(garbage-collect)' \
+	  '(nelisp--alloc-check-report)' \
+	  > target/alloc-check-collect-heavy.el
+	@# NB: no explicit (garbage-collect) after the prelude load -- under
+	@# NELISP_ALLOC_CHECK=1 that combination dies silently (empty output,
+	@# exit 0; binary of 2026-08-15, defect to peel separately).  The
+	@# form-boundary GC already produces verified-free counts.
+	@printf '%s\n' \
+	  '(nelisp--debug-switch 21 44)' \
+	  '(load "scripts/nelisp-stdlib-prelude.el")' \
+	  '(nelisp--alloc-check-report)' \
+	  > target/alloc-check-collect-prelude.el
+	@bin=./target/nelisp; \
+	case "$(NELISP_STANDALONE_TARGET)$$NELISP_STANDALONE_TARGET" in \
+	  windows*) bin=./target/nelisp.exe;; \
+	esac; \
+	log=.alloc-check/reports.log; \
+	for w in churn heavy prelude; do \
+	  rep="$$(NELISP_ALLOC_CHECK=1 $$bin --load target/alloc-check-collect-$$w.el | tail -n 1)"; \
+	  ts="$$(date -u +%Y-%m-%dT%H:%M:%SZ)"; \
+	  case "$$rep" in \
+	    "("*) printf '%s %s %s\n' "$$ts" "$$w" "$$rep" >> "$$log"; \
+	          echo "[alloc-check-collect] $$w -> $$rep";; \
+	    *) echo "[alloc-check-collect] FAIL: workload $$w produced no report -> $$rep"; \
+	       exit 1;; \
+	  esac; \
+	done; \
+	echo "[alloc-check-collect] appended 3 report line(s) to $$log"
 
 # Doc 163 Phase C regression: `intern-soft' real soft-fail semantics.
 # The base reader image has no stdlib prelude auto-loaded (plain --load
