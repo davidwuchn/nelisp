@@ -198,3 +198,4 @@ Phase 1 を独立に出荷して一度手を止め、継続判断を行うこと
 | 2026-08-15 | CI: checked smoke は Windows レーン限定 (env probe 制約) | DONE |
 | 2026-08-15 | Phase 5 は blueprint (Doc 171) を先行起案             | DRAFT  |
 | 2026-08-15 | Phase 3 Stage 3 (nl-resource + nl-check) SHIPPED — ERT 60 | DONE |
+| 2026-08-15 | 欠陥#6 名前空間: 検査側の部分解 nl-ns SHIPPED — ERT 30 | DONE |

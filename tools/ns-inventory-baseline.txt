@@ -1,0 +1,8 @@
+# nl-ns namespace-boundary baseline (tools/nl-ns-inventory.el).
+# One "KIND COUNT" line per tracked finding kind.  Raise a number only
+# in the commit that introduces the finding; lower it whenever the
+# ratchet notice says you can.
+ns-collision 307
+ns-prefix-violation 808
+ns-private-escape 520
+ns-unreadable 0
