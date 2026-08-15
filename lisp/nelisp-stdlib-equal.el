@@ -98,6 +98,10 @@ On entry, A and B are arbitrary Sexp values.  Heap-shared variants
 re-entry returns t instead of recursing forever.  Atoms (integer /
 symbol / nil / t) bypass VISITED — `nelisp--ref-eq' handles them."
   (cond
+   ;; String must be checked before `nelisp--ref-eq': on the bare reader
+   ;; the eq path can report distinct strings as equal (Doc 22 A3).
+   ((and (stringp a) (stringp b))
+    (nelisp--equal-string a b))
    ;; Identity short-circuit (also covers atoms).
    ((nelisp--ref-eq a b) t)
    ;; Cons — recurse on car/cdr with visited registration.
@@ -143,14 +147,18 @@ sub-structure exactly once.  Cycle-safe: a self-referential cons
 or graph with shared back-edges returns a stable answer instead
 of looping.
 
+Doc 22 A3: strings must NOT take the `eq' short path first, because on
+the bare reader `eq' can return t for distinct string objects.  String
+comparison is therefore handled before the identity fast path.
+
 Doc 50 stage 5b — re-implementation in elisp on top of
 `nelisp--ref-eq' (= identity short-circuit / visited tag) and
 `make-hash-table' (= visited registry).  Shadows the prior Rust
 `bi_equal' dispatch arm via function-cell override at load."
   (cond
-   ((nelisp--ref-eq a b) t)
    ((and (stringp a) (stringp b))
     (nelisp--equal-string a b))
+   ((nelisp--ref-eq a b) t)
    ((or (stringp a) (stringp b)) nil)
    ((and (numberp a) (numberp b)) (= a b))
    ((or (not (nelisp--equal-heapish-p a))

@@ -89,6 +89,9 @@ trampoline is available."
 ;; Improper list (= non-nil non-cons tail) signals
 ;; `wrong-type-argument' to match the previous list_elements path.
 (defun copy-sequence (seq)
+  "Return a copy of SEQ.  Doc 22 A4: strings and vectors are copied into a
+FRESH buffer (the old `(t seq)' arm returned the same object, so a following
+`aset' mutated the original / a string literal)."
   (cond
    ((null seq) nil)
    ((consp seq)
@@ -99,6 +102,15 @@ trampoline is available."
       (when cur
         (signal 'wrong-type-argument (list 'list seq)))
       (nreverse acc)))
+   ((stringp seq) (concat seq))
+   ((vectorp seq)
+    (let* ((n (length seq))
+           (copy (make-vector n nil))
+           (i 0))
+      (while (< i n)
+        (aset copy i (aref seq i))
+        (setq i (1+ i)))
+      copy))
    (t seq)))
 
 ;; Rust-min batch 6h (2026-05-06): `message' migrated from Rust to
@@ -225,10 +237,39 @@ call time, so it is safe for FN to mutate TABLE during the walk
 ;;
 ;; NOTE: must come before the batch-6e `(defalias 'print 'princ)' so
 ;; the eager symbol-resolution in `bi_defalias' sees the elisp def.
-(defun princ (object)
-  (let ((s (if (stringp object) object (prin1-to-string object))))
-    (nelisp--write-stdout-bytes s)
-    object))
+(defvar standard-output nil
+  "Output stream for `princ'/`prin1'/`print'/`terpri' (Doc 22 A9).")
+
+(defun nelisp--emit-to-stream (str stream)
+  "Send STR to STREAM.
+Function streams receive one character at a time; buffer streams are
+best-effort when the relevant buffer functions are present; all other
+streams fall back to stdout."
+  (cond
+   ((functionp stream)
+    (let ((i 0)
+          (n (length str)))
+      (while (< i n)
+        (funcall stream (aref str i))
+        (setq i (1+ i)))))
+   ((and (fboundp 'bufferp)
+         (bufferp stream)
+         (fboundp 'with-current-buffer)
+         (fboundp 'insert))
+    (with-current-buffer stream
+      (insert str)))
+   (t
+    (nelisp--write-stdout-bytes str))))
+
+(defun princ (object &optional stream)
+  "Print OBJECT with no quoting to STREAM or `standard-output' (Doc 22 A9)."
+  (let ((s (or stream standard-output)))
+    (if (or (null s) (eq s t))
+        (nelisp--write-stdout-bytes (nelisp--prn-to-string object nil))
+      (nelisp--emit-to-stream
+       (if (stringp object) object (nelisp--prn-to-string object nil))
+       s)))
+  object)
 
 ;; Rust-min batch 7b (2026-05-07, Doc 50 stage 2 first slice): file
 ;; existence / type predicates migrated from Rust to elisp on top of a

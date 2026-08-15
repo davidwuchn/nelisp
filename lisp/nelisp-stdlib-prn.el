@@ -216,19 +216,20 @@ escaping; everything else identical."
 Strings, symbols and characters are escaped so the result reads back."
   (nelisp--prn-to-string object t))
 
-(defun terpri (&optional _stream)
-  "Write a newline character to STREAM.
-STREAM defaults to stdout; non-nil values that are not functions
-signal `error' (= MVP scope: only stdout / function streams supported,
-matching the Rust princ sliver)."
-  (nelisp--write-stdout-bytes "\n")
-  nil)
+(defun terpri (&optional stream)
+  "Output a newline to STREAM or `standard-output' (Doc 22 A9)."
+  (let ((s (or stream standard-output)))
+    (if (or (null s) (eq s t))
+        (nelisp--write-stdout-bytes "\n")
+      (nelisp--emit-to-stream "\n" s)))
+  t)
 
-(defun prin1 (object &optional _stream)
-  "Output the printed representation of OBJECT to STREAM.
-STREAM defaults to stdout.  Like `prin1-to-string' but also writes
-the result to the stream and returns OBJECT."
-  (nelisp--write-stdout-bytes (nelisp--prn-to-string object t))
+(defun prin1 (object &optional stream)
+  "Print OBJECT in read syntax to STREAM or `standard-output' (Doc 22 A9)."
+  (let ((s (or stream standard-output)))
+    (if (or (null s) (eq s t))
+        (nelisp--write-stdout-bytes (nelisp--prn-to-string object t))
+      (nelisp--emit-to-stream (nelisp--prn-to-string object t) s)))
   object)
 
 (provide 'nelisp-stdlib-prn)

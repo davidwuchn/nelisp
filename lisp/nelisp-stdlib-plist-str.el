@@ -249,10 +249,11 @@ identity; else signal `wrong-type-argument'."
    (t (signal 'wrong-type-argument (list 'numberp arg)))))
 
 (defun format (template &rest args)
-  "Format TEMPLATE with ARGS.  Supports %s/%S/%c/%%/%d/%i/%x/%X/%o/
-%b/%f/%F/%e/%E/%g/%G with flags `-+ 0#', optional WIDTH and
-.PRECISION.  Pure-elisp dispatcher; only IEEE-754 float→string
-goes through `nelisp--format-float-body' (Rust)."
+  "Format TEMPLATE with ARGS honoring %[flags][width][.prec]conv (Doc 22 A7).
+Width, left-justify (-), zero-pad (0), sign (+/space) and string precision
+(.N) are applied in elisp.  Supports %s/%S/%c/%%/%d/%i/%x/%X/%o/%b/%f/%F/
+%e/%E/%g/%G; only IEEE-754 float conversion goes through
+`nelisp--format-float-body' (Rust)."
   (let ((i 0)
         (n (length template))
         (out nil)
@@ -321,6 +322,9 @@ goes through `nelisp--format-float-body' (Rust)."
                   (let* ((arg (nth arg-i args))
                          (b (prin1-to-string arg)))
                     (setq arg-i (1+ arg-i))
+                    (when precision
+                      (setq b (substring b 0 (if (< precision (length b))
+                                                 precision (length b)))))
                     (setq out (cons (nelisp--format-pad b width left-align zero-pad) out))))
                  ((or (eq conv ?d) (eq conv ?i))
                   (let* ((arg (nth arg-i args))
@@ -386,19 +390,34 @@ goes through `nelisp--format-float-body' (Rust)."
 ;; migrations.  Vector substring stays in Rust because the elisp
 ;; path here is string-only by design (= scope-matched to the
 ;; previous `bi_substring' which only accepted strings).
-(defun substring (str from &optional to)
-  (let* ((len (length str))
-         (from (if (< from 0) (+ len from) from))
-         (to (cond ((null to) len)
-                   ((< to 0) (+ len to))
-                   (t to))))
-    (when (or (< from 0) (< to from) (> to len))
-      (error "Args out of range"))
-    (let ((chars nil) (i to))
-      (while (> i from)
-        (setq i (1- i))
-        (setq chars (cons (aref str i) chars)))
-      (concat chars))))
+(defun substring (seq from &optional to)
+  "Return the SEQ slice [FROM, TO); vector support added (Doc 22 A5)."
+  (if (vectorp seq)
+      (let* ((len (length seq))
+             (from (if (< from 0) (+ len from) from))
+             (to (cond ((null to) len)
+                       ((< to 0) (+ len to))
+                       (t to))))
+        (when (or (< from 0) (< to from) (> to len))
+          (error "Args out of range"))
+        (let ((out (make-vector (- to from) nil))
+              (i 0))
+          (while (< (+ from i) to)
+            (aset out i (aref seq (+ from i)))
+            (setq i (1+ i)))
+          out))
+    (let* ((len (length seq))
+           (from (if (< from 0) (+ len from) from))
+           (to (cond ((null to) len)
+                     ((< to 0) (+ len to))
+                     (t to))))
+      (when (or (< from 0) (< to from) (> to len))
+        (error "Args out of range"))
+      (let ((chars nil) (i to))
+        (while (> i from)
+          (setq i (1- i))
+          (setq chars (cons (aref seq i) chars)))
+        (concat chars)))))
 
 ;; Rust-min (2026-05-06): compare-strings as elisp.  Emacs primitive
 ;; signature: (compare-strings STR1 START1 END1 STR2 START2 END2
