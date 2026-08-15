@@ -181,13 +181,17 @@ clean:
 # `make standalone-eval' recompiles just that unit + relinks.
 # Force one unit:  emacs ... --eval '(nelisp-standalone-rebuild-one "eq-symbol.o")'
 # Parametrize the embedded form: NELISP_FORM_OP={+,-,*} NELISP_FORM_A=N NELISP_FORM_B=M.
+# Standalone gates run a binary for the native host by default.  Override this
+# with NELISP_STANDALONE_TARGET to build a different target; its run gate will
+# report SKIP when that target is not executable on the host.
+STANDALONE_GATE_TARGET ?= $(or $(NELISP_STANDALONE_TARGET),$(if $(filter Windows_NT,$(OS)),windows-x86_64,linux-x86_64))
 standalone-eval:
-	$(EMACS) --batch -Q -L lisp -L src -L scripts \
+	NELISP_STANDALONE_TARGET=$(STANDALONE_GATE_TARGET) $(EMACS) --batch -Q -L lisp -L src -L scripts \
 	  --eval '(setq load-prefer-newer t)' \
 	  -l nelisp-standalone-build -f nelisp-standalone-build
 
 standalone-eval-test:
-	$(EMACS) --batch -Q -L lisp -L src -L scripts \
+	NELISP_STANDALONE_TARGET=$(STANDALONE_GATE_TARGET) $(EMACS) --batch -Q -L lisp -L src -L scripts \
 	  --eval '(setq load-prefer-newer t)' \
 	  -l nelisp-standalone-build -f nelisp-standalone-test
 
@@ -213,7 +217,7 @@ standalone-eval-clean:
 #   make standalone-reader-test   # build, run, assert exit == eval(NELISP_SRC)
 # Embedded source via NELISP_SRC (default "(+ 40 2)" -> 42; + - * only for now).
 standalone-reader:
-	$(EMACS) --batch -Q -L lisp -L src -L scripts \
+	NELISP_STANDALONE_TARGET=$(STANDALONE_GATE_TARGET) $(EMACS) --batch -Q -L lisp -L src -L scripts \
 	  --eval '(setq load-prefer-newer t)' \
 	  -l nelisp-standalone-build -f nelisp-standalone-build-reader
 
@@ -723,7 +727,17 @@ standalone-reader-mod-float-smoke: standalone-reader
 	@printf '%s\n' \
 	  '(list (= (mod 5.5 2) 1.5) (= (mod -5.5 2) 0.5) (= (mod 5.5 -2) -0.5) (= (mod -5.5 -2) -1.5) (= (mod 5 2.0) 1.0) (= (mod -5 2.0) 1.0) (= (mod 5 -2.0) -1.0) (= (mod -5 -2.0) -1.0) (= (mod 5.5 2.5) 0.5) (= (mod -5.5 2.5) 2.0) (= (mod 5.5 -2.5) -2.0) (= (mod -5.5 -2.5) -0.5) (= (mod 7 -3) -2) (= (mod -7 3) 2) (= (mod 7 3) 1) (= (mod -7 -3) -1) (= (mod 10 3) 1) (floatp (mod 5.5 0.0)) (floatp (mod 5.0 0)) (eq (condition-case nil (progn (mod 5 0) (quote no-error)) (error (quote caught-error))) (quote caught-error)) (= (+ 1.5 2.5) 4.0) (= (- 1.5 0.5) 1.0) (= (* 2.0 3.0) 6.0) (= (float 3) 3.0) (= (/ 1.0 3.0) 0.3333333333333333) (= (/ 10.0 2.0) 5.0))' \
 	  > target/standalone-reader-mod-float-smoke.el
-	@out="$$(./target/nelisp --load target/standalone-reader-mod-float-smoke.el)"; \
+	@out="$$(NELISP_STANDALONE_TARGET=$(STANDALONE_GATE_TARGET) $(EMACS) --batch -Q -L lisp -L src -L scripts \
+	  -l nelisp-standalone-build \
+	  --eval '(if (nelisp-standalone--target-runnable-on-host-p) (princ (nelisp-standalone--output-path t)) (kill-emacs 77))')"; \
+	rc=$$?; \
+	if [ $$rc -eq 77 ]; then \
+	  echo "[standalone-reader-mod-float-smoke] SKIP: target $(STANDALONE_GATE_TARGET) cannot run on this host"; \
+	  exit 0; \
+	elif [ $$rc -ne 0 ]; then \
+	  exit $$rc; \
+	fi; \
+	out="$$($$out --load target/standalone-reader-mod-float-smoke.el)"; \
 	if [ "$$out" = "(t t t t t t t t t t t t t t t t t t t t t t t t t t)" ]; then \
 	  echo "[standalone-reader-mod-float-smoke] PASS: -> $$out"; \
 	else \
@@ -935,7 +949,7 @@ standalone-reader-repl-smoke:
 #   cat scripts/nelisp-stdlib-prelude.el yourfile.el > /tmp/prog.el
 #   target/nelisp /tmp/prog.el   # exit = last form's value
 standalone-reader-prelude-test:
-	$(EMACS) --batch -Q -L lisp -L src -L scripts \
+	NELISP_STANDALONE_TARGET=$(STANDALONE_GATE_TARGET) $(EMACS) --batch -Q -L lisp -L src -L scripts \
 	  --eval '(setq load-prefer-newer t)' \
 	  -l nelisp-standalone-build -f nelisp-standalone-reader-prelude-test
 

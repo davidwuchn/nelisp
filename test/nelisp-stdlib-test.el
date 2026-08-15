@@ -436,20 +436,27 @@ and NeLisp-only defuns see (KEY VALUE) — not the raw host callee."
 
 (ert-deftest nelisp-stdlib-printer-avoids-reverse-list-buffer ()
   "`prin1-to-string' printer helpers should not allocate reversed parts lists."
-  (let* ((symbols '(nelisp--prn-string-escaped
-                    nelisp--prn-symbol-escaped
-                    nelisp--prn-symbol-char-needs-escape-p
-                    nelisp--prn-chunks-add
-                    nelisp--prn-chunks-string
-                    nelisp--prn-float
-                    nelisp--prn-reader-macro-abbrev
-                    nelisp--prn-list-body
-                    nelisp--prn-vector
-                    nelisp--prn-record
-                    nelisp--prn-to-string
-                    prin1-to-string
-                    prin1
-                    terpri))
+  (let* ((printer-forms
+          (with-temp-buffer
+            (insert-file-contents
+             (expand-file-name "lisp/nelisp-stdlib-prn.el"
+                               default-directory))
+            (goto-char (point-min))
+            (let ((done nil)
+                  forms)
+              (while (not done)
+                (condition-case nil
+                    (let ((form (read (current-buffer))))
+                      (when (and (consp form)
+                                 (eq (car form) 'defun)
+                                 (string-prefix-p "nelisp--prn-"
+                                                  (symbol-name (cadr form))))
+                        (push form forms)))
+                  (end-of-file
+                   (setq done t))))
+              (nreverse forms))))
+         (symbols (append (mapcar #'cadr printer-forms)
+                          '(prin1-to-string prin1 terpri)))
          (saved (mapcar (lambda (sym)
                           (cons sym
                                 (and (fboundp sym)
@@ -460,32 +467,8 @@ and NeLisp-only defuns see (KEY VALUE) — not the raw host callee."
          got)
     (unwind-protect
         (progn
-          (with-temp-buffer
-            (insert-file-contents
-             (expand-file-name "lisp/nelisp-stdlib-prn.el"
-                               default-directory))
-            (goto-char (point-min))
-            (let ((done nil))
-              (while (not done)
-                (condition-case nil
-                    (let ((form (read (current-buffer))))
-                      (when (and (consp form)
-                                 (eq (car form) 'defun)
-                                 (memq (cadr form)
-                                       '(nelisp--prn-string-escaped
-                                         nelisp--prn-symbol-escaped
-                                         nelisp--prn-symbol-char-needs-escape-p
-                                         nelisp--prn-chunks-add
-                                         nelisp--prn-chunks-string
-                                         nelisp--prn-float
-                                         nelisp--prn-reader-macro-abbrev
-                                         nelisp--prn-list-body
-                                         nelisp--prn-vector
-                                         nelisp--prn-record
-                                         nelisp--prn-to-string)))
-                        (eval form t)))
-                  (end-of-file
-                   (setq done t))))))
+          (dolist (form printer-forms)
+            (eval form t))
           (cl-letf (((symbol-function 'nreverse)
                      (lambda (&rest args)
                        (setq nreverse-calls (1+ nreverse-calls))

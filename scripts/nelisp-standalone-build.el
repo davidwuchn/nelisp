@@ -311,6 +311,22 @@ diagnosing the full source command path.")
     ('macos-aarch64 (if reader-p nelisp-standalone--reader-out nelisp-standalone--out))
     (_ (if reader-p nelisp-standalone--reader-out nelisp-standalone--out))))
 
+(defun nelisp-standalone--target-runnable-on-host-p (&optional target)
+  "Return non-nil when TARGET can run on this Emacs host."
+  (let ((target (or target nelisp-standalone--target))
+        (configuration (or system-configuration "")))
+    (pcase target
+      ('linux-x86_64
+       (and (eq system-type 'gnu/linux)
+            (string-match-p "x86_64\\|amd64" configuration)))
+      ('windows-x86_64
+       (and (eq system-type 'windows-nt)
+            (string-match-p "x86_64\\|amd64" configuration)))
+      ('macos-aarch64
+       (and (eq system-type 'darwin)
+            (string-match-p "aarch64\\|arm64" configuration)))
+      (_ nil))))
+
 (defun nelisp-standalone--dep-files ()
   "Toolchain source files; any newer than a cache entry forces recompile."
   (delq nil (cons nelisp-standalone--this-file
@@ -11030,16 +11046,21 @@ units)."
 ;;;###autoload
 (defun nelisp-standalone-test ()
   "Build then run the standalone binary; assert exit == expected.  Exits 0/1."
-  (let ((out (nelisp-standalone-build)))
-  (pcase-let ((`(,_op ,_a ,_b ,expected) (nelisp-standalone--form-params)))
-    (let ((code (call-process out nil nil nil)))
-      (if (= code expected)
-          (progn (message "[standalone] PASS: %s -> exit %d (expected %d)"
-                          out code expected)
-                 (kill-emacs 0))
-        (message "[standalone] FAIL: %s -> exit %d (expected %d)"
-                 out code expected)
-        (kill-emacs 1))))))
+  (if (not (nelisp-standalone--target-runnable-on-host-p))
+      (progn
+        (message "[standalone] SKIP: target %S cannot run on host %S"
+                 nelisp-standalone--target system-configuration)
+        (kill-emacs 0))
+    (let ((out (nelisp-standalone-build)))
+      (pcase-let ((`(,_op ,_a ,_b ,expected) (nelisp-standalone--form-params)))
+        (let ((code (call-process out nil nil nil)))
+          (if (= code expected)
+              (progn (message "[standalone] PASS: %s -> exit %d (expected %d)"
+                              out code expected)
+                     (kill-emacs 0))
+            (message "[standalone] FAIL: %s -> exit %d (expected %d)"
+                     out code expected)
+            (kill-emacs 1)))))))
 
 ;; ===================================================================
 ;; READER PATH (Doc 137 M1) — text -> AOT reader -> eval, ZERO Rust.
@@ -16307,29 +16328,34 @@ loader when it is absent."
 ;;;###autoload
 (defun nelisp-standalone-reader-test ()
   "Build the reader binary, run it, assert exit == eval(NELISP_SRC).  Exits 0/1."
-  (let* ((out (nelisp-standalone-build-reader))
-         (code (call-process out nil nil nil "--embedded"))
-        (expected (nelisp-standalone--reader-expected)))
-    (if (= code expected)
-        (condition-case err
-            (progn
-              (nelisp-standalone--reader-hash-table-literal-smoke)
-              (nelisp-standalone--reader-large-quoted-alist-mutation-smoke)
-              (nelisp-standalone--reader-setcar-setcdr-type-smoke)
-              (nelisp-standalone--reader-runtime-image-smoke)
-              (nelisp-standalone--reader-cli-smoke)
-              (nelisp-standalone--reader-neln-selftest-smoke)
-              (nelisp-standalone--reader-repl-smoke)
-              (message "[standalone-reader] PASS: %S -> exit %d (expected %d)"
-                       (nelisp-standalone--reader-src) code expected)
-              (kill-emacs 0))
-          (error
-           (message "[standalone-reader] FAIL: command smoke: %s"
-                    (error-message-string err))
-           (kill-emacs 1)))
-      (message "[standalone-reader] FAIL: %S -> exit %d (expected %d)"
-               (nelisp-standalone--reader-src) code expected)
-      (kill-emacs 1))))
+  (if (not (nelisp-standalone--target-runnable-on-host-p))
+      (progn
+        (message "[standalone-reader] SKIP: target %S cannot run on host %S"
+                 nelisp-standalone--target system-configuration)
+        (kill-emacs 0))
+    (let* ((out (nelisp-standalone-build-reader))
+           (code (call-process out nil nil nil "--embedded"))
+           (expected (nelisp-standalone--reader-expected)))
+      (if (= code expected)
+          (condition-case err
+              (let ((nelisp-standalone--reader-out out))
+                (nelisp-standalone--reader-hash-table-literal-smoke)
+                (nelisp-standalone--reader-large-quoted-alist-mutation-smoke)
+                (nelisp-standalone--reader-setcar-setcdr-type-smoke)
+                (nelisp-standalone--reader-runtime-image-smoke)
+                (nelisp-standalone--reader-cli-smoke)
+                (nelisp-standalone--reader-neln-selftest-smoke)
+                (nelisp-standalone--reader-repl-smoke)
+                (message "[standalone-reader] PASS: %S -> exit %d (expected %d)"
+                         (nelisp-standalone--reader-src) code expected)
+                (kill-emacs 0))
+            (error
+             (message "[standalone-reader] FAIL: command smoke: %s"
+                      (error-message-string err))
+             (kill-emacs 1)))
+        (message "[standalone-reader] FAIL: %S -> exit %d (expected %d)"
+                 (nelisp-standalone--reader-src) code expected)
+        (kill-emacs 1)))))
 
 ;;;###autoload
 (defun nelisp-standalone-reader-repl-test ()
@@ -16820,25 +16846,30 @@ all combine so a single wrong primitive shifts the result off 42."
 binary's exit code == 42.  This proves the prelude LOADS AS-IS on standalone
 NeLisp and the Wave-1 (B) breadth primitives back the stdlib (cond/dolist/nth/
 plist-get/backquote).  Exits 0/1."
-  (nelisp-standalone-build-reader)
-  (let* ((tmp (make-temp-file "nelisp-prelude-breadth-" nil ".el"))
-         (expected 42))
-    (unwind-protect
-        (progn
-          (with-temp-file tmp
-            (insert-file-contents nelisp-standalone--prelude-file)
-            (goto-char (point-max))
-            (insert "\n" (nelisp-standalone--prelude-breadth-test-src)))
-          (let ((code (call-process nelisp-standalone--reader-out nil nil nil tmp)))
-            (if (= code expected)
-                (progn
-                  (message "[standalone-reader-prelude] PASS: prelude + breadth -> exit %d (expected %d)"
-                           code expected)
-                  (kill-emacs 0))
-              (message "[standalone-reader-prelude] FAIL: prelude + breadth -> exit %d (expected %d)"
-                       code expected)
-              (kill-emacs 1))))
-      (when (file-exists-p tmp) (delete-file tmp)))))
+  (if (not (nelisp-standalone--target-runnable-on-host-p))
+      (progn
+        (message "[standalone-reader-prelude] SKIP: target %S cannot run on host %S"
+                 nelisp-standalone--target system-configuration)
+        (kill-emacs 0))
+    (let* ((out (nelisp-standalone-build-reader))
+           (tmp (make-temp-file "nelisp-prelude-breadth-" nil ".el"))
+           (expected 42))
+      (unwind-protect
+          (progn
+            (with-temp-file tmp
+              (insert-file-contents nelisp-standalone--prelude-file)
+              (goto-char (point-max))
+              (insert "\n" (nelisp-standalone--prelude-breadth-test-src)))
+            (let ((code (call-process out nil nil nil tmp)))
+              (if (= code expected)
+                  (progn
+                    (message "[standalone-reader-prelude] PASS: prelude + breadth -> exit %d (expected %d)"
+                             code expected)
+                    (kill-emacs 0))
+                (message "[standalone-reader-prelude] FAIL: prelude + breadth -> exit %d (expected %d)"
+                         code expected)
+                (kill-emacs 1))))
+        (when (file-exists-p tmp) (delete-file tmp))))))
 
 (provide 'nelisp-standalone-build)
 
