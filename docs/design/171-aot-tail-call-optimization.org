@@ -1,0 +1,447 @@
+#+TITLE: Doc 171 — AOT 末尾呼び出し最適化 (透過 TCO) 設計ブループリント
+#+AUTHOR: zawatton
+#+DATE: 2026-08-15
+#+STARTUP: overview
+#+OPTIONS: toc:2 num:t
+
+* ステータス
+
+| 項目     | 値                                                    |
+|----------+-------------------------------------------------------|
+| Doc 番号 | 171                                                   |
+| 状態     | DRAFT（設計のみ、実装なし）                           |
+| 親       | Doc 168 §5 Phase 5（L2: 末尾呼び出し最適化）          |
+| 兄弟     | Doc 169 §5（L1 =nl-loop= / =nl-recur=、出荷済）       |
+| 対象     | =lisp/nelisp-aot-compiler.el=（フロントエンド pass）  |
+| 関連     | Doc 129（user .el AOT）, Doc 137（自己ホスト・rec_max）, Doc 140/145-150（arena/GC）, Doc 142（native-exec） |
+
+* 1. 目的と位置づけ
+
+Doc 168 §5 Phase 5 のマンデート:
+
+#+begin_quote
+Phase 5 — L2: 末尾呼び出し最適化。AOT コンパイラへのパス追加。
+NeLisp の最大の差別化要素。Emacs 意味論を変えない
+（スタックが伸びなくなるだけ）ため互換性リスクなし。
+#+end_quote
+
+Doc 169 §5.2 は L1 版（=nl-loop= / =nl-recur=、出荷済:
+=packages/nl-prelude/src/nl-prelude.el= L555-666）が明示構文を要求する
+のに対し、本 L2 版は **既存の =defun= に透過的に働く** ことを本命と定
+めた。本ドキュメントはその AOT パスの設計を確定する。実装は含まない。
+
+一言で: **自己末尾再帰の =defun= を、コンパイラフロントエンドの
+source-to-source 書き換えでループに変換する。** ネイティブフレームが
+再帰深さに比例して伸びなくなり、深さ 1e6 の自己再帰が定数スタックで
+完走する。意味論は現行 AOT の直接呼び出し規約（§4 で詳述）を一切変え
+ない。
+
+* 2. 現状の実測（コンパイラの呼び出し lowering の実態）
+
+設計判断の前提となる、現行コードの実測事実。
+
+** 2.1 同一ユニット内の名前付き呼び出しは既に「直接 call」
+
+=lisp/nelisp-aot-compiler.el= L9687-9763: 呼び出し頭部シンボルが
+=defuns=（コンパイル単位内で収集された defun シグネチャ alist、
+=--collect-defuns= L10413）に =assq= で見つかる場合、=call= IR ノード
+（=:name= 付き直接呼び出し）に lower される。**実行時の関数セル参照は
+一切発生しない。** 引数不足の =&optional= は raw 0 で pad される
+（L9761）。
+
+** 2.2 ユニット外呼び出しは PLT reloc（これも早期束縛）
+
+L9764-9779（Doc 129.7AS）: =nelisp-aot-compiler--allow-external-user-calls=
+（L222、=nelisp-standalone--compile-to-unit=
+=scripts/nelisp-standalone-build.el= L818 が t に束縛）配下では、未知
+の名前付き呼び出しは =extern-call= IR + PLT relocation に落ち、リンク
+時に解決される。これも遅延束縛ではない。
+
+** 2.3 遅延束縛が生きているのは interpreter / wrapper 層のみ
+
+=lisp/nelisp-artifact.el= L1065-1077
+（=nelisp-artifact--install-function=）: 関数セルは
+=(gethash 'SYM nelisp--functions)= を **呼び出し毎に** 引くブリッジで
+あり、native wrapper の差し替えが =fset= なしで見える。つまり Emacs
+的な「毎呼び出しで関数セルを引く」意味論は interpreter 経路にだけ残っ
+ており、AOT ネイティブ経路は既にユニット内早期束縛で出荷済である。
+
+** 2.4 再帰深さの現行制限
+
+- interpreter 経路: =rec_cur= / =rec_max= ガード（ctx+96 / ctx+104、
+  =scripts/nelisp-standalone-build.el= L3215-3218）。既定 2000。
+- AOT ネイティブ経路: ガードなし、ネイティブ C スタックに直接依存
+  （Doc 137「Recursion depth — rec_max 2000 / native C stack; no
+  TCO」）。深い自己再帰は SIGSEGV。
+
+本パスが解決するのは 2.4 の AOT ネイティブ側である。interpreter 側の
+rec_max は本 Doc のスコープ外（§10 非目標）。
+
+* 3. スコープの階段 (scope ladder)
+
+** 3.1 (a) 自己末尾再帰 → ループ変換 — 第 1 出荷単位
+
+=(defun f ...)= 本体の末尾位置にある =(f ...)= 呼び出しをループ
+back-edge に変換する。対象は §2.1 の「同一ユニット直接 call」に既に
+lower される呼び出しのうち、頭部シンボルが **囲んでいる defun 自身**
+のもののみ。第 1 出荷はこれだけに絞る（Doc 168 §3.1 のスコープ規律）。
+
+** 3.2 (b) 相互再帰 — 見送り（トランポリンは L1 で既定路線）
+
+選択肢の比較:
+
+| 案                         | 機構                                                         | コスト | 判定 |
+|----------------------------+--------------------------------------------------------------+--------+------|
+| SCC 統合ループ             | 相互再帰する defun 群を 1 関数+状態変数に融合                | 各 defun が個別の exported label であり続ける必要（unit link / =.neln= metadata / cross-object PLT の対象）と衝突。フレーム形状（arity・=:rt-slot-count=・hidden boundary 17 slots, Doc 142）が defun 毎に異なる | 却下 |
+| sibling-jmp（=call=→=jmp=） | 末尾の兄弟呼び出しをフレーム再構築+jmp に置換                | per-arch emitter 改造（x86_64 sysv/win64・aarch64・wasm32）、二パス byte 不変量の再検証、prologue スキップの整合 | 却下（第1出荷では） |
+| トランポリン               | =nl-trampoline=（Doc 169 §5.1 で L1 として計画済）           | L1 マクロのみ、AOT 改造ゼロ                                  | *採用* |
+
+*推奨: 相互再帰は本 Doc の対象外とし、L1 =nl-trampoline= に委ねる。*
+理由: (1) 深い相互末尾再帰は実コーパス（compiler.el 等）で頻度が低く、
+Doc 168 §3.1 の「L2 着手は L1 出荷後の実使用データを見てから」の規律
+に従うべき対象そのもの。(2) 上表の通り AOT 側実装はフレーム形状差の
+処理が本質的で、自己再帰の 10 倍のコストがかかる。(3) トランポリンは
+明示構文だが、相互再帰の「関数境界を保ったまま」という要求と透過変換
+は原理的に相性が悪い（関数単位の置換が観測可能になる）。
+
+** 3.3 (c) 任意関数への一般末尾呼び出し — 対象外（理由つき）
+
+一般 TCO（Scheme 的 proper tail calls）は以下の理由で対象外とする:
+
+1. *ABI 変更になる。* funcall dispatcher
+   （=nelisp_aot_builtin_call1/calln=、Doc 142）・PLT 経由の
+   extern-call・builtin bridge はすべて通常の C 呼び出し規約で
+   スタックフレームを積む。呼び出し先 arity が不明な一般末尾呼び出し
+   でフレームを再利用するには calling convention ごと変える必要があ
+   り、Doc 168 §3.1 の L3（処理系全体・撤回コスト高）に相当する。
+2. *意味論的に証明不能。* 呼び出し先が advice / =fset= で差し替わり
+   うる以上、「末尾呼び出し先のフレーム需要」を静的に確定できない。
+3. *ゲートを壊す。* 全 call site の emit が変わるため、
+   「pass 無効時 byte-identical」（§9）の検証面が全コードに拡大する。
+
+必要になった場合は Doc 90 (ideas-backlog) 送りとし、本 Doc の決定事項
+としては作らない。
+
+* 4. 意味論の核心 — 関数セルと透過 TCO（本設計の成否を分ける決定）
+
+** 4.1 問題の定式化
+
+Emacs では =(f ...)= は **毎呼び出しで** シンボル =f= の関数セルを引
+く。再帰の途中で =fset= / advice が =f= を差し替えれば、次の再帰呼び
+出しから新定義が走る。素朴な self-TCO（ループ先頭へ jmp）はこの参照
+を消すため、*Emacs 意味論に対しては* 挙動を変える。
+
+** 4.2 しかし NeLisp AOT の基線は既に早期束縛である（§2.1 実測）
+
+現行の出荷済コンパイラは、同一ユニット内の =(f ...)= を既に直接
+=call= 命令に lower している（L9687）。つまり「再帰中の =fset= が次
+呼び出しに反映される」挙動は、**TCO 以前に AOT ネイティブ経路には存
+在しない。** ユニット外からの呼び出し・interpreter からの呼び出しは
+=nelisp--functions= ブリッジ（§2.3）経由で引き続き新定義を見る。こ
+の非対称は Doc 129.7AS 以来の AOT 契約であり、既存 3604 テストと
+非侵襲性ゲート（Doc 168 §6）の下で出荷されている。
+
+** 4.3 選択肢の比較
+
+| 案 | 内容 | 意味論 | 実行時コスト | 実装コスト | 判定 |
+|----+------+--------+--------------+------------+------|
+| A  | *直接 call 継承ゲート*: 呼び出しが §2.1 の同一ユニット直接 call arm に lower され、かつ =:name= が囲む defun 自身である場合のみ変換 | 現行 AOT と **完全に同一**（早期束縛→早期束縛）。デルタゼロ | ゼロ | 小（判定は =assq (car sexp) defuns= + =eq name self= の再利用） | *採用* |
+| B  | 関数セル同一性ガード: ループ back-edge の直前に「=f= のセルが自分のままか」を実行時チェックし、違えば実 call にフォールバック | 現行 AOT より *強い*（= 基線が持たない遅延束縛を TCO 経路にだけ導入し、非 TCO 直接 call と挙動が食い違う） | 毎イテレーションで load+cmp + 新規 runtime bridge シンボル | 中〜大（native 側に「自己の識別子」を持つ仕組みが現存しない） | 却下（v1） |
+| C  | =nl-strict= / whitelist 限定: 宣言したユニットのみ変換 | 安全だが「既存 defun に透過」というマンデート（Doc 169 §5.2）に反する | ゼロ | 小 | 却下（既定としては） |
+
+** 4.4 決定（提案）
+
+*案 A を採用する。* 根拠:
+
+1. 変換の適用条件を「既に早期束縛で emit されている call site」に限
+   定すれば、TCO は意味論を 1 ビットも動かさない。=fset= /advice の
+   可視性は変換前後で同一（どちらも不可視）。よって「Emacs 意味論を
+   変えない（スタックが伸びなくなるだけ）」という Doc 168 §5 の主張
+   は、*現行 AOT 契約を基準として* 厳密に成立する。
+2. 案 B のガードは一見安全側だが、実際には「TCO された呼び出しだけ
+   遅延束縛」という新しい非一様性を持ち込み、基線より意味論が複雑に
+   なる。ガードが検知に使う関数セル自体、ネイティブコードは参照して
+   いない（§2.3）。
+3. 撤回コスト: 案 A はフラグ 1 個で no-op 化でき（§9 G2）、pass 関数
+   群の削除も局所的（Doc 168 §3.1 の L2 想定通り「中」）。
+
+*付帯条項（将来互換）*: もし将来 Doc 90 系の作業で AOT の名前付き呼
+び出しが遅延束縛化（毎呼び出しセル参照）された場合、本パスの適用条件
+は自動的に偽になる（直接 call arm が消えるため）。その時点で案 B の
+ガード（back-edge 前のセル同一性チェック + 実 call フォールバック）
+を再評価する。この将来分岐に備え、変換可否判定は単一の述語
+=nelisp-aot-compiler--tco-self-call-p=（新設）に集約し、call lowering
+の分岐（L9687）と同じ条件式を共有する実装とすること。
+
+*エスケープハッチ*: defun 単位の opt-out を用意する。案:
+=(declare (nelisp-no-tco))= を defun 本体先頭で認識し、その defun を
+変換対象から外す（=--defun-runtime-body-forms= L3068 が declare を既
+に剥がしている位置に判定を差す）。透過最適化には必ず個別脱出口を付け
+る。
+
+* 5. 末尾位置の定義（lowering される special form ごと）
+
+変換パスが「ここにある自己呼び出しは末尾である」と認定する規則。判定
+は保守的側に倒す: *下表にない form の内部はすべて非末尾*（最適化を逃
+すだけで、誤変換にはならない）。L1 =nl--loop-walk=
+（=packages/nl-prelude/src/nl-prelude.el= L581-644）と同じ構造だが、
+対象は preprocess 後の AOT source dialect である。
+
+| form                          | 末尾位置                     | 非末尾                | 根拠 (file:line)                              |
+|-------------------------------+------------------------------+-----------------------+-----------------------------------------------|
+| =(if T A B)=                  | A, B                         | T                     | parse L8020-8036 / preprocess L3654           |
+| =(cond (C B...)...)=          | 各節の最終 body form         | 各 C                  | preprocess で if 連鎖に脱糖 L3106/L3681       |
+| =(progn/seq F1..Fn)=          | Fn                           | F1..Fn-1              | preprocess L3583/L3591、parse L8106           |
+| =(let BINDINGS BODY)= 全 lexical | BODY 最終 form            | 各初期化式            | L3627 / parse-multi-let L1206                 |
+| =(let/let*)= に special 変数を含む | *なし*（BODY も非末尾）  | 全部                  | §6 参照。L6777 / L5198-5219                   |
+| =(let* ...)=                  | 脱糖後の nested let に従う   | —                     | =--preprocess-let*-bindings= L3082            |
+| =(and F1..Fn)= / =(or F1..Fn)= | Fn                          | F1..Fn-1              | L3694-3703、L1 版と同判定                     |
+| =(while T BODY...)=           | *なし*（ループは 0 を返す）  | 全部                  | parse L8038-8055                              |
+| =(catch TAG BODY...)=         | *なし*（handler pop が BODY 後に走る） | 全部        | =--parse-aot-catch-normal-exit= L6874, 分岐 L8297 |
+| =(condition-case V B H...)=   | *なし*（v1。B は handler 生存中なので非末尾。H 側は pop 後だが v1 では保守的に非末尾） | 全部 | =--parse-aot-condition-case-normal-exit= L7039, 分岐 L8307 |
+| =(unwind-protect B C...)=     | *なし*（B の後に cleanup、C の後に保存値 return。**B は末尾位置ではない**） | 全部 | =--parse-aot-unwind-protect-normal-exit= L7449, 分岐 L8317 |
+| =setq= の値式                 | なし                         | 全部                  | L7802                                         |
+| 関数引数位置                  | なし（=(g (f ...))= は非末尾）| 全部                 | 定義                                          |
+
+明示の注意点:
+
+- *=unwind-protect= の BODY は末尾位置ではない。* cleanup 実行後に保
+  存済 BODY 値を返す lowering（Doc 129.8G）であり、BODY 中の自己呼び
+  出しをループ化すると cleanup が再帰 1 回分しか走らなくなる。絶対に
+  変換しない。
+- *=condition-case= の bodyform も末尾位置ではない。* handler がスタッ
+  クに積まれたまま BODY が走る（handler-push → BODY → handler-pop、
+  Doc 129.8F）。ループ化すると handler の push/pop が不均衡になる。
+  handler 節側（pop 後に実行される）は理論上は末尾化可能だが、v1 では
+  節内も非末尾扱いとし、拡張候補として §10 に記録する。
+- =cond= の網羅: preprocess が =cond= を if 連鎖へ、=let*= を nested
+  let へ、static =and=/=or= を刈り込む（§8.2 の pass 順序参照）ため、
+  walker が直接扱う form 種は少なくて済む。
+
+* 6. 動的束縛（special variables）との相互作用
+
+** 6.1 現行 lowering の事実
+
+special 変数を含む source =let= は
+=nelisp_aot_push_special= / =nelisp_aot_pop_special= ブリッジ
+（L5198/L5219、Doc 129.4C）で囲まれ、BODY の値を temp slot に保存し
+てから pop して返す（=--parse-aot-special-let-mixed-normal-exit=
+L6777-6800 ほか §1.C.4-C.7 系）。つまり *special let の BODY は
+lowering の構造上すでに末尾位置ではない。*
+
+** 6.2 帰結: 意味論は自動的に保存される
+
+再帰経路上に defvar の再束縛（special let）がある場合、その内側の自
+己呼び出しは §5 の表により変換されない。これは正しい: Emacs でも
+special 束縛を挟んだ「末尾」再帰は specpdl を再帰毎に積む（真の末尾
+呼び出しではない）ため、定数スタック化してはならない。**per-iteration
+の bind→unwind 意味論は「special let 内は非末尾」という規則 1 本で
+無傷に保たれ、追加機構は不要。**
+
+帰結として、本パスの定数スタック保証は「再帰経路上に special 再束縛・
+handler・cleanup を持たない defun」にのみ与えられる。README / doc
+にこの限定を明記する（Doc 168 §3.4 の健全性範囲明示の原則）。
+
+* 7. GC / arena モデルとの相互作用
+
+** 7.1 root scope はループの外側に置く（既存機構がそのまま合う）
+
+alloc を含む defun 本体は =--maybe-wrap-aot-root-scope=（L1087-1140）
+が =nelisp_aot_push_roots= / =nelisp_aot_pop_roots=（L1129/L1136、
+Doc 129.5E-K）で包む。§8 の source 書き換えは parse より前に走るため、
+root scope は *書き換え後のループ全体* を 1 回だけ包む形に自然に落ち
+る。root vector が指すのは param spill slot / let-rt slot 自身
+（=[rbp - 8*(slot+1)]=、Doc 142 invariants）であり、ループが同じ
+slot に新値を再代入しても root の指す先は不変。よって push/pop の均
+衡・root の有効性ともに追加作業ゼロで保たれる。
+
+** 7.2 スタックは定数化するが、arena 圧は別問題
+
+ループ変換が消すのは「再帰 1 段 = ネイティブフレーム 1 個」の線形成
+長のみ。イテレーション毎の boxed 値割り付けは従来どおり arena に載る。
+1e6 回の割り付けを伴うループの生存性は Doc 140（flat chunked arena）
+/ Doc 145-146（low-memory transient arena / value rep）/ Doc 150
+（intra-form scratch recycling）の既存機構に依存する。TCO はこれらを
+変更しない。受け入れテスト（§9 G3）は、スタック定数性の検証には
+非 alloc 本体（int アキュムレータ）を、arena 挙動の確認には alloc
+を含む変種を、分けて用意する。
+
+** 7.3 temp slot のエイリアシング（設計上の要検証事項）
+
+Doc 142 の hidden boundary 規約では builtin の結果は caller-owned
+=out= slot に書かれ「そのポインタを current boxed value として再利用」
+する。並列代入用 temp（§8.3）を =let= 束縛として表現する本設計では、
+temp の実体は既存 let lowering の slot 規約をそのまま継承する。
+=(let ((x (car l)) (y (cdr l))) ...)= が現行出荷コードで正しい以上、
+継承は安全という設計仮定を置くが、**「自己呼び出しの複数引数がすべて
+builtin 結果」のケースを G1 の回帰テストに必ず含め**、out-slot 経由の
+エイリアスが temp 間で起きないことを実測で固定する。
+
+* 8. パス設計
+
+** 8.1 方式の選定: source-to-source 書き換え（案 S）を採用
+
+| 案 | 機構 | 長所 | 短所 | 判定 |
+|----+------+------+------+------|
+| S  | preprocess 段の source 書き換え（=while= + =setq= へ変換） | emitter 改造ゼロ。x86_64 sysv/win64・aarch64・wasm32 の 3 arch に自動対応（=while= IR L8038 と =setq-local= IR L7802-7835 は全 arch で出荷済。wasm は =nelisp-asm-wasm-op-loop= L221）。二パス byte 不変量に触れない。flag off で恒等 pass = byte 同一が自明 | ループ形状は =while= の emit 品質に依存（ただし §8.5 の通り実測上等価） | *採用* |
+| E  | IR/emit 段（=self-tail-jump= IR 新設、prologue 直後 label へ jmp。=--object-defun-body-offset= L233-259 が body-entry offset を既にモデル化） | 命令レベルで最短 | per-arch emitter 4 系統 + byte 不変量 + root scope / =--rsp-temp-depth= (L178) との手動整合。撤回コスト増 | 却下（将来のマイクロ最適化候補として §10 に記録） |
+
+案 S の決め手: register allocator を持たない現行バックエンドでは、
+param 参照は毎回 spill slot（=[rbp - 8*(slot+1)]=）のロードであり
+（=--emit-defun= L16339 の GP class rationale）、案 E の「引数を書き
+戻して jmp」と案 S の「=setq-local= で書き戻して =while= back-edge」
+は同じメモリ操作列に落ちる。性能差が原理的に出ないため、安い方を採る。
+
+** 8.2 配置とフラグ
+
+- 新規 defvar: =nelisp-aot-compiler-tco-enabled=（既定 *nil*）。
+  Doc 168 §3.2「ビルドフラグで no-op 化」原則に従い、nil のとき pass
+  関数は一切呼ばれない（=when= ガード 1 個）。
+- フック位置: =--preprocess-source= の =defun= arm（L3613-3621）。
+  =--defun-runtime-body-forms=（L3068）で declare 除去済みの本体に対
+  し、preprocess 済み body を得た *後* に TCO 書き換えを適用する。
+  これにより walker は §5 の表の通り =cond=→=if=、=let*=→nested
+  =let=、static =and=/=or= 刈り込み後の正規形だけを見ればよい。
+- ビルド配線: =nelisp-standalone--compile-to-unit=
+  （=scripts/nelisp-standalone-build.el= L802-825）の dynvar 束縛列
+  （L815-819）に =nelisp-aot-compiler-tco-enabled= を追加し、
+  Makefile 変数（例 =NELISP_TCO=1=）から制御する。
+
+** 8.3 書き換え仕様
+
+適用条件（すべて満たす defun のみ。1 つでも欠ければ無変換）:
+
+1. 本体の末尾位置（§5）に自己呼び出し =(NAME ...)= が 1 個以上ある
+2. その呼び出しが §2.1 の同一ユニット直接 call arm で lower される
+   （=--tco-self-call-p= 述語、§4.4）
+3. params が全て GP class（=setq-local= arm の =:class gp= 制約
+   L7810-7813。f64 param defun は v1 対象外）
+4. =&rest= を持たない（rest 自己呼び出しは毎回 list 構築が要り、
+   =nelisp_aot_listn= 経由の別 lowering L9707-9747 になるため v1 対象外。
+   =&optional= は可: 省略引数は現行 call と同じく raw 0 を代入 L9761）
+5. コンパイル単位内に同名 defun が 2 個以上ない（保守的 skip）
+6. =(declare (nelisp-no-tco))= がない（§4.4）
+
+変換形（source dialect。gensym は =--gensym= L510 を使用）:
+
+#+begin_src elisp
+;; 変換前
+(defun NAME (P1 .. Pk) BODY)
+
+;; 変換後
+(defun NAME (P1 .. Pk)
+  (let ((cont# 1) (ret# 0))
+    (while (= cont# 1)
+      (seq (setq cont# 0)
+           (setq ret# BODY')))
+    ret#))
+#+end_src
+
+BODY' は BODY の末尾位置の各 =(NAME E1 .. En)= を次に置換したもの:
+
+#+begin_src elisp
+(let ((t1# E1) .. (tn# En))          ; 並列代入: 全引数を先に評価
+  (seq (setq P1 t1# .. Pn tn#)      ; その後で param slot へ書き戻し
+       (setq cont# 1)
+       0))                           ; ループ値はダミー（ret# は次周で上書き）
+#+end_src
+
+- 並列代入の temp 挟みは L1 =nl-recur= の展開（nl-prelude.el
+  L590-610）と同一の規律。=(f b a)= 型の swap 再帰を壊さないため必須。
+- =&optional= の省略位置は =0= を代入（直接 call の pad 規約 L9761 と
+  同値に揃える）。
+- 非末尾位置の自己呼び出しは *そのまま残す*（通常の直接 call として
+  再帰する）。=fact= のような非末尾再帰は変換対象外のまま動き続ける。
+
+** 8.4 変換しないものの扱い
+
+- 適用条件を満たさない defun: 完全に無変換（IR も byte も不変）。
+- 末尾・非末尾が混在する defun: 末尾のものだけループ化し、非末尾は
+  call のまま。混在時もループ外形は 1 個で足りる。
+- lambda / closure（=--lambda-lift-call= L2601 系で lift されるもの）:
+  v1 対象外。lift 後の名前は自己参照にならないため自然に除外される。
+
+** 8.5 性能の見立て
+
+変換後の形は L1 =nl-loop= の展開結果（=while= + temp let + =setq=）
+と同型であり、lowering 経路（=while= IR + =setq-local= IR）も同一。
+したがって *nl-loop と同等性能が構成的に期待でき*、§9 G4 のベンチは
+それを実測で固定するゲートである。非 TCO の再帰 call 対比では、call/
+ret とフレーム設営が消える分だけ改善方向。
+
+* 9. 受け入れゲート
+
+Doc 168 §6 の品質ゲート様式に従う。
+
+| # | ゲート | 条件 |
+|---+--------+------|
+| G1 | 既存テスト不変 | =make test=（Makefile L53）unexpected 0。既存 3604 件（Doc 168 §6 基準数）に変更なし。新規 =test/nelisp-aot-tco-test.el= を追加（walker 単体・変換等価性・swap 再帰・=&optional= pad・§7.3 エイリアス回帰・opt-out declare・§5 の各非末尾 form で無変換、を含む） |
+| G2 | flag off で byte-identical | =nelisp-aot-compiler-tco-enabled= nil のビルド成果物が pass 追加前 commit と =cmp= 一致（Doc 168 §3.2 no-op 原則。実務手順は既存の byte-identity 検証慣行に従う） |
+| G3 | 深い再帰 | 自己末尾再帰 1e6 回（int アキュムレータ、非 alloc）が standalone =target/nelisp= 上で定数スタックで完走し正値を返す。同形を flag off でビルドした場合の失敗（スタック起因）も確認して差分を証明する。alloc を含む 1e6 回変種は arena 挙動確認として別テスト（§7.2） |
+| G4 | ベンチ | 同一アルゴリズム（sum/gcd 系）の TCO 済 defun が =nl-loop= 手書き版の 0.95x 以上。=bench/nelisp-bench.el= に追加し、=nelisp-performance-gate=（Makefile L232）の対象へ |
+| G5 | 非侵襲性 | flag off が既定である限り自明。flag on 既定化（Phase 5.3）の際に G1-G4 を再走 |
+| G6 | CI 配線 | G1 は =make test= に自動包含。G2 用の =tco-noop-identity= 相当の Makefile target を追加し、G3 smoke を standalone smoke 群（=standalone-eval-test= 系）に追加。elisp 変更は byte-compile warning ゼロ（既存 =make compile= ゲート L158） |
+
+* 10. フェーズ分割・工数・非目標
+
+** 10.1 フェーズ
+
+| Phase | 内容 | 見積 LOC | 撤回コスト |
+|-------+------+----------+------------|
+| 5.0 | 本ブループリント（この Doc） | — | — |
+| 5.1 | 変換 pass 本体: =--tco-self-call-p= 述語 + 末尾 walker + 書き換え + opt-out declare。flag 既定 off | pass ~250-350 (elisp, =nelisp-aot-compiler.el= 内) + ERT ~300-400 | 低（flag off = no-op、関数群削除で完全撤回） |
+| 5.2 | ビルド配線 + ゲート: =compile-to-unit= 束縛、Makefile flag、G2 identity target、G3 smoke、G4 bench | ~100-150 | 低 |
+| 5.3 | 既定 on 化 + Doc 169 §5.2 / README 更新。G1-G5 再走を gate に | ~20-50 | 低（既定値 1 行） |
+| 5.4 | （データ待ち・着手ゲート付き）=&rest= 自己呼び出し、condition-case handler 節の末尾化、f64 param 対応 | 各 ~100-200 | 中 |
+
+Rust LOC 増加はゼロ（全 phase が elisp のみ。Doc 137 invariants の
+「Rust LOC must never increase」に抵触する要素なし）。
+
+** 10.2 何を作らないか（非目標）
+
+- *相互再帰の AOT 変換*（§3.2。=nl-trampoline= L1 に委譲）
+- *一般末尾呼び出し*（§3.3。Doc 90 送り）
+- *interpreter 経路の TCO*: =rec_max= ガード（§2.4)はそのまま。
+  eval core の while 化は別議論
+- *bytecode VM への TCO*: byte-compile 系は STUB であり本 Doc の対象外
+- *案 B の関数セルガード*（§4.3。AOT が遅延束縛化した将来にのみ再評価）
+- *案 E の jmp レベル最適化*（§8.1。ベンチで =while= 形状が劣ると実測
+  された場合のみ Doc 90 経由で再提案）
+- *emitter / asm / linker / runtime bridge の変更一切*（本パスは
+  フロントエンド preprocess のみに閉じる）
+
+* 11. リスクと対策
+
+| リスク | 影響 | 対策 |
+|--------+------+------|
+| 末尾判定の誤り（非末尾を末尾扱い） | 誤コンパイル（高） | 表 §5 を許可リスト方式で実装（未知 form = 非末尾）。L1 =nl--loop-walk= と同構造の走査を ERT で form 種別ごとに固定 |
+| temp slot エイリアス（§7.3） | silent 誤値（高） | G1 に専用回帰テスト。設計仮定が崩れたら =nl_sexp_clone_into= 挟みを追加 |
+| 透過変換が想定外 defun に当たる | 挙動退行 | flag 既定 off で 5.1-5.2 を bake。opt-out declare。適用時に compile log へ 1 行記録（監査可能性） |
+| byte-identity ゲート違反 | CI red | pass off 時は書き換え関数を呼ばない構造（=when= ガード 1 個）で構成的に保証 |
+| wasm32 での =while= back-edge 未検証 | arch 退行 | G3 smoke を wasm ターゲット（=make wasm-smoke= 系）でも走らせて確認 |
+
+* 12. 未決事項（ユーザー確認待ち）
+
+1. *既定 on 化のタイミング*（Phase 5.3）: G1-G5 green 直後に flip する
+   か、1 リリース bake するか。
+2. *§7.3 のエイリアス規律*: 既存 let lowering の temp slot 独立性を
+   設計仮定として引き継いだ。実装冒頭で probe テストを書いて仮定を実
+   証してから本体に着手する段取りで良いか。
+3. *=&rest= / f64 param 対応の優先度*（Phase 5.4）: 実コーパスで必要
+   になるまで凍結で良いか。
+4. *opt-out 構文*: =(declare (nelisp-no-tco))= 案で良いか、file-local
+   変数方式が良いか。
+5. *wasm32 を v1 の受け入れ対象に含めるか*: 含める場合 G3 の wasm
+   smoke が gate に入る（工数 +α）。
+
+* 13. 決定事項ログ
+
+| 日付       | 決定                                                         | 状態  |
+|------------+--------------------------------------------------------------+-------|
+| 2026-08-15 | 第 1 出荷 = 自己末尾再帰のみ（§3.1）                         | DRAFT |
+| 2026-08-15 | 相互再帰は nl-trampoline (L1) に委譲、AOT 変換は作らない     | DRAFT |
+| 2026-08-15 | 一般末尾呼び出しは対象外（Doc 90 送り）                      | DRAFT |
+| 2026-08-15 | 関数セル問題は案 A（直接 call 継承ゲート）で解決（§4.4）     | DRAFT |
+| 2026-08-15 | 実装方式は案 S（preprocess 段 source 書き換え）（§8.1）      | DRAFT |
+| 2026-08-15 | special let / catch / condition-case / unwind-protect 内は非末尾（§5-6） | DRAFT |
+| 2026-08-15 | flag =nelisp-aot-compiler-tco-enabled= 既定 nil、G2 byte-identity を gate に | DRAFT |
