@@ -290,6 +290,12 @@ Under strict mode an `nl-match' over unregistered variants is an
 expansion error instead of falling back to an unchecked dispatch."
   `(eval-and-compile (setq nl--strict ,flag)))
 
+(defun nl-strict-p ()
+  "Return non-nil when strict expansion-time checking is in effect.
+Public read API for the flag set by the `nl-strict' macro; sibling
+packages' macros should call this instead of touching `nl--strict'."
+  nl--strict)
+
 ;;;; Warnings ---------------------------------------------------------
 
 (defun nl--warn (format-string &rest args)
