@@ -246,6 +246,7 @@
 ;;; Polling timer lifecycle -------------------------------------------
 
 (ert-deftest nelisp-filenotify-start-stop-polling-roundtrip ()
+  (skip-unless (fboundp 'alloc-bytes))
   (nelisp-filenotify-test--fresh
     (should-not (nelisp-filenotify-polling-active-p))
     (nelisp-filenotify-start-polling 60.0) ; long interval — no fire
@@ -255,6 +256,7 @@
 
 (ert-deftest nelisp-filenotify-start-polling-twice-replaces-timer ()
   "Calling start a second time must not leak the first timer."
+  (skip-unless (fboundp 'alloc-bytes))
   (nelisp-filenotify-test--fresh
     (nelisp-filenotify-start-polling 60.0)
     (let ((first (symbol-value 'nelisp-filenotify--poll-timer)))

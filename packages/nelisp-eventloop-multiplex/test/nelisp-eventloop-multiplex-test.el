@@ -312,6 +312,7 @@ list cannot grow mid-walk."
      (should (equal (func-arity pf) '(0 . 0))))))
 
 (ert-deftest nelisp-eventloop-multiplex-pull-fn-emits-event-on-ready ()
+  (skip-unless (fboundp 'alloc-bytes))
   "pull-fn returns a `nelisp-event' of kind `fd-data' when bytes wait."
   (nelisp-eventloop-multiplex-test--fresh
    (let* ((proc (nelisp-eventloop-multiplex-test--make-cat))

@@ -13,6 +13,7 @@
 
 (ert-deftest nelisp-text-buffer-make-empty ()
   "An empty `make-text-buffer' has length 0 and cursor at 0."
+  (skip-unless (fboundp 'string-byte))
   (let ((tb (make-text-buffer)))
     (should (nelisp-text-buffer-p tb))
     (should (= 0 (text-buffer-length tb)))
@@ -23,6 +24,7 @@
 
 (ert-deftest nelisp-text-buffer-make-from-string ()
   "Initial-content is reflected in length / byte-length / substring."
+  (skip-unless (fboundp 'string-byte))
   (let ((tb (make-text-buffer "hello")))
     (should (= 5 (text-buffer-length tb)))
     (should (= 5 (text-buffer-byte-length tb)))
@@ -34,6 +36,7 @@
 
 (ert-deftest nelisp-text-buffer-insert-at-cursor ()
   "Inserting at the end advances the cursor to the new end."
+  (skip-unless (fboundp 'string-byte))
   (let ((tb (make-text-buffer "abc")))
     (text-buffer-set-cursor tb 3)
     (text-buffer-insert tb "XYZ")
@@ -43,6 +46,7 @@
 
 (ert-deftest nelisp-text-buffer-insert-multiple-times ()
   "Repeated inserts at varying positions preserve content integrity."
+  (skip-unless (fboundp 'string-byte))
   (let ((tb (make-text-buffer "Hello")))
     (text-buffer-set-cursor tb 5)
     (text-buffer-insert tb ", World")
@@ -60,6 +64,7 @@
 
 (ert-deftest nelisp-text-buffer-delete-range ()
   "Deleting [start, end) shrinks length and removes the right content."
+  (skip-unless (fboundp 'string-byte))
   (let ((tb (make-text-buffer "abcdefghij")))
     (text-buffer-delete tb 3 7)
     (should (= 6 (text-buffer-length tb)))
@@ -71,6 +76,7 @@
 
 (ert-deftest nelisp-text-buffer-set-cursor-and-substring ()
   "Cursor moves, substring extracts arbitrary ranges, no mutation."
+  (skip-unless (fboundp 'string-byte))
   (let ((tb (make-text-buffer "0123456789")))
     (text-buffer-set-cursor tb 4)
     (should (= 4 (text-buffer-cursor tb)))
@@ -85,6 +91,7 @@
 
 (ert-deftest nelisp-text-buffer-search-literal-found ()
   "Literal pattern hits return the 0-indexed char position."
+  (skip-unless (fboundp 'string-byte))
   (let ((tb (make-text-buffer "the quick brown fox jumps over the lazy dog")))
     (should (= 4 (text-buffer-search tb "quick")))
     (should (= 16 (text-buffer-search tb "fox")))
@@ -97,6 +104,7 @@
 
 (ert-deftest nelisp-text-buffer-search-not-found ()
   "Missing patterns return nil; search past last possible start = nil."
+  (skip-unless (fboundp 'string-byte))
   (let ((tb (make-text-buffer "hello world")))
     (should (null (text-buffer-search tb "xyz")))
     (should (null (text-buffer-search tb "world" 7)))
@@ -106,6 +114,7 @@
 
 (ert-deftest nelisp-text-buffer-multibyte-japanese-text ()
   "UTF-8 round-trip: あいう = 3 chars / 9 bytes; insert/delete preserve."
+  (skip-unless (fboundp 'string-byte))
   (let ((tb (make-text-buffer "あいう")))
     (should (text-buffer-multibyte-p tb))
     (should (= 3 (text-buffer-length tb)))
@@ -137,6 +146,7 @@
 This is a *correctness* stress, not a perf gate: we maintain a parallel
 `expected' Lisp string and assert that `text-buffer-substring' tracks it
 exactly across 200 random operations on a multi-hundred-KB buffer."
+  (skip-unless (fboundp 'string-byte))
   (let* ((seed-len 200000)
          (chars (make-string seed-len ?a))
          (tb (make-text-buffer chars))

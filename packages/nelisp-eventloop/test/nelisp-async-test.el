@@ -14,6 +14,7 @@
      ,@body))
 
 (ert-deftest nelisp-async-one-shot-fires ()
+  (skip-unless (fboundp 'alloc-bytes))
   (nelisp-async-test--fresh
     (let ((fired nil))
       (run-at-time 0.02 nil (lambda () (setq fired t)))
@@ -21,6 +22,7 @@
       (should fired))))
 
 (ert-deftest nelisp-async-one-shot-timing ()
+  (skip-unless (fboundp 'alloc-bytes))
   (nelisp-async-test--fresh
     (let ((at nil) (t0 (float-time)))
       (run-at-time 0.1 nil (lambda () (setq at (float-time))))
@@ -38,6 +40,7 @@
       (should-not fired))))
 
 (ert-deftest nelisp-async-repeat-rearms ()
+  (skip-unless (fboundp 'alloc-bytes))
   (nelisp-async-test--fresh
     (let ((n 0) (tm nil))
       (setq tm (run-at-time 0.01 0.01
@@ -46,6 +49,7 @@
       (should (= n 3)))))
 
 (ert-deftest nelisp-async-deadline-order ()
+  (skip-unless (fboundp 'alloc-bytes))
   ;; Three timers armed out of order fire in deadline order.
   (nelisp-async-test--fresh
     (let ((log nil))
@@ -56,6 +60,7 @@
       (should (equal '(a b c) (nreverse log))))))
 
 (ert-deftest nelisp-async-sit-for-services-timers ()
+  (skip-unless (fboundp 'alloc-bytes))
   ;; `sit-for' must fire a due timer while it waits (Emacs semantics).
   (nelisp-async-test--fresh
     (let ((fired nil))
@@ -64,6 +69,7 @@
       (should fired))))
 
 (ert-deftest nelisp-async-run-stops-on-main-quit ()
+  (skip-unless (fboundp 'alloc-bytes))
   ;; A timer sends a quit; the driver returns the actor's terminal status.
   (nelisp-async-test--fresh
     (setq nelisp-eventloop--bindings (make-hash-table :test 'equal))
@@ -73,6 +79,7 @@
       (should (eq (nelisp-async-run main) :dead)))))
 
 (ert-deftest nelisp-async-timer-routes-event-to-actor ()
+  (skip-unless (fboundp 'alloc-bytes))
   ;; End-to-end: scheduled timer -> event -> main actor dispatch -> command.
   (nelisp-async-test--fresh
     (setq nelisp-eventloop--bindings (make-hash-table :test 'equal))

@@ -315,6 +315,7 @@
 
 (ert-deftest nelisp-worker-health-timer-start-returns-timer ()
   "With a positive interval the start registers a live timer."
+  (skip-unless (fboundp 'alloc-bytes))
   (nelisp-worker-test--with-pool p
     (let ((t0 (nelisp-worker-health-timer-start p 0.5)))
       (should (timerp t0))
@@ -341,6 +342,7 @@
       (should (eq t2 (nelisp-worker-health-timer-active-p p))))))
 
 (ert-deftest nelisp-worker-pool-create-auto-starts-timer ()
+  (skip-unless (fboundp 'alloc-bytes))
   "Default interval > 0 auto-starts the periodic scan on create."
   (let* ((nelisp-worker-health-check-interval 0.5)
          (p (nelisp-worker-pool-create
@@ -370,6 +372,7 @@
 
 (ert-deftest nelisp-worker-pool-kill-cancels-timer ()
   "Tearing the pool down also unregisters the scan timer."
+  (skip-unless (fboundp 'alloc-bytes))
   (let* ((nelisp-worker-health-check-interval 0.5)
          (p (nelisp-worker-pool-create
              'hk :read-size 1 :write-size 1 :batch-size 1)))
@@ -492,6 +495,7 @@ warmup expression's side effects (a defvar on the child)."
 
 (ert-deftest nelisp-worker-warmup-deferred-timer-fires ()
   "With a positive delay, the warmup lands via `run-at-time'."
+  (skip-unless (fboundp 'alloc-bytes))
   (let* ((nelisp-worker-batch-warmup-expressions
           '((defvar nelisp-worker-test-deferred-val 777)))
          (nelisp-worker-batch-warmup-delay 0.1)

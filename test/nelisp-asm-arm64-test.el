@@ -494,24 +494,26 @@
                  (nelisp-asm-arm64-test--word #x9AC02BBD))))
 
 (ert-deftest nelisp-asm-arm64-b-cond-eq-placeholder-and-fixup ()
-  ;; B.eq foo emits the base word with imm19 = 0 and records a b19 fixup.
+  ;; Long-safe B.eq foo emits B.ne .+8 followed by a b26 fixup to foo.
   (let ((b (nelisp-asm-arm64-make-buffer)))
     (nelisp-asm-arm64-b-cond b 'eq 'foo)
     (should (equal (nelisp-asm-arm64-buffer-bytes b)
-                   (nelisp-asm-arm64-test--word #x54000000)))
+                   (concat (nelisp-asm-arm64-test--word #x54000041)
+                           (nelisp-asm-arm64-test--word #x14000000))))
     (should (equal (nelisp-asm-arm64-buffer-fixups b)
-                   '((0 foo b19))))))
+                   '((4 foo b26))))))
 
 (ert-deftest nelisp-asm-arm64-b-cond-lt-after-nop-placeholder-and-fixup ()
-  ;; B.lt foo at slot 4 keeps imm19 clear in the placeholder and records b19.
+  ;; B.lt foo at slot 4 emits B.ge .+8 and a b26 fixup at slot 8.
   (let ((b (nelisp-asm-arm64-make-buffer)))
     (nelisp-asm-arm64-nop b)
     (nelisp-asm-arm64-b-cond b 'lt 'foo)
     (should (equal (nelisp-asm-arm64-buffer-bytes b)
                    (concat (nelisp-asm-arm64-test--word #xD503201F)
-                           (nelisp-asm-arm64-test--word #x5400000B))))
+                           (nelisp-asm-arm64-test--word #x5400004A)
+                           (nelisp-asm-arm64-test--word #x14000000))))
     (should (equal (nelisp-asm-arm64-buffer-fixups b)
-                   '((4 foo b19))))))
+                   '((8 foo b26))))))
 
 (ert-deftest nelisp-asm-arm64-str-pre-sp-16-x0 ()
   ;; STR x0, [sp, #-16]! = 0xF81F0FE0 | 0 = 0xF81F0FE0

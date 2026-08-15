@@ -643,6 +643,7 @@ resolvable and completes without error returning nil."
 timer and immediately cancel it via host `cancel-timer' (called
 from ERT, not NeLisp) to avoid leaking a real timer into the test
 suite."
+  (skip-unless (fboundp 'alloc-bytes))
   (let ((timer (nelisp-eval
                 '(run-at-time 3600 nil (lambda () (ignore))))))
     (should (timerp timer))

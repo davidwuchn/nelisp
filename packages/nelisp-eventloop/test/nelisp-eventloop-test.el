@@ -178,6 +178,7 @@
      (should (memq (nelisp-actor-status main) '(:dead :done))))))
 
 (ert-deftest nelisp-eventloop-schedule-timer-routes-to-target ()
+  (skip-unless (fboundp 'alloc-bytes))
   (nelisp-eventloop-test--fresh
    (let ((seen nil))
      (nelisp-eventloop-bind "timer" (lambda (_ev) 'noop))  ; unused
