@@ -36,6 +36,9 @@ jobs:
       - name: Byte-compile
         shell: bash
         run: make compile
+      - name: "Unsafe-surface inventory (Doc 170 sec 4.3 baseline gate)"
+        shell: bash
+        run: make unsafe-inventory
 
       # Placed before the ERT suite so a pre-existing test failure does
       # not skip the Mach-O toolchain-acceptance signal.

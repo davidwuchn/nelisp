@@ -1,4 +1,4 @@
-.PHONY: test test-fast test-parallel test-one wasm-smoke wasm-runtime-image-smoke wasm-dtw-skeleton-smoke wasm-dtw-transpile wasm-dtw-compile wasm-dtw-smoke wasm-dtw-site wasm-dtw-site-smoke compile clean all bench gc-bench actor-bench soak soak-1h soak-full soak-worker \
+.PHONY: unsafe-inventory test test-fast test-parallel test-one wasm-smoke wasm-runtime-image-smoke wasm-dtw-skeleton-smoke wasm-dtw-transpile wasm-dtw-compile wasm-dtw-smoke wasm-dtw-site wasm-dtw-site-smoke compile clean all bench gc-bench actor-bench soak soak-1h soak-full soak-worker \
         sqlite-module sqlite-module-clean \
         release-artifact release-checksum soak-blocker soak-post-ship \
         bench-actual bench-allocator bench-allocator-heavy \
@@ -220,6 +220,15 @@ standalone-reader:
 # fboundp-liar audit: every name in the reader's builtin fboundp list must
 # have a dispatch arm (or be combiner-handled), so `fboundp' never lies the
 # way `nelisp--syscall-readdir' did (2026-06-10).
+# Doc 170 sec 4.3: unsafe-surface inventory.  Counts nl-check
+# `unsafe-call' findings (unsafe primitives outside `nl-unsafe';
+# quoted AOT-grammar data is not scanned) across lisp/ and scripts/,
+# and fails when the total exceeds tools/unsafe-inventory-baseline.txt.
+# Shrinking the surface?  Lower the baseline in the same commit.
+unsafe-inventory:
+	$(EMACS) --batch -Q -L packages/nl-prelude/src -L packages/nl-safe/src \
+	  -L packages/nl-check/src -l tools/nl-check-inventory.el
+
 reader-surface-audit:
 	$(EMACS) --batch -Q -L lisp -L src -L scripts \
 	  --eval '(setq load-prefer-newer t)' \

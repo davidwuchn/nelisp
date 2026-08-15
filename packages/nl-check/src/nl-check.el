@@ -82,6 +82,18 @@ deliberate discard in `ignore' to silence it, the way Rust uses
 Passing a tracked resource to anything else is treated as a move and
 reported as `resource-untracked'.")
 
+(defun nl-check--proper-list (tail)
+  "Return the proper-list prefix of TAIL (drops a dotted terminator).
+Real source files contain dotted forms (alist literals in macro
+positions and the like); iterating them with `dolist' signals
+wrong-type-argument, so every walk over user form tails goes through
+this."
+  (let ((out nil))
+    (while (consp tail)
+      (push (car tail) out)
+      (setq tail (cdr tail)))
+    (nreverse out)))
+
 (defun nl-check--quoted-p (form)
   "Return non-nil when FORM is a quoted constant the walker must skip."
   (and (consp form) (memq (car form) '(quote function))
@@ -137,7 +149,7 @@ STATEMENT-P is non-nil when FORM's value is discarded."
     (cond
      ;; Binding inits are value positions; the body is a sequence.
      ((memq head '(let let*))
-      (dolist (binding (car (cdr form)))
+      (dolist (binding (nl-check--proper-list (car (cdr form))))
         (when (consp binding)
           (setq findings (nl-check--must-use-seq (cdr binding) findings))))
       (nl-check--must-use-seq body findings))
@@ -147,7 +159,7 @@ STATEMENT-P is non-nil when FORM's value is discarded."
      ((eq head 'while)
       (setq findings (nl-check--must-use-scan (nth 1 form) nil findings))
       ;; Every form in a `while' body is a statement.
-      (dolist (sub (cdr (cdr form)))
+      (dolist (sub (nl-check--proper-list (cdr (cdr form))))
         (setq findings (nl-check--must-use-scan sub t findings)))
       findings)
      ((eq head 'if)
@@ -155,19 +167,19 @@ STATEMENT-P is non-nil when FORM's value is discarded."
       (setq findings (nl-check--must-use-scan (nth 2 form) nil findings))
       (nl-check--must-use-seq (nthcdr 3 form) findings))
      ((eq head 'cond)
-      (dolist (clause (cdr form))
+      (dolist (clause (nl-check--proper-list (cdr form)))
         (when (consp clause)
           (setq findings (nl-check--must-use-scan (car clause) nil findings))
           (setq findings (nl-check--must-use-seq (cdr clause) findings))))
       findings)
      ((eq head 'prog1)
       (setq findings (nl-check--must-use-scan (nth 1 form) nil findings))
-      (dolist (sub (cdr (cdr form)))
+      (dolist (sub (nl-check--proper-list (cdr (cdr form))))
         (setq findings (nl-check--must-use-scan sub t findings)))
       findings)
      ((eq head 'unwind-protect)
       (setq findings (nl-check--must-use-scan (nth 1 form) nil findings))
-      (dolist (sub (cdr (cdr form)))
+      (dolist (sub (nl-check--proper-list (cdr (cdr form))))
         (setq findings (nl-check--must-use-scan sub t findings)))
       findings)
      ((eq head 'setq)
@@ -180,7 +192,7 @@ STATEMENT-P is non-nil when FORM's value is discarded."
      (body (nl-check--must-use-seq body findings))
      ;; Ordinary call: every argument is a value position.
      (t
-      (dolist (sub (cdr form))
+      (dolist (sub (nl-check--proper-list (cdr form)))
         (setq findings (nl-check--must-use-scan sub nil findings)))
       findings))))
 
@@ -259,7 +271,7 @@ its body more than once."
             (nl-check--consumes-seq (nthcdr 3 form) var))))
    ((eq (car form) 'cond)
     (let ((worst 0))
-      (dolist (clause (cdr form))
+      (dolist (clause (nl-check--proper-list (cdr form)))
         (when (consp clause)
           (setq worst (max worst (nl-check--consumes-seq clause var)))))
       worst))
@@ -296,7 +308,7 @@ its body more than once."
    (t
     (when (memq (car form) '(let let*))
       (let ((body (cdr (cdr form))))
-        (dolist (binding (car (cdr form)))
+        (dolist (binding (nl-check--proper-list (car (cdr form))))
           (when (and (consp binding)
                      (symbolp (car binding))
                      (nl-check--fresh-resource-p (car (cdr binding))))

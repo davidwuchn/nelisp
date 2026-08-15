@@ -260,6 +260,19 @@
                1))
     (should-not (nl-check-findings-of-kind findings 'unsafe-call))))
 
+(ert-deftest nl-check-dotted-forms-do-not-crash ()
+  "Real source files contain dotted forms (alist literals in macro
+positions); every walker must tolerate improper lists (found via the
+unsafe-inventory scan of lisp/nelisp-stdlib-os.el)."
+  (dolist (form '((while c (f . 9))
+                  (when c (f . 9))
+                  (progn (f . 9) (g . 9))
+                  (let ((x (f . 9))) (g . 9))
+                  (cond ((c) (f . 9)))
+                  (unwind-protect (f . 9) (g . 9))
+                  (f (g . 9) . 9)))
+    (should (listp (nl-check-form form)))))
+
 (provide 'nl-check-test)
 
 ;;; nl-check-test.el ends here
