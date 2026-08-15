@@ -68,21 +68,35 @@ The reported ratio is LOOP-TIME / TCO-TIME, so values >= 0.95 pass."
    ".."
    (file-name-directory (or load-file-name buffer-file-name default-directory))))
 
+(defun nelisp-aot-tco-bench--loop-baseline-defun ()
+  "Return the nl-loop baseline defun with the macro already expanded.
+The AOT native pass compiles plain forms, so an unexpanded `nl-loop'
+call is an unknown function to it and the baseline silently drops out
+of the native section -- CI reported exactly that as \"native symbol
+doc171-bench-loop-sum not in artifact defun metadata\".  Expanding it
+here, where nl-prelude is loaded, keeps the baseline the hand-written
+`nl-loop' shape while making it natively compilable."
+  (require 'nl-prelude)
+  ;; Expand the BODY only: `macroexpand-all' on the whole defun would
+  ;; rewrite it to `defalias', and the native pass selects forms whose
+  ;; head is literally `defun'.
+  `(defun doc171-bench-loop-sum (n acc)
+     ,(macroexpand-all
+       '(nl-loop ((n n) (acc acc))
+          (if (= n 0)
+              acc
+            (nl-recur (- n 1) (+ acc n)))))))
+
 (defun nelisp-aot-tco-bench--source ()
   "Return the temporary benchmark module source."
   (mapconcat
    #'identity
-   '("(require 'nl-prelude)"
-     "(defun doc171-bench-tco-sum (n acc)"
-     "  (if (= n 0)"
-     "      acc"
-     "    (doc171-bench-tco-sum (- n 1) (+ acc n))))"
-     "(defun doc171-bench-loop-sum (n acc)"
-     "  (nl-loop ((n n) (acc acc))"
-     "    (if (= n 0)"
-     "        acc"
-     "      (nl-recur (- n 1) (+ acc n)))))"
-     "(provide 'doc171-bench)")
+   (list "(defun doc171-bench-tco-sum (n acc)"
+         "  (if (= n 0)"
+         "      acc"
+         "    (doc171-bench-tco-sum (- n 1) (+ acc n))))"
+         (prin1-to-string (nelisp-aot-tco-bench--loop-baseline-defun))
+         "(provide 'doc171-bench)")
    "\n"))
 
 (defun nelisp-aot-tco-bench--expected-sum (n)
