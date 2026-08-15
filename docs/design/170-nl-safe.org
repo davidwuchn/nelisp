@@ -1,0 +1,288 @@
+#+TITLE: Doc 170 — nl-safe / nl-contract / nl-check 詳細設計
+#+AUTHOR: zawatton
+#+DATE: 2026-08-15
+#+STARTUP: overview
+#+OPTIONS: toc:2 num:t
+
+* ステータス
+
+| 項目     | 値                                              |
+|----------+-------------------------------------------------|
+| Doc 番号 | 170                                             |
+| 状態     | DRAFT                                           |
+| 親       | Doc 168                                         |
+| 対象     | packages/nl-safe, packages/nl-contract, packages/nl-check |
+| 関連     | Doc 79 v7 (GC), Doc 76 (OS 面移行)              |
+
+* 1. 前提の整理
+
+NeLisp は GC を持つ動的言語であり、通常の Lisp コード層は既にメモリ安全。
+危険なのは *ランタイム実装層* である。
+
+| 危険源             | 具体例                                  |
+|--------------------+-----------------------------------------|
+| 生ポインタ         | raw memory access, mmap 領域            |
+| syscall 面         | =syscall-direct=, 可変長引数, fd        |
+| アリーナ           | =frame-alloc=, bump ポインタ            |
+| ネイティブ出力     | asm エンコーダ、リロケーション          |
+| 並行性             | =clone(2)= 共有アドレス空間             |
+
+「Rust 的な安全性」の要求は、実際には性質の異なる3つに分解される。
+
+1. *メモリ安全性* — use-after-free、境界外アクセス
+2. *エイリアシング安全性* — 共有と可変の同時成立
+3. *資源安全性* — 解放忘れ、二重解放（厳密にはメモリ安全性ではない）
+
+本設計はこの3つを別々の機構で扱う。
+
+* 2. 中核判断：動的検査を先に置く
+
+完全な借用検査器は Elisp では現実的でない。Rust のそれは数万行あり、
+かつ =eval= と実行時再定義がある環境では健全性が保証できない。
+
+代わりに Rust の =RefCell= を全面採用した設計を第一段とする。
+「共有と可変の排他 (aliasing XOR mutation)」を実行時カウンタで強制する。
+
+*得られるもの*:
+
+1. 今週書ける
+2. 実際の違反データが取れる（静的検査器の設計入力になる）
+3. API 構文が先に固まる。後から同じ構文の上に静的パスを載せられる
+4. ビルドフラグで no-op 化でき、リリース性能を損なわない
+
+* 3. Stage 1 — 動的借用 =nl-cell=
+
+** 3.1 API
+
+#+begin_src elisp
+(nl-defcell buf (make-vector 1024 0))
+
+(nl-with-borrow-mut (b buf)      ; 排他借用
+  (aset b 0 42))
+
+(nl-with-borrow (b buf)          ; 共有借用（複数可）
+  (aref b 0))
+#+end_src
+
+** 3.2 表現と検査規則
+
+セルは =[nl--cell VALUE STATE]= のベクタ。STATE は整数:
+
+| STATE | 意味                 |
+|-------+----------------------|
+|     0 | 未借用               |
+|   n>0 | 共有借用 n 個        |
+|    -1 | 排他借用中           |
+
+- =nl-with-borrow=: STATE が -1 なら =nl-borrow-error= を signal、
+  それ以外は +1 して本体を実行、=unwind-protect= で -1 して戻す
+- =nl-with-borrow-mut=: STATE が 0 でなければ signal、
+  -1 にして本体を実行、=unwind-protect= で 0 に戻す
+
+** 3.3 エラー報告
+
+違反時のエラーには以下を含める。静的検査器の設計入力になるため、
+情報量を惜しまないこと。
+
+- セル名、既存借用の種別
+- 既存借用を取得した位置（=nl-strict= 下ではソース位置を埋め込む）
+- 現在の借用の位置
+
+*違反ログの収集*: =nl-safe-log-violations= を有効にすると、
+違反を =nl-safe--violation-log= に蓄積する。Doc 168 Phase 6 の
+着手判断（静的に判定可能な違反の割合）はこのログを根拠とする。
+
+** 3.4 並行性との関係
+
+=clone(2)= 経路（共有アドレス空間）では STATE の更新に
+=atomic-fetch-add= を用いる。=fork(2)= 経路は COW 隔離のため不要。
+
+* 4. Stage 1 — fat pointer と unsafe 境界
+
+** 4.1 表現
+
+生ポインタを裸の整数として扱うことを禁じ、以下に包む。
+
+#+begin_src elisp
+;; [nl--ptr BASE LEN GENERATION]
+#+end_src
+
+- =BASE=: 先頭アドレス
+- =LEN=: 有効長（バイト）
+- =GENERATION=: アロケータが払い出す世代番号
+
+** 4.2 アクセサ
+
+#+begin_src elisp
+(nl-ptr-ref-u8  PTR OFFSET)
+(nl-ptr-set-u8  PTR OFFSET VALUE)
+(nl-ptr-ref-u64 PTR OFFSET)
+(nl-ptr-slice   PTR OFFSET LEN)   ; 派生ポインタ。範囲を親に制限
+#+end_src
+
+各アクセサは検査有効時に以下を行う:
+
+1. =OFFSET + SIZE <= LEN= の境界検査
+2. =GENERATION= とアロケータの現世代の照合（use-after-free 検出）
+
+検査無効時（リリースビルド）は素の =raw-memory-ref= に展開される。
+
+** 4.3 unsafe 境界の確立
+
+*これが本 Stage の本質*。生ポインタを直接生成・変換できる
+プリミティブを列挙し、それ以外の場所からの使用を禁じる。
+
+#+begin_src elisp
+(nl-unsafe
+  ;; 生ポインタを扱えるのはこのブロック内のみ
+  (let ((raw (syscall-direct 9 ...)))       ; mmap
+    (nl-ptr-make raw len (nl-alloc-generation))))
+#+end_src
+
+- =nl-unsafe= ブロック外での =nl-ptr-make= / =syscall-direct= /
+  =raw-memory-*= の使用は、=(nl-strict t)= 下で展開時エラー
+- =nl-check= に「unsafe 面の棚卸し」レポート機能を持たせ、
+  =nl-unsafe= ブロックの総数と位置を CI で追跡する
+
+*受け入れ条件*: unsafe プリミティブの総数を 20 個以内に固定し、
+CI で増加を検出する。Rust の safe core / unsafe kernel と同じ構造。
+
+* 5. Stage 2 — 検証アロケータ（ランタイム側）
+
+ライブラリではなくビルドフラグだが、*投入労力あたりのバグ検出数が
+全項目中で最大* と見積もる。自作アロケータを持つ強みが最も効く。
+
+** 5.1 機能
+
+| 機能            | 内容                                             |
+|-----------------+--------------------------------------------------|
+| redzone         | 各割当の前後に番兵バイトを置き、free 時に破損検査 |
+| poison          | free 時に領域を既知パターンで埋める              |
+| 世代タグ        | 割当ごとに世代番号。fat pointer と照合           |
+| 割当元記録      | =nl-strict= 下で割当位置を記録し、報告に含める   |
+| リーク検出      | 終了時に未解放の割当を一覧                        |
+
+** 5.2 有効化
+
+=NELISP_ALLOC_CHECK=1= 環境変数、またはビルドターゲット
+=make standalone-reader-checked= で有効化する。既定は無効。
+
+** 5.3 CI ゲート
+
+既存の soak テスト（1h / RSS 増加 5MB 未満）を、
+検証アロケータ有効版でも実行する。redzone 破損・リーク検出を
+それぞれ blocker とする。
+
+* 6. Stage 3 — 資源と Drop
+
+** 6.1 API
+
+#+begin_src elisp
+(nl-defresource file-handle
+  :drop (lambda (fd) (nl-close fd)))
+
+(nl-with-resource (fd (nl-open "/tmp/x"))
+  (nl-read fd 100))                ; スコープ離脱時に自動 drop
+#+end_src
+
+- =nl-with-resource= は =unwind-protect= に展開する
+- 二重 drop は実行時に検出して signal する（drop 済みフラグ）
+
+** 6.2 =nl-must-use=
+
+#+begin_src elisp
+(nl-defun nl-open (path)
+  (declare (nl-must-use t))
+  ...)
+#+end_src
+
+戻り値が捨てられている呼び出しを、=nl-strict= 下で展開時に検出する。
+Rust の =#[must_use]= に相当。
+
+** 6.3 線形性検査（展開時、限定範囲）
+
+「ちょうど一度だけ消費される」ことの検査は、対象を
+fd / mmap 領域 / 外部バッファに絞る。検査対象が小さいほど
+検査器は小さく、偽陽性も減る。
+
+*適用範囲*: =nl-defun= の本体内で、=nl-defresource= 型の値が
+束縛から離脱するまでの経路を追う。ラムダに捕捉された時点で
+追跡を放棄し「未検査」と報告する（不健全であることを明示する）。
+
+* 7. Stage 4 — 契約 =nl-contract=
+
+Racket 方式。静的型を持たない代わりに、モジュール境界で動的に検査し、
+違反時に *責任の所在* を報告する。
+
+#+begin_src elisp
+(nl-provide/contract
+  (parse-config (-> string? (nl-result-of hash-table? symbol?))))
+#+end_src
+
+- 契約違反時のメッセージに「呼び出し側が破った / 実装側が破った」を明記する
+- =nl-strict= を宣言していないファイルとの境界で特に有用
+
+** 7.1 位置づけ
+
+Doc 168 §3.4 の「健全性の主張範囲」を実装する機構。
+strict なコンパイル単位の外側から入ってくる値を、境界で検査する。
+
+* 8. Stage 5 — 静的線形性検査（条件付き）
+
+*着手前にゲートがある*（Doc 168 §5 Phase 6）。
+
+- 条件: =nl-safe--violation-log= が捕捉した違反のうち、
+  静的に判定可能なものが 50% を超えること
+- 下回る場合は本 Stage を中止し、動的検査の改善に振り向ける
+
+この判断を先送りしないこと。借用検査器の設計は面白いが、
+実データが支持しない場合の投資回収は見込めない。
+
+* 9. 性能予算
+
+| 経路                    | 許容オーバーヘッド      |
+|-------------------------+-------------------------|
+| 検査無効（リリース）    | 0%（展開後のコードが同一であること） |
+| =nl-cell= 借用          | 有効時 15% 以内         |
+| fat pointer アクセス    | 有効時 20% 以内         |
+| 検証アロケータ          | 予算なし（デバッグ専用） |
+
+*検査無効時に展開後コードが素の版と同一になること* を ERT で検証する
+（マクロ展開結果の比較）。これが崩れると「ビルドフラグで消せる」という
+前提が失われる。
+
+* 10. nl-check の位置づけ
+
+- 展開時検査パスを一手に引き受ける独立パッケージ
+- *どのパッケージからも依存されない*（Doc 168 §4.1、一方向）
+- CI で依存方向を検証する
+- 提供機能:
+  - =nl-strict= 宣言の処理
+  - 網羅性検査（Doc 169 §3）
+  - unsafe 面の棚卸しレポート
+  - =nl-must-use= 検査
+  - 線形性検査（Stage 3 / Stage 5）
+
+* 11. 段階まとめ
+
+| Stage | 内容                     | 層     | 依存           |
+|-------+--------------------------+--------+----------------|
+|     1 | =nl-cell= / fat pointer  | L1     | nl-prelude     |
+|     2 | 検証アロケータ           | 実装層 | なし（独立）   |
+|     3 | 資源 / Drop / must-use   | L1+検査 | Stage 1        |
+|     4 | 契約                     | L1     | Stage 1        |
+|     5 | 静的線形性検査           | 検査   | Stage 3 の実データ |
+
+Stage 1 と Stage 2 は独立しており並行できる。
+Stage 5 は条件付きであり、着手を既定としない。
+
+* 12. 受け入れ条件（Stage 1）
+
+| 項目           | 条件                                           |
+|----------------+------------------------------------------------|
+| ERT            | 60 件以上、unexpected 0                        |
+| 展開同一性     | 検査無効時の展開結果が素の版と一致すること     |
+| unsafe 棚卸し  | プリミティブ 20 個以内、CI で増加検出          |
+| standalone     | =target/nelisp= 上で green                     |
+| 性能           | §9 の予算内（bench/ に計測を追加）             |
+| 違反ログ       | =nl-safe--violation-log= が Phase 6 判断に足る情報を持つ |

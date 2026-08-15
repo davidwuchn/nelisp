@@ -1,0 +1,265 @@
+#+TITLE: Doc 169 — nl-prelude / nl-condition 詳細設計
+#+AUTHOR: zawatton
+#+DATE: 2026-08-15
+#+STARTUP: overview
+#+OPTIONS: toc:2 num:t
+
+* ステータス
+
+| 項目     | 値                        |
+|----------+---------------------------|
+| Doc 番号 | 169                       |
+| 状態     | DRAFT                     |
+| 親       | Doc 168                   |
+| 対象     | packages/nl-prelude, packages/nl-condition |
+
+* 1. 対象とする言語的欠陥
+
+| # | 欠陥                     | 対策                       | 層 | Phase |
+|---+--------------------------+----------------------------+----+-------|
+| 1 | エラー処理が値でない     | Result / Option / =nl-?=   | L1 |     1 |
+| 2 | 網羅性検査がない         | =nl-defdata= / =nl-match=  | L1 |    2a |
+| 3 | 変数捕捉（非衛生マクロ） | 自動 gensym =foo#=         | L1 |    2a |
+| 4 | 末尾呼び出し最適化なし   | =nl-loop= / =nl-recur=     | L1 |    2a |
+| 4'| 同上（本命）             | AOT パスによる真の TCO     | L2 |     5 |
+| 5 | 条件システムが貧弱       | restart system             | L1 |     4 |
+| 6 | 名前空間がない           | —（Doc 90 送り）           | L3 |     — |
+| 7 | 衛生的マクロがない       | —（Doc 90 送り）           | L3 |     — |
+
+#3 は #7 の完全実装ではないが、実務上のマクロバグの大半を消せる
+費用対効果の高い部分解である。
+
+* 2. Result / Option（Phase 1）
+
+** 2.1 表現
+
+=cl-defstruct= ではなくタグ付き cons を使う。理由は 8 バイトスロット
+表現との相性、および =pcase= 展開の単純さ。
+
+#+begin_src elisp
+;; Result: (nl--ok . VALUE) / (nl--err . ERROR)
+;; Option: (nl--some . VALUE) / nl--none
+#+end_src
+
+タグは interned symbol とし、=eq= 比較で判定する。
+
+** 2.2 API
+
+#+begin_src elisp
+;; 構築
+(nl-ok VALUE)                  ; => Result
+(nl-err ERROR)                 ; => Result
+(nl-some VALUE)                ; => Option
+nl-none                        ; => Option（定数）
+
+;; 判定
+(nl-ok-p R) (nl-err-p R) (nl-some-p O) (nl-none-p O)
+
+;; 取り出し
+(nl-unwrap R)                  ; err なら signal
+(nl-unwrap-or R DEFAULT)
+(nl-unwrap-or-else R FN)
+
+;; 変換
+(nl-map R FN)                  ; ok の中身に FN
+(nl-map-err R FN)              ; err の中身に FN
+(nl-and-then R FN)             ; FN は Result を返す（monadic bind）
+(nl-ok->option R)
+(nl-option->ok O ERROR)
+
+;; 集約
+(nl-collect LIST-OF-RESULTS)   ; 全 ok なら (nl-ok LIST)、最初の err で短絡
+#+end_src
+
+** 2.3 =nl-?= — early return
+
+Rust の =?= 演算子に相当。=nl-defun= / =nl-lambda= の本体でのみ有効。
+
+#+begin_src elisp
+(nl-defun read-config (path)
+  (nl-let* ((text (nl-? (nl-read-file path)))
+            (data (nl-? (nl-parse-json text))))
+    (nl-ok data)))
+#+end_src
+
+*** 展開戦略
+
+=nl-defun= が本体を =cl-block= で包み、=nl-?= が =cl-return-from= に展開する。
+
+#+begin_src elisp
+(defmacro nl-? (form)
+  (let ((r (gensym "nl--r")))
+    `(let ((,r ,form))
+       (if (nl-err-p ,r)
+           (cl-return-from nl--fn-block ,r)
+         (cdr ,r)))))
+#+end_src
+
+*** 制約（README に明記すること）
+
+- =nl-?= を =nl-defun= の外で使った場合は展開時にエラーとする
+  （=cl-return-from= の実行時エラーに落とさない）
+- =nl-?= はネストしたラムダを越えない。越える使用は展開時に検出して拒否する
+
+** 2.4 テスト
+
+- 各 API について ok/err、some/none の両系統
+- =nl-?= の早期脱出が =unwind-protect= と正しく協調すること
+- =nl-collect= の短絡が副作用の実行回数として観測できること
+- ラムダ越えの =nl-?= が展開時に拒否されること（=should-error=）
+
+* 3. 代数的データ型と網羅性検査（Phase 2a）
+
+** 3.1 目的
+
+=pcase= は強力だが網羅性を検査しない。ヴァリアントを閉じた集合として
+宣言し、=nl-match= が展開時に「全て覆っているか」を判定する。
+
+本機能は **展開時解析の練習台** として位置づける。対象が閉じており、
+=eval= の影響を受けにくく、失敗時の被害が小さい。Doc 170 の静的検査に
+進む前にここで手法を確立する。
+
+** 3.2 API
+
+#+begin_src elisp
+(nl-defdata shape
+  (circle radius)
+  (rect width height)
+  (point))
+
+(nl-match s
+  ((circle r)   (* float-pi r r))
+  ((rect w h)   (* w h))
+  ((point)      0))
+#+end_src
+
+- =nl-defdata= はコンストラクタ、述語、アクセサを生成し、
+  ヴァリアント集合を =nl--data-registry= に登録する
+- =nl-match= は展開時にレジストリを引き、未カバーのヴァリアントがあれば
+  =error= を出す（コンパイルを止める）
+- =_= ワイルドカードがある場合は網羅性検査をスキップし、代わりに
+  「到達不能な節」を警告する
+
+** 3.3 表現
+
+#+begin_src elisp
+;; (circle 3.0) => [nl--data shape circle 3.0]
+#+end_src
+
+レコード（=cl-defstruct= のバッキング）ではなくベクタを使う。理由:
+8 バイトスロット表現でのフットプリントと、=nl-match= が
+=aref= 列に素直に展開できること。
+
+** 3.4 レジストリと =eval= の問題
+
+=nl-defdata= が実行時に評価される以上、=nl-match= の展開時に
+レジストリが埋まっている保証はない。対策:
+
+1. =nl-defdata= を =eval-and-compile= 相当で登録する
+2. レジストリに未登録の型に対する =nl-match= は、
+   =(nl-strict t)= 下では展開時エラー、それ以外では検査をスキップして
+   実行時 =pcase= にフォールバックする
+
+この「strict なら止める / 通常なら緩める」パターンは、
+nl-safe / nl-check でも一貫して採用する。
+
+* 4. 自動 gensym（Phase 2a）
+
+** 4.1 API
+
+Clojure の syntax-quote 方式。=nl-defmacro= 本体のバッククォート内で、
+=foo#= の形のシンボルを同一展開内で一意な gensym に置換する。
+
+#+begin_src elisp
+(nl-defmacro nl-unless (test &rest body)
+  `(let ((result# (not ,test)))
+     (when result# ,@body)))
+;; result# は展開ごとに一意な nl--result-1234 になる
+#+end_src
+
+** 4.2 実装
+
+=nl-defmacro= が本体のバッククォート式を走査し、=#= で終わるシンボルを
+収集して、展開時に生成される =gensym= へ束縛するコードを差し込む。
+
+*** 制約
+
+- 衛生性を保証するのは *この形式で書かれた変数のみ*。
+  自由変数の捕捉や関数位置の捕捉は防げない
+- README に「これは syntax-case の代替ではない」と明記すること
+
+* 5. 末尾再帰（Phase 2a — L1 版）
+
+** 5.1 API
+
+#+begin_src elisp
+(nl-loop ((acc 0) (n 100))
+  (if (zerop n)
+      acc
+    (nl-recur (+ acc n) (1- n))))
+#+end_src
+
+- =nl-loop= は =while= + 変数の再代入に展開する
+- =nl-recur= が末尾位置以外にある場合は展開時エラー
+- 相互再帰は =nl-trampoline= で別途対応する
+
+** 5.2 L2 版との関係
+
+本 L1 版は明示的な構文を要求するため、既存コードには効かない。
+本命は Phase 5 の AOT パス（Doc 168 §5）であり、そちらは
+既存の =defun= に対して透過的に働く。L1 版は L2 版が入っても
+「意図を明示する構文」として残す価値がある。
+
+* 6. nl-condition — 再起動可能な条件システム（Phase 4）
+
+** 6.1 動機
+
+Elisp の =condition-case= はスタックを巻き戻してからハンドラを実行する。
+CL の =handler-bind= は *巻き戻す前に* ハンドラを実行するため、
+エラー地点の文脈を保ったまま復旧できる。これが restart の前提となる。
+
+cl-lib にも存在しない領域であり、Elisp 界隈全体に対して価値がある。
+
+** 6.2 API
+
+#+begin_src elisp
+(nl-restart-case
+    (nl-handler-bind ((file-missing
+                       (lambda (c) (nl-invoke-restart 'use-default))))
+      (load-config "/etc/app.conf"))
+  (use-default () default-config)
+  (retry (path) (load-config path)))
+#+end_src
+
+** 6.3 実装方針
+
+- ハンドラスタックを動的束縛された特殊変数として保持する
+- =nl-signal= がハンドラスタックを内側から走査し、巻き戻さずに呼ぶ
+- =nl-invoke-restart= は =throw= で対応する =catch= まで脱出する
+- 既存の =signal= / =condition-case= と相互運用させる:
+  =nl-signal= はハンドラが復帰した場合、通常の =signal= にフォールバックする
+
+** 6.4 リスク
+
+L1 で書けるが、動的束縛とスタック巻き戻しの相互作用は間違えやすい。
+=unwind-protect= との組み合わせを重点的にテストすること。
+
+* 7. スコープ外（Doc 90 送り）
+
+以下は L3 を要するため本ドキュメントの対象外とする。
+
+- 名前空間（リーダーによるプレフィックス展開）
+- 衛生的マクロの完全実装（syntax objects）
+- 第一級継続・代数的エフェクトハンドラ
+- 数値タワーの拡張（bignum はランタイム側 Phase 8.x の課題）
+
+* 8. 受け入れ条件（Phase 1）
+
+| 項目             | 条件                                          |
+|------------------+-----------------------------------------------|
+| ERT              | 40 件以上、unexpected 0                       |
+| standalone       | =target/nelisp= 上で全テスト green            |
+| 非侵襲性         | 未ロード時に既存テスト結果が不変              |
+| 行数             | src 400 行以内（スコープ規律の指標）          |
+| README.org       | 動機・API 一覧・非目標・=nl-?= の制約         |
+| パッケージ規約   | =packages/nl-prelude/{src,test,README.org}=   |
