@@ -1,4 +1,5 @@
-.PHONY: unsafe-inventory ns-inventory test test-fast test-parallel test-one wasm-smoke wasm-runtime-image-smoke wasm-dtw-skeleton-smoke wasm-dtw-transpile wasm-dtw-compile wasm-dtw-smoke wasm-dtw-site wasm-dtw-site-smoke compile clean all bench bench-aot-tco gc-bench actor-bench soak soak-1h soak-full soak-worker \n        sqlite-module sqlite-module-clean \
+.PHONY: unsafe-inventory ns-inventory parens-check test test-fast test-parallel test-one wasm-smoke wasm-runtime-image-smoke wasm-dtw-skeleton-smoke wasm-dtw-transpile wasm-dtw-compile wasm-dtw-smoke wasm-dtw-site wasm-dtw-site-smoke compile clean all bench bench-aot-tco gc-bench actor-bench soak soak-1h soak-full soak-worker \
+        sqlite-module sqlite-module-clean \
         release-artifact release-checksum soak-blocker soak-post-ship \
         bench-actual bench-allocator bench-allocator-heavy \
         stage-d-tarball stage-d-v2-tarball stage-d-v2-tarball-verify \
@@ -236,6 +237,8 @@ unsafe-inventory:
 ns-inventory:
 	$(EMACS) --batch -Q -L packages/nl-prelude/src -L packages/nl-ns/src \
 	  -l tools/nl-ns-inventory.el
+parens-check:
+	$(EMACS) --batch -Q -L packages/nl-parens/src -l tools/nl-parens-check.el
 
 reader-surface-audit:
 	$(EMACS) --batch -Q -L lisp -L src -L scripts \
