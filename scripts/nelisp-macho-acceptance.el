@@ -15,6 +15,11 @@
 ;;                                       Darwin syscall (SVC #0x80)
 ;;   dist/macho-acceptance/add5          MH_EXECUTE — exit(add(2,3)) = 5,
 ;;                                       exercises the defun call path
+;;   dist/macho-acceptance/rwdata        MH_EXECUTE — copies a __data word
+;;                                       through a __bss slot and exits
+;;                                       with it (= 42), exercising the
+;;                                       writable __DATA segment and the
+;;                                       linker placement that feeds it
 ;;   dist/macho-acceptance/add_macho.o   MH_OBJECT — global `_add',
 ;;                                       linked against a C harness by
 ;;                                       clang/ld64 on the runner
@@ -55,6 +60,7 @@
 (require 'nelisp-macos-build)
 (require 'nelisp-aot-compiler)
 (require 'nelisp-mach-o-write)
+(require 'nelisp-static-linker)
 (require 'nelisp-asm-arm64)
 
 (defvar nelisp-macho-acceptance-outdir "dist/macho-acceptance"
@@ -88,6 +94,43 @@ to ARM64_RELOC_PAGE21 / PAGEOFF12."
              :relocs relocs
              :machine 'aarch64)))))
 
+(defun nelisp-macho-acceptance--emit-rw-executable (path)
+  "Link an MH_EXECUTE that copies a __data word through a __bss slot.
+ADRP/ADD pairs address `answer' in the file-backed __data section and
+`counter' in the zero-fill __bss section; the program stores the loaded
+value, clears the register, reads the slot back, and exits with it.  A
+__DATA segment placed anywhere other than where the linker relocated
+against therefore shows up as a wrong exit status (or a fault), not as a
+passing check."
+  (let ((buf (nelisp-asm-arm64-make-buffer)))
+    (nelisp-asm-arm64-adrp buf 'x0 "answer")
+    (nelisp-asm-arm64-add-abs-lo12-nc buf 'x0 'x0 "answer")
+    (nelisp-asm-arm64-mov-imm-z buf 'x1 0)
+    (nelisp-asm-arm64-ldr-reg-reg buf 'x0 'x0 'x1)
+    (nelisp-asm-arm64-adrp buf 'x2 "counter")
+    (nelisp-asm-arm64-add-abs-lo12-nc buf 'x2 'x2 "counter")
+    (nelisp-asm-arm64-str-reg-reg buf 'x0 'x2 'x1)
+    (nelisp-asm-arm64-mov-imm-z buf 'x0 0)
+    (nelisp-asm-arm64-ldr-reg-reg buf 'x0 'x2 'x1)
+    (nelisp-asm-arm64-mov-imm-z buf 'x16 1)   ; SYS_exit
+    (nelisp-asm-arm64-svc buf #x80)
+    (let* ((text (nelisp-asm-arm64-buffer-bytes buf))
+           (relocs (mapcar (lambda (r) (append r (list :section 'text)))
+                           (nelisp-asm-arm64-buffer-relocs buf)))
+           (unit (nelisp-link-unit-make
+                  "rwdata.o"
+                  (list (cons 'text text)
+                        (cons 'data (unibyte-string 42 0 0 0 0 0 0 0))
+                        (cons 'bss 8))
+                  (list (nelisp-link-symbol "_main" 0 :section 'text
+                                            :bind 'global :type 'func)
+                        (nelisp-link-symbol "answer" 0 :section 'data
+                                            :bind 'global :type 'object)
+                        (nelisp-link-symbol "counter" 0 :section 'bss
+                                            :bind 'global :type 'object))
+                  relocs)))
+      (nelisp-link-units-macho-exec path (list unit) "_main" 'aarch64))))
+
 (defun nelisp-macho-acceptance-emit ()
   "Batch entry: write the macOS acceptance artifact set."
   (let ((dir (file-name-as-directory nelisp-macho-acceptance-outdir)))
@@ -99,6 +142,7 @@ to ARM64_RELOC_PAGE21 / PAGEOFF12."
      '(seq (defun add (a b) (+ a b))
            (exit (add 2 3)))
      (concat dir "add5"))
+    (nelisp-macho-acceptance--emit-rw-executable (concat dir "rwdata"))
     (nelisp-aot-compile-to-object
      '(defun add (a b) (+ a b))
      (concat dir "add_macho.o")

@@ -525,6 +525,12 @@ Matches ld/clang; leaves >=16 bytes of slack after the load commands so
 symtab addresses identical to the e1 blueprint for milestone 1.")
 (defconst nelisp-mach-o--exe-minos #x1A0000 "minos 26.0.0.")
 (defconst nelisp-mach-o--exe-sdk   #x1A0200 "sdk 26.2.0.")
+(defconst nelisp-mach-o--exe-ro-ncmds 15
+  "Load command count of the fixed MH_EXECUTE command set.
+Counts every command except the optional writable __DATA segment.")
+(defconst nelisp-mach-o--exe-ro-sizeofcmds 648
+  "Byte size of the fixed MH_EXECUTE command set.
+Excludes the optional __DATA LC_SEGMENT_64 and its section headers.")
 
 (defun nelisp-mach-o--exe-page-size (machine)
   "Return executable page size for MACHINE."
@@ -606,6 +612,65 @@ ULEB, which covers every executable code offset used by this writer."
     (aset b 8 (logior (logand (aref b 8) #x3f) #x80))
     (apply #'unibyte-string (append b nil))))
 
+;;;###autoload
+(defun nelisp-mach-o-exe-layout (text-size data-size bss-size &optional machine)
+  "Return the MH_EXECUTE file and VM layout for the given section sizes.
+TEXT-SIZE is the byte length of the single __text payload (callers that
+carry a read-only section concatenate it onto .text first), DATA-SIZE the
+byte length of __data, and BSS-SIZE the zero-fill length of __bss.
+MACHINE selects the page size (`aarch64' or `x86_64'; default `aarch64').
+
+Returns a plist with `:ncmds', `:sizeofcmds', `:code-off', `:text-vmaddr',
+`:text-filesize', `:data-off', `:data-vmaddr', `:data-filesize',
+`:data-vmsize', `:bss-vmaddr', `:linkedit-off' and `:linkedit-vmaddr'.
+`nelisp-mach-o--build-executable' emits exactly this layout, so a linker
+can pin section addresses before any byte has been relocated; keeping both
+sides on this one function is what stops the two placements from drifting.
+A writable __DATA segment adds one load command, which pushes __text past
+the fixed `nelisp-mach-o--exe-code-off' offset."
+  (let* ((mach (or machine 'aarch64))
+         (have-data (> data-size 0))
+         (have-bss (> bss-size 0))
+         (have-rw (or have-data have-bss))
+         (rw-nsects (+ (if have-data 1 0) (if have-bss 1 0)))
+         (rw-cmd-size (if have-rw
+                          (+ nelisp-mach-o--segment-command-size
+                             (* rw-nsects nelisp-mach-o--section-size))
+                        0))
+         (ncmds (+ nelisp-mach-o--exe-ro-ncmds (if have-rw 1 0)))
+         (sizeofcmds (+ nelisp-mach-o--exe-ro-sizeofcmds rw-cmd-size))
+         ;; 16 bytes of slack after the commands leave room for the
+         ;; LC_CODE_SIGNATURE `codesign' inserts later.
+         (code-off (if have-rw
+                       (nelisp-mach-o--align-up
+                        (+ nelisp-mach-o--header-size sizeofcmds 16)
+                        16)
+                     nelisp-mach-o--exe-code-off))
+         (vmbase nelisp-mach-o--exe-text-vmaddr)
+         (page (nelisp-mach-o--exe-page-size mach))
+         (text-filesize (nelisp-mach-o--align-up (+ code-off text-size) page))
+         (data-off text-filesize)
+         (data-vmaddr (+ vmbase text-filesize))
+         (data-filesize (if have-data (nelisp-mach-o--align-up data-size page) 0))
+         (data-vmsize (if have-rw
+                          (nelisp-mach-o--align-up (+ data-size bss-size) page)
+                        0))
+         (linkedit-off (+ data-off data-filesize))
+         (linkedit-vmaddr (+ (if have-rw data-vmaddr vmbase)
+                             (if have-rw data-vmsize text-filesize))))
+    (list :ncmds ncmds
+          :sizeofcmds sizeofcmds
+          :code-off code-off
+          :text-vmaddr (+ vmbase code-off)
+          :text-filesize text-filesize
+          :data-off data-off
+          :data-vmaddr data-vmaddr
+          :data-filesize data-filesize
+          :data-vmsize data-vmsize
+          :bss-vmaddr (+ data-vmaddr data-size)
+          :linkedit-off linkedit-off
+          :linkedit-vmaddr linkedit-vmaddr)))
+
 (defun nelisp-mach-o--build-executable (sections)
   "Build an UNSIGNED native macOS MH_EXECUTE image from SECTIONS.
 Recognised keys: :text (required unibyte code), :data (optional writable
@@ -631,26 +696,19 @@ needs an ad-hoc code signature (`codesign -s -') before it will run."
                           (+ nelisp-mach-o--segment-command-size
                              (* rw-nsects nelisp-mach-o--section-size))
                         0))
-         (ncmds (+ 15 (if have-rw 1 0)))
-         (sizeofcmds (+ 648 rw-cmd-size))
-         (code-off (if have-rw
-                       (nelisp-mach-o--align-up
-                        (+ nelisp-mach-o--header-size sizeofcmds 16)
-                        16)
-                     nelisp-mach-o--exe-code-off))
+         (layout (nelisp-mach-o-exe-layout text-size data-size bss-size machine))
+         (ncmds (plist-get layout :ncmds))
+         (sizeofcmds (plist-get layout :sizeofcmds))
+         (code-off (plist-get layout :code-off))
          (vmbase nelisp-mach-o--exe-text-vmaddr)
          (page (nelisp-mach-o--exe-page-size machine))
-         (text-end (+ code-off text-size))
-         (text-filesize (nelisp-mach-o--align-up text-end page))
-         (data-off text-filesize)
-         (data-vmaddr (+ vmbase text-filesize))
-         (data-filesize (if have-data (nelisp-mach-o--align-up data-size page) 0))
-         (data-vmsize (if have-rw
-                          (nelisp-mach-o--align-up (+ data-size bss-size) page)
-                        0))
-         (linkedit-off (+ data-off data-filesize))
-         (linkedit-vmaddr (+ (if have-rw data-vmaddr vmbase)
-                             (if have-rw data-vmsize text-filesize)))
+         (text-filesize (plist-get layout :text-filesize))
+         (data-off (plist-get layout :data-off))
+         (data-vmaddr (plist-get layout :data-vmaddr))
+         (data-filesize (plist-get layout :data-filesize))
+         (data-vmsize (plist-get layout :data-vmsize))
+         (linkedit-off (plist-get layout :linkedit-off))
+         (linkedit-vmaddr (plist-get layout :linkedit-vmaddr))
          ;; __LINKEDIT pieces, in e1 order.
          (fixups (nelisp-mach-o--exe-chained-fixups (if have-rw 4 3)))
          (trie (nelisp-mach-o--exe-exports-trie code-off))
@@ -857,9 +915,13 @@ needs an ad-hoc code signature (`codesign -s -') before it will run."
 ;;;###autoload
 (defun nelisp-mach-o-write-executable (file-path sections)
   "Emit an UNSIGNED native macOS MH_EXECUTE to FILE-PATH.
-SECTIONS keys: :text (unibyte code, required), :machine (`aarch64' or
-`x86_64'), :entry-sym (optional).  Sign arm64 output with `codesign -s -'
-on macOS before running.  See `nelisp-mach-o--build-executable'.
+SECTIONS keys: :text (unibyte code, required), :data (optional writable
+bytes), :bss-size (optional zero-fill length), :machine (`aarch64' or
+`x86_64'), :entry-sym (optional).  :data and :bss-size become the __data
+and __bss sections of a writable __DATA segment; use
+`nelisp-mach-o-exe-layout' to learn where they land.  Sign arm64 output
+with `codesign -s -' on macOS before running.  See
+`nelisp-mach-o--build-executable'.
 The file is written with mode #o755 (= +x bit set, mirroring the ELF
 executable writer)."
   (let ((bytes (nelisp-mach-o--build-executable sections))

@@ -5503,11 +5503,16 @@ unresolved at link time."
                            (nl_ht_meta_set_count table_ptr (+ (nl_ht_meta_count table_ptr) 1))
                            (nl_ht_copy32 out val_ptr)
                            0))))
-                  (let* ((val_slot (nl_cons_cdr_ptr entry_ptr)))
-                    (seq
-                     (nl_ht_copy32 val_slot val_ptr)
-                     (nl_ht_copy32 out val_ptr)
-                     0))))
+                  ;; Overwrite an existing KEY through the cons mutator, the
+                  ;; way `setcdr' does.  `nl_cons_cdr_ptr' materialises a
+                  ;; FRESH 32B box when the cdr holds an immediate, so writing
+                  ;; the new value into that view updated a scratch copy and
+                  ;; the table kept the old value -- silently, since the entry
+                  ;; was found and the count stayed correct.
+                  (seq
+                   (cons-set-cdr entry_ptr val_ptr)
+                   (nl_ht_copy32 out val_ptr)
+                   0)))
             (wf_write_nil out)))))
     (defun nl_ht_get (args out)
       (let* ((key_ptr (wf_arg_ptr args 0)) (table_ptr (wf_arg_ptr args 1))
@@ -10501,25 +10506,26 @@ SVC #0x80."
 
 (defun nelisp-standalone--macos-aarch64-reader-start-unit ()
   "Return the macOS arm64 Mach-O `_main' start unit for standalone-reader.
-Dyld enters `_main(argc, argv, envp)'.  The reader driver expects the Linux
-entry-stack argv shape (`argc' at slot 0, argv pointers inline after it), so
-this trampoline first snapshots argc and argv[0..3] from the original stack,
-switches onto a large anonymous mmap'd native stack, copies the snapshot into a
-fresh driver stack block, and passes that block to `driver'.  It then exits
+Dyld enters `_main(argc, argv, envp)' through LC_MAIN, which is an ordinary
+C call: argc in x0 and argv in x1, NOT the Linux kernel's entry stack.  The
+reader driver wants the Linux shape (`argc' at slot 0, argv pointers inline
+after it), so this trampoline snapshots argc and argv[0..3] from those two
+registers (as `nelisp-standalone--macos-aarch64-basic-start-unit' does),
+switches onto a large anonymous mmap'd native stack, copies the snapshot into
+a fresh driver stack block, and passes that block to `driver'.  It then exits
 through the Darwin raw syscall ABI with x16=1 and SVC #0x80."
   (let* ((size nelisp-standalone--macos-native-stack-size)
          (buf (nelisp-asm-arm64-make-buffer))
          (reloc-off nil))
     (nelisp-asm-arm64-sub-imm buf 'sp 'sp 48)
-    (nelisp-asm-arm64-ldr-imm buf 'x2 'sp 48) ; original sp: argc
-    (nelisp-asm-arm64-str-imm buf 'x2 'sp 0)
-    (nelisp-asm-arm64-ldr-imm buf 'x2 'sp 56)
+    (nelisp-asm-arm64-str-imm buf 'x0 'sp 0)  ; argc
+    (nelisp-asm-arm64-ldr-imm buf 'x2 'x1 0)
     (nelisp-asm-arm64-str-imm buf 'x2 'sp 8)
-    (nelisp-asm-arm64-ldr-imm buf 'x2 'sp 64)
+    (nelisp-asm-arm64-ldr-imm buf 'x2 'x1 8)
     (nelisp-asm-arm64-str-imm buf 'x2 'sp 16)
-    (nelisp-asm-arm64-ldr-imm buf 'x2 'sp 72)
+    (nelisp-asm-arm64-ldr-imm buf 'x2 'x1 16)
     (nelisp-asm-arm64-str-imm buf 'x2 'sp 24)
-    (nelisp-asm-arm64-ldr-imm buf 'x2 'sp 80)
+    (nelisp-asm-arm64-ldr-imm buf 'x2 'x1 24)
     (nelisp-asm-arm64-str-imm buf 'x2 'sp 32)
     (nelisp-asm-arm64-mov-imm64 buf 'x0 0)
     (nelisp-asm-arm64-mov-imm64 buf 'x1 size)

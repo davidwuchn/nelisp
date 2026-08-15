@@ -1260,6 +1260,102 @@ the lea)."
                            (nelisp-link-test--ub #x02 #x00 #x00 #x94)))))
       (when (file-exists-p path) (delete-file path)))))
 
+(ert-deftest nelisp-link-units-macho-exec-writable-data-segment ()
+  "Mach-O executable linking emits .data/.bss as a writable __DATA segment.
+The relocated pointers prove the linker patched against the very addresses
+the writer went on to emit, which is the whole point of sharing
+`nelisp-mach-o-exe-layout' between the two."
+  (let* ((unit (nelisp-link-unit-make
+                "main.o"
+                (list (cons 'text
+                            (nelisp-link-test--ub
+                             #xc0 #x03 #x5f #xd6))   ; ret
+                      ;; Two pointer slots patched by the relocs below.
+                      (cons 'data (nelisp-link-test--bytes 16))
+                      (cons 'bss 8))
+                (list (nelisp-link-symbol "_main" 0
+                                          :section 'text
+                                          :bind 'global
+                                          :type 'func)
+                      (nelisp-link-symbol "counter" 0
+                                          :section 'bss
+                                          :bind 'global
+                                          :type 'object)
+                      (nelisp-link-symbol "slots" 0
+                                          :section 'data
+                                          :bind 'global
+                                          :type 'object))
+                (list (list :offset 0 :type 'abs64
+                            :symbol "counter" :addend 0 :section 'data)
+                      (list :offset 8 :type 'abs64
+                            :symbol "_main" :addend 0 :section 'data))))
+         (lay (nelisp-mach-o-exe-layout 4 16 8 'aarch64))
+         (code-off (plist-get lay :code-off))
+         (data-off (plist-get lay :data-off))
+         (data-vmaddr (plist-get lay :data-vmaddr))
+         (page #x4000)
+         ;; Commands run header (32) + __PAGEZERO (72) + __TEXT (152).
+         (data-cmd 256)
+         (bss-sect (+ data-cmd 72 80))
+         (path (make-temp-file "nelisp-link-macho-rw-" nil "")))
+    (unwind-protect
+        (progn
+          (nelisp-link-units-macho-exec path (list unit) "_main")
+          (let ((bytes (nelisp-link-test--read-file-bytes path)))
+            ;; A __DATA segment adds one load command to the fixed set.
+            (should (= (nelisp-link-test--read-le32 bytes 16) 16))
+            (should (= (nelisp-link-test--read-le32 bytes 20)
+                       (plist-get lay :sizeofcmds)))
+            ;; __text moved past the fixed offset to make room for it.
+            (should (> code-off nelisp-mach-o--exe-code-off))
+            (should (equal (substring bytes code-off (+ code-off 4))
+                           (nelisp-link-test--ub #xc0 #x03 #x5f #xd6)))
+            ;; LC_SEGMENT_64 __DATA, read/write, two sections.
+            (should (equal (substring bytes (+ data-cmd 8) (+ data-cmd 14))
+                           "__DATA"))
+            (should (= (nelisp-link-test--read-le64 bytes (+ data-cmd 24))
+                       data-vmaddr))
+            (should (= (nelisp-link-test--read-le64 bytes (+ data-cmd 32))
+                       page))                                   ; vmsize
+            (should (= (nelisp-link-test--read-le64 bytes (+ data-cmd 40))
+                       data-off))
+            (should (= (nelisp-link-test--read-le64 bytes (+ data-cmd 48))
+                       page))                                   ; filesize
+            (should (= (nelisp-link-test--read-le32 bytes (+ data-cmd 56)) 3))
+            (should (= (nelisp-link-test--read-le32 bytes (+ data-cmd 60)) 3))
+            (should (= (nelisp-link-test--read-le32 bytes (+ data-cmd 64)) 2))
+            ;; section_64 __data: file-backed, 16 bytes at the segment start.
+            (should (equal (substring bytes (+ data-cmd 72) (+ data-cmd 78))
+                           "__data"))
+            (should (= (nelisp-link-test--read-le64 bytes (+ data-cmd 72 32))
+                       data-vmaddr))
+            (should (= (nelisp-link-test--read-le64 bytes (+ data-cmd 72 40)) 16))
+            (should (= (nelisp-link-test--read-le32 bytes (+ data-cmd 72 48))
+                       data-off))
+            ;; section_64 __bss: zero-fill, so no file offset of its own.
+            (should (equal (substring bytes (+ bss-sect) (+ bss-sect 5))
+                           "__bss"))
+            (should (= (nelisp-link-test--read-le64 bytes (+ bss-sect 32))
+                       (plist-get lay :bss-vmaddr)))
+            (should (= (nelisp-link-test--read-le64 bytes (+ bss-sect 40)) 8))
+            (should (= (nelisp-link-test--read-le32 bytes (+ bss-sect 48)) 0))
+            (should (= (nelisp-link-test--read-le32 bytes (+ bss-sect 64)) 1))
+            ;; The linked pointers hold the emitted __bss and __text addresses.
+            (should (= (nelisp-link-test--read-le64 bytes data-off)
+                       (plist-get lay :bss-vmaddr)))
+            (should (= (nelisp-link-test--read-le64 bytes (+ data-off 8))
+                       (plist-get lay :text-vmaddr)))))
+      (when (file-exists-p path) (delete-file path)))))
+
+(ert-deftest nelisp-mach-o-exe-layout-matches-fixed-offset-without-rw ()
+  "Without .data/.bss the layout keeps the blueprint-pinned __text offset."
+  (let ((lay (nelisp-mach-o-exe-layout 64 0 0 'aarch64)))
+    (should (= (plist-get lay :ncmds) 15))
+    (should (= (plist-get lay :code-off) nelisp-mach-o--exe-code-off))
+    (should (= (plist-get lay :data-filesize) 0))
+    (should (= (plist-get lay :data-vmsize) 0))
+    (should (= (plist-get lay :linkedit-off) (plist-get lay :text-filesize)))))
+
 ;; ---- PE32+ link path ----
 
 (ert-deftest nelisp-link-units-pe32-import-thunk ()
