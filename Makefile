@@ -1,4 +1,4 @@
-.PHONY: unsafe-inventory test test-fast test-parallel test-one wasm-smoke wasm-runtime-image-smoke wasm-dtw-skeleton-smoke wasm-dtw-transpile wasm-dtw-compile wasm-dtw-smoke wasm-dtw-site wasm-dtw-site-smoke compile clean all bench gc-bench actor-bench soak soak-1h soak-full soak-worker \
+.PHONY: unsafe-inventory test test-fast test-parallel test-one wasm-smoke wasm-runtime-image-smoke wasm-dtw-skeleton-smoke wasm-dtw-transpile wasm-dtw-compile wasm-dtw-smoke wasm-dtw-site wasm-dtw-site-smoke compile clean all bench bench-aot-tco gc-bench actor-bench soak soak-1h soak-full soak-worker \
         sqlite-module sqlite-module-clean \
         release-artifact release-checksum soak-blocker soak-post-ship \
         bench-actual bench-allocator bench-allocator-heavy \
@@ -988,6 +988,14 @@ bench: compile
 	  --eval '(setq load-prefer-newer t)' \
 	  -l nelisp-bench \
 	  -f nelisp-bench-batch
+
+# Doc 171 G4: native artifact proof that transparent self-tail TCO
+# keeps pace with the handwritten `nl-loop' form of the same algorithm.
+bench-aot-tco:
+	$(EMACS) --batch -Q -L lisp -L src -L bench -L packages/nl-prelude/src \
+	  --eval '(setq load-prefer-newer t)' \
+	  -l nelisp-aot-tco-bench \
+	  -f nelisp-aot-tco-bench-batch
 
 # Phase 3c.6 GC mark-pass bench.  Advisory only — not gated.
 gc-bench: compile
