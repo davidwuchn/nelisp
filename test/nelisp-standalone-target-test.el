@@ -820,7 +820,9 @@ Windows uses the target-correct `.obj' unit name; linux/macOS keep `.o'."
             (should sym)
             (should (equal (cdr expected) (plist-get sym :value)))
             (should (eq 'bss (plist-get sym :section)))))
-        (should (equal 1106192
+        ;; Doc 170 Stage 2: +96 bytes for the `nl_alloc_check' checked-
+        ;; allocator control block appended after `nl_fvcache_*'.
+        (should (equal (+ 57616 1048576 96)
                        (cdr (assq 'bss (plist-get u :sections)))))))))
 
 (ert-deftest nelisp-standalone-target-stage8-build-appends-arena-base-slot-unit ()
