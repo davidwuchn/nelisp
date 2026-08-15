@@ -244,7 +244,12 @@ symbols) would be reused by the static link and fail with
                    (format "windows-x86_64-arena-%x"
                            nelisp-standalone--windows-arena-base)
                  (symbol-name target)))
-         (base (if (getenv "NELISP_READER_DYNAMIC") (concat base "-dyn") base)))
+         (base (if (getenv "NELISP_READER_DYNAMIC") (concat base "-dyn") base))
+         ;; Doc 171 G2: the TCO pass changes unit bytes but the cache is
+         ;; keyed on mtimes only, so NELISP_TCO=1 builds get their own
+         ;; cache (same split rationale as `-dyn' above) -- otherwise a
+         ;; flag flip silently links stale objects from the other mode.
+         (base (if (equal (getenv "NELISP_TCO") "1") (concat base "-tco") base)))
     (expand-file-name base nelisp-standalone--cache-dir)))
 
 (defconst nelisp-standalone--out
@@ -823,13 +828,21 @@ standalone units can call each other."
          (nelisp-aot-compiler--abi resolved-abi)
          ;; Doc 171: self-tail-call optimization, off unless the build
          ;; opts in via NELISP_TCO=1 (byte-identity gate, Doc 171 G2).
+         ;; `make TARGET NELISP_TCO=1' works: command-line make
+         ;; variables are exported into recipe environments.
          (nelisp-aot-compiler-tco-enabled
           (equal (getenv "NELISP_TCO") "1"))
+         (nelisp--tco-log-start (length nelisp-aot-compiler--tco-log))
          (ir (nelisp-aot-compiler--parse source nil))
          (defuns (nelisp-aot-compiler--collect-defuns ir))
          (buf (if (eq arch 'aarch64)
                   (nelisp-asm-arm64-make-buffer)
                 (nelisp-asm-x86_64-make-buffer resolved-abi))))
+    (when nelisp-aot-compiler-tco-enabled
+      (message "nelisp-tco: %d rewrite(s) in unit %s"
+               (- (length nelisp-aot-compiler--tco-log)
+                  nelisp--tco-log-start)
+               name))
     (dolist (d defuns) (nelisp-aot-compiler--emit-defun d buf))
     (let* ((arm64-linked (when (eq arch 'aarch64)
                            (nelisp-standalone--arm64-link-unit-text+relocs buf)))
