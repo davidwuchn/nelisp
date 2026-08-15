@@ -336,8 +336,9 @@ through Elisp-generated native code.
   and runs.
 - *Cross-platform native emit* (May 2026 — see =Cross-Platform Support=
   below): 5 OS×arch targets supported entirely from elisp.
-- *GC pure-elisp* (Doc 79 v7 Phase C Stage 5.3):  Bacon-Rajan cycle
-  collector at =lisp/nelisp-stdlib-gc.el= ( *806 LoC* ).
+- *GC pure-elisp* (Doc 79 v7 Phase C Stage 5.3): object tracker and
+  collector implementation at =src/nelisp-gc.el= ( *379 LoC* ) and
+  =src/nelisp-gc-inner.el= ( *2,941 LoC* ).
 - All special forms, builtins, env / mirror / frame ops, NlBox
   Clone/Drop, reader (lexer + parser), JIT trampolines, syscall
   handlers — now live in elisp via AOT .o.

@@ -27,9 +27,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
       - name: Set up Emacs
         uses: purcell/setup-emacs@v8.0
         with:
@@ -64,9 +61,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
       - name: Set up Emacs
         uses: purcell/setup-emacs@v8.0
         with:
@@ -94,9 +88,6 @@ jobs:
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
 
       - name: Set up Emacs
         uses: purcell/setup-emacs@v8.0

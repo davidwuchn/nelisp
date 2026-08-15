@@ -87,7 +87,7 @@ inotify 等は Lisp 側に出す。
 本 Phase は Phase 5-B の成果物に依存する:
 - =src/nelisp-buffer.el= gap buffer + marker / overlay (Phase
   5-B.1/5-B.2) — process output buffer の受け皿
-- =src/nelisp-redisplay.el= terminal dirty-region (Phase 5-B.3)
+- =nelisp-emacs= 兄弟リポジトリの =src/nelisp-redisplay.el= terminal dirty-region (Phase 5-B.3)
   — MCP server tail view / process status view
 - =src/nelisp-eventloop.el= key / timer event (Phase 5-B.4) +
   actor integration — process I/O event を同 event-loop に
