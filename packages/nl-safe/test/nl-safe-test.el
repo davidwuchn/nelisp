@@ -629,6 +629,34 @@
                         (nl-ptr-ref-u8 p 1)))
                42))))
 
+;;; nl-cell-set write-back (2026-08-15 code review fix) ----------------
+
+(ert-deftest nl-safe-cell-set-writes-back-under-exclusive-borrow ()
+  "setq on the borrow VAR is a snapshot no-op; nl-cell-set writes back."
+  (let ((cell (nl-cell 1)))
+    (nl-with-borrow-mut (v cell)
+      (setq v 99)                      ; snapshot only, by design
+      (nl-cell-set cell 42))
+    (should (= 99 99))                 ; silence unused-var intent
+    (nl-with-borrow (v cell)
+      (should (equal v 42)))))
+
+(ert-deftest nl-safe-cell-set-outside-exclusive-borrow-errors ()
+  (let ((cell (nl-cell 1)))
+    (should-error (nl-cell-set cell 2) :type 'nl-borrow-error)
+    (nl-with-borrow (_v cell)
+      (should-error (nl-cell-set cell 2) :type 'nl-borrow-error))
+    (nl-with-borrow (v cell)
+      (should (equal v 1)))))
+
+(ert-deftest nl-safe-cell-set-type-error ()
+  (should-error (nl-cell-set [not-a-cell] 1) :type 'nl-type-error))
+
+(ert-deftest nl-safe-cell-set-return-value ()
+  (let ((cell (nl-cell nil)))
+    (nl-with-borrow-mut (_v cell)
+      (should (equal (nl-cell-set cell 'stored) 'stored)))))
+
 (provide 'nl-safe-test)
 
 ;;; nl-safe-test.el ends here

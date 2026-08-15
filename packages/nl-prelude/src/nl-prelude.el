@@ -294,11 +294,19 @@ expansion error instead of falling back to an unchecked dispatch."
 
 (defun nl--warn (format-string &rest args)
   "Emit an nl-prelude warning built from FORMAT-STRING and ARGS.
-Uses `display-warning' when available (absent on standalone NeLisp)."
+During byte compilation this routes through `byte-compile-warn' so the
+CI compile gate (`byte-compile-error-on-warn' t) catches it; otherwise
+it uses `display-warning' when available (absent on standalone
+NeLisp), falling back to `message'."
   (let ((msg (apply #'format format-string args)))
-    (if (fboundp 'display-warning)
-        (display-warning 'nl-prelude msg)
-      (message "Warning (nl-prelude): %s" msg))))
+    (cond
+     ((and (fboundp 'byte-compile-warn)
+           (fboundp 'macroexp-compiling-p)
+           (macroexp-compiling-p))
+      (byte-compile-warn "%s" msg))
+     ((fboundp 'display-warning)
+      (display-warning 'nl-prelude msg))
+     (t (message "Warning (nl-prelude): %s" msg)))))
 
 ;;;; Algebraic data types (Doc 169 section 3, Phase 2a) ---------------
 
@@ -312,7 +320,15 @@ Uses `display-warning' when available (absent on standalone NeLisp)."
 
 (defun nl--data-register (type variants)
   "Register TYPE with VARIANTS, a list of (VARIANT . ARITY).
-Re-registering TYPE replaces its previous variant set."
+Re-registering TYPE replaces its previous variant set.  A variant name
+already claimed by a DIFFERENT type is an error: constructors and
+predicates are global defuns, so a silent cross-type takeover would
+clobber the other type's functions and registry entry."
+  (dolist (v variants)
+    (let ((prev (gethash (car v) nl--data-variants)))
+      (when (and prev (not (eq (car prev) type)))
+        (error "nl-defdata: variant %s already belongs to type %s"
+               (car v) (car prev)))))
   (dolist (old (gethash type nl--data-registry))
     (let ((rev (gethash (car old) nl--data-variants)))
       (when (and rev (eq (car rev) type))
@@ -381,6 +397,10 @@ exhaustiveness at expansion time."
                  variants)))
     (unless specs
       (error "nl-defdata: %s needs at least one variant" type))
+    (when (memq type (mapcar #'car specs))
+      (error
+       "nl-defdata: variant must not share the type name %s (its %s-p would clobber the type predicate)"
+       type type))
     `(progn
        (eval-and-compile
          (nl--data-register
@@ -510,8 +530,11 @@ signals `nl-match-error'."
               (string-suffix-p "#" name)))))
 
 (defun nl--rename-auto-gensyms-1 (form table)
-  "Rewrite trailing-# symbols in FORM using TABLE for consistency."
+  "Rewrite trailing-# symbols in FORM using TABLE for consistency.
+Quoted forms are left untouched (matching the other tree walkers):
+a trailing-# symbol used as literal DATA keeps its spelling."
   (cond
+   ((and (consp form) (eq (car form) 'quote)) form)
    ((nl--auto-gensym-p form)
     (or (gethash form table)
         (puthash form
@@ -570,55 +593,54 @@ Used for non-tail subtrees, which may not contain `nl-recur' at all."
    (t (nl--loop-scan (car form))
       (nl--loop-scan (cdr form)))))
 
-(defun nl--loop-walk-body (forms vars continue)
-  "Walk an implicit-progn FORMS list: all non-tail but the last."
+(defun nl--loop-walk-body (forms regs continue)
+  "Walk an implicit-progn FORMS list: all non-tail but the last.
+REGS is the (VAR . REGISTER) alist; CONTINUE the loop-again flag."
   (let ((head (butlast forms))
         (tail (last forms)))
     (mapc #'nl--loop-scan head)
     (append head
-            (list (nl--loop-walk (car tail) vars continue)))))
+            (list (nl--loop-walk (car tail) regs continue)))))
 
-(defun nl--loop-walk (form vars continue)
+(defun nl--loop-walk (form regs continue)
   "Rewrite `nl-recur' calls in tail position of FORM.
-VARS are the `nl-loop' variables; CONTINUE is the loop-again flag
-symbol.  Signals on `nl-recur' in non-tail position or with the wrong
-argument count."
+REGS is an alist of (VAR . REGISTER): the user-visible loop variables
+and the hidden gensym registers `nl-recur' assigns to.  Assigning
+registers (not VARs) makes the rewrite immune to an inner `let'
+shadowing a loop variable, and gives simultaneous-rebinding semantics
+for free (the argument expressions still see the per-iteration VAR
+bindings).  CONTINUE is the loop-again flag symbol.  Signals on
+`nl-recur' in non-tail position or with the wrong argument count."
   (cond
    ((not (consp form)) form)
    ((eq (car form) 'quote) form)
    ((eq (car form) 'nl-loop) form)
    ((eq (car form) 'nl-recur)
     (let ((args (cdr form)))
-      (unless (= (length args) (length vars))
+      (unless (= (length args) (length regs))
         (error "nl-recur: expects %d value(s) for %S, got %d"
-               (length vars) vars (length args)))
+               (length regs) (mapcar #'car regs) (length args)))
       (mapc #'nl--loop-scan args)
-      (let ((temps (mapcar (lambda (v) (gensym (format "nl--%s-" v)))
-                           vars)))
-        `(let ,(let ((pairs nil) (ts temps) (as args))
-                 (while ts
-                   (push (list (car ts) (car as)) pairs)
-                   (setq ts (cdr ts) as (cdr as)))
-                 (nreverse pairs))
-           (setq ,@(let ((sets nil) (vs vars) (ts temps))
-                     (while vs
-                       (push (car vs) sets) (push (car ts) sets)
-                       (setq vs (cdr vs) ts (cdr ts)))
-                     (nreverse sets))
-                 ,continue t)
-           nil))))
+      `(progn
+         (setq ,@(let ((sets nil) (rs regs) (as args))
+                   (while rs
+                     (push (cdr (car rs)) sets) (push (car as) sets)
+                     (setq rs (cdr rs) as (cdr as)))
+                   (nreverse sets))
+               ,continue t)
+         nil)))
    ((memq (car form) '(progn when unless))
     (if (eq (car form) 'progn)
-        `(progn ,@(nl--loop-walk-body (cdr form) vars continue))
+        `(progn ,@(nl--loop-walk-body (cdr form) regs continue))
       (nl--loop-scan (nth 1 form))
       `(,(car form) ,(nth 1 form)
-        ,@(nl--loop-walk-body (cddr form) vars continue))))
+        ,@(nl--loop-walk-body (cddr form) regs continue))))
    ((eq (car form) 'if)
     (nl--loop-scan (nth 1 form))
     `(if ,(nth 1 form)
-         ,(nl--loop-walk (nth 2 form) vars continue)
+         ,(nl--loop-walk (nth 2 form) regs continue)
        ,@(if (cdddr form)
-             (nl--loop-walk-body (cdddr form) vars continue)
+             (nl--loop-walk-body (cdddr form) regs continue)
            nil)))
    ((eq (car form) 'cond)
     `(cond
@@ -627,17 +649,22 @@ argument count."
                   (if (cdr clause)
                       (cons (car clause)
                             (nl--loop-walk-body (cdr clause)
-                                                vars continue))
+                                                regs continue))
                     clause))
                 (cdr form))))
    ((memq (car form) '(let let*))
     (dolist (b (nth 1 form)) (nl--loop-scan b))
     `(,(car form) ,(nth 1 form)
-      ,@(nl--loop-walk-body (cddr form) vars continue)))
+      ,@(nl--loop-walk-body (cddr form) regs continue)))
    ((memq (car form) '(and or))
-    (mapc #'nl--loop-scan (butlast (cdr form)))
-    `(,(car form) ,@(butlast (cdr form))
-      ,(nl--loop-walk (car (last form)) vars continue)))
+    ;; Zero-argument (and) / (or) has no tail sub-form to rewrite;
+    ;; (car (last form)) would be the head symbol itself and the
+    ;; rewrite would emit the bogus (and and) / (or or).
+    (if (null (cdr form))
+        form
+      (mapc #'nl--loop-scan (butlast (cdr form)))
+      `(,(car form) ,@(butlast (cdr form))
+        ,(nl--loop-walk (car (last form)) regs continue))))
    (t (nl--loop-scan form) form)))
 
 (defmacro nl-loop (bindings &rest body)
@@ -645,7 +672,13 @@ argument count."
 BINDINGS is a list of (VAR INIT) evaluated like `let'.  BODY is an
 implicit progn; (nl-recur NEW...) in tail position rebinds all VARs
 simultaneously and restarts, in constant stack space; any other value
-ends the loop and is returned (Doc 169 section 5)."
+ends the loop and is returned (Doc 169 section 5).
+
+The loop state lives in hidden registers; each iteration binds the
+VARs fresh from them.  `nl-recur' therefore works correctly even when
+an inner `let' shadows a loop variable, and Clojure loop/recur
+semantics apply: mutating a VAR directly never affects the next
+iteration -- only `nl-recur' does."
   (declare (indent 1))
   (dolist (b bindings)
     (unless (and (consp b) (symbolp (car b)) (car b)
@@ -654,13 +687,19 @@ ends the loop and is returned (Doc 169 section 5)."
   (unless body
     (error "nl-loop: empty body"))
   (let* ((vars (mapcar #'car bindings))
+         (regs (mapcar (lambda (v) (cons v (gensym (format "nl--reg-%s-" v))))
+                       vars))
          (continue (gensym "nl--continue"))
          (result (gensym "nl--result"))
-         (walked (nl--loop-walk-body body vars continue)))
-    `(let (,@bindings (,continue t) (,result nil))
+         (walked (nl--loop-walk-body body regs continue)))
+    `(let (,@(mapcar (lambda (b) (list (cdr (assq (car b) regs)) (nth 1 b)))
+                     bindings)
+           (,continue t) (,result nil))
        (while ,continue
          (setq ,continue nil)
-         (setq ,result (progn ,@walked)))
+         (setq ,result
+               (let ,(mapcar (lambda (r) (list (car r) (cdr r))) regs)
+                 ,@walked)))
        ,result)))
 
 (provide 'nl-prelude)

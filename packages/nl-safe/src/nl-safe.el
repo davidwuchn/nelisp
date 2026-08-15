@@ -172,6 +172,20 @@ Signal `nl-borrow-error' unless CELL is completely unborrowed."
   "Release the exclusive borrow on CELL."
   (aset cell 2 0))
 
+(defun nl-cell-set (cell value)
+  "Store VALUE into CELL and return VALUE; the write-back API.
+`nl-with-borrow-mut' binds its VAR to a one-time snapshot of the cell
+value, so `setq' on VAR does NOT write back to the cell — call this
+inside the exclusive-borrow body instead.  Signals `nl-borrow-error'
+\(and logs the violation) unless the exclusive borrow is currently
+held.  When `nl-safe--enabled' is nil the borrow-state check is
+skipped and the write always happens."
+  (nl-safe--cell-check cell 'nl-cell-set)
+  (when (and nl-safe--enabled (/= (aref cell 2) -1))
+    (nl-safe--borrow-violation 'nl-cell-set (aref cell 2) 'write))
+  (aset cell 1 value)
+  value)
+
 (defun nl-safe--borrow-spec (spec caller)
   "Validate the borrow binding SPEC (VAR CELL) for the macro CALLER."
   (unless (and (consp spec) (symbolp (car spec)) (car spec)

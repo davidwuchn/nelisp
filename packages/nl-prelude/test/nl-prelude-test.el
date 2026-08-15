@@ -537,6 +537,63 @@ dispatch on the variant tag at runtime."
                (should-not nl--strict))
       (setq nl--strict old))))
 
+;;; Review-fix regressions (2026-08-15 code review) --------------------
+
+(ert-deftest nl-prelude-loop-shadowed-variable-still-advances ()
+  "An inner `let' shadowing a loop variable must not break nl-recur.
+Pre-fix this looped forever: the emitted setq mutated the shadow."
+  (should (equal (nl-loop ((x 0))
+                   (let ((x (1+ x)))
+                     (if (> x 5) x (nl-recur x))))
+                 6)))
+
+(ert-deftest nl-prelude-loop-empty-and-or-tail ()
+  "Zero-argument (and)/(or) in tail position stay valid Elisp.
+Pre-fix they were rewritten to the bogus (and and) / (or or)."
+  (should (eq (nl-loop ((x 0)) (and)) t))
+  (should (eq (nl-loop ((x 0)) (or)) nil)))
+
+(ert-deftest nl-prelude-defdata-cross-type-variant-collision-errors ()
+  "A variant name claimed by another type is a loud error, not a
+silent registry/defun clobber."
+  (should-error (eval '(nl-defdata nlt-other-shape (nlt-circle r)))))
+
+(ert-deftest nl-prelude-defdata-variant-naming-type-errors ()
+  "A variant sharing the type name would clobber the TYPE-p predicate."
+  (should-error (macroexpand '(nl-defdata nlt-selfname (nlt-selfname a)))))
+
+(nl-defmacro nlt-quoted-tag (x)
+  `(list 'tag\# ,x))
+
+(ert-deftest nl-prelude-auto-gensym-preserves-quoted-literals ()
+  "Trailing-# symbols under `quote' are data, not template variables."
+  (should (equal (nlt-quoted-tag 5) (list 'tag\# 5)))
+  (let ((e (macroexpand '(nlt-quoted-tag 5))))
+    (should (nl-prelude-test--tree-member 'tag\# e))))
+
+(ert-deftest nl-prelude-match-warning-fails-compile-gate ()
+  "Duplicate-clause warnings must trip byte-compile-error-on-warn.
+Skipped (trivially true) on standalone, which has no byte compiler."
+  (if (not (fboundp 'byte-compile))
+      (should t)
+    (let ((byte-compile-error-on-warn t))
+      ;; byte-compile logs the error and returns nil (it does not
+      ;; signal); batch-byte-compile turns that into a non-zero exit.
+      (should-not
+       (functionp
+        (byte-compile '(lambda (s)
+                        (nl-match s
+                          ((nlt-circle r) r)
+                          ((nlt-circle r2) r2)
+                          ((nlt-rect w h) w)
+                          ((nlt-dot) 0))))))
+      ;; Control: the clean form still compiles.
+      (should (functionp (byte-compile '(lambda (s)
+                               (nl-match s
+                                 ((nlt-circle r) r)
+                                 ((nlt-rect w h) (+ w h))
+                                 ((nlt-dot) 0)))))))))
+
 (provide 'nl-prelude-test)
 
 ;;; nl-prelude-test.el ends here
