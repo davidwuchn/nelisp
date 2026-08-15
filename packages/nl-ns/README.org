@@ -1,0 +1,181 @@
+#+TITLE: nl-ns — namespace boundaries as a checkable declaration
+
+* Motivation
+
+Doc 169 language defect #6: Emacs Lisp has no namespaces.  There is one
+obarray, so =(defun foo ...)= is assignment to a global name and a
+second definition silently wins.  Doc 168 sent the fix to Doc 90
+because a real namespace system is an L3 change — it touches how the
+reader turns text into symbols, which is the highest-cost, hardest-to-
+withdraw layer in the whole design.
+
+This package takes the other road.  It does *not* rewrite code, and it
+adds nothing at run time.  It reads files and reports where the
+boundaries that Elisp cannot enforce have actually been crossed.
+
+** Why not a renaming macro
+
+The obvious library shape is =names.el='s: a =(define-namespace foo- ...)=
+block that turns =bar= into =foo-bar= during macro expansion.  It buys
+shorter source names and pays for them everywhere else — the debugger,
+the backtrace, =describe-function=, =M-.=, and byte-compiler warnings
+all start naming something the author never typed.  In a runtime whose
+failures are already dominated by *silent wrong values*, adding a layer
+that makes error messages disagree with the source is a bad trade.
+
+And shorter names are not the problem.  The problems are:
+
+1. collisions are silent,
+2. "this file depends on that file" is written nowhere,
+3. the =--= private convention is a comment, not a rule.
+
+All three are checkable without touching a single source file.
+
+* Findings
+
+Same plist shape as =nl-check=: =(:kind KIND :subject S ...)=.
+
+| kind                       | meaning                                     |
+|----------------------------+---------------------------------------------|
+| =ns-collision=             | symbol defined in more than one file        |
+| =ns-prefix-violation=      | definition outside its file's namespace     |
+| =ns-private-escape=        | another file's =--= name is referenced      |
+| =ns-undeclared-dependency= | cross-file reference with no =require=      |
+| =ns-unreadable=            | the file could not be read                  |
+
+* Zero configuration
+
+A file's namespace is *inferred*: the longest hyphen-boundary prefix
+shared by more than half the names the file defines.
+
+#+begin_src elisp
+(nl-ns-file-namespace "a.el" '(nl-safe-one nl-safe-two nl-safe-three))
+;; => "nl-safe-"
+(nl-ns-file-namespace "prelude.el" '(car cdr princ terpri))
+;; => nil   ; no dominant prefix
+#+end_src
+
+A file with no dominant prefix is treated as deliberately global and
+skips the prefix check entirely, so a stdlib prelude that defines =car=
+and =princ= does not drown the report.  =nl-ns-declare= overrides the
+inference where it guesses wrong:
+
+#+begin_src elisp
+(nl-ns-declare "lisp/odd-one-out.el" "nelisp-")
+#+end_src
+
+Because inference needs no edits, the whole existing tree can be
+analysed as it stands.
+
+* Usage
+
+#+begin_src elisp
+(require 'nl-ns)
+
+(let ((findings (nl-ns-check-files (file-expand-wildcards "lisp/*.el"))))
+  (princ (nl-ns-report findings))
+  (nl-ns-summary findings))          ; => ((ns-collision . 12) ...)
+#+end_src
+
+Analysis and checking are separate from file I/O, so the pass also runs
+on forms you already have:
+
+#+begin_src elisp
+(nl-ns-check
+ (nl-ns-analyse '(("a.el" (defun eql (a b) a))
+                  ("b.el" (defalias 'eql 'equal)))))
+;; => ((:kind ns-collision :subject eql :files ("a.el" "b.el") :count 2))
+#+end_src
+
+* What it finds in this tree today
+
+Over =lisp/=, =src/=, =scripts/= and =packages/*/src/= (340 files):
+
+| kind                  | count |
+|-----------------------+-------|
+| =ns-prefix-violation= |   808 |
+| =ns-private-escape=   |   520 |
+| =ns-collision=        |   307 |
+
+The collisions are dominated by the two-stdlib split — =abs=, =and=,
+=append=, =backquote=, =eql= and 300 others exist once in
+=lisp/nelisp-stdlib*.el= and again in =scripts/nelisp-stdlib-prelude.el=,
+with no mechanism anywhere that says the two must agree.  =eql= is the
+case where they already do not: one file aliases it to =equal=, the
+other gives it the numeric-aware definition.
+
+The private escapes are concentrated in the AOT compiler reaching
+through the assemblers' =--= boundary
+(=nelisp-asm-arm64--emit-word=, =nelisp-asm-x86_64--abi-win64-arg-regs=,
+=nelisp-asm-wasm--global-kind=, ...), which is why those modules cannot
+be refactored independently today.
+
+* CI gate
+
+=make ns-inventory= counts the findings and fails when any kind exceeds
+=tools/ns-inventory-baseline.txt=.  Same ratchet rule as
+=make unsafe-inventory=: below the baseline prints a notice so the
+number can be lowered in the change that shrank it; above it fails.
+The point is to stop the numbers growing, not to demand a cleanup
+nobody scheduled.
+
+=ns-undeclared-dependency= is not part of the gate.  A tree that has
+always relied on load order produces one finding per edge of its real
+dependency graph — worth reading once, useless as a threshold.  Pass a
+non-nil second argument to =nl-ns-check= to see it.
+
+* Limits
+
+- *Reference collection is over-approximate.*  Every symbol in a form
+  counts as a reference, including quoted data.  That is deliberate:
+  this codebase passes function names as quoted symbols constantly, and
+  missing those would understate the coupling.
+- *Only cross-file ownership is modelled.*  Defining a name twice in
+  one file is a different problem and is not reported here.
+- *A symbol defined in two files has no single owner*, so no private
+  escape is attributed to it; the collision finding covers it instead.
+- *Nothing is enforced at run time.*  This package cannot prevent a
+  collision, only report one.
+
+* Non-goals
+
+- *Not a renaming layer.*  See above.
+- *Not a module system.*  There is no import form, no export list, no
+  visibility enforcement — only a report on the conventions already in
+  the source.
+- *Not depended on by anything.*  Like =nl-check= (Doc 168 section 4.1),
+  the arrow points one way so the package can always be deleted.
+
+* Testing
+
+Host Emacs (part of =make test= at the repo root):
+
+#+begin_src sh
+emacs --batch -Q -L packages/nl-prelude/src -L packages/nl-ns/src \
+  -L packages/nl-ns/test \
+  -l ert -l nl-ns-test -f ert-run-tests-batch-and-exit
+#+end_src
+
+Standalone NeLisp:
+
+#+begin_src sh
+./target/nelisp --load packages/nl-ns/test/nl-ns-standalone-smoke.el
+#+end_src
+
+The standalone run needs a binary built at or after =7cd3b827=
+("let =puthash= overwrite an existing key").  Before that commit the
+prefix-inference counters silently stop at 1 and namespace inference
+returns nil for every file — a good illustration of why the smoke
+exists.
+
+* Follow-ups
+
+- Wire =make ns-inventory= into CI next to =unsafe-inventory=.
+- Reconcile the 307 stdlib collisions: today =lisp/nelisp-stdlib*.el=
+  and =scripts/nelisp-stdlib-prelude.el= can drift apart with nothing
+  detecting it.  A first step is a targeted report of collisions whose
+  two definitions are not textually identical.
+- Narrow reference collection to evaluated positions, behind a flag, so
+  =ns-undeclared-dependency= becomes precise enough to gate.
+- Optional shorter-name tier (=names.el=-style rewriting) if it is ever
+  wanted, documented with the debugger caveats above.

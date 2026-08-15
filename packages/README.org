@@ -66,16 +66,19 @@ it as the canonical example for future library moves.
 
 * The nl-* extension family (Doc 168)
 
-=nl-prelude= / =nl-condition= / =nl-safe= / =nl-check= are opt-in
-LANGUAGE extension libraries (Doc 168-170), not extractions from the
-core: they never ship loaded, and the root Makefile globs both the
+=nl-prelude= / =nl-condition= / =nl-safe= / =nl-check= / =nl-ns= are
+opt-in LANGUAGE extension libraries (Doc 168-170), not extractions from
+the core: they never ship loaded, and the root Makefile globs both the
 =nelisp-*= and =nl-*= name families for compile and test.  Each
 follows the same layout as above plus a
 =test/<name>-standalone-smoke.el= runner that executes the identical
 ERT bodies on =target/nelisp= (which has no ert) through a minimal
 shim -- copy that pattern for new nl-* packages.
 
-=nl-check= is the exception to the dependency rule: it is the
-expansion-time checking pass (Doc 170 section 10), so it depends on
-the feature packages and *nothing depends on it*.  Keep that arrow
-one-way; the point is that the checker can always be deleted.
+=nl-check= and =nl-ns= are the exceptions to the dependency rule: they
+are checking passes (Doc 170 section 10; Doc 169 defect #6), so they
+depend on the feature packages and *nothing depends on them*.  Keep
+that arrow one-way; the point is that a checker can always be deleted.
+=nl-check= reads one form at a time (must-use, resource linearity,
+unsafe calls); =nl-ns= reads a whole file set at once (cross-file name
+collisions, stray definitions, private-boundary references).

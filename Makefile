@@ -1,4 +1,4 @@
-.PHONY: unsafe-inventory test test-fast test-parallel test-one wasm-smoke wasm-runtime-image-smoke wasm-dtw-skeleton-smoke wasm-dtw-transpile wasm-dtw-compile wasm-dtw-smoke wasm-dtw-site wasm-dtw-site-smoke compile clean all bench gc-bench actor-bench soak soak-1h soak-full soak-worker \
+.PHONY: unsafe-inventory ns-inventory test test-fast test-parallel test-one wasm-smoke wasm-runtime-image-smoke wasm-dtw-skeleton-smoke wasm-dtw-transpile wasm-dtw-compile wasm-dtw-smoke wasm-dtw-site wasm-dtw-site-smoke compile clean all bench gc-bench actor-bench soak soak-1h soak-full soak-worker \
         sqlite-module sqlite-module-clean \
         release-artifact release-checksum soak-blocker soak-post-ship \
         bench-actual bench-allocator bench-allocator-heavy \
@@ -228,6 +228,15 @@ standalone-reader:
 unsafe-inventory:
 	$(EMACS) --batch -Q -L packages/nl-prelude/src -L packages/nl-safe/src \
 	  -L packages/nl-check/src -l tools/nl-check-inventory.el
+
+# Doc 169 defect #6: namespace boundaries, checked instead of enforced
+# by a reader extension.  Counts nl-ns cross-file collisions, stray
+# definitions, and references through another file's `--' private
+# boundary, and fails when any kind exceeds
+# tools/ns-inventory-baseline.txt.  Same ratchet rule as above.
+ns-inventory:
+	$(EMACS) --batch -Q -L packages/nl-prelude/src -L packages/nl-ns/src \
+	  -l tools/nl-ns-inventory.el
 
 reader-surface-audit:
 	$(EMACS) --batch -Q -L lisp -L src -L scripts \
