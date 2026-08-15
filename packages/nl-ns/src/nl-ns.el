@@ -36,6 +36,7 @@
 ;;   ns-prefix-violation       definition outside its file's namespace
 ;;   ns-private-escape         another file's `--' name is referenced
 ;;   ns-undeclared-dependency  cross-file reference with no `require'
+;;   ns-quoted-member          member name is literal inside `nl-ns-in'
 ;;   ns-unreadable             the file could not be read
 ;;
 ;; Zero configuration by design.  A file's namespace is inferred as the
@@ -123,16 +124,90 @@ on them."
           (setq i (1+ i)))))))
   table)
 
+(defun nl-ns--ns-members (form)
+  "Return the `:members' list declared by an `nl-ns-define' FORM."
+  (let ((properties (cdr (cdr form)))
+        (members nil))
+    (while properties
+      (when (eq (car properties) :members)
+        (setq members (car (cdr properties))))
+      (setq properties (cdr (cdr properties))))
+    (if (listp members) members nil)))
+
+(defun nl-ns--ns-prefix (form name)
+  "Return the prefix declared by `nl-ns-define' FORM for NAME."
+  (let ((properties (cdr (cdr form)))
+        (prefix nil))
+    (while properties
+      (when (eq (car properties) :prefix)
+        (setq prefix (car (cdr properties))))
+      (setq properties (cdr (cdr properties))))
+    (if (stringp prefix) prefix (concat (symbol-name name) "-"))))
+
+(defun nl-ns--quoted-members-in-template (form members depth)
+  "Return MEMBERS appearing as literal data in backquote FORM at DEPTH."
+  (cond
+   ((symbolp form) (if (memq form members) (list form) nil))
+   ((not (consp form)) nil)
+   ((eq (car form) '\`)
+    (nl-ns--quoted-members-in-template (car (cdr form)) members (1+ depth)))
+   ((memq (car form) '(\, \,@))
+    (if (= depth 1)
+        nil
+      (nl-ns--quoted-members-in-template (car (cdr form)) members (1- depth))))
+   (t (append (nl-ns--quoted-members-in-template (car form) members depth)
+              (nl-ns--quoted-members-in-template (cdr form) members depth)))))
+
+(defun nl-ns--quoted-members-in-form (form members)
+  "Return MEMBERS that FORM uses in quote or backquote literal positions."
+  (cond
+   ((not (consp form)) nil)
+   ((eq (car form) 'quote)
+    (nl-ns--quoted-members-in-template (car (cdr form)) members 0))
+   ((eq (car form) '\`)
+    (nl-ns--quoted-members-in-template (car (cdr form)) members 1))
+   (t (append (nl-ns--quoted-members-in-form (car form) members)
+              (nl-ns--quoted-members-in-form (cdr form) members)))))
+
+(defun nl-ns--ns-in-defines (form members prefix)
+  "Return qualified definitions from `nl-ns-in' FORM for MEMBERS and PREFIX."
+  (let ((out nil))
+    (dolist (body-form (cdr (cdr form)))
+      (let ((defined (nl-ns--defined-symbol body-form)))
+        (when (and defined (memq defined members))
+          (setq out (cons (intern (concat prefix (symbol-name defined))) out)))))
+    (nreverse out)))
+
 (defun nl-ns-scan-forms (forms)
   "Return a plist describing FORMS, the top-level forms of one file.
 Keys: `:defines' (list of symbols, in order), `:requires' and
 `:provides' (lists of feature symbols), `:symbols' (hash set of every
-symbol mentioned)."
-  (let ((defines nil) (requires nil) (provides nil)
+symbol mentioned), and `:quoted-members' (namespace/member pairs)."
+  (let ((defines nil) (requires nil) (provides nil) (quoted-members nil)
+        (namespaces (make-hash-table :test 'eq))
         (symbols (make-hash-table :test 'eq)))
     (dolist (form forms)
-      (let ((defined (nl-ns--defined-symbol form)))
-        (when defined (setq defines (cons defined defines))))
+      (cond
+       ((and (consp form) (eq (car form) 'nl-ns-define)
+             (symbolp (car (cdr form))))
+        (let ((name (car (cdr form))))
+          (puthash name (list :members (nl-ns--ns-members form)
+                              :prefix (nl-ns--ns-prefix form name))
+                   namespaces)))
+       ((and (consp form) (eq (car form) 'nl-ns-in)
+             (symbolp (car (cdr form))))
+        (let* ((name (car (cdr form)))
+               (declaration (gethash name namespaces))
+               (members (plist-get declaration :members))
+               (prefix (plist-get declaration :prefix)))
+          (dolist (defined (nl-ns--ns-in-defines form members prefix))
+            (setq defines (cons defined defines)))
+          (dolist (member (nl-ns--quoted-members-in-form
+                           (cdr (cdr form)) members))
+            (setq quoted-members (cons (cons name member) quoted-members)))))
+       (t
+        (let ((defined (nl-ns--defined-symbol form)))
+          (when defined (setq defines (cons defined defines))))))
       (when (and (consp form) (eq (car form) 'require))
         (let ((feature (nl-ns--quoted-feature form)))
           (when feature (setq requires (cons feature requires)))))
@@ -143,6 +218,7 @@ symbol mentioned)."
     (list :defines (nreverse defines)
           :requires (nreverse requires)
           :provides (nreverse provides)
+          :quoted-members (nreverse quoted-members)
           :symbols symbols)))
 
 (defun nl-ns-read-file (path)
@@ -238,6 +314,7 @@ be read.  Keys of the result: `:files' (list of per-file plists),
                               :defines defines
                               :requires (plist-get scan :requires)
                               :provides (plist-get scan :provides)
+                              :quoted-members (plist-get scan :quoted-members)
                               :symbols (plist-get scan :symbols))
                         files))))))
     (list :files (nreverse files)
@@ -355,6 +432,16 @@ only when CHECK-DEPS is non-nil."
                         findings))))))
     findings))
 
+(defun nl-ns--check-quoted-members (entry findings)
+  "Add `ns-quoted-member' findings for literal members in ENTRY."
+  (dolist (quoted (plist-get entry :quoted-members))
+    (setq findings
+          (cons (list :kind 'ns-quoted-member
+                      :subject (cdr quoted) :file (plist-get entry :file)
+                      :namespace (car quoted))
+                findings)))
+  findings)
+
 (defun nl-ns-check (analysis &optional check-dependencies)
   "Return the findings for ANALYSIS, in a stable order.
 CHECK-DEPENDENCIES additionally reports `ns-undeclared-dependency'.
@@ -370,6 +457,7 @@ turn it on when you are ready to read that graph."
                             :file (plist-get entry :file))
                       findings))
         (setq findings (nl-ns--check-prefixes entry findings))
+        (setq findings (nl-ns--check-quoted-members entry findings))
         (setq findings
               (nl-ns--check-references entry analysis check-dependencies
                                        findings))))
@@ -409,6 +497,9 @@ turn it on when you are ready to read that graph."
      ((eq kind 'ns-undeclared-dependency)
       (format "ns-undeclared-dependency: %s uses %s without requiring it"
               (plist-get finding :file) subject))
+     ((eq kind 'ns-quoted-member)
+      (format "ns-quoted-member: %s quotes member `%s' in namespace `%s'"
+              (plist-get finding :file) subject (plist-get finding :namespace)))
      ((eq kind 'ns-unreadable)
       (format "ns-unreadable: %s could not be read" subject))
      (t (format "%s: %s" kind subject)))))

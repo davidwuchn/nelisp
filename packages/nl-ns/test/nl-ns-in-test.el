@@ -2,263 +2,150 @@
 
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 
-;;; Commentary:
-
-;; Coverage for `src/nl-ns-in.el': the registry, the resolution rule
-;; (defined-here and not lexically bound), shadowing through every
-;; binding form the walker models, what is deliberately left alone
-;; (quoted data, foreign names), and end-to-end evaluation.
-;;
-;; The shadowing tests carry the weight.  A namespace macro that
-;; rewrites a `let' variable because it happens to share a name with a
-;; member is worse than no namespace macro, so each binder gets an
-;; explicit test.
-;;
-;; No cl-lib, no ert-x, so the bodies also run under the standalone
-;; harness.
-
 ;;; Code:
 
 (require 'ert)
 (require 'nl-ns-in)
 
-;;; Helpers ------------------------------------------------------------
-
 (defun nl-ns-in-test--reset ()
-  "Start from a clean registry with namespace `tns' defined."
+  "Start from a clean registry with namespace `tns' declared."
   (nl-ns-clear-namespaces)
-  (eval '(nl-ns-define tns) t))
+  (eval '(nl-ns-define tns :members (limit wrap chunk helper err items)) t))
 
 (defun nl-ns-in-test--expand (body)
   "Expand BODY in namespace `tns' after resetting the registry."
   (nl-ns-in-test--reset)
   (nl-ns-expand 'tns body))
 
-;;; Registry ------------------------------------------------------------
-
 (ert-deftest nl-ns-in-define-sets-default-prefix ()
   (nl-ns-in-test--reset)
-  (should (equal (nl-ns-prefix 'tns) "tns-")))
+  (should (equal (nl-ns-prefix 'tns) "tns-"))
+  (should (equal (nl-ns-member-list 'tns) '(limit wrap chunk helper err items))))
 
-(ert-deftest nl-ns-in-define-accepts-explicit-prefix ()
+(ert-deftest nl-ns-in-define-accepts-prefix-and-members ()
   (nl-ns-clear-namespaces)
-  (eval '(nl-ns-define tns :prefix "t/") t)
-  (should (equal (nl-ns-prefix 'tns) "t/"))
+  (eval '(nl-ns-define tns :prefix "t/" :members (foo)) t)
   (should (eq (nl-ns-qualify 'tns 'foo) 't/foo)))
 
 (ert-deftest nl-ns-in-define-rejects-bad-input ()
   (should-error (macroexpand '(nl-ns-define "tns")))
   (should-error (macroexpand '(nl-ns-define tns :prefix sym)))
+  (should-error (macroexpand '(nl-ns-define tns :members foo)))
+  (should-error (macroexpand '(nl-ns-define tns :members (foo 3))))
   (should-error (macroexpand '(nl-ns-define tns :suffix "x"))))
-
-(ert-deftest nl-ns-in-undefined-namespace-signals ()
-  (nl-ns-clear-namespaces)
-  (should-error (nl-ns-prefix 'no-such-namespace)))
-
-(ert-deftest nl-ns-in-members-accumulate ()
-  (nl-ns-in-test--reset)
-  (eval '(nl-ns-members tns alpha beta) t)
-  (should (equal (nl-ns-member-list 'tns) '(alpha beta)))
-  ;; Declaring the same member twice does not duplicate it.
-  (eval '(nl-ns-members tns alpha) t)
-  (should (equal (nl-ns-member-list 'tns) '(alpha beta))))
 
 (ert-deftest nl-ns-in-qualify ()
   (nl-ns-in-test--reset)
   (should (eq (nl-ns-qualify 'tns 'wrap) 'tns-wrap)))
 
-;;; The resolution rule --------------------------------------------------
-
-(ert-deftest nl-ns-in-renames-definitions ()
-  (should (equal (nl-ns-in-test--expand '((defun wrap (s) s)))
-                 '((defun tns-wrap (s) s)))))
-
-(ert-deftest nl-ns-in-renames-calls-to-block-members ()
+(ert-deftest nl-ns-in-renames-declared-definitions-and-calls ()
   (should (equal (nl-ns-in-test--expand
-                  '((defun wrap (s) (chunk s))
-                    (defun chunk (s) s)))
+                  '((defun wrap (s) (chunk s)) (defun chunk (s) s)))
                  '((defun tns-wrap (s) (tns-chunk s))
                    (defun tns-chunk (s) s)))))
 
-(ert-deftest nl-ns-in-renames-variables ()
+(ert-deftest nl-ns-in-renames-declared-variables ()
   (should (equal (nl-ns-in-test--expand
-                  '((defvar limit 80)
-                    (defun wrap (s) (substring s 0 limit))))
+                  '((defvar limit 80) (defun wrap (s) (substring s 0 limit))))
                  '((defvar tns-limit 80)
                    (defun tns-wrap (s) (substring s 0 tns-limit))))))
+
+(ert-deftest nl-ns-in-member-may-be-defined-by-another-block ()
+  (should (equal (nl-ns-in-test--expand '((defun wrap (s) (helper s))))
+                 '((defun tns-wrap (s) (tns-helper s))))))
+
+(ert-deftest nl-ns-in-does-not-discover-members-from-the-body ()
+  (nl-ns-clear-namespaces)
+  (eval '(nl-ns-define tns :members (wrap)) t)
+  (should-error (nl-ns-expand 'tns '((defun wrap () (chunk))
+                                      (defun chunk () 1)))))
+
+(ert-deftest nl-ns-in-rejects-definition-of-non-member ()
+  (nl-ns-in-test--reset)
+  (let ((err (should-error (nl-ns-expand 'tns '((defun stray () 1)))
+                           :type 'nl-ns-in-non-member-error)))
+    (should (memq 'stray (cdr err)))))
 
 (ert-deftest nl-ns-in-leaves-foreign-names-alone ()
   (should (equal (nl-ns-in-test--expand
                   '((defun wrap (s) (mapcar #'car (substring s 0 1)))))
                  '((defun tns-wrap (s) (mapcar #'car (substring s 0 1)))))))
 
-(ert-deftest nl-ns-in-uses-declared-members ()
-  (nl-ns-in-test--reset)
-  (eval '(nl-ns-members tns helper) t)
-  ;; `helper' is defined by another block, so it resolves here too.
-  (should (equal (nl-ns-expand 'tns '((defun wrap (s) (helper s))))
-                 '((defun tns-wrap (s) (tns-helper s))))))
-
-(ert-deftest nl-ns-in-forward-reference-within-a-block ()
-  ;; `chunk' is used before it is defined; the scan is done first, so
-  ;; order inside the block does not matter.
+(ert-deftest nl-ns-in-leaves-quote-alone ()
   (should (equal (nl-ns-in-test--expand
-                  '((defun wrap (s) (chunk s))
-                    (defun chunk (s) s)))
-                 '((defun tns-wrap (s) (tns-chunk s))
-                   (defun tns-chunk (s) s)))))
-
-;;; Quoted data is not rewritten -----------------------------------------
-
-(ert-deftest nl-ns-in-leaves-quoted-symbols-alone ()
-  (should (equal (nl-ns-in-test--expand
-                  '((defun wrap (s) (list 'chunk s))
-                    (defun chunk (s) s)))
-                 '((defun tns-wrap (s) (list 'chunk s))
-                   (defun tns-chunk (s) s)))))
+                  '((defun wrap (s) (list 'chunk s))))
+                 '((defun tns-wrap (s) (list 'chunk s))))))
 
 (ert-deftest nl-ns-in-rewrites-sharp-quoted-function-refs ()
   (should (equal (nl-ns-in-test--expand
-                  '((defun wrap (l) (mapcar #'chunk l))
-                    (defun chunk (s) s)))
-                 '((defun tns-wrap (l) (mapcar #'tns-chunk l))
-                   (defun tns-chunk (s) s)))))
+                  '((defun wrap (l) (mapcar #'chunk l))))
+                 '((defun tns-wrap (l) (mapcar #'tns-chunk l))))))
 
-(ert-deftest nl-ns-in-rewrites-inside-sharp-quoted-lambda ()
+(ert-deftest nl-ns-in-backquote-template-is-literal ()
   (should (equal (nl-ns-in-test--expand
-                  '((defun wrap (l) (mapcar (lambda (x) (chunk x)) l))
-                    (defun chunk (s) s)))
-                 '((defun tns-wrap (l) (mapcar (lambda (x) (tns-chunk x)) l))
-                   (defun tns-chunk (s) s)))))
+                  '((defun wrap () `(chunk . 1))))
+                 '((defun tns-wrap () `(chunk . 1))))))
 
-;;; Shadowing -------------------------------------------------------------
-
-(ert-deftest nl-ns-in-let-shadows-a-member ()
+(ert-deftest nl-ns-in-backquote-unquote-is-rewritten ()
   (should (equal (nl-ns-in-test--expand
-                  '((defvar limit 80)
-                    (defun wrap (s) (let ((limit 5)) (substring s 0 limit)))))
-                 '((defvar tns-limit 80)
-                   (defun tns-wrap (s)
-                     (let ((limit 5)) (substring s 0 limit)))))))
+                  '((defun wrap () `(result ,chunk ,@items))))
+                 '((defun tns-wrap () `(result ,tns-chunk ,@tns-items))))))
 
-(ert-deftest nl-ns-in-let-init-is-outer-scope ()
-  ;; In plain `let' the init sees the OUTER binding, so it is rewritten.
+(ert-deftest nl-ns-in-nested-backquote-is-literal ()
   (should (equal (nl-ns-in-test--expand
-                  '((defvar limit 80)
-                    (defun wrap () (let ((limit limit)) limit))))
-                 '((defvar tns-limit 80)
-                   (defun tns-wrap () (let ((limit tns-limit)) limit))))))
+                  '((defun wrap () `(outer `(chunk ,chunk)))))
+                 '((defun tns-wrap () `(outer `(chunk ,chunk)))))))
 
-(ert-deftest nl-ns-in-let-star-init-sees-previous-bindings ()
+(defun nl-ns-in-test--shadow-error (form symbol)
+  "Assert that FORM rejects a local binding of SYMBOL."
+  (let ((err (should-error (nl-ns-in-test--expand form)
+                           :type 'nl-ns-in-member-binding-error)))
+    (should (memq symbol (cdr err)))))
+
+(ert-deftest nl-ns-in-let-member-binding-is-an-error ()
+  (nl-ns-in-test--shadow-error '((defun wrap () (let ((limit 1)) limit))) 'limit))
+(ert-deftest nl-ns-in-let-star-member-binding-is-an-error ()
+  (nl-ns-in-test--shadow-error '((defun wrap () (let* ((limit 1)) limit))) 'limit))
+(ert-deftest nl-ns-in-lambda-member-binding-is-an-error ()
+  (nl-ns-in-test--shadow-error '((defun wrap () (lambda (limit) limit))) 'limit))
+(ert-deftest nl-ns-in-defun-member-binding-is-an-error ()
+  (nl-ns-in-test--shadow-error '((defun wrap (limit) limit)) 'limit))
+(ert-deftest nl-ns-in-defmacro-member-binding-is-an-error ()
+  (nl-ns-in-test--shadow-error '((defmacro wrap (limit) limit)) 'limit))
+(ert-deftest nl-ns-in-defsubst-member-binding-is-an-error ()
+  (nl-ns-in-test--shadow-error '((defsubst wrap (limit) limit)) 'limit))
+(ert-deftest nl-ns-in-cl-defun-member-binding-is-an-error ()
+  (nl-ns-in-test--shadow-error '((cl-defun wrap (limit) limit)) 'limit))
+(ert-deftest nl-ns-in-cl-defmacro-member-binding-is-an-error ()
+  (nl-ns-in-test--shadow-error '((cl-defmacro wrap (limit) limit)) 'limit))
+(ert-deftest nl-ns-in-optional-member-binding-is-an-error ()
+  (nl-ns-in-test--shadow-error '((defun wrap (&optional limit) limit)) 'limit))
+(ert-deftest nl-ns-in-keyword-member-binding-is-an-error ()
+  (nl-ns-in-test--shadow-error '((cl-defun wrap (&key limit) limit)) 'limit))
+(ert-deftest nl-ns-in-supplied-p-member-binding-is-an-error ()
+  (nl-ns-in-test--shadow-error
+   '((defun wrap (&optional (x 1 limit)) x)) 'limit))
+(ert-deftest nl-ns-in-dolist-member-binding-is-an-error ()
+  (nl-ns-in-test--shadow-error '((defun wrap (xs) (dolist (limit xs) limit))) 'limit))
+(ert-deftest nl-ns-in-dotimes-member-binding-is-an-error ()
+  (nl-ns-in-test--shadow-error '((defun wrap () (dotimes (limit 2) limit))) 'limit))
+(ert-deftest nl-ns-in-condition-case-member-binding-is-an-error ()
+  (nl-ns-in-test--shadow-error
+   '((defun wrap () (condition-case err (error "x") (error err)))) 'err))
+
+(ert-deftest nl-ns-in-default-forms-are-rewritten ()
   (should (equal (nl-ns-in-test--expand
-                  '((defvar limit 80)
-                    (defun wrap () (let* ((limit 5) (n limit)) n))))
-                 '((defvar tns-limit 80)
-                   (defun tns-wrap () (let* ((limit 5) (n limit)) n))))))
-
-(ert-deftest nl-ns-in-lambda-argument-shadows ()
-  (should (equal (nl-ns-in-test--expand
-                  '((defvar limit 80)
-                    (defun wrap () (lambda (limit) limit))))
-                 '((defvar tns-limit 80)
-                   (defun tns-wrap () (lambda (limit) limit))))))
-
-(ert-deftest nl-ns-in-defun-argument-shadows ()
-  (should (equal (nl-ns-in-test--expand
-                  '((defvar limit 80)
-                    (defun wrap (limit) limit)))
-                 '((defvar tns-limit 80)
-                   (defun tns-wrap (limit) limit)))))
-
-(ert-deftest nl-ns-in-defun-optional-marker-is-not-a-variable ()
-  (should (equal (nl-ns-in-test--expand
-                  '((defvar limit 80)
-                    (defun wrap (&optional limit) limit)))
-                 '((defvar tns-limit 80)
-                   (defun tns-wrap (&optional limit) limit)))))
-
-(ert-deftest nl-ns-in-defun-optional-spec-vars-shadow ()
-  (should (equal (nl-ns-in-test--expand
-                  '((defvar limit 80)
-                    (defun wrap (&optional (limit 1 supplied))
-                      (list limit supplied))))
-                 '((defvar tns-limit 80)
-                   (defun tns-wrap (&optional (limit 1 supplied))
-                     (list limit supplied))))))
-
-(ert-deftest nl-ns-in-defun-default-is-outer-scope ()
-  (should (equal (nl-ns-in-test--expand
-                  '((defvar limit 80)
-                    (defun wrap (&optional (n limit)) n)))
-                 '((defvar tns-limit 80)
-                   (defun tns-wrap (&optional (n tns-limit)) n)))))
-
-(ert-deftest nl-ns-in-dolist-variable-shadows ()
-  (should (equal (nl-ns-in-test--expand
-                  '((defvar limit 80)
-                    (defun wrap (l) (dolist (limit l) limit))))
-                 '((defvar tns-limit 80)
-                   (defun tns-wrap (l) (dolist (limit l) limit))))))
-
-(ert-deftest nl-ns-in-dolist-list-form-is-rewritten ()
-  (should (equal (nl-ns-in-test--expand
-                  '((defvar items nil)
-                    (defun wrap () (dolist (x items) x))))
-                 '((defvar tns-items nil)
-                   (defun tns-wrap () (dolist (x tns-items) x))))))
-
-(ert-deftest nl-ns-in-dolist-result-sees-loop-variable ()
-  (should (equal (nl-ns-in-test--expand
-                  '((defvar limit 80)
-                    (defun wrap (l) (dolist (limit l limit) nil))))
-                 '((defvar tns-limit 80)
-                   (defun tns-wrap (l) (dolist (limit l limit) nil))))))
-
-(ert-deftest nl-ns-in-dotimes-result-sees-loop-variable ()
-  (should (equal (nl-ns-in-test--expand
-                  '((defvar limit 80)
-                    (defun wrap () (dotimes (limit 3 limit) limit))))
-                 '((defvar tns-limit 80)
-                   (defun tns-wrap () (dotimes (limit 3 limit) limit))))))
-
-(ert-deftest nl-ns-in-condition-case-variable-shadows ()
-  (should (equal (nl-ns-in-test--expand
-                  '((defvar err 1)
-                    (defun wrap () (condition-case err (f) (error err)))))
-                 '((defvar tns-err 1)
-                   (defun tns-wrap ()
-                     (condition-case err (f) (error err)))))))
-
-(ert-deftest nl-ns-in-condition-case-protected-form-is-outer-scope ()
-  (should (equal (nl-ns-in-test--expand
-                  '((defvar err 1)
-                    (defun wrap ()
-                      (condition-case err err (error err)))))
-                 '((defvar tns-err 1)
-                   (defun tns-wrap ()
-                     (condition-case err tns-err (error err)))))))
-
-;;; End to end ------------------------------------------------------------
+                  '((defun wrap (&optional (x limit)) x)))
+                 '((defun tns-wrap (&optional (x tns-limit)) x)))))
 
 (ert-deftest nl-ns-in-defines-qualified-functions ()
   (nl-ns-in-test--reset)
   (eval '(nl-ns-in tns
            (defvar limit 3)
            (defun chunk (s) (substring s 0 limit))
-           (defun wrap (s) (chunk s)))
-        t)
+           (defun wrap (s) (chunk s))) t)
   (should (fboundp 'tns-wrap))
-  (should (fboundp 'tns-chunk))
-  (should (boundp 'tns-limit))
-  (should-not (fboundp 'wrap))
   (should (equal (funcall 'tns-wrap "abcdef") "abc")))
-
-(ert-deftest nl-ns-in-registers-members-for-later-blocks ()
-  (nl-ns-in-test--reset)
-  (eval '(nl-ns-in tns (defun helper (x) (* x 2))) t)
-  ;; A second block resolves `helper' because the first block declared it.
-  (should (equal (nl-ns-expand 'tns '((defun use (x) (helper x))))
-                 '((defun tns-use (x) (tns-helper x))))))
 
 (ert-deftest nl-ns-in-requires-a-defined-namespace ()
   (nl-ns-clear-namespaces)

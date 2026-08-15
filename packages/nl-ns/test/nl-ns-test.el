@@ -57,6 +57,22 @@
   (let ((scan (nl-ns-scan-forms '((message "hi") (setq x 1)))))
     (should-not (plist-get scan :defines))))
 
+(ert-deftest nl-ns-scan-expands-ns-in-definitions-without-evaluation ()
+  (let ((scan (nl-ns-scan-forms
+               '((nl-ns-define text :members (limit wrap chunk))
+                 (nl-ns-in text
+                   (defvar limit 80)
+                   (defun wrap (s) (chunk s limit))
+                   (defun chunk (s) s))))))
+    (should (equal (plist-get scan :defines)
+                   '(text-limit text-wrap text-chunk)))))
+
+(ert-deftest nl-ns-scan-honors-ns-prefix ()
+  (let ((scan (nl-ns-scan-forms
+               '((nl-ns-define text :prefix "t/" :members (wrap))
+                 (nl-ns-in text (defun wrap () 1))))))
+    (should (equal (plist-get scan :defines) '(t/wrap)))))
+
 ;;; Namespace inference -------------------------------------------------
 
 (ert-deftest nl-ns-infers-dominant-prefix ()
@@ -185,6 +201,32 @@
                    (defun mine-public () (mine--secret)))))
                'ns-private-escape)))
 
+;;; Quoted namespace members ------------------------------------------
+
+(ert-deftest nl-ns-quoted-member-is-reported-for-quote ()
+  (let ((findings (nl-ns-findings-of-kind
+                   (nl-ns-test--check
+                    '(("text.el"
+                       (nl-ns-define text :members (wrap chunk))
+                       (nl-ns-in text
+                         (defun wrap () 'chunk)))) )
+                   'ns-quoted-member)))
+    (should (= (length findings) 1))
+    (should (eq (plist-get (car findings) :subject) 'chunk))
+    (should (eq (plist-get (car findings) :namespace) 'text))))
+
+(ert-deftest nl-ns-quoted-member-is-reported-for-backquote-template ()
+  (let ((findings (nl-ns-findings-of-kind
+                   (nl-ns-test--check
+                    '(("text.el"
+                       (nl-ns-define text :members (wrap chunk))
+                       (nl-ns-in text
+                         (defun wrap () `(chunk ,(funcall chunk)))))) )
+                   'ns-quoted-member)))
+    ;; The template's `chunk' is literal; the unquoted call is evaluated.
+    (should (= (length findings) 1))
+    (should (eq (plist-get (car findings) :subject) 'chunk))))
+
 (ert-deftest nl-ns-ambiguous-private-is-not-attributed ()
   ;; Defined in two files, so no single owner: the collision finding
   ;; covers it and attributing an escape would be a guess.
@@ -241,10 +283,17 @@
                  (nl-ns-test--check
                   '(("a.el" (defun eql (a b) a))
                     ("b.el" (defalias 'eql 'equal)))))))
-    (should (string-match-p "1 finding" report))
-    (should (string-match-p "ns-collision" report))
-    (should (string-match-p "a.el" report))
-    (should (string-match-p "b.el" report))))
+    (should (string-match "1 finding" report))
+    (should (string-match "ns-collision" report))
+    (should (string-match "a.el" report))
+    (should (string-match "b.el" report))))
+
+(ert-deftest nl-ns-report-describes-quoted-members ()
+  (let ((report (nl-ns-report
+                 (list (list :kind 'ns-quoted-member :subject 'chunk
+                             :file "text.el" :namespace 'text)))))
+    (should (string-match "ns-quoted-member" report))
+    (should (string-match "chunk" report))))
 
 (ert-deftest nl-ns-summary-counts-by-kind ()
   (let ((summary (nl-ns-summary

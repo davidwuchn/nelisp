@@ -41,6 +41,7 @@ Same plist shape as =nl-check=: =(:kind KIND :subject S ...)=.
 | =ns-prefix-violation=      | definition outside its file's namespace     |
 | =ns-private-escape=        | another file's =--= name is referenced      |
 | =ns-undeclared-dependency= | cross-file reference with no =require=      |
+| =ns-quoted-member=         | =nl-ns-in= leaves a member name as data     |
 | =ns-unreadable=            | the file could not be read                  |
 
 * Zero configuration
@@ -188,8 +189,8 @@ not replace the checker in =nl-ns.el=.
 
 #+begin_src elisp
 (require 'nl-ns-in)
-(nl-ns-define text)                  ; default prefix: "text-"
-(nl-ns-members text external-helper) ; members from another block/file
+(nl-ns-define text :members (limit wrap chunk external-helper))
+;; default prefix: "text-"
 
 (nl-ns-in text
   (defvar limit 80)
@@ -198,18 +199,37 @@ not replace the checker in =nl-ns.el=.
 ;; Defines text-limit, text-wrap, and text-chunk.
 #+end_src
 
-=nl-ns-define= declares a namespace (and accepts =:prefix= for an
-explicit prefix).  =nl-ns-members= declares short member names before
-or outside a block.  =nl-ns-in= rewrites and evaluates its body;
+=nl-ns-define= declares a namespace, its closed =:members= set, and
+optionally an explicit =:prefix=.  =nl-ns-in= rewrites and evaluates its body;
 =nl-ns-expand= returns its rewritten forms for inspection or tests;
 and =nl-ns-qualify= returns one qualified symbol.
 
 The resolution rule is exact: a symbol is rewritten if and only if it
-is defined by a top-level definition in the =nl-ns-in= block, or was
-declared through =nl-ns-members=, and it is not lexically bound at that
-point.  Foreign names remain untouched.  Quoted data is never
-rewritten: ='chunk= stays =chunk=.  A function reference is different:
-=#'chunk= is rewritten to =#'text-chunk=.
+is in the declared member set.  Foreign names remain untouched.  A
+definition whose name is not declared is an expansion-time error; this
+catches a typo or an accidental extra definition instead of changing
+the block's meaning.  A member need not be defined in every block: it
+may refer to a definition from another block in the same namespace.
+
+Likewise, a local binding may not use a member name.  =let=, =let*=,
+=lambda=, definition argument lists, =dolist=, =dotimes=, and
+=condition-case= all signal an expansion-time error naming the symbol
+and asking you to rename the local.  There is no escape hatch: rename
+the local so that a member always means the namespace member.
+
+Quoted data is never rewritten: ='chunk= stays =chunk=.  A function
+reference is different: =#'chunk= is rewritten to =#'text-chunk=.  The
+literal part of a backquote template is also data, while unquote and
+splice positions are evaluated and rewritten.  To make a template
+expand into a call to a member, write the qualified name in the
+template, or use =,(nl-ns-qualify 'text 'chunk)=.  The checker reports
+=ns-quoted-member= for a declared member that appears in a quote or
+backquote template inside an =nl-ns-in= block, so those places can be
+made explicit.
+
+Member names must now be written twice: once in =:members= and once at
+their definition or use.  That is the price of order-independent macro
+expansion, the same trade Common Lisp makes with =:export=.
 
 This is only a convenient spelling for ordinary globals.  There is no
 isolation: another file can still collide with =text-wrap=, which is
