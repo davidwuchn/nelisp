@@ -33,7 +33,8 @@
   "tools/ns-inventory-baseline.txt")
 
 (defconst nl-ns-inventory--kinds
-  '(ns-collision ns-prefix-violation ns-private-escape ns-unreadable)
+  '(ns-collision ns-collision-divergent ns-prefix-violation
+    ns-private-escape ns-unreadable)
   "Finding kinds this gate tracks, in report order.")
 
 (defun nl-ns-inventory--baseline ()

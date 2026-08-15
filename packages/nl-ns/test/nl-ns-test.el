@@ -115,8 +115,8 @@
 
 (ert-deftest nl-ns-collision-across-files ()
   (let ((findings (nl-ns-test--check
-                   '(("a.el" (defun eql (a b) a))
-                     ("b.el" (defalias 'eql 'equal))))))
+                   '(("a.el" (defun eql (a b) (eq a b)))
+                     ("b.el" (defun eql (a b) (eq a b)))))))
     (should (= (length findings) 1))
     (let ((finding (car findings)))
       (should (eq (plist-get finding :kind) 'ns-collision))
@@ -124,11 +124,65 @@
       (should (= (plist-get finding :count) 2))
       (should (equal (plist-get finding :files) '("a.el" "b.el"))))))
 
+(ert-deftest nl-ns-collision-divergent-replaces-plain-collision ()
+  (let ((findings (nl-ns-test--check
+                   '(("a.el" (defun eql (a b) (eq a b)))
+                     ("b.el" (defun eql (a b) (equal a b)))))))
+    (should (= (length (nl-ns-findings-of-kind
+                        findings 'ns-collision-divergent)) 1))
+    (should-not (nl-ns-findings-of-kind findings 'ns-collision))))
+
+(ert-deftest nl-ns-collision-docstring-difference-is-not-divergent ()
+  (let ((findings (nl-ns-test--check
+                   '(("a.el" (defun eql (a b) "First wording." (eq a b)))
+                     ("b.el" (defun eql (a b) "Second wording." (eq a b)))))))
+    (should (= (length (nl-ns-findings-of-kind findings 'ns-collision)) 1))
+    (should-not (nl-ns-findings-of-kind findings 'ns-collision-divergent))))
+
+(ert-deftest nl-ns-collision-backquote-reader-spellings-agree ()
+  (let ((findings (nl-ns-test--check
+                   (list
+                    (list "a.el"
+                          (list 'defun 'eql '(x)
+                                (list '\` (list 'value (list '\, 'x)))))
+                    (list "b.el"
+                          (list 'defun 'eql '(x)
+                                (list 'backquote
+                                      (list 'value (list 'comma 'x)))))))))
+    (should (= (length (nl-ns-findings-of-kind findings 'ns-collision)) 1))
+    (should-not (nl-ns-findings-of-kind findings 'ns-collision-divergent))))
+
+(ert-deftest nl-ns-collision-divergent-records-definition-heads ()
+  (let ((finding (car (nl-ns-findings-of-kind
+                       (nl-ns-test--check
+                        '(("a.el" (defalias 'eql 'equal))
+                          ("b.el" (defun eql (a b) (eq a b)))))
+                       'ns-collision-divergent))))
+    (should (equal (plist-get finding :heads)
+                   '(("a.el" . defalias) ("b.el" . defun))))))
+
+(ert-deftest nl-ns-collision-divergent-finds-conditional-definition ()
+  (let ((findings (nl-ns-test--check
+                   '(("a.el" (defalias 'eql 'equal))
+                     ("b.el" (unless (fboundp 'eql)
+                               (defun eql (a b) (eq a b))))))))
+    (should (= (length (nl-ns-findings-of-kind
+                        findings 'ns-collision-divergent)) 1))))
+
+(ert-deftest nl-ns-collision-divergent-with-three-definers ()
+  (let ((findings (nl-ns-test--check
+                   '(("a.el" (defun eql (a b) (eq a b)))
+                     ("b.el" (defun eql (a b) (eq a b)))
+                     ("c.el" (defun eql (a b) (equal a b)))))))
+    (should (= (length (nl-ns-findings-of-kind
+                        findings 'ns-collision-divergent)) 1))
+    (should-not (nl-ns-findings-of-kind findings 'ns-collision))))
+
 (ert-deftest nl-ns-collision-counts-every-definer ()
   (let ((finding (car (nl-ns-test--check
                        '(("a.el" (defun push () 1))
-                         ("b.el" (defmacro push () 2))
-                         ("c.el" (defun push () 3)))))))
+                         ("b.el" (defun push () 1))
+                         ("c.el" (defun push () 1)))))))
     (should (= (plist-get finding :count) 3))))
 
 (ert-deftest nl-ns-single-definition-is-not-a-collision ()
@@ -292,9 +346,9 @@
 
 (ert-deftest nl-ns-report-lists-each-finding ()
   (let ((report (nl-ns-report
-                 (nl-ns-test--check
-                  '(("a.el" (defun eql (a b) a))
-                    ("b.el" (defalias 'eql 'equal)))))))
+                  (nl-ns-test--check
+                   '(("a.el" (defun eql (a b) (eq a b)))
+                     ("b.el" (defun eql (a b) (eq a b))))))))
     (should (string-match "1 finding" report))
     (should (string-match "ns-collision" report))
     (should (string-match "a.el" report))
@@ -309,9 +363,9 @@
 
 (ert-deftest nl-ns-summary-counts-by-kind ()
   (let ((summary (nl-ns-summary
-                  (nl-ns-test--check
-                   '(("a.el" (defun eql (a b) a))
-                     ("b.el" (defalias 'eql 'equal))
+                   (nl-ns-test--check
+                    '(("a.el" (defun eql (a b) (eq a b)))
+                      ("b.el" (defun eql (a b) (eq a b)))
                      ("c.el" (defun nl-x-one () 1) (defun nl-x-two () 2)
                       (defun stray () 3)))))))
     (should (equal (cdr (assq 'ns-collision summary)) 1))
@@ -319,8 +373,8 @@
 
 (ert-deftest nl-ns-findings-of-kind-filters ()
   (let ((findings (nl-ns-test--check
-                   '(("a.el" (defun eql (a b) a))
-                     ("b.el" (defalias 'eql 'equal))))))
+                   '(("a.el" (defun eql (a b) (eq a b)))
+                     ("b.el" (defun eql (a b) (eq a b)))))))
     (should (= (length (nl-ns-findings-of-kind findings 'ns-collision)) 1))
     (should-not (nl-ns-findings-of-kind findings 'ns-private-escape))))
 

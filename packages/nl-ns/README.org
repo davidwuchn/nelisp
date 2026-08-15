@@ -38,6 +38,7 @@ Same plist shape as =nl-check=: =(:kind KIND :subject S ...)=.
 | kind                       | meaning                                     |
 |----------------------------+---------------------------------------------|
 | =ns-collision=             | symbol defined in more than one file        |
+| =ns-collision-divergent=   | collision whose definitions differ          |
 | =ns-prefix-violation=      | definition outside its file's namespace     |
 | =ns-private-escape=        | another file's =--= name is referenced      |
 | =ns-undeclared-dependency= | cross-file reference with no =require=      |
@@ -96,7 +97,8 @@ Over =lisp/=, =src/=, =scripts/= and =packages/*/src/= (340 files):
 |-----------------------+-------|
 | =ns-prefix-violation= |   808 |
 | =ns-private-escape=   |   520 |
-| =ns-collision=        |   307 |
+| =ns-collision=        |   306 |
+| =ns-collision-divergent= | 1 |
 
 The collisions are dominated by the two-stdlib split — =abs=, =and=,
 =append=, =backquote=, =eql= and 300 others exist once in
@@ -104,6 +106,13 @@ The collisions are dominated by the two-stdlib split — =abs=, =and=,
 with no mechanism anywhere that says the two must agree.  =eql= is the
 case where they already do not: one file aliases it to =equal=, the
 other gives it the numeric-aware definition.
+
+=ns-collision= and =ns-collision-divergent= partition collisions: a
+divergent finding replaces, rather than accompanies, the plain
+collision for its symbol.  Definitions are compared as read forms,
+ignoring only the definition's own docstring.  Whitespace, indentation,
+comments, and docstring wording therefore do not make a collision
+divergent.
 
 The private escapes are concentrated in the AOT compiler reaching
 through the assemblers' =--= boundary
@@ -172,10 +181,10 @@ exists.
 * Follow-ups
 
 - Wire =make ns-inventory= into CI next to =unsafe-inventory=.
-- Reconcile the 307 stdlib collisions: today =lisp/nelisp-stdlib*.el=
-  and =scripts/nelisp-stdlib-prelude.el= can drift apart with nothing
-  detecting it.  A first step is a targeted report of collisions whose
-  two definitions are not textually identical.
+- Reconcile the stdlib collisions reported as =ns-collision-divergent=:
+  today =lisp/nelisp-stdlib*.el= and =scripts/nelisp-stdlib-prelude.el=
+  can drift apart, although the checker now identifies the actionable
+  cases.
 - Narrow reference collection to evaluated positions, behind a flag, so
   =ns-undeclared-dependency= becomes precise enough to gate.
 - Optional shorter-name tier (=names.el=-style rewriting) if it is ever

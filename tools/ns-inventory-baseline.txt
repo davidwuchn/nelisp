@@ -2,7 +2,12 @@
 # One "KIND COUNT" line per tracked finding kind.  Raise a number only
 # in the commit that introduces the finding; lower it whenever the
 # ratchet notice says you can.
-ns-collision 307
-ns-prefix-violation 808
-ns-private-escape 520
+#
+# ns-collision-divergent is the actionable half: the definitions differ,
+# so which behaviour you get depends on load order.  ns-collision is the
+# benign half: same definition in two places.
+ns-collision 275
+ns-collision-divergent 114
+ns-prefix-violation 853
+ns-private-escape 526
 ns-unreadable 0

@@ -33,6 +33,7 @@
 ;; Findings (same plist shape as nl-check):
 ;;
 ;;   ns-collision              symbol defined in more than one file
+;;   ns-collision-divergent    collision whose definitions differ
 ;;   ns-prefix-violation       definition outside its file's namespace
 ;;   ns-private-escape         another file's `--' name is referenced
 ;;   ns-undeclared-dependency  cross-file reference with no `require'
@@ -96,6 +97,20 @@ for example \"nl-safe-\".  Overrides `nl-ns-file-namespace' inference."
                 (symbolp (car (cdr name))))
            (car (cdr name)))
           (t nil)))))
+
+(defun nl-ns--definition-forms-in-form (form)
+  "Return definition symbol/form pairs nested in executable FORM.
+Quoted and backquote data are not executable, so definitions appearing
+there are deliberately ignored."
+  (cond
+   ((not (consp form)) nil)
+   ((nl-ns--defined-symbol form)
+    (list (cons (nl-ns--defined-symbol form) form)))
+   ((or (eq (car form) 'quote) (eq (car form) 'function)
+        (memq (car form) '(\` backquote)))
+    nil)
+   (t (append (nl-ns--definition-forms-in-form (car form))
+              (nl-ns--definition-forms-in-form (cdr form))))))
 
 (defun nl-ns--quoted-feature (form)
   "Return the feature symbol in FORM's second position, or nil."
@@ -178,12 +193,27 @@ on them."
           (setq out (cons (intern (concat prefix (symbol-name defined))) out)))))
     (nreverse out)))
 
+(defun nl-ns--ns-in-definition-forms (form members prefix)
+  "Return qualified definition/form pairs from `nl-ns-in' FORM.
+MEMBERS and PREFIX have the same meaning as in `nl-ns--ns-in-defines'."
+  (let ((out nil))
+    (dolist (body-form (cdr (cdr form)))
+      (let ((defined (nl-ns--defined-symbol body-form)))
+        (when (and defined (memq defined members))
+          (setq out
+                (cons (cons (intern (concat prefix (symbol-name defined)))
+                            body-form)
+                      out)))))
+    (nreverse out)))
+
 (defun nl-ns-scan-forms (forms)
   "Return a plist describing FORMS, the top-level forms of one file.
-Keys: `:defines' (list of symbols, in order), `:requires' and
-`:provides' (lists of feature symbols), `:symbols' (hash set of every
-symbol mentioned), and `:quoted-members' (namespace/member pairs)."
-  (let ((defines nil) (requires nil) (provides nil) (quoted-members nil)
+Keys: `:defines' (list of symbols, in order), `:definition-forms'
+(symbol/form pairs), `:requires' and `:provides' (lists of feature
+symbols), `:symbols' (hash set of every symbol mentioned), and
+`:quoted-members' (namespace/member pairs)."
+  (let ((defines nil) (definition-forms nil) (requires nil) (provides nil)
+        (quoted-members nil)
         (namespaces (make-hash-table :test 'eq))
         (symbols (make-hash-table :test 'eq)))
     (dolist (form forms)
@@ -202,12 +232,16 @@ symbol mentioned), and `:quoted-members' (namespace/member pairs)."
                (prefix (plist-get declaration :prefix)))
           (dolist (defined (nl-ns--ns-in-defines form members prefix))
             (setq defines (cons defined defines)))
+          (dolist (definition
+                   (nl-ns--ns-in-definition-forms form members prefix))
+            (setq definition-forms (cons definition definition-forms)))
           (dolist (member (nl-ns--quoted-members-in-form
                            (cdr (cdr form)) members))
             (setq quoted-members (cons (cons name member) quoted-members)))))
        (t
-        (let ((defined (nl-ns--defined-symbol form)))
-          (when defined (setq defines (cons defined defines))))))
+        (dolist (definition (nl-ns--definition-forms-in-form form))
+          (setq defines (cons (car definition) defines))
+          (setq definition-forms (cons definition definition-forms)))))
       (when (and (consp form) (eq (car form) 'require))
         (let ((feature (nl-ns--quoted-feature form)))
           (when feature (setq requires (cons feature requires)))))
@@ -216,6 +250,7 @@ symbol mentioned), and `:quoted-members' (namespace/member pairs)."
           (when feature (setq provides (cons feature provides)))))
       (nl-ns--collect-symbols form symbols))
     (list :defines (nreverse defines)
+          :definition-forms (nreverse definition-forms)
           :requires (nreverse requires)
           :provides (nreverse provides)
           :quoted-members (nreverse quoted-members)
@@ -312,6 +347,8 @@ be read.  Keys of the result: `:files' (list of per-file plists),
                   (cons (list :file file
                               :namespace namespace
                               :defines defines
+                              :definition-forms
+                              (plist-get scan :definition-forms)
                               :requires (plist-get scan :requires)
                               :provides (plist-get scan :provides)
                               :quoted-members (plist-get scan :quoted-members)
@@ -353,8 +390,75 @@ be read.  Keys of the result: `:files' (list of per-file plists),
         (setq found t)))
     found))
 
+(defun nl-ns--definition-without-docstring (form)
+  "Return definition FORM without its own docstring, when it has one.
+Only the docstring is excluded from divergent-collision equality; all
+other parts of the definition remain significant."
+  (let ((head (car form)))
+    (cond
+     ((and (memq head '(defun defmacro defsubst cl-defun cl-defmacro))
+           (stringp (car (cdr (cdr (cdr form))))))
+      (append (list (car form) (car (cdr form)) (car (cdr (cdr form))))
+              (cdr (cdr (cdr (cdr form))))))
+     ((and (memq head '(defalias defvar defconst defcustom))
+           (stringp (car (cdr (cdr (cdr form))))))
+      (append (list (car form) (car (cdr form)) (car (cdr (cdr form))))
+              (cdr (cdr (cdr (cdr form))))))
+     ((and (eq head 'define-minor-mode) (stringp (car (cdr form))))
+      (cons head (cdr (cdr form))))
+     ((and (eq head 'define-derived-mode)
+           (stringp (car (cdr (cdr (cdr (cdr form)))))))
+      (append (list (car form) (car (cdr form)) (car (cdr (cdr form)))
+                    (car (cdr (cdr (cdr form)))))
+              (cdr (cdr (cdr (cdr (cdr form)))))))
+     (t form))))
+
+(defun nl-ns--normalise-definition-form (form)
+  "Return FORM with equivalent backquote reader heads made identical."
+  (cond
+   ((consp form)
+    (let ((head (car form)))
+      (cons (cond
+             ((memq head '(\` backquote)) 'backquote)
+             ((memq head '(\, comma)) 'comma)
+             ((memq head '(\,@ comma-at)) 'comma-at)
+             (t (nl-ns--normalise-definition-form head)))
+            (nl-ns--normalise-definition-form (cdr form)))))
+   ((vectorp form)
+    (let ((out (make-vector (length form) nil)) (i 0))
+      (while (< i (length form))
+        (aset out i (nl-ns--normalise-definition-form (aref form i)))
+        (setq i (1+ i)))
+      out))
+   (t form)))
+
+(defun nl-ns--definition-forms-equal-p (first second)
+  "Return non-nil when definition forms FIRST and SECOND are equal.
+Equality ignores a definition's own docstring and treats the reader's
+`backquote'/`comma'/`comma-at' heads as equivalent to Emacs's `\\`'/`\\,'/
+`\\,@' heads."
+  (equal (nl-ns--normalise-definition-form
+          (nl-ns--definition-without-docstring first))
+         (nl-ns--normalise-definition-form
+          (nl-ns--definition-without-docstring second))))
+
+(defun nl-ns--entry-definition (entry symbol)
+  "Return ENTRY's first definition form for SYMBOL, or nil."
+  (cdr (assq symbol (plist-get entry :definition-forms))))
+
+(defun nl-ns--analysis-file-entry (analysis file)
+  "Return ANALYSIS's entry for FILE, or nil."
+  (let ((entries (plist-get analysis :files)) (found nil))
+    (while (and entries (not found))
+      (when (equal (plist-get (car entries) :file) file)
+        (setq found (car entries)))
+      (setq entries (cdr entries)))
+    found))
+
 (defun nl-ns--check-collisions (analysis findings)
-  "Add one `ns-collision' finding per multiply-defined symbol."
+  "Add one collision finding per multiply-defined symbol.
+`ns-collision-divergent' replaces `ns-collision' when definition forms
+are not equal after each definition's own docstring is excluded."
   (let ((owner (plist-get analysis :owner))
         (collisions nil))
     (maphash
@@ -368,12 +472,27 @@ be read.  Keys of the result: `:files' (list of per-file plists),
                 (lambda (a b) (string< (symbol-name (car a))
                                        (symbol-name (car b))))))
     (dolist (collision collisions)
-      (setq findings
-            (cons (list :kind 'ns-collision
-                        :subject (car collision)
-                        :files (cdr collision)
-                        :count (length (cdr collision)))
-                  findings)))
+      (let ((reference nil) (divergent nil) (heads nil))
+        (dolist (file (cdr collision))
+          (let* ((entry (nl-ns--analysis-file-entry analysis file))
+                 (form (nl-ns--entry-definition entry (car collision))))
+            (when form
+              (setq heads (cons (cons file (car form)) heads))
+              (if reference
+                  (unless (nl-ns--definition-forms-equal-p reference form)
+                    (setq divergent t))
+                (setq reference form)))))
+        (setq findings
+              (cons (append (list :kind (if divergent
+                                          'ns-collision-divergent
+                                        'ns-collision)
+                                  :subject (car collision)
+                                  :files (cdr collision)
+                                  :count (length (cdr collision)))
+                            (if divergent
+                                (list :heads (nreverse heads))
+                              nil))
+                    findings))))
     findings))
 
 (defun nl-ns--check-prefixes (entry findings)
@@ -485,6 +604,10 @@ turn it on when you are ready to read that graph."
     (cond
      ((eq kind 'ns-collision)
       (format "ns-collision: `%s' defined in %d files: %s"
+              subject (plist-get finding :count)
+              (mapconcat #'identity (plist-get finding :files) ", ")))
+     ((eq kind 'ns-collision-divergent)
+      (format "ns-collision-divergent: `%s' differs in %d files: %s"
               subject (plist-get finding :count)
               (mapconcat #'identity (plist-get finding :files) ", ")))
      ((eq kind 'ns-prefix-violation)

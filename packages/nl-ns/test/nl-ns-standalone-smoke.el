@@ -110,7 +110,7 @@ KEYS supports `:type SYMBOL' for condition matching like ert."
         (setq all (cdr all))))
     (error "nl-ns-standalone-smoke: %d failure(s), %d passed"
            (length failures) ran))
-  (when (< ran 30)
+  (when (< ran 36)
     (error "nl-ns-standalone-smoke: only %d tests ran (expected >= 30)"
            ran))
   (princ (format "nl-ns-standalone-smoke: PASS (%d tests)\n" ran)))
