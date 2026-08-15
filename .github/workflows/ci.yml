@@ -39,6 +39,14 @@ jobs:
       - name: "Unsafe-surface inventory (Doc 170 sec 4.3 baseline gate)"
         shell: bash
         run: make unsafe-inventory
+      - name: "Doc 171 G4 native TCO benchmark (TCO-rewritten defun vs hand-written nl-loop, floor 0.95x; Linux is the only lane with the cc + objcopy native-exec toolchain)"
+        if: runner.os == 'Linux'
+        shell: bash
+        run: make bench-aot-tco
+      - name: "Standalone NeLisp CHECKED allocator smoke (Doc 170 Stage 2 redzone/generation/leak report; Windows x86_64 -- the only standalone target with a runtime env probe, which NELISP_ALLOC_CHECK=1 arming needs)"
+        if: runner.os == 'Windows'
+        shell: bash
+        run: make standalone-reader-checked NELISP_STANDALONE_TARGET=windows-x86_64
 
       # Placed before the ERT suite so a pre-existing test failure does
       # not skip the Mach-O toolchain-acceptance signal.
@@ -70,8 +78,4 @@ jobs:
         if: runner.os == 'Linux'
         shell: bash
         run: make standalone-parallel-compile-test
-      - name: "Standalone NeLisp CHECKED allocator smoke (Doc 170 Stage 2 redzone/generation/leak report; Windows x86_64 -- the only standalone target with a runtime env probe, which NELISP_ALLOC_CHECK=1 arming needs)"
-        if: runner.os == 'Windows'
-        shell: bash
-        run: make standalone-reader-checked NELISP_STANDALONE_TARGET=windows-x86_64
 
