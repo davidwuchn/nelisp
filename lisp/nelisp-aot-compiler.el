@@ -3079,6 +3079,233 @@ forms after that are function metadata rather than runtime body forms."
       (setq forms (cdr forms)))
     forms))
 
+;; ---- Doc 171: transparent self-tail-call optimization (TCO) ----
+;;
+;; Source-to-source rewrite (Doc 171 sec 8, option S) applied by the
+;; `defun' arm of `--preprocess-source' AFTER the body has been
+;; preprocessed, so the walker only sees the normalized dialect
+;; (cond -> if chains, let* -> nested let, progn -> seq, static and/or
+;; pruned).  A self-tail-recursive defun becomes a `while' loop with
+;; parallel parameter reassignment; the native frame no longer grows
+;; with recursion depth.
+;;
+;; Semantics delta is exactly zero (Doc 171 sec 4, option A): the
+;; rewrite only touches calls that the same-unit direct-call arm of
+;; `--parse-value' would lower to early-bound `call' IR anyway -- the
+;; AOT native path never consults the function cell for these, so
+;; converting call -> loop back-edge changes stack behavior only.
+;;
+;; The pass is a no-op unless `nelisp-aot-compiler-tco-enabled' is
+;; non-nil (Doc 168 sec 3.2: build-flag no-op principle; flag-off
+;; builds are byte-identical by construction).
+
+(defvar nelisp-aot-compiler-tco-enabled nil
+  "Non-nil enables the Doc 171 self-tail-call loop rewrite.
+Default nil: the pass is never invoked and compiled output is
+byte-identical to a pre-pass compiler.  Bound per build by
+`nelisp-standalone--compile-to-unit' from the NELISP_TCO make flag.")
+
+(defvar nelisp-aot-compiler--tco-log nil
+  "Names of defuns rewritten by the TCO pass, newest first.
+Audit trail (Doc 171 sec 11): lets a build inspect exactly which
+defuns were transformed.")
+
+(defun nelisp-aot-compiler--tco-opt-out-p (raw-body)
+  "Return non-nil when RAW-BODY carries (declare (nelisp-no-tco)).
+RAW-BODY is the unstripped defun body (docstring / declare intact)."
+  (let ((forms raw-body)
+        (out nil))
+    (when (and forms (stringp (car forms)))
+      (setq forms (cdr forms)))
+    (while (and forms
+                (consp (car forms))
+                (memq (caar forms) '(declare interactive)))
+      (when (and (eq (caar forms) 'declare)
+                 (assq 'nelisp-no-tco (cdr (car forms))))
+        (setq out t))
+      (setq forms (cdr forms)))
+    out))
+
+(defun nelisp-aot-compiler--tco-f64-suspect-p (form)
+  "Return non-nil when FORM plausibly involves f64 lowering.
+Conservative guard for Doc 171 sec 8.3 condition 3: parameters are
+f64-classed by usage, which preprocess cannot see, so any head symbol
+mentioning \"f64\" disables the rewrite for the whole defun (v1
+freeze; skipping only costs the optimization)."
+  (cond
+   ((not (consp form)) nil)
+   ((and (symbolp (car form))
+         (string-match-p "f64" (symbol-name (car form))))
+    t)
+   (t (let ((hit nil)
+            (tail form))
+        (while (and (consp tail) (not hit))
+          (when (nelisp-aot-compiler--tco-f64-suspect-p (car tail))
+            (setq hit t))
+          (setq tail (cdr tail)))
+        hit))))
+
+(defun nelisp-aot-compiler--tco-let-special-p (bindings)
+  "Return non-nil when any of the let BINDINGS targets a special var.
+Special lets lower through the push/pop-special bridge and their body
+is structurally not a tail position (Doc 171 sec 6)."
+  (let ((hit nil))
+    (dolist (b bindings)
+      (let ((var (if (consp b) (car b) b)))
+        (when (nelisp-aot-compiler--special-var-p var)
+          (setq hit t))))
+    hit))
+
+(defun nelisp-aot-compiler--tco-rewrite-call (call params required cont)
+  "Rewrite the tail self-call CALL into a loop back-edge form.
+PARAMS is the marker-free parameter list, REQUIRED the required-arg
+count, CONT the loop-continue gensym.  Returns nil when the argument
+count cannot match the direct-call convention (the parse arm will
+signal on it later; leave it alone here)."
+  (let ((args (cdr call)))
+    (when (and (>= (length args) required)
+               (<= (length args) (length params)))
+      ;; Pad omitted &optional positions with raw 0, matching the
+      ;; direct-call pad convention of the call-lowering arm.
+      (let* ((full (append args (make-list (- (length params)
+                                              (length args))
+                                           0)))
+             (temps (mapcar (lambda (_p)
+                              (nelisp-aot-compiler--gensym
+                               "nelisp-tco-arg"))
+                            params))
+             (sets nil))
+        (let ((ps params) (ts temps))
+          (while ps
+            (push (car ps) sets)
+            (push (car ts) sets)
+            (setq ps (cdr ps) ts (cdr ts))))
+        `(let ,(let ((bs nil) (ts temps) (as full))
+                 (while ts
+                   (push (list (car ts) (car as)) bs)
+                   (setq ts (cdr ts) as (cdr as)))
+                 (nreverse bs))
+           (seq (setq ,@(nreverse sets))
+                (setq ,cont 1)
+                0))))))
+
+(defun nelisp-aot-compiler--tco-walk (form name params required cont
+                                           found-cell)
+  "Rewrite tail-position self-calls to NAME inside preprocessed FORM.
+Allowlist walker (Doc 171 sec 5): forms not listed are opaque -- their
+interiors are never tail positions, so unknown forms only cost the
+optimization, never correctness.  FOUND-CELL is a one-element list
+whose car is set to t when a rewrite happened."
+  (cond
+   ((not (consp form)) form)
+   ;; The tail self-call itself.
+   ((and (eq (car form) name)
+         (not (eq name 'seq)) (not (eq name 'if)) (not (eq name 'let))
+         (not (eq name 'and)) (not (eq name 'or)) (not (eq name 'while)))
+    (let ((rewritten (nelisp-aot-compiler--tco-rewrite-call
+                      form params required cont)))
+      (if rewritten
+          (progn (setcar found-cell t) rewritten)
+        form)))
+   ((eq (car form) 'seq)
+    (if (null (cdr form))
+        form
+      (let* ((body (cdr form))
+             (head (butlast body))
+             (tail (car (last body))))
+        `(seq ,@head
+              ,(nelisp-aot-compiler--tco-walk tail name params required
+                                              cont found-cell)))))
+   ((eq (car form) 'if)
+    ;; (if C THEN [ELSE...]) -- ELSE tail is the last else form.
+    (let ((c (nth 1 form))
+          (then (nth 2 form))
+          (else (nthcdr 3 form)))
+      `(if ,c
+           ,(nelisp-aot-compiler--tco-walk then name params required
+                                           cont found-cell)
+         ,@(if else
+               (append (butlast else)
+                       (list (nelisp-aot-compiler--tco-walk
+                              (car (last else)) name params required
+                              cont found-cell)))
+             nil))))
+   ((eq (car form) 'let)
+    (let ((bindings (nth 1 form))
+          (body (nthcdr 2 form)))
+      (if (or (null body)
+              (nelisp-aot-compiler--tco-let-special-p bindings))
+          form
+        `(let ,bindings
+           ,@(butlast body)
+           ,(nelisp-aot-compiler--tco-walk (car (last body)) name params
+                                           required cont found-cell)))))
+   ((eq (car form) 'cond)
+    ;; Preprocess keeps `cond' (the if-chain desugar happens at parse
+    ;; time), so each clause's final body form is a tail position.
+    ;; Single-element clauses (TEST) return the test value; treat the
+    ;; test conservatively as non-tail.
+    `(cond
+      ,@(mapcar (lambda (clause)
+                  (if (and (consp clause) (cdr clause))
+                      (append (list (car clause))
+                              (butlast (cdr clause))
+                              (list (nelisp-aot-compiler--tco-walk
+                                     (car (last clause)) name params
+                                     required cont found-cell)))
+                    clause))
+                (cdr form))))
+   ((memq (car form) '(and or))
+    (if (null (cdr form))
+        form
+      `(,(car form)
+        ,@(butlast (cdr form))
+        ,(nelisp-aot-compiler--tco-walk (car (last (cdr form))) name
+                                        params required cont
+                                        found-cell))))
+   ;; Everything else (while / catch / condition-case /
+   ;; unwind-protect / calls / setq ...): interior is not a tail
+   ;; position.  Self-calls there stay ordinary recursion.
+   (t form)))
+
+(defun nelisp-aot-compiler--tco-maybe-rewrite (name params raw-body body)
+  "Return the TCO loop form for defun NAME, or nil when not applied.
+PARAMS is the raw parameter list, RAW-BODY the unstripped body (for
+the opt-out declare), BODY the preprocessed single body form.
+Eligibility follows Doc 171 sec 8.3; any failed condition returns nil
+and the defun compiles exactly as before."
+  (catch 'nelisp-tco-skip
+    (unless (and (listp params)
+                 (not (memq '&rest params))
+                 (not (memq '&c-varargs params)))
+      (throw 'nelisp-tco-skip nil))
+    (when (nelisp-aot-compiler--tco-opt-out-p raw-body)
+      (throw 'nelisp-tco-skip nil))
+    (when (nelisp-aot-compiler--tco-f64-suspect-p body)
+      (throw 'nelisp-tco-skip nil))
+    (let* ((norm (nelisp-aot-compiler--normalize-defun-params
+                  params (list 'defun name params)))
+           (plain (plist-get norm :params))
+           (required (plist-get norm :required-count)))
+      (unless (and plain
+                   (let ((ok t))
+                     (dolist (p plain) (unless (symbolp p) (setq ok nil)))
+                     ok))
+        (throw 'nelisp-tco-skip nil))
+      (let* ((cont (nelisp-aot-compiler--gensym "nelisp-tco-cont"))
+             (ret (nelisp-aot-compiler--gensym "nelisp-tco-ret"))
+             (found (list nil))
+             (new-body (nelisp-aot-compiler--tco-walk
+                        body name plain required cont found)))
+        (unless (car found)
+          (throw 'nelisp-tco-skip nil))
+        (push name nelisp-aot-compiler--tco-log)
+        `(let ((,cont 1) (,ret 0))
+           (seq (while (= ,cont 1)
+                  (seq (setq ,cont 0)
+                       (setq ,ret ,new-body)))
+                ,ret))))))
+
 (defun nelisp-aot-compiler--preprocess-let*-bindings (bindings body)
   "Desugar `let*' BINDINGS and BODY into nested AOT `let' forms."
   (if (null bindings)
@@ -3613,11 +3840,18 @@ the whole program."
     (unless (>= (length sexp) 4)
       (signal 'nelisp-aot-compiler-error
               (list :defun-arity sexp)))
-    `(defun ,(nth 1 sexp)
-       ,(nth 2 sexp)
-       ,(nelisp-aot-compiler--body->form
-         (nelisp-aot-compiler--defun-runtime-body-forms
-          (nthcdr 3 sexp)))))
+    (let* ((name (nth 1 sexp))
+           (params (nth 2 sexp))
+           (raw-body (nthcdr 3 sexp))
+           (body (nelisp-aot-compiler--body->form
+                  (nelisp-aot-compiler--defun-runtime-body-forms
+                   raw-body))))
+      `(defun ,name ,params
+         ;; Doc 171: self-tail-call loop rewrite (no-op unless enabled).
+         ,(or (and nelisp-aot-compiler-tco-enabled
+                   (nelisp-aot-compiler--tco-maybe-rewrite
+                    name params raw-body body))
+              body))))
    ((eq (car sexp) 'defmacro)
     ;; Top-level defmacros are stripped before this point.  Nested
     ;; defmacro has no AOT runtime meaning.

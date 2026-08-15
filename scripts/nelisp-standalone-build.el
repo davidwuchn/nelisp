@@ -821,6 +821,10 @@ standalone units can call each other."
          (nelisp-aot-compiler--os (nelisp-standalone--target-os))
          (nelisp-aot-compiler--allow-external-user-calls t)
          (nelisp-aot-compiler--abi resolved-abi)
+         ;; Doc 171: self-tail-call optimization, off unless the build
+         ;; opts in via NELISP_TCO=1 (byte-identity gate, Doc 171 G2).
+         (nelisp-aot-compiler-tco-enabled
+          (equal (getenv "NELISP_TCO") "1"))
          (ir (nelisp-aot-compiler--parse source nil))
          (defuns (nelisp-aot-compiler--collect-defuns ir))
          (buf (if (eq arch 'aarch64)
