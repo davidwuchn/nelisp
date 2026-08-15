@@ -7006,6 +7006,118 @@ unresolved at link time."
       (let* ((sym (wf_arg_ptr args 0)) (mirror (+ env 0)))
         (if (= (nelisp_mirror_is_bound mirror sym) 1)
             (wf_write_t out) (wf_write_nil out))))
+    ;; The reader keeps provided features in the evaluator's global mirror.
+    ;; That makes the list visible to the collector and gives `features' the
+    ;; ordinary Lisp-variable semantics expected by code that inspects it.
+    (defun bf_features_symbol (out)
+      (let* ((buf (alloc-bytes 8 1)))
+        (seq (ptr-write-u64 buf 0 8315178135798768998) ; "features"
+             (nl_alloc_symbol buf 8 out)
+             0)))
+    (defun bf_features_get (env out)
+      (let* ((sym (alloc-bytes 32 8)))
+        (seq
+         (bf_features_symbol sym)
+         (if (= (nelisp_mirror_is_bound (+ env 0) sym) 1)
+             (nelisp_mirror_lookup_value (+ env 0) sym out)
+           (wf_write_nil out))
+         0)))
+    (defun bf_feature_member_p (feature features)
+      (if (= (ptr-read-u64 features 0) 7)
+          (if (= (bf_eq2 feature (nl_cons_car_ptr features)) 1)
+              1
+            (bf_feature_member_p feature (nl_cons_cdr_ptr features)))
+        0))
+    (defun bf_featurep (args env out)
+      (let* ((features (alloc-bytes 32 8)))
+        (seq
+         (bf_features_get env features)
+         (if (= (bf_feature_member_p (wf_arg_ptr args 0) features) 1)
+             (wf_write_t out)
+           (wf_write_nil out))
+         0)))
+    (defun bf_provide (args env out)
+      (let* ((feature (wf_arg_ptr args 0))
+             (features (alloc-bytes 32 8))
+             (sym (alloc-bytes 32 8))
+             (new-features (alloc-bytes 32 8)))
+        (seq
+         (bf_features_get env features)
+         (if (= (bf_feature_member_p feature features) 1)
+             0
+           (seq
+            (nelisp_cons_construct feature features new-features)
+            (bf_features_symbol sym)
+            (nl_env_set_value env sym new-features)))
+         (wf_copy32 out feature)
+         0)))
+    (defun bf_require_arg_present_p (args n)
+      (if (= (ptr-read-u64 args 0) 7)
+          (if (= n 0) 1
+            (bf_require_arg_present_p (nl_cons_cdr_ptr args) (- n 1)))
+        0))
+    (defun bf_require_noerror_p (args)
+      (if (= (bf_require_arg_present_p args 2) 1)
+          (if (= (ptr-read-u64 (wf_arg_ptr args 2) 0) 0) 0 1)
+        0))
+    (defun bf_require_file_missing (feature)
+      (let* ((buf (alloc-bytes 16 1)))
+        (seq
+         (ptr-write-u64 buf 0 8316298228658891110) ; "file-mis"
+         (ptr-write-u32 (+ buf 8) 0 1735289203)    ; "sing"
+         (nl_alloc_symbol buf 12 268435480)
+         ;; The feature is sufficient diagnostic data for condition handlers;
+         ;; the standalone reader has no host `load-path' search diagnostics.
+         (bf_sig_copy32 268435512 feature)
+         (ptr-write-u64 268435472 0 1)
+         (atomic-fetch-add 268435544 1)
+         1)))
+    (defun bf_require_file_readable_p (file)
+      (let* ((cpath (nl_bi_make_cpath file))
+             (fd (nl_os_open_read cpath)))
+        (if (< fd 0)
+            0
+          (seq (nl_os_close_handle fd) 1))))
+    (defun bf_require_load_file (file env out)
+      (let* ((nil-slot (alloc-bytes 32 8))
+             (load-args (alloc-bytes 32 8)))
+        (seq
+         (wf_write_nil nil-slot)
+         (nelisp_cons_construct file nil-slot load-args)
+         (bf_load load-args env out))))
+    (defun bf_require_after_load (rc feature noerror env out)
+      (if (= rc 0)
+          (let* ((features (alloc-bytes 32 8)))
+            (seq
+             (bf_features_get env features)
+             (if (= (bf_feature_member_p feature features) 1)
+                 (seq (wf_copy32 out feature) 0)
+               (if (= noerror 1)
+                   (seq (ptr-write-u64 268435472 0 0) (wf_write_nil out) 0)
+                 (bf_require_file_missing feature)))))
+        (if (= noerror 1)
+            (seq (ptr-write-u64 268435472 0 0) (wf_write_nil out) 0)
+          1)))
+    (defun bf_require (args env out)
+      (let* ((feature (wf_arg_ptr args 0))
+             (features (alloc-bytes 32 8))
+             (noerror (bf_require_noerror_p args))
+             (file (if (= (bf_require_arg_present_p args 1) 1)
+                       (let* ((candidate (wf_arg_ptr args 1)))
+                         (if (= (ptr-read-u64 candidate 0) 0) feature candidate))
+                     feature)))
+        (seq
+         (bf_features_get env features)
+         (if (= (bf_feature_member_p feature features) 1)
+             (seq (wf_copy32 out feature) 0)
+           ;; `bf_load' is the standalone reader's only source loader.  It
+           ;; treats an unreadable path as empty input, so probe first to keep
+           ;; require from converting a missing dependency into false success.
+           (if (= (bf_require_file_readable_p file) 1)
+               (bf_require_after_load (bf_require_load_file file env out) feature noerror env out)
+             (if (= noerror 1)
+                 (seq (wf_write_nil out) 0)
+               (bf_require_file_missing feature)))))))
     (defun bf_set (args env out)
       (let* ((sym (wf_arg_ptr args 0))
              (val (wf_arg_ptr args 1)))
@@ -7396,9 +7508,9 @@ Wave-2 (C) appends bf_ash (shl/sar compose) + bf_str_lt (byte-lexicographic).")
     ((:lit "symbol-value") . (bf_symbol_value args env out))
     ((:lit "fboundp")  . (bf_fboundp args env out))
     ((:lit "boundp")   . (bf_boundp args env out))
-    ((:lit "featurep") . (wf_write_nil out))
-    ((:lit "provide")  . (seq (wf_copy32 out (wf_arg_ptr args 0)) 0))
-    ((:lit "require")  . (seq (wf_copy32 out (wf_arg_ptr args 0)) 0))
+    ((:lit "featurep") . (bf_featurep args env out))
+    ((:lit "provide")  . (bf_provide args env out))
+    ((:lit "require")  . (bf_require args env out))
     ;; --- symbol ops ---
     ;; symbol-name: a Symbol (tag 4) already has the str layout (ptr@16/len@24);
     ;; produce a Str (tag 5) sharing those bytes via nl_alloc_str.
@@ -14999,6 +15111,7 @@ correctly."
     ;; sf-capture-lexical.o intentionally omitted -- replaced by the corrected
     ;; nl_env_capture_lexical in `nelisp-standalone--reader-capture-source'.
     ("sf-symbol-is-lambda.o" nelisp-cc-symbol-is-lambda          nelisp-cc-symbol-is-lambda--source)
+    ("mirror-lookup-value.o" nelisp-cc-mirror-lookup-value       nelisp-cc-mirror-lookup-value--source)
     ("sf-env-lookup-value.o" nelisp-cc-env-lookup-value          nelisp-cc-env-lookup-value--source)
     ("sf-frame-ensure-cap.o" nelisp-cc-frame-ensure-capacity     nelisp-cc-frame-ensure-capacity--source)
     ("sf-alloc-cell.o"     nelisp-cc-nlcell-alloc                nelisp-cc-nlcell-alloc--source)

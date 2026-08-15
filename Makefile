@@ -7,7 +7,7 @@
         verify-elisp-fixtures \
         standalone-eval standalone-eval-clean standalone-eval-test standalone-eval-j \
         standalone-reader standalone-reader-test standalone-reader-load-smoke standalone-reader-checked standalone-reader-fmt-smoke standalone-reader-prelude-equal-reload-smoke standalone-reader-declare-strip-smoke standalone-reader-nested-backquote-macro-smoke standalone-reader-derived-mode-shape-smoke standalone-reader-pcase-quote-literal-smoke standalone-reader-catch-throw-tag-smoke standalone-reader-cond-let-shape-smoke standalone-reader-ffi-smoke standalone-reader-tls-smoke standalone-reader-process-smoke standalone-reader-realrt-smoke standalone-reader-repl-smoke standalone-reader-prelude-test standalone-reader-intern-soft-smoke standalone-reader-intern-soft-loop-smoke standalone-selfhost-test standalone-selfhost-mt-test standalone-parallel-compile-test standalone-chunk-growth-test \
-        standalone-reader-mod-float-smoke standalone-reader-match-data-smoke standalone-reader-current-time-smoke \
+        standalone-reader-mod-float-smoke standalone-reader-match-data-smoke standalone-reader-current-time-smoke standalone-reader-require-provide-smoke \
         alloc-check-collect \
         nelisp-performance-gate nelisp-nelix-command-gate nelisp-native-artifact-gate nelisp-nelix-native-hot-gate \
         nelisp-nelix-operational-gate \
@@ -279,6 +279,19 @@ standalone-reader-load-smoke: standalone-reader
 	  echo "[standalone-reader-load-smoke] PASS: --load -> $$out"; \
 	else \
 	  echo "[standalone-reader-load-smoke] FAIL: --load -> $$out"; \
+	  exit 1; \
+	fi
+
+# Feature registry and dependency-failure contract.  The missing-feature case
+# is caught only to assert its condition type; require itself must signal it.
+standalone-reader-require-provide-smoke: standalone-reader
+	@mkdir -p target
+	@printf '%s\n' '(list (progn (provide (quote zzz)) (featurep (quote zzz))) (featurep (quote never-provided)) (condition-case err (progn (require (quote no-such-feature-xyz)) (quote no-signal)) (file-missing (car err))) (require (quote no-such-feature-xyz) nil t) (progn (provide (quote zzz)) (require (quote zzz))))' > target/standalone-reader-require-provide-smoke.el
+	@out="$$(./target/nelisp --load target/standalone-reader-require-provide-smoke.el)"; \
+	if [ "$$out" = "(t nil file-missing nil zzz)" ]; then \
+	  echo "[standalone-reader-require-provide-smoke] PASS: -> $$out"; \
+	else \
+	  echo "[standalone-reader-require-provide-smoke] FAIL: -> $$out (expected (t nil file-missing nil zzz))"; \
 	  exit 1; \
 	fi
 
