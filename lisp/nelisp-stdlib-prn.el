@@ -16,8 +16,8 @@
 ;; Edge cases (very large / NaN / inf) are passed through unchanged.
 ;;
 ;; Reader-macro abbreviation: a 2-element cons `(QUOTE-TAG ARG)' whose
-;; head is one of `quote' / `function' / `backquote' / `comma' /
-;; `comma-at' is rendered with the corresponding prefix (`\''
+;; head is one of `quote' / `function' or the punctuation-named symbols
+;; `\`' / `,' / `,@' is rendered with the corresponding prefix (`\''
 ;; / `#\'' / `\`' / `,' / `,@').
 ;;
 ;; The MVP omits cycle detection (`#1=...#1#'); circular structures
@@ -60,6 +60,27 @@ bundled reader vs the host."
       (setq i (1+ i)))
     (nelisp--prn-chunks-string chunks)))
 
+(defun nelisp--prn-symbol-char-needs-escape-p (c)
+  "Return non-nil when C terminates or escapes a reader symbol atom.
+This mirrors the reader atom-terminator predicate.  A backslash also
+needs escaping because the reader consumes it as an escape prefix."
+  (or (= c 92) (= c 40) (= c 41) (= c 91) (= c 93) (= c 39)
+      (= c 96) (= c 44) (= c 59) (= c 34) (= c 32) (= c 9)
+      (= c 10) (= c 13) (= c 11) (= c 12)))
+
+(defun nelisp--prn-symbol-escaped (s)
+  "Return S with reader atom terminators escaped for readable printing."
+  (let ((chunks (cons nil nil))
+        (i 0)
+        (n (length s)))
+    (while (< i n)
+      (let ((c (aref s i)))
+        (when (nelisp--prn-symbol-char-needs-escape-p c)
+          (nelisp--prn-chunks-add chunks "\\"))
+        (nelisp--prn-chunks-add chunks (char-to-string c)))
+      (setq i (1+ i)))
+    (nelisp--prn-chunks-string chunks)))
+
 (defun nelisp--prn-float (x)
   "Return a compact, round-trip-safe string for float X.
 Built on `(number-to-string X)' (= `%g' which in NeLisp is fixed
@@ -90,10 +111,10 @@ round-trip identity.  `inf' / `-inf' / `NaN' pass through unchanged."
 
 (defun nelisp--prn-reader-macro-abbrev (lst escape)
   "Return abbreviated form for `(TAG ARG)' reader-macro shapes, or nil.
-TAG ∈ {quote, function, backquote, comma, comma-at}; ARG is printed
-recursively via `nelisp--prn-to-string' under ESCAPE.
-We dispatch on `symbol-name' string equality to avoid any reader-side
-re-interning of `backquote' / `comma' / `comma-at' under abbrev forms."
+TAG is quote, function, or an Emacs-compatible punctuation-named symbol.
+Legacy convenience names remain ordinary symbols so readable output
+round-trips without changing the list head.  ARG is printed recursively
+via `nelisp--prn-to-string' under ESCAPE."
   (when (and (consp lst)
              (symbolp (car lst))
              (consp (cdr lst))
@@ -102,9 +123,9 @@ re-interning of `backquote' / `comma' / `comma-at' under abbrev forms."
            (arg (car (cdr lst)))
            (prefix (cond ((string= tag-name "quote")     "'")
                          ((string= tag-name "function")  "#'")
-                         ((string= tag-name "backquote") "`")
-                         ((string= tag-name "comma")     ",")
-                         ((string= tag-name "comma-at")  ",@")
+                         ((string= tag-name "`")         "`")
+                         ((string= tag-name ",")         ",")
+                         ((string= tag-name ",@")        ",@")
                          (t nil))))
       (when prefix
         (concat prefix (nelisp--prn-to-string arg escape))))))
@@ -169,7 +190,10 @@ escaping; everything else identical."
    ((eq obj t) "t")
    ((integerp obj) (number-to-string obj))
    ((floatp obj)   (nelisp--prn-float obj))
-   ((symbolp obj)  (symbol-name obj))
+   ((symbolp obj)
+    (if escape
+        (nelisp--prn-symbol-escaped (symbol-name obj))
+      (symbol-name obj)))
    ((stringp obj)
     (if escape
         (concat "\"" (nelisp--prn-string-escaped obj) "\"")

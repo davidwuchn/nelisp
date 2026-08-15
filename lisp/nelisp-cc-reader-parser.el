@@ -504,35 +504,17 @@
                                 (mut-str-push-byte scratch 101))))))
 
     (defun nelisp_reader_p_push_backquote_bytes (scratch)
-      ;; "backquote"
-      (nelisp_reader_p_prog2 (mut-str-push-byte scratch 98)
-       (nelisp_reader_p_prog2 (mut-str-push-byte scratch 97)
-        (nelisp_reader_p_prog2 (mut-str-push-byte scratch 99)
-         (nelisp_reader_p_prog2 (mut-str-push-byte scratch 107)
-          (nelisp_reader_p_prog2 (mut-str-push-byte scratch 113)
-           (nelisp_reader_p_prog2 (mut-str-push-byte scratch 117)
-            (nelisp_reader_p_prog2 (mut-str-push-byte scratch 111)
-             (nelisp_reader_p_prog2 (mut-str-push-byte scratch 116)
-                                    (mut-str-push-byte scratch 101)))))))))) ; e
+      ;; "`"
+      (mut-str-push-byte scratch 96))
 
     (defun nelisp_reader_p_push_comma_bytes (scratch)
-      ;; "comma"
-      (nelisp_reader_p_prog2 (mut-str-push-byte scratch 99)
-       (nelisp_reader_p_prog2 (mut-str-push-byte scratch 111)
-        (nelisp_reader_p_prog2 (mut-str-push-byte scratch 109)
-         (nelisp_reader_p_prog2 (mut-str-push-byte scratch 109)
-                                (mut-str-push-byte scratch 97))))))
+      ;; ","
+      (mut-str-push-byte scratch 44))
 
     (defun nelisp_reader_p_push_comma_at_bytes (scratch)
-      ;; "comma-at"
-      (nelisp_reader_p_prog2 (mut-str-push-byte scratch 99)
-       (nelisp_reader_p_prog2 (mut-str-push-byte scratch 111)
-        (nelisp_reader_p_prog2 (mut-str-push-byte scratch 109)
-         (nelisp_reader_p_prog2 (mut-str-push-byte scratch 109)
-          (nelisp_reader_p_prog2 (mut-str-push-byte scratch 97)
-           (nelisp_reader_p_prog2 (mut-str-push-byte scratch 45)
-            (nelisp_reader_p_prog2 (mut-str-push-byte scratch 97)
-                                   (mut-str-push-byte scratch 116)))))))))
+      ;; ",@"
+      (nelisp_reader_p_prog2 (mut-str-push-byte scratch 44)
+                             (mut-str-push-byte scratch 64)))
 
     (defun nelisp_reader_p_push_function_bytes (scratch)
       ;; "function"

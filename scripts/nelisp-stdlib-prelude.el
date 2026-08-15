@@ -4038,6 +4038,23 @@ Doc 156: was `(apply #\\='vector ...)', but the reader now exposes a native
       (setq i (1+ i)))
     (nelisp--prn-chunks-string chunks)))
 
+(defun nelisp--prn-symbol-char-needs-escape-p (c)
+  "Return non-nil when C terminates or escapes a reader symbol atom."
+  (or (= c 92) (= c 40) (= c 41) (= c 91) (= c 93) (= c 39)
+      (= c 96) (= c 44) (= c 59) (= c 34) (= c 32) (= c 9)
+      (= c 10) (= c 13) (= c 11) (= c 12)))
+
+(defun nelisp--prn-symbol-escaped (s)
+  "Return S with reader atom terminators escaped for readable printing."
+  (let ((chunks (cons nil nil)) (i 0) (n (length s)))
+    (while (< i n)
+      (let ((c (aref s i)))
+        (when (nelisp--prn-symbol-char-needs-escape-p c)
+          (nelisp--prn-chunks-add chunks "\\"))
+        (nelisp--prn-chunks-add chunks (char-to-string c)))
+      (setq i (1+ i)))
+    (nelisp--prn-chunks-string chunks)))
+
 (defun nelisp--prn-float (x)
   (let ((s (number-to-string x)))
     (cond
@@ -4063,9 +4080,9 @@ Doc 156: was `(apply #\\='vector ...)', but the reader now exposes a native
            (arg (car (cdr lst)))
            (prefix (cond ((string= tag-name "quote")     "'")
                          ((string= tag-name "function")  "#'")
-                         ((string= tag-name "backquote") "`")
-                         ((string= tag-name "comma")     ",")
-                         ((string= tag-name "comma-at")  ",@")
+                         ((string= tag-name "`")         "`")
+                         ((string= tag-name ",")         ",")
+                         ((string= tag-name ",@")        ",@")
                          (t nil))))
       (when prefix
         (concat prefix (nelisp--prn-to-string arg escape))))))
@@ -4115,7 +4132,10 @@ Doc 156: was `(apply #\\='vector ...)', but the reader now exposes a native
    ((eq obj t) "t")
    ((integerp obj) (number-to-string obj))
    ((floatp obj)   (nelisp--prn-float obj))
-   ((symbolp obj)  (symbol-name obj))
+   ((symbolp obj)
+    (if escape
+        (nelisp--prn-symbol-escaped (symbol-name obj))
+      (symbol-name obj)))
    ((stringp obj)
     (if escape (concat "\"" (nelisp--prn-string-escaped obj) "\"") obj))
    ((consp obj)
@@ -4150,12 +4170,29 @@ Doc 156: was `(apply #\\='vector ...)', but the reader now exposes a native
   (let ((stop nil))
     (while (and (< i n) (not stop))
       (let ((c (aref s i)))
-        (if (or (= c 32) (= c 9) (= c 10) (= c 13) (= c 12)
-                (= c 40) (= c 41) (= c 91) (= c 93)
-                (= c 34) (= c 39) (= c 96) (= c 44) (= c 59))
-            (setq stop t)
-          (setq i (1+ i)))))
+        (cond
+         ((= c 92)
+          ;; A symbol backslash quotes the following character, so it cannot
+          ;; terminate this atom even when it normally would.
+          (setq i (if (< (1+ i) n) (+ i 2) (1+ i))))
+         ((or (= c 32) (= c 9) (= c 10) (= c 13) (= c 12)
+              (= c 40) (= c 41) (= c 91) (= c 93)
+              (= c 34) (= c 39) (= c 96) (= c 44) (= c 59))
+          (setq stop t))
+         (t (setq i (1+ i))))))
     i))
+
+(defun nelisp--rd-symbol-unescape (tok)
+  "Remove symbol backslashes, retaining their following characters literally."
+  (let ((out "") (i 0) (n (length tok)))
+    (while (< i n)
+      (let ((c (aref tok i)))
+        (if (and (= c 92) (< (1+ i) n))
+            (setq out (concat out (char-to-string (aref tok (1+ i))))
+                  i (+ i 2))
+          (setq out (concat out (char-to-string c))
+                i (1+ i)))))
+    out))
 
 (defun nelisp--rd-numeric-token-p (tok)
   (let ((n (length tok)) (i 0) (seen-digit nil) (ok t))
@@ -4224,18 +4261,23 @@ Doc 156: was `(apply #\\='vector ...)', but the reader now exposes a native
                        (setq items (cons (car r) items) k (cdr r))))))
           (cons (apply #'vector (nreverse items)) k)))
        ((= c 39) (let ((r (nelisp--rd-one s (1+ i) n))) (cons (list 'quote (car r)) (cdr r))))
-       ((= c 96) (let ((r (nelisp--rd-one s (1+ i) n))) (cons (list 'backquote (car r)) (cdr r))))
+       ((= c 96) (let ((r (nelisp--rd-one s (1+ i) n))) (cons (list (intern "`") (car r)) (cdr r))))
        ((= c 44)
         (if (and (< (1+ i) n) (= (aref s (1+ i)) 64))
-            (let ((r (nelisp--rd-one s (+ i 2) n))) (cons (list 'comma-at (car r)) (cdr r)))
-          (let ((r (nelisp--rd-one s (1+ i) n))) (cons (list 'comma (car r)) (cdr r)))))
-       ((= c 35) ; #
-        (if (and (< (1+ i) n) (= (aref s (1+ i)) 39))
-            (let ((r (nelisp--rd-one s (+ i 2) n))) (cons (list 'function (car r)) (cdr r)))
-          (let* ((e (nelisp--rd-atom-end s i n))) (cons (intern (substring s i e)) e))))
+            (let ((r (nelisp--rd-one s (+ i 2) n))) (cons (list (intern ",@") (car r)) (cdr r)))
+          (let ((r (nelisp--rd-one s (1+ i) n))) (cons (list (intern ",") (car r)) (cdr r)))))
+        ((= c 35) ; #
+         (if (and (< (1+ i) n) (= (aref s (1+ i)) 39))
+             (let ((r (nelisp--rd-one s (+ i 2) n))) (cons (list 'function (car r)) (cdr r)))
+           (let* ((e (nelisp--rd-atom-end s i n))
+                  (tok (substring s i e)))
+             (cons (intern (nelisp--rd-symbol-unescape tok)) e))))
        (t
-        (let* ((e (nelisp--rd-atom-end s i n)) (tok (substring s i e)))
-          (cons (cond ((nelisp--rd-numeric-token-p tok) (string-to-number tok))
+         (let* ((e (nelisp--rd-atom-end s i n))
+                (raw-tok (substring s i e))
+                (escaped (nelisp--rd-symbol-unescape raw-tok)))
+           (cons (cond ((nelisp--rd-numeric-token-p raw-tok)
+                        (string-to-number raw-tok))
                       ;; `intern' on "nil"/"t" allocates a fresh Symbol Sexp
                       ;; that is NOT `eq' to the canonical nil/t sentinel this
                       ;; runtime's `while'/`if'/`car'/`cdr' etc. compare
@@ -4246,10 +4288,10 @@ Doc 156: was `(apply #\\='vector ...)', but the reader now exposes a native
                       ;; two self-evaluating symbols through the literal
                       ;; embedded here so they resolve to the SAME sentinel
                       ;; `defun'/`if' bodies use throughout the interpreter.
-                      ((string= tok "nil") nil)
-                      ((string= tok "t") t)
-                      (t (intern tok)))
-                e)))))))
+                       ((string= raw-tok "nil") nil)
+                       ((string= raw-tok "t") t)
+                       (t (intern escaped)))
+                 e)))))))
 
 (unless (fboundp 'read-from-string)
   (defun read-from-string (string &optional start end)
@@ -4986,8 +5028,9 @@ strings compare equal."
   "Format TEMPLATE with ARGS honoring %[flags][width][.prec]conv (Doc 22 A7).
 Width, left-justify (-), zero-pad (0), sign (+/space) and string precision
 (.N) are applied in elisp; %f/%F honor their .PRECISION via
-`nelisp--ffmt-f' (Doc 159 §3); the remaining conversions are delegated to
-native `format', which lacks only the field-width layer."
+`nelisp--ffmt-f' (Doc 159 §3); %S uses `prin1-to-string' and the remaining
+conversions are delegated to native `format', which lacks only the field-width
+layer."
   (let ((n (length template)) (i 0) (out "") (argp args))
     (while (< i n)
       (let ((ch (aref template i)))
@@ -5033,12 +5076,14 @@ native `format', which lacks only the field-width layer."
                                    ;; %d/%i/%o/%x/%X of a float: truncate toward
                                    ;; zero like Emacs (native reads the raw bits
                                    ;; otherwise).  Doc 159 §13.
-                                   (nelisp--native-format
-                                    (concat "%" (char-to-string conv))
-                                    (if (and (floatp arg)
-                                             (or (= conv 100) (= conv 105) (= conv 111)
-                                                 (= conv 120) (= conv 88)))
-                                        (truncate arg) arg)))))
+                                    (if (= conv 83) ; ?S
+                                        (prin1-to-string arg)
+                                      (nelisp--native-format
+                                       (concat "%" (char-to-string conv))
+                                       (if (and (floatp arg)
+                                                (or (= conv 100) (= conv 105) (= conv 111)
+                                                    (= conv 120) (= conv 88)))
+                                           (truncate arg) arg))))))
                       (setq argp (cdr argp))
                       (when (and prec (or (= conv 115) (= conv 83))   ; s S
                                  (> (length body) prec))

@@ -116,7 +116,43 @@
            1))
 
     ;; -----------------------------------------------------------------------
-    ;; (5) Try reader macro prefix: write prefix if s is (SYMBOL ARG)
+    ;; (5) Symbol writer: escape bytes that terminate or escape reader atoms
+    ;; -----------------------------------------------------------------------
+    (defun nl_fmt_sexp_symbol_byte_needs_escape (b)
+      ;; Keep this in step with `nelisp_reader_is_atom_term'.  A backslash
+      ;; itself also needs escaping because the reader consumes it as an
+      ;; escape prefix while scanning a symbol atom.
+      (cond
+       ((= b 92) 1)  ; \
+       ((= b 40) 1)  ; (
+       ((= b 41) 1)  ; )
+       ((= b 91) 1)  ; [
+       ((= b 93) 1)  ; ]
+       ((= b 39) 1)  ; '
+       ((= b 96) 1)  ; `
+       ((= b 44) 1)  ; ,
+       ((= b 59) 1)  ; ;
+       ((= b 34) 1)  ; "
+       ((= b 32) 1)  ; space
+       ((= b 9) 1)   ; tab
+       ((= b 10) 1)  ; linefeed
+       ((= b 13) 1)  ; carriage return
+       ((= b 11) 1)  ; vertical tab
+       ((= b 12) 1)  ; form feed
+       (1 0)))
+
+    (defun nl_fmt_sexp_write_symbol_bytes (bytes-ptr i n buf)
+      (if (= i n)
+          1
+        (and (if (= (nl_fmt_sexp_symbol_byte_needs_escape
+                     (ptr-read-u8 bytes-ptr i)) 1)
+                 (mut-str-push-byte buf 92)
+               1)
+             (mut-str-push-byte buf (ptr-read-u8 bytes-ptr i))
+             (nl_fmt_sexp_write_symbol_bytes bytes-ptr (+ i 1) n buf))))
+
+    ;; -----------------------------------------------------------------------
+    ;; (6) Try reader macro prefix: write prefix if s is (SYMBOL ARG)
     ;;     Returns 1 if wrote a reader macro, 0 if not.
     ;; -----------------------------------------------------------------------
     (defun nl_fmt_sexp_try_reader_macro (s buf)
@@ -138,19 +174,19 @@
                     (sexp-payload-ptr (+ (sexp-payload-ptr s) 32))
                     buf)
                    1)
-            (if (symbol-name-eq (sexp-payload-ptr s) "backquote")
+            (if (symbol-name-eq (sexp-payload-ptr s) "`")
                 (and (mut-str-push-byte buf 96)  ; `
                      (nl_fmt_sexp_dispatch
                       (sexp-payload-ptr (+ (sexp-payload-ptr s) 32))
                       buf)
                      1)
-              (if (symbol-name-eq (sexp-payload-ptr s) "comma")
+              (if (symbol-name-eq (sexp-payload-ptr s) ",")
                   (and (mut-str-push-byte buf 44)  ; ,
                        (nl_fmt_sexp_dispatch
                         (sexp-payload-ptr (+ (sexp-payload-ptr s) 32))
                         buf)
                        1)
-                (if (symbol-name-eq (sexp-payload-ptr s) "comma-at")
+                (if (symbol-name-eq (sexp-payload-ptr s) ",@")
                     (and (mut-str-push-byte buf 44)  ; ,
                          (mut-str-push-byte buf 64)  ; @
                          (nl_fmt_sexp_dispatch
@@ -168,7 +204,7 @@
         0))
 
     ;; -----------------------------------------------------------------------
-    ;; (6) Write list body: recursive list printer (proper + dotted)
+    ;; (7) Write list body: recursive list printer (proper + dotted)
     ;; -----------------------------------------------------------------------
     (defun nl_fmt_sexp_write_list_body (s buf is-first)
       ;; s: *const Sexp, buf: *mut Sexp::MutStr, is-first: i64 (1=first, 0=rest)
@@ -190,7 +226,7 @@
                0))))
 
     ;; -----------------------------------------------------------------------
-    ;; (7) Write Vector items: "[" already pushed, writes items and "]"
+    ;; (8) Write Vector items: "[" already pushed, writes items and "]"
     ;; -----------------------------------------------------------------------
     (defun nl_fmt_sexp_write_vec_items (s i n buf)
       ;; s: *const Sexp::Vector, i: current index, n: length, buf: *mut Sexp::MutStr
@@ -201,7 +237,7 @@
              (nl_fmt_sexp_write_vec_items s (+ i 1) n buf))))
 
     ;; -----------------------------------------------------------------------
-    ;; (8) CharTable formatter
+    ;; (9) CharTable formatter
     ;; -----------------------------------------------------------------------
     (defun nl_fmt_sexp_write_char_table (ct-ptr buf)
       ;; ct-ptr: NlCharTable* (= sexp-payload-ptr of CharTable Sexp)
@@ -255,7 +291,7 @@
        1))
 
     ;; -----------------------------------------------------------------------
-    ;; (9) BoolVector helpers
+    ;; (10) BoolVector helpers
     ;; -----------------------------------------------------------------------
 
     ;; Write 3-digit octal escape: \NNN
@@ -310,7 +346,7 @@
        1))
 
     ;; -----------------------------------------------------------------------
-    ;; (10) Record writer
+    ;; (11) Record writer
     ;; -----------------------------------------------------------------------
     (defun nl_fmt_sexp_write_record_slots (s i n buf)
       ;; s: *const Sexp::Record, i: slot index, n: slot count, buf: *mut Sexp::MutStr
@@ -334,7 +370,7 @@
        1))
 
     ;; -----------------------------------------------------------------------
-    ;; (11) Main dispatch (equivalent to write_sexp)
+    ;; (12) Main dispatch (equivalent to write_sexp)
     ;; -----------------------------------------------------------------------
     (defun nl_fmt_sexp_dispatch (s buf)
       ;; s: *const Sexp, buf: *mut Sexp::MutStr (accumulator)
@@ -362,10 +398,10 @@
           (and (= (extern-call nl_f64_bits_append_to_mut_str
                                (ptr-read-u64 s 8) buf) 0)
                1))
-         ;; Symbol (tag=4) → raw bytes (str-len works for inline String)
+         ;; Symbol (tag=4) → readable escaped atom
          ((= (sexp-tag s) 4)
-          (and (nl_fmt_sexp_write_bytes (str-bytes-ptr s) 0 (str-len s) buf)
-               1))
+          (nl_fmt_sexp_write_symbol_bytes
+           (str-bytes-ptr s) 0 (str-len s) buf))
          ;; Str (tag=5) or MutStr (tag=6) → "..." with escaping
          ((or (= (sexp-tag s) 5) (= (sexp-tag s) 6))
           (nl_fmt_sexp_write_quoted_str s buf))
@@ -398,7 +434,7 @@
          (1 1))))
 
     ;; -----------------------------------------------------------------------
-    ;; (12) Public entry point: nelisp_fmt_sexp
+    ;; (13) Public entry point: nelisp_fmt_sexp
     ;; -----------------------------------------------------------------------
     (defun nelisp_fmt_sexp (s result-slot)
       ;; s: *const Sexp, result-slot: *mut Sexp
