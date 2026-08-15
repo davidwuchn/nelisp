@@ -1,0 +1,261 @@
+;;; nelisp-aot-tco-bench.el --- Doc 171 TCO vs nl-loop native bench -*- lexical-binding: t; -*-
+
+;; SPDX-License-Identifier: GPL-3.0-or-later
+
+;;; Commentary:
+
+;; Doc 171 G4 requires a benchmark proving that a self-tail-recursive
+;; `defun' rewritten by the transparent TCO pass performs at least as
+;; well as the handwritten `nl-loop' version of the same algorithm.
+;;
+;; This harness compiles a temporary `.neln' module containing both
+;; variants, executes them through the existing host native-exec proof
+;; path, and compares elapsed wall-clock time on the supported proof
+;; lane (Linux x86_64 with cc + objcopy available).
+;;
+;; Performance rule:
+;;   ratio = loop_time / tco_time
+;;   pass  = ratio >= 0.95
+;;
+;; So the TCO-rewritten `defun' may be at most ~5% slower than the
+;; handwritten `nl-loop' baseline, and equal/faster results pass.
+
+;;; Code:
+
+(require 'cl-lib)
+(require 'nelisp-artifact)
+
+(defgroup nelisp-aot-tco-bench nil
+  "Doc 171 TCO benchmark."
+  :group 'nelisp)
+
+(defcustom nelisp-aot-tco-bench-input 1000000
+  "Input N for the sum benchmark.
+The workload is large enough that native driver process overhead does
+not dominate the function-body timing."
+  :type 'integer
+  :group 'nelisp-aot-tco-bench)
+
+(defcustom nelisp-aot-tco-bench-repeats 5
+  "Number of timed runs per function."
+  :type 'integer
+  :group 'nelisp-aot-tco-bench)
+
+(defcustom nelisp-aot-tco-bench-threshold 0.95
+  "Minimum acceptable performance ratio for TCO vs `nl-loop'.
+The reported ratio is LOOP-TIME / TCO-TIME, so values >= 0.95 pass."
+  :type 'number
+  :group 'nelisp-aot-tco-bench)
+
+(defvar nelisp-aot-compiler-tco-enabled)
+(defvar nelisp-aot-compiler--label-counter)
+(declare-function nelisp-aot-compiler--preprocess-source "nelisp-aot-compiler"
+                  (sexp))
+
+(defconst nelisp-aot-tco-bench--feature 'doc171-bench
+  "Feature provided by the temporary Doc 171 benchmark source file.")
+
+(defun nelisp-aot-tco-bench-supported-p ()
+  "Return non-nil when the host can run the Doc 171 native proof lane."
+  (and (eq system-type 'gnu/linux)
+       (string-match-p "x86_64" (or system-configuration ""))
+       (executable-find "cc")
+       (executable-find "objcopy")))
+
+(defun nelisp-aot-tco-bench--repo-root ()
+  "Return the repository root."
+  (expand-file-name
+   ".."
+   (file-name-directory (or load-file-name buffer-file-name default-directory))))
+
+(defun nelisp-aot-tco-bench--source ()
+  "Return the temporary benchmark module source."
+  (mapconcat
+   #'identity
+   '("(require 'nl-prelude)"
+     "(defun doc171-bench-tco-sum (n acc)"
+     "  (if (= n 0)"
+     "      acc"
+     "    (doc171-bench-tco-sum (- n 1) (+ acc n))))"
+     "(defun doc171-bench-loop-sum (n acc)"
+     "  (nl-loop ((n n) (acc acc))"
+     "    (if (= n 0)"
+     "        acc"
+     "      (nl-recur (- n 1) (+ acc n)))))"
+     "(provide 'doc171-bench)")
+   "\n"))
+
+(defun nelisp-aot-tco-bench--expected-sum (n)
+  "Return 1 + ... + N."
+  (/ (* n (1+ n)) 2))
+
+(defun nelisp-aot-tco-bench--run-once (artifact-path symbol n)
+  "Run SYMBOL from ARTIFACT-PATH with N and ACC=0."
+  (nelisp-artifact-native-exec-general artifact-path symbol (list n 0)))
+
+(defun nelisp-aot-tco-bench--measure (artifact-path symbol n repeats)
+  "Return elapsed seconds for REPEATS native runs of SYMBOL."
+  (let ((start (current-time)))
+    (dotimes (_ repeats)
+      (nelisp-aot-tco-bench--run-once artifact-path symbol n))
+    (float-time (time-since start))))
+
+(cl-defun nelisp-aot-tco-bench-run (&key (input nelisp-aot-tco-bench-input)
+                                         (repeats nelisp-aot-tco-bench-repeats))
+  "Run the Doc 171 benchmark and return a result plist."
+  (unless (nelisp-aot-tco-bench-supported-p)
+    (error "Doc 171 bench requires Linux x86_64 with cc + objcopy"))
+  (let* ((temp-dir (make-temp-file "nelisp-aot-tco-bench-" t))
+         (source-path (expand-file-name "doc171-bench.el" temp-dir))
+         (artifact-path (concat source-path ".neln"))
+         (repo-root (nelisp-aot-tco-bench--repo-root))
+         (expected (nelisp-aot-tco-bench--expected-sum input))
+         (process-environment (cons "NELISP_TCO=1" process-environment))
+         (load-paths (list (expand-file-name "packages/nl-prelude/src" repo-root))))
+    (unwind-protect
+        (progn
+          (write-region (nelisp-aot-tco-bench--source) nil source-path nil 'silent)
+          (nelisp-artifact-compile-file
+           source-path artifact-path nil nil load-paths nil nil 'neln)
+          ;; Warm both cached drivers before timing so the measurement is about
+          ;; the native function body, not first-link startup.
+          (unless (= (nelisp-aot-tco-bench--run-once artifact-path "doc171-bench-tco-sum" 16)
+                     (nelisp-aot-tco-bench--expected-sum 16))
+            (error "Doc 171 bench TCO warmup returned the wrong value"))
+          (unless (= (nelisp-aot-tco-bench--run-once artifact-path "doc171-bench-loop-sum" 16)
+                     (nelisp-aot-tco-bench--expected-sum 16))
+            (error "Doc 171 bench nl-loop warmup returned the wrong value"))
+          (let* ((tco-value (nelisp-aot-tco-bench--run-once
+                             artifact-path "doc171-bench-tco-sum" input))
+                 (loop-value (nelisp-aot-tco-bench--run-once
+                              artifact-path "doc171-bench-loop-sum" input))
+                 (tco-seconds (nelisp-aot-tco-bench--measure
+                               artifact-path "doc171-bench-tco-sum" input repeats))
+                 (loop-seconds (nelisp-aot-tco-bench--measure
+                                artifact-path "doc171-bench-loop-sum" input repeats))
+                 (ratio (if (zerop tco-seconds)
+                            0.0
+                          (/ loop-seconds tco-seconds))))
+            (list :input input
+                  :repeats repeats
+                  :expected expected
+                  :tco-value tco-value
+                  :loop-value loop-value
+                  :tco-seconds tco-seconds
+                  :loop-seconds loop-seconds
+                  :ratio ratio
+                  :threshold nelisp-aot-tco-bench-threshold
+                  :pass (>= ratio nelisp-aot-tco-bench-threshold))))
+      (when (file-directory-p temp-dir)
+        (delete-directory temp-dir t)))))
+
+
+;;; Host fallback lane -------------------------------------------------
+;;
+;; The native lane above measures the real artifact, but it needs the
+;; Linux native-exec toolchain (cc + objcopy).  Everywhere else we can
+;; still compare the two SOURCE SHAPES the compiler emits -- the TCO
+;; rewrite output versus the hand-written `nl-loop' expansion -- by
+;; evaluating them on host Emacs through the same `seq' -> `progn'
+;; shim `test/nelisp-aot-tco-test.el' uses.  These are host bytecode
+;; numbers, NOT native AOT numbers: they show whether the rewrite
+;; produces a loop of the same shape and cost class as `nl-loop', not
+;; what the emitted machine code does.
+
+(defun nelisp-aot-tco-bench--host-fn (body)
+  "Compile BODY (AOT source dialect, params N and ACC) into a function.
+Both lanes go through `eval' + `byte-compile' so the comparison is
+between the two shapes, not between interpreted and compiled code."
+  (byte-compile
+   (eval `(cl-macrolet ((seq (&rest fs) (cons 'progn fs)))
+            (lambda (n acc) ,body))
+         t)))
+
+(defun nelisp-aot-tco-bench--host-time (fn n repeats)
+  "Return the best wall time of REPEATS calls of FN with N and 0."
+  (let ((best nil))
+    (dotimes (_ repeats)
+      (garbage-collect)
+      (let ((start (current-time)))
+        (funcall fn n 0)
+        (let ((elapsed (float-time (time-since start))))
+          (when (or (null best) (< elapsed best))
+            (setq best elapsed)))))
+    best))
+
+(defun nelisp-aot-tco-bench-host-run (&optional input repeats)
+  "Compare the TCO rewrite against `nl-loop' on host Emacs.
+Returns a result plist shaped like `nelisp-aot-tco-bench-run'."
+  (require 'nelisp-aot-compiler)
+  (require 'nl-prelude)
+  (let* ((input (or input 2000000))
+         (repeats (or repeats 3))
+         (expected (/ (* input (1+ input)) 2))
+         (tco-body
+          (nth 3 (let ((nelisp-aot-compiler-tco-enabled t)
+                       (nelisp-aot-compiler--label-counter 0))
+                   (nelisp-aot-compiler--preprocess-source
+                    '(defun doc171-host-sum (n acc)
+                       (if (= n 0) acc
+                         (doc171-host-sum (- n 1) (+ acc n))))))))
+         (tco-fn (nelisp-aot-tco-bench--host-fn tco-body))
+         ;; Built through `eval' so `nl-loop' expands at run time: the
+         ;; bench file must byte-compile without nl-prelude on the
+         ;; load-path.
+         (loop-fn (byte-compile
+                   (eval '(lambda (n acc)
+                            (nl-loop ((n n) (acc acc))
+                              (if (= n 0)
+                                  acc
+                                (nl-recur (- n 1) (+ acc n)))))
+                         t)))
+         (_ (unless (and (= (funcall tco-fn 100 0) 5050)
+                         (= (funcall loop-fn 100 0) 5050))
+              (error "doc171 host bench: variants disagree on a known input")))
+         (tco (nelisp-aot-tco-bench--host-time tco-fn input repeats))
+         (loop (nelisp-aot-tco-bench--host-time loop-fn input repeats))
+         (ratio (/ loop tco)))
+    (unless (= (funcall tco-fn input 0) expected)
+      (error "doc171 host bench: TCO variant returned a wrong sum"))
+    (list :lane 'host :input input :repeats repeats
+          :tco-seconds tco :loop-seconds loop :ratio ratio
+          :threshold nelisp-aot-tco-bench-threshold
+          :pass (>= ratio nelisp-aot-tco-bench-threshold))))
+
+(defun nelisp-aot-tco-bench-batch ()
+  "Batch entry point for the Doc 171 benchmark.
+Runs the native lane where it is available, and otherwise falls back
+to the host source-shape lane so the target always reports numbers."
+  (unless (nelisp-aot-tco-bench-supported-p)
+    ;; INFORMATIONAL ONLY.  The Doc 171 G4 floor is defined on native
+    ;; AOT code; this lane measures the two source shapes under
+    ;; Emacs's byte-code VM, a different cost model, and the numbers
+    ;; move with the execution engine and with machine load (observed
+    ;; on one host: ~1.29x for the TCO form as interpreted closures,
+    ;; 0.83x-1.06x across repeated byte-compiled runs).  So the lane
+    ;; reports numbers and never fails the target.
+    (let ((result (nelisp-aot-tco-bench-host-run)))
+      (message "doc171-bench lane=host INFORMATIONAL (native lane needs Linux x86_64 + cc + objcopy; the G4 floor applies to the native lane only) input=%d repeats=%d tco=%.4fs loop=%.4fs ratio=%.3fx"
+               (plist-get result :input)
+               (plist-get result :repeats)
+               (plist-get result :tco-seconds)
+               (plist-get result :loop-seconds)
+               (plist-get result :ratio))
+      (when noninteractive
+        (kill-emacs 0))))
+  (let* ((result (nelisp-aot-tco-bench-run))
+         (pass (plist-get result :pass)))
+    (message "doc171-bench input=%d repeats=%d tco=%.4fs loop=%.4fs ratio=%.3fx threshold=%.2f %s"
+             (plist-get result :input)
+             (plist-get result :repeats)
+             (plist-get result :tco-seconds)
+             (plist-get result :loop-seconds)
+             (plist-get result :ratio)
+             (plist-get result :threshold)
+             (if pass "PASS" "FAIL"))
+    (when noninteractive
+      (kill-emacs (if pass 0 1)))))
+
+(provide 'nelisp-aot-tco-bench)
+
+;;; nelisp-aot-tco-bench.el ends here
