@@ -423,6 +423,39 @@ artifact-class native + the AOT runtime-abi + native metadata."
       (when (file-directory-p temp-dir)
         (delete-directory temp-dir t)))))
 
+(ert-deftest nelisp-artifact/neln-native-compile-honors-tco-env ()
+  "Artifact native compilation forwards `NELISP_TCO' to the AOT frontend."
+  (let ((captured nil)
+        (process-environment (cons "NELISP_TCO=1" process-environment)))
+    (cl-letf (((symbol-function 'nelisp-artifact--target-arch)
+               (lambda (_target) 'x86_64))
+              ((symbol-function 'nelisp-artifact--ensure-native-compiler)
+               (lambda () t))
+              ((symbol-function 'nelisp-artifact--native-defun-forms)
+               (lambda (_forms)
+                 '((defun artifact-tco-smoke (n acc)
+                     (if (= n 0) acc
+                       (artifact-tco-smoke (- n 1) (+ acc n)))))))
+              ((symbol-function 'nelisp-aot-compile-to-link-unit)
+               (lambda (_sexp &rest _keys)
+                 (setq captured nelisp-aot-compiler-tco-enabled)
+                 '(:text "x" :relocs nil :extern-symbols nil
+                   :defuns ((:name "artifact-tco-smoke")))))
+              ((symbol-function 'nelisp-artifact--write-elf-rel-object)
+               (lambda (path _unit)
+                 (let ((coding-system-for-write 'binary))
+                   (write-region "x" nil path nil 'silent))))
+              ((symbol-function 'nelisp-artifact--native-section-plist)
+               (lambda (_obj _unit _arch _symbols _compile-report)
+                 '(:native-section-version 2))))
+      (should (equal (nelisp-artifact--native-compile-section
+                      '((defun artifact-tco-smoke (n acc)
+                          (if (= n 0) acc
+                            (artifact-tco-smoke (- n 1) (+ acc n)))))
+                      nil 'required)
+                     '(:native-section-version 2)))
+      (should captured))))
+
 (ert-deftest nelisp-artifact/neln-auto-suffix-and-cli ()
   "Doc 142 §6.5: --kind auto with a .neln output resolves to the native
 lane; the CLI compile/eval surface works end-to-end for .neln."

@@ -25,6 +25,7 @@
                   (sexp file-path &rest keys))
 (declare-function nelisp-aot-compile-to-link-unit "nelisp-aot-compiler"
                   (sexp &rest keys))
+(defvar nelisp-aot-compiler-tco-enabled)
 (declare-function nelisp-elf-write-binary "nelisp-elf-write"
                   (file-path sections))
 (declare-function nelisp--rd-one "nelisp-stdlib-prelude"
@@ -1228,6 +1229,13 @@ coverage when a native executor rejects the call."
               (expand-file-name "lisp/nelisp-aot-compiler.el" root))
             roots)))
 
+(defun nelisp-artifact--native-tco-enabled-p ()
+  "Return non-nil when artifact native compilation should enable Doc 171 TCO.
+This mirrors `nelisp-standalone--compile-to-unit' so USER code compiled through
+the `.neln' artifact pipeline sees the same `NELISP_TCO=1' behavior as the
+standalone build pipeline."
+  (equal (getenv "NELISP_TCO") "1"))
+
 (defun nelisp-artifact--load-native-compiler-from-path (path)
   "Load the native compiler dependency chain from compiler PATH."
   (let* ((lisp-dir (file-name-directory path))
@@ -1414,7 +1422,9 @@ module."
        (list :forms (length forms) :defuns (length defuns)))
       (let ((eligible nil)
             (symbols nil)
-            (compile-report nil))
+            (compile-report nil)
+            (nelisp-aot-compiler-tco-enabled
+             (nelisp-artifact--native-tco-enabled-p)))
         (if (eq policy 'required)
             (nelisp-artifact--native-compile-required-section defuns arch)
           (or (nelisp-artifact--native-compile-fast-batch-section defuns arch)
