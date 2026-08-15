@@ -66,7 +66,8 @@ it as the canonical example for future library moves.
 
 * The nl-* extension family (Doc 168)
 
-=nl-prelude= / =nl-condition= / =nl-safe= / =nl-check= are opt-in
+=nl-prelude= / =nl-condition= / =nl-safe= / =nl-contract= /
+=nl-check= are opt-in
 LANGUAGE extension libraries (Doc 168-170), not extractions from the
 core: they never ship loaded, and the root Makefile globs both the
 =nelisp-*= and =nl-*= name families for compile and test.  Each

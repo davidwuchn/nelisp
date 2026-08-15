@@ -1,0 +1,142 @@
+#+TITLE: nl-contract — Racket-style boundary contracts with blame for NeLisp
+
+* Motivation
+
+Doc 170 Stage 4, implementing Doc 168 section 3.4 (the explicit
+soundness perimeter).  With =eval= and runtime redefinition around,
+NeLisp does not claim whole-program soundness: =nl-strict= carves out
+per-file expansion-time checking, and values that cross into checked
+code from OUTSIDE that perimeter have to be defended dynamically.
+=nl-contract= is that defense: Racket-style contracts installed at a
+function boundary, checked on every call, and — the point — a
+violation report that names the *party at fault* instead of blowing
+up somewhere deep inside the callee.
+
+This is an *opt-in* extension library (Doc 168 section 2).  It
+depends only on =nl-prelude= (error hierarchy, Results) and =nl-safe=
+(violation-log machinery); nothing here depends on =nl-check=, and
+nothing may ever depend the other way either (Doc 168 section 4.1).
+
+* Contracts as values
+
+A contract is a plain Lisp value; there is no predicate library —
+callers use ordinary Elisp predicates.
+
+- *Flat contract*: any predicate — a function value (=#'stringp=, a
+  =lambda=) or a symbol naming one (='integerp=).  Doc 170 spells
+  these Racket-style (=string?=, =hash-table?=); both spellings are
+  just predicate names to nl-contract.
+- =(nl-> DOM... RANGE)=: a function contract, fixed arity.  All
+  arguments but the last are per-argument domain contracts; the last
+  is the range contract for the return value.
+- =(nl-result-of OK-CONTRACT ERR-CONTRACT)=: a contract over
+  nl-prelude Results — an ok payload is checked against OK-CONTRACT,
+  an err payload against ERR-CONTRACT; a non-Result value fails.
+
+=nl-contract-check CONTRACT VALUE= runs any of these against a value
+and returns a boolean; =nl-contract-describe CONTRACT= renders the
+printable form used in blame reports.
+
+* The boundary: nl-provide/contract
+
+#+begin_src elisp
+(nl-provide/contract
+  (parse-config (nl-> stringp (nl-result-of hash-table-p symbolp))))
+#+end_src
+
+Inside the macro, bare symbols are predicate names (quoted for you,
+matching Doc 170's Racket-style example); =lambda= forms,
+sharp-quoted functions, and arbitrary expressions evaluate as
+written.  The combinators are also plain functions, so contracts can
+be built programmatically and installed with the same machinery.
+
+Every call through the wrapped =parse-config= now checks:
+
+| Check                       | On failure, blame    | Position       |
+|-----------------------------+----------------------+----------------|
+| call arity = contract arity | =caller=             | =arity=        |
+| each argument vs its domain | =caller=             | 0-based index  |
+| return value vs the range   | =implementation=     | =return=       |
+
+* Blame semantics
+
+A violation signals =nl-contract-error= (defined under =nl-error=)
+whose data plist names everything a boundary report needs:
+
+#+begin_src elisp
+(:function parse-config          ; the contracted function
+ :blame    caller                ; or implementation
+ :position 0                     ; 0-based arg index, `return', or `arity'
+ :contract stringp               ; nl-contract-describe notation
+ :value    42)                   ; the offending value
+#+end_src
+
+- A *caller* violation is raised BEFORE the original function runs —
+  the implementation never sees the bad argument.
+- An *implementation* violation means the original ran and returned a
+  value the range contract rejects.
+
+The same record (plus =:kind contract=) is pushed onto nl-safe's
+=nl-safe--violation-log= through =nl-safe--log-violation= — one log,
+one =nl-safe-log-violations= switch, one =nl-safe-report= pipeline —
+so contract violations accrue in the Doc 168 Phase 6 gate data
+alongside borrow / bounds / generation / resource records.
+
+* Wrapping mechanics
+
+=nl-provide/contract= replaces the function cell of an EXISTING named
+function (=fset=) with a checking closure and stores the original in
+a hash table:
+
+- *Idempotent re-provide*: providing the same name again re-wraps the
+  stored ORIGINAL under the new contract — wrappers never stack, and
+  one =nl-contract-remove= always gets back to the raw function.
+- =(nl-contract-remove NAME)= restores the original; returns NAME, or
+  nil when NAME was not contracted.
+- =(nl-contract-wrapped-p NAME)= reports the current state.
+
+The contract exists at the boundary where =nl-provide/contract= ran:
+code that plain-=require='d the module and captured the raw function
+value before wrapping (or that runs after removal) calls the
+unchecked function.  That is the intended semantics — the wrapper IS
+the boundary — not a bypass bug.
+
+* Disable flag
+
+=nl-contract--enabled= (default t) mirrors =nl-safe--enabled=, but
+gates the *wrap-time* act instead of macro expansion: when nil at
+wrap time, =nl-provide/contract= leaves the function cell untouched —
+zero overhead, nothing to strip.  Expansion identity (Doc 170 section
+9) is not applicable here because wrapping is a runtime effect, not a
+macro expansion; the equivalent guarantee is "disabled provide
+installs nothing".  Flipping the flag later does not affect wrappers
+that are already installed — use =nl-contract-remove=.
+
+* Non-goals (v1, keep the scope tight)
+
+- *No predicate library*: use Elisp predicates.
+- *No higher-order wrapping*: an =nl->= contract in a value position
+  (an argument or return that is itself a function) checks
+  =functionp= only; it does not wrap the value to propagate blame
+  into later calls, as full Racket contracts do.
+- *Fixed arity only*: no =&optional= / =&rest= domain contracts.
+- *No expansion-time integration*: =nl-check= neither knows about nor
+  verifies contracts (one-way dependency rule).
+
+* Layout
+
+#+begin_example
+packages/nl-contract/
+├── README.org
+├── src/nl-contract.el
+└── test/
+    ├── nl-contract-test.el              ; ERT (host Emacs)
+    └── nl-contract-standalone-smoke.el  ; same bodies on target/nelisp
+#+end_example
+
+The root Makefile already globs =nl-*= packages into compile/test.
+Standalone gate, from the repository root:
+
+#+begin_example
+./target/nelisp --load packages/nl-contract/test/nl-contract-standalone-smoke.el
+#+end_example
