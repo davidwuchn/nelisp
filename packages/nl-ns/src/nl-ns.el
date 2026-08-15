@@ -149,9 +149,9 @@ on them."
   (cond
    ((symbolp form) (if (memq form members) (list form) nil))
    ((not (consp form)) nil)
-   ((eq (car form) '\`)
+   ((memq (car form) '(\` backquote))
     (nl-ns--quoted-members-in-template (car (cdr form)) members (1+ depth)))
-   ((memq (car form) '(\, \,@))
+   ((memq (car form) '(\, \,@ comma comma-at))
     (if (= depth 1)
         nil
       (nl-ns--quoted-members-in-template (car (cdr form)) members (1- depth))))
@@ -164,7 +164,7 @@ on them."
    ((not (consp form)) nil)
    ((eq (car form) 'quote)
     (nl-ns--quoted-members-in-template (car (cdr form)) members 0))
-   ((eq (car form) '\`)
+   ((memq (car form) '(\` backquote))
     (nl-ns--quoted-members-in-template (car (cdr form)) members 1))
    (t (append (nl-ns--quoted-members-in-form (car form) members)
               (nl-ns--quoted-members-in-form (cdr form) members)))))

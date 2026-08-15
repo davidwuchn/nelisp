@@ -216,16 +216,28 @@
     (should (eq (plist-get (car findings) :namespace) 'text))))
 
 (ert-deftest nl-ns-quoted-member-is-reported-for-backquote-template ()
-  (let ((findings (nl-ns-findings-of-kind
-                   (nl-ns-test--check
-                    '(("text.el"
-                       (nl-ns-define text :members (wrap chunk))
-                       (nl-ns-in text
-                         (defun wrap () `(chunk ,(funcall chunk)))))) )
-                   'ns-quoted-member)))
-    ;; The template's `chunk' is literal; the unquoted call is evaluated.
-    (should (= (length findings) 1))
-    (should (eq (plist-get (car findings) :subject) 'chunk))))
+  (dolist (heads '((\` \, \,@) (backquote comma comma-at)))
+    (let* ((backquote (car heads))
+           (comma (car (cdr heads)))
+           (comma-at (car (cdr (cdr heads))))
+           (findings
+            (nl-ns-findings-of-kind
+             (nl-ns-test--check
+              (list
+               (list "text.el"
+                     (list 'nl-ns-define 'text :members '(wrap chunk))
+                     (list 'nl-ns-in 'text
+                           (list 'defun 'wrap nil
+                                 (list backquote
+                                       (list 'chunk
+                                             (list comma
+                                                   (list 'funcall 'wrap))
+                                             (list comma-at
+                                                   (list 'funcall 'wrap)))))))))
+             'ns-quoted-member)))
+      ;; The template's `chunk' is literal; unquoted forms are evaluated.
+      (should (= (length findings) 1))
+      (should (eq (plist-get (car findings) :subject) 'chunk)))))
 
 (ert-deftest nl-ns-ambiguous-private-is-not-attributed ()
   ;; Defined in two files, so no single owner: the collision finding
