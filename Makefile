@@ -6,7 +6,7 @@
         standalone-tarball standalone-tarball-verify \
         verify-elisp-fixtures \
         standalone-eval standalone-eval-clean standalone-eval-test standalone-eval-j \
-        standalone-reader standalone-reader-test standalone-reader-load-smoke standalone-reader-fmt-smoke standalone-reader-prelude-equal-reload-smoke standalone-reader-declare-strip-smoke standalone-reader-nested-backquote-macro-smoke standalone-reader-derived-mode-shape-smoke standalone-reader-pcase-quote-literal-smoke standalone-reader-catch-throw-tag-smoke standalone-reader-cond-let-shape-smoke standalone-reader-ffi-smoke standalone-reader-tls-smoke standalone-reader-process-smoke standalone-reader-realrt-smoke standalone-reader-repl-smoke standalone-reader-prelude-test standalone-reader-intern-soft-smoke standalone-reader-intern-soft-loop-smoke standalone-selfhost-test standalone-selfhost-mt-test standalone-parallel-compile-test standalone-chunk-growth-test \
+        standalone-reader standalone-reader-test standalone-reader-load-smoke standalone-reader-checked standalone-reader-fmt-smoke standalone-reader-prelude-equal-reload-smoke standalone-reader-declare-strip-smoke standalone-reader-nested-backquote-macro-smoke standalone-reader-derived-mode-shape-smoke standalone-reader-pcase-quote-literal-smoke standalone-reader-catch-throw-tag-smoke standalone-reader-cond-let-shape-smoke standalone-reader-ffi-smoke standalone-reader-tls-smoke standalone-reader-process-smoke standalone-reader-realrt-smoke standalone-reader-repl-smoke standalone-reader-prelude-test standalone-reader-intern-soft-smoke standalone-reader-intern-soft-loop-smoke standalone-selfhost-test standalone-selfhost-mt-test standalone-parallel-compile-test standalone-chunk-growth-test \
         standalone-reader-mod-float-smoke standalone-reader-match-data-smoke standalone-reader-current-time-smoke \
         nelisp-performance-gate nelisp-nelix-command-gate nelisp-native-artifact-gate nelisp-nelix-native-hot-gate \
         nelisp-nelix-operational-gate \
@@ -260,6 +260,63 @@ standalone-reader-load-smoke: standalone-reader
 	  echo "[standalone-reader-load-smoke] PASS: --load -> $$out"; \
 	else \
 	  echo "[standalone-reader-load-smoke] FAIL: --load -> $$out"; \
+	  exit 1; \
+	fi
+
+# Doc 170 Stage 2: checked-allocator smoke (redzone / generation tags /
+# alloc-site / poison / leak scan).  Three runs against the same binary:
+#   1. env OFF — behaviour must match the stock reader (43) and the
+#      report head must be (0 0 ...) = checked mode fully disabled.
+#   2. NELISP_ALLOC_CHECK=1 — same compute still yields 43 (the checked
+#      suffix must not change program behaviour).
+#   3. NELISP_ALLOC_CHECK=1 — churn garbage across a form boundary +
+#      explicit garbage-collect, then assert via the report:
+#      enable=1, armed=1, generation/checked-allocs/verified-frees > 0,
+#      redzone violations = 0, alloc-site id round-trips.
+# The runtime env probe is wired on the Windows standalone target; on
+# targets without runtime env inheritance enable via
+# `(nelisp--debug-switch 19)' instead (stamping + poison, no verify).
+# NB: pass NELISP_STANDALONE_TARGET as a make VARIABLE (not just env) —
+# MSYS make drops it from recipe environments otherwise:
+#   make standalone-reader-checked NELISP_STANDALONE_TARGET=windows-x86_64
+standalone-reader-checked: standalone-reader
+	@mkdir -p target
+	@printf '%s\n' '(nelisp--alloc-check-report)' > target/alloc-check-report.el
+	@printf '%s\n' '(+ 40 3)' > target/alloc-check-compute.el
+	@printf '%s\n' \
+	  '(nelisp--debug-switch 21 42)' \
+	  '(let* ((i 0) (acc nil)) (while (< i 200) (setq acc (cons i acc)) (setq i (+ i 1))) 0)' \
+	  '(garbage-collect)' \
+	  '(nelisp--alloc-check-report)' \
+	  > target/alloc-check-smoke.el
+	@bin=./target/nelisp; \
+	case "$(NELISP_STANDALONE_TARGET)$$NELISP_STANDALONE_TARGET" in \
+	  windows*) bin=./target/nelisp.exe;; \
+	esac; \
+	off="$$($$bin --load target/alloc-check-report.el | tail -n 1)"; \
+	set -- $$(echo "$$off" | tr -d '()'); \
+	if [ "$$1" = "0" ] && [ "$$2" = "0" ]; then \
+	  echo "[standalone-reader-checked] PASS: default-off report head -> $$off"; \
+	else \
+	  echo "[standalone-reader-checked] FAIL: checked mode not off by default -> $$off"; \
+	  exit 1; \
+	fi; \
+	out="$$($$bin --load target/alloc-check-compute.el | tail -n 1)"; \
+	on="$$(NELISP_ALLOC_CHECK=1 $$bin --load target/alloc-check-compute.el | tail -n 1)"; \
+	if [ "$$out" = "43" ] && [ "$$on" = "43" ]; then \
+	  echo "[standalone-reader-checked] PASS: compute parity off/on -> $$out/$$on"; \
+	else \
+	  echo "[standalone-reader-checked] FAIL: compute parity off/on -> $$out/$$on"; \
+	  exit 1; \
+	fi; \
+	rep="$$(NELISP_ALLOC_CHECK=1 $$bin --load target/alloc-check-smoke.el | tail -n 1)"; \
+	set -- $$(echo "$$rep" | tr -d '()'); \
+	if [ "$$1" = "1" ] && [ "$$2" = "1" ] && [ "$${3:-0}" -gt 0 ] \
+	   && [ "$${4:-0}" -gt 0 ] && [ "$${5:-0}" -gt 0 ] && [ "$$6" = "0" ] \
+	   && [ "$$8" = "42" ]; then \
+	  echo "[standalone-reader-checked] PASS: $$rep"; \
+	else \
+	  echo "[standalone-reader-checked] FAIL: $$rep"; \
 	  exit 1; \
 	fi
 

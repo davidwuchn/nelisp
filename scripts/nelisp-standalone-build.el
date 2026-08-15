@@ -494,7 +494,23 @@ storage — not an arena reservation."
    ;; BSS flag (= allow `nl_val_clone_into' to shallow-rebox safe boxes).
    ;; `(nelisp--debug-switch 15)' sets it to 1 to force the legacy fresh-box
    ;; clone path, and `(nelisp--debug-switch 16)' clears it for A/B checks.
-   (list (cons 'bss (+ 57568 1048576 48)))
+   ;; Doc 170 Stage 2 (checked allocator): nl_alloc_check @ +57616+1MiB =
+   ;; a 96-byte control block for the NELISP_ALLOC_CHECK=1 checked-allocator
+   ;; mode (redzone / generation tags / alloc-site / leak counters).  Slots:
+   ;;   +0  enable (0 = off, zero behaviour change; 1 = pad every
+   ;;       `nl_alloc_bytes' block with a 16-byte guard suffix)
+   ;;   +8  armed (redzone verify-on-free; set ONLY by the boot-time env
+   ;;       probe, before any freeable block exists, so verification never
+   ;;       sees an unguarded block)
+   ;;   +16 generation counter (increments per checked allocation; low 32
+   ;;       bits are stored in the guard word as the block's generation tag)
+   ;;   +24 current alloc-site id (set via `(nelisp--debug-switch 21 ID)';
+   ;;       stamped into the site word of every checked allocation)
+   ;;   +32 redzone violation count   +40 first-bad header address
+   ;;   +48 checked-alloc count       +56 verified-free count
+   ;;   +64 leak-scan live count      +72 leak-scan live bytes
+   ;;   +80/+88 spare.  BSS zero-fill = disabled by default.
+   (list (cons 'bss (+ 57616 1048576 96)))
    (list (nelisp-link-symbol "nl_arena_base" 0
                              :section 'bss :bind 'global :type 'object)
          (nelisp-link-symbol "nl_rootstack_top" 8
@@ -524,8 +540,178 @@ storage — not an arena reservation."
          (nelisp-link-symbol "nl_frame_push_sym1" (+ 57528 1048576)
                              :section 'bss :bind 'global :type 'object)
          (nelisp-link-symbol "nl_dynalign_rsp_save" (+ 57560 1048576)
+                             :section 'bss :bind 'global :type 'object)
+         (nelisp-link-symbol "nl_alloc_check" (+ 57616 1048576)
                              :section 'bss :bind 'global :type 'object))
    nil))
+
+;; ===================================================================
+;; Doc 170 Stage 2 — checked allocator (debug-only, default OFF).
+;;
+;; A build-time-always-present, runtime-gated verification mode for the
+;; standalone arena allocator.  With the gate disabled (the default) the
+;; allocator behaves exactly as before: `nl_alloc_bytes' pays one extra
+;; bss slot read per call and every block layout / free-list bucket /
+;; GC walk is unchanged.  With the gate enabled every `nl_alloc_bytes'
+;; block gets a 16-byte suffix:
+;;
+;;   [ 8B header | payload ... | guard word | site word ]
+;;                              ^ hdr+bt-16   ^ hdr+bt-8
+;;
+;;   guard word = (GUARD-HI << 32) | (generation & #xFFFFFFFF)
+;;   site word  = current alloc-site id (nl_alloc_check+24)
+;;
+;; Because the suffix is INSIDE the block total, the free-list buckets,
+;; the sweep walk, compaction copies and the census all keep working
+;; unmodified — they only ever consume BT from the header.
+;;
+;; Verification (redzone check on free) is a SEPARATE `armed' gate set
+;; only by the boot-time environment probe (NELISP_ALLOC_CHECK=1): the
+;; probe runs inside `nl_os_environ_init', i.e. before the BOOT
+;; WATERMARK is frozen, and every block allocated before that point is
+;; a boot block that `nl_gc_free_block' never frees — so an armed
+;; verifier can never encounter an unguarded block.  The manual toggle
+;; `(nelisp--debug-switch 19)' enables guard/poison stamping mid-run
+;; but deliberately does NOT arm verification (mid-run arming would
+;; false-positive on pre-enable blocks freed later).
+;;
+;; Leak report: `(nelisp--alloc-check-report)' walks every chunk like
+;; the size census and returns
+;;   (enable armed generation checked-allocs verified-frees violations
+;;    first-bad-hdr site live-blocks live-bytes)
+;; where live-blocks / live-bytes count non-boot blocks not on the
+;; free-list (= still-reachable allocations; run `garbage-collect'
+;; first to drop garbage so the residue is the true retention).
+
+(defconst nelisp-standalone--alloc-check-guard-hi #x5AFEC4EC
+  "High 32 bits of the checked-allocator guard word.
+Kept below #x80000000 so the full guard word stays a positive i64 and
+`(sar guard 32)' recovers this value exactly.")
+
+(defconst nelisp-standalone--alloc-check-guard-word
+  (ash nelisp-standalone--alloc-check-guard-hi 32)
+  "Guard word with a zero generation field ( = GUARD-HI << 32).")
+
+(defconst nelisp-standalone--alloc-check-env-name "NELISP_ALLOC_CHECK"
+  "Environment variable that enables + arms the checked allocator at boot.")
+
+(defun nelisp-standalone--alloc-check-env-name-words ()
+  "Pack `nelisp-standalone--alloc-check-env-name' as UTF-16LE integers.
+Returns (U64-0 U64-1 U64-2 U64-3 U32-TAIL) covering the 18
+characters: four u64 words of 4 UTF-16 code units each, then one u32
+of the final 2 code units.  Used by the boot env probe to compare the
+wide \"NAME=VALUE\" entry against the variable name with 5 loads
+instead of 18 per-character reads."
+  (let ((s nelisp-standalone--alloc-check-env-name)
+        (words nil))
+    (unless (= (length s) 18)
+      (error "alloc-check env name must be 18 chars, got %S" s))
+    (dotimes (w 4)
+      (let ((acc 0))
+        (dotimes (i 4)
+          (setq acc (logior acc (ash (aref s (+ (* w 4) i)) (* 16 i)))))
+        (push acc words)))
+    (push (logior (aref s 16) (ash (aref s 17) 16)) words)
+    (nreverse words)))
+
+(defun nelisp-standalone--alloc-check-arena-forms ()
+  "Checked-allocator defuns appended to `nelisp-standalone--arena-source'.
+`nl_alloc_bytes' becomes a thin wrapper around the historical
+implementation (renamed `nl_alloc_bytes_uncheck'): pad the request by
+16 bytes when enabled, then stamp guard + site words into the suffix.
+`nl_alloc_check_verify' is called by `nl_gc_free_block_link' (gc unit,
+cross-unit call) before the freed payload is poisoned."
+  `((defun nl_alloc_check_enabled ()
+      (ptr-read-u64 (data-addr nl_alloc_check) 0))
+    ;; Boot-time enable used by the env probe (OS unit calls this
+    ;; cross-unit; `data-addr' is proven in the arena unit).  Sets
+    ;; enable + armed + the existing Stage-3a poison-on-free flag.
+    (defun nl_alloc_check_env_enable ()
+      (seq
+       (ptr-write-u64 (data-addr nl_alloc_check) 0 1)
+       (ptr-write-u64 (data-addr nl_alloc_check) 8 1)
+       (ptr-write-u64 (data-addr nl_gc_diag) 32 1)
+       0))
+    (defun nl_alloc_check_size (size)
+      (if (= (nl_alloc_check_enabled) 1) (+ size 16) size))
+    ;; Stamp the guard + site suffix of a freshly-allocated block OBJ.
+    ;; Reads BT from the header the raw allocator just wrote, so the
+    ;; bump path and the free-list reuse path (whose zero-fill wipes
+    ;; the suffix area just before) are both covered.  OBJ = 0 (OOM)
+    ;; passes through untouched.
+    (defun nl_alloc_check_stamp (obj)
+      (if (= obj 0) 0
+        (if (= (nl_alloc_check_enabled) 0) obj
+          (let* ((bt (nl_hdr_bt (- obj 8)))
+                 (gen (+ (ptr-read-u64 (data-addr nl_alloc_check) 16) 1)))
+            (seq
+             (ptr-write-u64 (data-addr nl_alloc_check) 16 gen)
+             (ptr-write-u64 (data-addr nl_alloc_check) 48
+                            (+ (ptr-read-u64 (data-addr nl_alloc_check) 48) 1))
+             (ptr-write-u64 (+ (- obj 8) (- bt 16)) 0
+                            (+ ,nelisp-standalone--alloc-check-guard-word
+                               (logand gen 4294967295)))
+             (ptr-write-u64 (+ (- obj 8) (- bt 8)) 0
+                            (ptr-read-u64 (data-addr nl_alloc_check) 24))
+             obj)))))
+    (defun nl_alloc_bytes (size align)
+      (nl_alloc_check_stamp
+       (nl_alloc_bytes_uncheck (nl_alloc_check_size size) align)))
+    ;; Redzone verify on free (called from `nl_gc_free_block_link'
+    ;; BEFORE poison-on-free overwrites the suffix).  Armed only via
+    ;; the boot env probe, so every freed block carries a guard; the
+    ;; bt < 32 escape is belt-and-suspenders (a checked block's minimum
+    ;; BT is 8 + 8 + 16 = 32).  A corrupted guard bumps the violation
+    ;; counter and records the first bad header for the report.
+    (defun nl_alloc_check_verify (hdr)
+      (if (= (ptr-read-u64 (data-addr nl_alloc_check) 8) 0) 0
+        (let ((bt (nl_hdr_bt hdr)))
+          (if (< bt 32) 0
+            (seq
+             (ptr-write-u64 (data-addr nl_alloc_check) 56
+                            (+ (ptr-read-u64 (data-addr nl_alloc_check) 56) 1))
+             (if (= (sar (ptr-read-u64 (+ hdr (- bt 16)) 0) 32)
+                    ,nelisp-standalone--alloc-check-guard-hi)
+                 0
+               (seq
+                (ptr-write-u64 (data-addr nl_alloc_check) 32
+                               (+ (ptr-read-u64 (data-addr nl_alloc_check) 32) 1))
+                (if (= (ptr-read-u64 (data-addr nl_alloc_check) 40) 0)
+                    (ptr-write-u64 (data-addr nl_alloc_check) 40 hdr)
+                  0)
+                0))
+             0)))))))
+
+(defun nelisp-standalone--alloc-check-env-probe-forms ()
+  "Boot env probe defuns appended to the Windows OS base forms.
+`nl_alloc_check_env_probe' is called once per \"NAME=VALUE\" entry by
+`nl_win_environ_walk'; when the 18-character name equals
+`nelisp-standalone--alloc-check-env-name' and the value is exactly
+\"1\" it calls `nl_alloc_check_env_enable' (arena unit).  The name is
+compared with four unaligned u64 loads + one u32 load against
+compile-time UTF-16LE constants.  Linux / macOS standalone targets do
+not populate the runtime environment yet, so the probe is
+Windows-only; use `(nelisp--debug-switch 19)' there instead."
+  (pcase-let ((`(,w0 ,w1 ,w2 ,w3 ,w4)
+               (nelisp-standalone--alloc-check-env-name-words)))
+    `((defun nl_alloc_check_env_probe (block off eqpos end)
+        (if (= (- eqpos off) 18)
+            (if (= (ptr-read-u64 block (* off 2)) ,w0)
+                (if (= (ptr-read-u64 block (+ (* off 2) 8)) ,w1)
+                    (if (= (ptr-read-u64 block (+ (* off 2) 16)) ,w2)
+                        (if (= (ptr-read-u64 block (+ (* off 2) 24)) ,w3)
+                            (if (= (ptr-read-u32 block (+ (* off 2) 32)) ,w4)
+                                (if (= (- end eqpos) 2)
+                                    (if (= (ptr-read-u16 block (* (+ eqpos 1) 2)) 49)
+                                        (nl_alloc_check_env_enable)
+                                      0)
+                                  0)
+                              0)
+                          0)
+                      0)
+                  0)
+              0)
+          0)))))
 
 (defun nelisp-standalone--target-uses-dynamic-arena-base-p (&optional target)
   "Return non-nil when TARGET stores chunk 0's runtime base in `nl_arena_base'."
@@ -820,7 +1006,8 @@ not linked."
 ;; The bump allocator still NEVER auto-frees mid-eval; reclamation is the
 ;; GC sweep at the top-level form boundary (see the reader driver).
 (defconst nelisp-standalone--arena-source
-  '(seq
+  (append
+   '(seq
     (defun nl_seq2 (_a b) b)
     (defun nl_align_up (n a) (logand (+ n (- a 1)) (- 0 a)))
     ;; BLOCK_TOTAL for a request of SIZE bytes: 16-byte header + object
@@ -1048,7 +1235,11 @@ not linked."
                     (setq done 1))
                  0))))
          obj)))
-    (defun nl_alloc_bytes (size align)
+    ;; Doc 170 Stage 2: renamed from `nl_alloc_bytes' — the public
+    ;; symbol is now the checked-allocator wrapper appended at the end
+    ;; of this unit (`nelisp-standalone--alloc-check-arena-forms').
+    ;; Body is byte-for-byte the historical allocator.
+    (defun nl_alloc_bytes_uncheck (size align)
       (let ((want (nl_block_total size)))
         ;; 1) try exact-fit free-list reuse (sweep populates the list).
         ;;    DEBUG: slot 268435624 == 1 disables reuse (always bump).
@@ -1143,7 +1334,11 @@ not linked."
     (defun nl_frame_push_sym0_ptr () (data-addr nl_frame_push_sym0))
     (defun nl_frame_push_sym1_ptr () (data-addr nl_frame_push_sym1))
     (defun nl_bind_clone_force_flag ()
-      (ptr-read-u64 (data-addr nl_bind_clone_force) 0))))
+      (ptr-read-u64 (data-addr nl_bind_clone_force) 0)))
+   ;; Doc 170 Stage 2: checked-allocator wrapper + guard stamping /
+   ;; verification (see the commentary at the generator).  The wrapper
+   ;; re-defines `nl_alloc_bytes' around `nl_alloc_bytes_uncheck' above.
+   (nelisp-standalone--alloc-check-arena-forms)))
 
 (defconst nelisp-standalone--windows-stack-reserve #x40000000
   "Windows standalone PE stack reserve size.
@@ -1761,7 +1956,12 @@ arm64 Linux has no legacy x86 numbering)."
           (nl_seq2 (ptr-write-u64 (+ hdr off) 0 16045481047390945280)
                    (nl_gc_poison_fill hdr (+ off 8) bt))
         0))
+    ;; Doc 170 Stage 2: `nl_alloc_check_verify' (arena unit) runs FIRST
+    ;; so the redzone guard is checked before the free-list next-link
+    ;; write and before poison-on-free overwrites the block suffix.
+    ;; A no-op single slot-read when the checked allocator is not armed.
     (defun nl_gc_free_block_link (hdr head)
+      (nl_seq2 (nl_alloc_check_verify hdr)
       (nl_seq2 (nl_hdr_set_mark hdr 2)
        (nl_seq2 (ptr-write-u64 (+ hdr 8) 0 (ptr-read-u64 head 0))
         (nl_seq2 (ptr-write-u64 head 0 (+ hdr 8))
@@ -1769,7 +1969,7 @@ arm64 Linux has no legacy x86 numbering)."
              (nl_seq2 (ptr-write-u64 (data-addr nl_gc_diag) 40
                         (+ (ptr-read-u64 (data-addr nl_gc_diag) 40) 1))
                       (nl_gc_poison_fill hdr 16 (nl_hdr_bt hdr)))
-           0)))))
+           0))))))
     (defun nl_gc_free_block (hdr)
       (if (= (nl_gc_is_boot hdr) 1) 0   ; HARD: never free a chunk-0 boot block
        (nl_gc_free_block_link hdr
@@ -3241,6 +3441,8 @@ argument (reachability + in-arena bounds checks).")
     ((:lit "nelisp--gc-diag") . (bf_debug_switch args out))
     ((:lit "nelisp--arena-force-grow-smoke") . (bf_arena_force_grow_smoke out))
     ((:lit "nelisp--size-census") . (bf_size_census out))
+    ;; Doc 170 Stage 2: checked-allocator counters + leak scan.
+    ((:lit "nelisp--alloc-check-report") . (bf_alloc_check_report out))
     ;; --- M7 file I/O (impls in m7b-fileio.o glue unit) ---
     ((:u8 "wrf")  . (seq (nl_bi_write_file args out) 0))
     ((:u8 "rdf")  . (seq (nl_bi_read_file args out) 0))
@@ -3542,6 +3744,34 @@ unresolved at link time."
     ;; Returns the list
     ;; (trip-count bad-cur bad-bt bad-want poison-count poison-enable
     ;;  context-depth mid-form-fired-count bind-legacy-force).
+    ;; Doc 170 Stage 2: debug-switch extension codes (19+), split out so
+    ;; the historical 18-arm chain stays untouched.  ARG0:
+    ;;   19 = enable checked-allocator stamping (guard/site suffix on
+    ;;        every alloc) + poison-on-free.  Does NOT arm redzone
+    ;;        verification — mid-run arming would false-positive on
+    ;;        blocks allocated before the toggle; verification arms
+    ;;        only via the boot NELISP_ALLOC_CHECK=1 env probe.
+    ;;   20 = disable checked mode entirely (enable + armed + poison off).
+    ;;   21 = set the current alloc-site id to ARG1 (stamped into the
+    ;;        site word of every subsequent checked allocation).
+    ;; Unknown codes return 0 (same as the historical default arm).
+    (defun bf_debug_switch_ext (args)
+      (if (= (wf_argval args 0) 19)
+          (seq
+           (ptr-write-u64 (data-addr nl_alloc_check) 0 1)
+           (ptr-write-u64 (data-addr nl_gc_diag) 32 1)
+           0)
+        (if (= (wf_argval args 0) 20)
+            (seq
+             (ptr-write-u64 (data-addr nl_alloc_check) 0 0)
+             (ptr-write-u64 (data-addr nl_alloc_check) 8 0)
+             (ptr-write-u64 (data-addr nl_gc_diag) 32 0)
+             0)
+          (if (= (wf_argval args 0) 21)
+              (nl_seq2
+               (ptr-write-u64 (data-addr nl_alloc_check) 24 (wf_argval args 1))
+               0)
+            0))))
     (defun bf_debug_switch (args out)
       (seq
         (if (= (wf_argval args 0) 1) (ptr-write-u64 (data-addr nl_gc_diag) 32 1)
@@ -3588,7 +3818,10 @@ unresolved at link time."
                                             (ptr-write-u64 (data-addr nl_fvcache_disable_lookup) 0 1)
                                           (if (= (wf_argval args 0) 18)
                                               (ptr-write-u64 (data-addr nl_fvcache_disable_lookup) 0 0)
-                                            0))))))))))))))))))
+                                            ;; Doc 170 Stage 2: codes
+                                            ;; 19+ live in the extension
+                                            ;; dispatcher below.
+                                            (bf_debug_switch_ext args)))))))))))))))))))
         (let* ((nils (alloc-bytes 32 8)) (s8 (alloc-bytes 32 8)) (s7 (alloc-bytes 32 8)) (s6 (alloc-bytes 32 8)) (s5 (alloc-bytes 32 8)) (s4 (alloc-bytes 32 8))
                (s3 (alloc-bytes 32 8)) (s2 (alloc-bytes 32 8)) (s1 (alloc-bytes 32 8)))
           (seq
@@ -4892,6 +5125,77 @@ unresolved at link time."
          (wf_cons_int (ptr-read-u64 (+ acc 16) 0) s3 s2)
          (wf_cons_int (ptr-read-u64 (+ acc 8) 0) s2 s1)
          (wf_cons_int (ptr-read-u64 acc 0) s1 out)
+         0)))
+    ;; Doc 170 Stage 2: checked-allocator leak scan.  Same header walk
+    ;; as the size census, but accumulates only NON-BOOT blocks that are
+    ;; not on the free-list (mark != 2): ACC+0 = live block count,
+    ;; ACC+8 = live bytes (BLOCK_TOTAL sum).  Boot blocks are permanent
+    ;; by design (never freed) so they are excluded from the leak view.
+    (defun bf_ac_scan_chunk (chunk acc)
+      (let* ((end (nl_gc_chunk_end chunk))
+             (hdr (ptr-read-u64 (+ chunk 24) 0)))
+        (seq
+         (while (and (> hdr 0) (< hdr end))
+           (if (= (nl_gc_bt_ok hdr (nl_hdr_bt hdr) end) 0)
+               (setq hdr end)
+             (seq
+              (if (= (nl_gc_is_boot hdr) 1) 0
+                (if (= (nl_hdr_mark hdr) 2) 0
+                  (seq
+                   (ptr-write-u64 acc 0 (+ (ptr-read-u64 acc 0) 1))
+                   (ptr-write-u64 (+ acc 8) 0
+                                  (+ (ptr-read-u64 (+ acc 8) 0)
+                                     (nl_hdr_bt hdr))))))
+              (setq hdr (+ hdr (nl_hdr_bt hdr))))))
+         0)))
+    (defun bf_ac_scan_chunks (chunk acc)
+      (if (= chunk 0) 0
+        (nl_seq2 (bf_ac_scan_chunk chunk acc)
+                 (bf_ac_scan_chunks (ptr-read-u64 (+ chunk 48) 0) acc))))
+    ;; `(nelisp--alloc-check-report)' — returns the 10-element list
+    ;;   (enable armed generation checked-allocs verified-frees
+    ;;    violations first-bad-hdr site live-blocks live-bytes).
+    ;; live-blocks / live-bytes come from a fresh chunk walk; call
+    ;; `garbage-collect' first for a true end-of-run leak residue.
+    ;; The 8 counter slots are SNAPSHOTTED into ACC before any cons is
+    ;; built: `wf_cons_int' allocates, and with checked mode enabled
+    ;; each allocation bumps the generation / checked-alloc counters —
+    ;; reading them lazily mid-consing would skew the reported values.
+    (defun bf_alloc_check_report (out)
+      (let* ((acc (alloc-bytes 80 8))
+             (nil-slot (alloc-bytes 32 8))
+             (s9 (alloc-bytes 32 8))
+             (s8 (alloc-bytes 32 8))
+             (s7 (alloc-bytes 32 8))
+             (s6 (alloc-bytes 32 8))
+             (s5 (alloc-bytes 32 8))
+             (s4 (alloc-bytes 32 8))
+             (s3 (alloc-bytes 32 8))
+             (s2 (alloc-bytes 32 8))
+             (s1 (alloc-bytes 32 8)))
+        (seq
+         (ptr-write-u64 acc 0 0)
+         (ptr-write-u64 (+ acc 8) 0 0)
+         (bf_ac_scan_chunks (ptr-read-u64 268436160 0) acc)
+         (ptr-write-u64 (+ acc 16) 0 (ptr-read-u64 (data-addr nl_alloc_check) 0))
+         (ptr-write-u64 (+ acc 24) 0 (ptr-read-u64 (data-addr nl_alloc_check) 8))
+         (ptr-write-u64 (+ acc 32) 0 (ptr-read-u64 (data-addr nl_alloc_check) 16))
+         (ptr-write-u64 (+ acc 40) 0 (ptr-read-u64 (data-addr nl_alloc_check) 48))
+         (ptr-write-u64 (+ acc 48) 0 (ptr-read-u64 (data-addr nl_alloc_check) 56))
+         (ptr-write-u64 (+ acc 56) 0 (ptr-read-u64 (data-addr nl_alloc_check) 32))
+         (ptr-write-u64 (+ acc 64) 0 (ptr-read-u64 (data-addr nl_alloc_check) 40))
+         (ptr-write-u64 (+ acc 72) 0 (ptr-read-u64 (data-addr nl_alloc_check) 24))
+         (wf_write_nil nil-slot)
+         (wf_cons_int (ptr-read-u64 (+ acc 8) 0) nil-slot s9)
+         (wf_cons_int (ptr-read-u64 acc 0) s9 s8)
+         (wf_cons_int (ptr-read-u64 (+ acc 72) 0) s8 s7)
+         (wf_cons_int (ptr-read-u64 (+ acc 64) 0) s7 s6)
+         (wf_cons_int (ptr-read-u64 (+ acc 56) 0) s6 s5)
+         (wf_cons_int (ptr-read-u64 (+ acc 48) 0) s5 s4)
+         (wf_cons_int (ptr-read-u64 (+ acc 40) 0) s4 s3)
+         (wf_cons_int (ptr-read-u64 (+ acc 32) 0) s3 s2)
+         (wf_cons_int (ptr-read-u64 (+ acc 24) 0) s2 s1)
+         (wf_cons_int (ptr-read-u64 (+ acc 16) 0) s1 out)
          0))))
   "Reader-only arena size-census diagnostics (call `nl_gc_bt_ok' /
 `nl_gc_chunk_end' from `reader-gc.o'); excluded from the baked eval applyfn.")
@@ -10704,6 +11008,7 @@ value (matches the binary's M8 read+eval-loop driver)."
     "nelisp--repr" "nelisp--json-encode" "nelisp--sha256" "nelisp--string-search" "nelisp--arena-stats" "garbage-collect"
     "nelisp--fmt-float"
     "nelisp--debug-switch" "nelisp--gc-diag" "nelisp--arena-force-grow-smoke" "nelisp--size-census" "nelisp--arena-walk-verify"
+    "nelisp--alloc-check-report"
     "nelisp--arena-dump-copy-verify" "nelisp--arena-mark-reach-verify" "nelisp--arena-swizzle-verify"
     "nelisp--arena-load-relocate-verify" "nelisp--arena-image-root-verify"
     "nelisp--arena-dump-table-verify"
@@ -12954,6 +13259,7 @@ boundary (Doc 151 Phase B):
   "Return the per-target base OS helper defuns (argv/file/process)."
   (pcase nelisp-standalone--target
     ((or 'windows-x86_64 'windows-aarch64)
+     (append
      '((defun nl_win_wcs_utf8_dup (src)
          (let* ((n (extern-call WideCharToMultiByte 65001 0 src -1 0 0 0 0))
                 (cap (if (< n 1) 1 n))
@@ -13128,6 +13434,11 @@ boundary (Doc 151 Phase B):
                   (pair (nl_win_env_pair block off end eqpos))
                   (rest (alloc-bytes 32 8)))
              (seq
+              ;; Doc 170 Stage 2: boot probe for NELISP_ALLOC_CHECK=1.
+              ;; Runs before the BOOT WATERMARK freeze, so arming the
+              ;; redzone verifier here is sound (see the checked-
+              ;; allocator commentary near the arena bss unit).
+              (nl_alloc_check_env_probe block off eqpos end)
               (nl_win_environ_walk block (+ end 1) rest)
               (nelisp_cons_construct pair rest result-slot)))))
        (defun nl_os_environ_init (result-slot)
@@ -13135,7 +13446,10 @@ boundary (Doc 151 Phase B):
            (seq
             (nl_win_environ_walk block 0 result-slot)
             (extern-call FreeEnvironmentStringsW block)
-            result-slot)))))
+            result-slot))))
+     ;; Doc 170 Stage 2: env probe defuns (compile-time UTF-16LE name
+     ;; constants; see the generator's docstring).
+     (nelisp-standalone--alloc-check-env-probe-forms)))
     ('macos-aarch64
      '((defun nl_os_environ_init (result-slot) (wf_write_nil result-slot))
        (defun nl_darwin_skip_to_nul (ptr off)
