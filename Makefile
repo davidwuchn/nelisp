@@ -27,13 +27,15 @@ export TMP    ?= /tmp
 SRCS  := $(sort $(wildcard src/nelisp*.el))
 PACKAGE_SRC_DIRS := $(sort $(wildcard packages/*/src))
 PACKAGE_TEST_DIRS := $(sort $(wildcard packages/*/test))
-PACKAGE_SRCS := $(sort $(wildcard packages/*/src/nelisp*.el))
+PACKAGE_SRCS := $(sort $(wildcard packages/*/src/nelisp*.el) \
+                       $(wildcard packages/*/src/nl-*.el))
 # Soak test (Phase 5-D.6) is advisory only and deliberately excluded
 # from the gated TESTS glob — it runs long-lived `sleep-for' jobs and
 # is invoked explicitly via `make soak'.
 TESTS := $(sort $(filter-out test/nelisp-worker-soak-test.el, \
                   $(wildcard test/nelisp*-test.el) \
-                  $(wildcard packages/*/test/nelisp*-test.el)))
+                  $(wildcard packages/*/test/nelisp*-test.el) \
+                  $(wildcard packages/*/test/nl-*-test.el)))
 TEST_LOADS := $(addprefix -l ,$(TESTS))
 PACKAGE_SRC_LOADS := $(addprefix -L ,$(PACKAGE_SRC_DIRS))
 PACKAGE_TEST_LOADS := $(addprefix -L ,$(PACKAGE_TEST_DIRS))

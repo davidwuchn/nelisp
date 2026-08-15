@@ -1,0 +1,118 @@
+#+TITLE: nl-prelude — Result/Option error handling for NeLisp
+
+* Motivation
+
+Doc 168/169 Phase 1.  Elisp error handling is not value-based: =signal=
+unwinds the stack and =nil= conflates "no value" with "false" and
+"empty".  =nl-prelude= brings Rust-style =Result= / =Option= values and
+the =nl-?= early-return operator to Elisp code running on NeLisp (or on
+host Emacs — the package is pure Lisp and runtime-neutral).
+
+This is an *opt-in* extension library (Doc 168 section 2): loading it
+changes nothing about plain Elisp semantics, and code that does not
+=require= it is unaffected.
+
+* Representation
+
+Tagged conses compared with =eq= on interned tag symbols
+(Doc 169 section 2.1):
+
+#+begin_src elisp
+;; Result: (nl--ok . VALUE) / (nl--err . ERROR)
+;; Option: (nl--some . VALUE) / nl--none
+#+end_src
+
+The tags are internal; always go through the public constructors and
+predicates.
+
+* API
+
+#+begin_src elisp
+;; Construction
+(nl-ok VALUE)  (nl-err ERROR)  (nl-some VALUE)  nl-none
+
+;; Predicates
+(nl-ok-p X) (nl-err-p X) (nl-result-p X)
+(nl-some-p X) (nl-none-p X) (nl-option-p X)
+
+;; Extraction (generic over Result and Option)
+(nl-unwrap R)                  ; err/none -> signal nl-unwrap-error
+(nl-unwrap-or R DEFAULT)
+(nl-unwrap-or-else R FN)       ; err -> (FN payload), none -> (FN)
+
+;; Transform
+(nl-map R FN)                  ; ok/some mapped, err/none pass through
+(nl-map-err R FN)              ; Result only
+(nl-and-then R FN)             ; monadic bind, FN returns Result/Option
+(nl-ok->option R)  (nl-option->ok O ERROR)
+
+;; Aggregation
+(nl-collect LIST-OF-RESULTS)   ; all ok -> (nl-ok LIST), first err short-circuits
+
+;; Early return
+(nl-defun NAME ARGLIST BODY...)
+(nl-lambda ARGLIST BODY...)
+(nl-let* BINDINGS BODY...)     ; plain let* alias, marks nl-? pipelines
+(nl-? RESULT-FORM)             ; ok -> unwrapped value, err -> return it
+#+end_src
+
+Example (Doc 169 section 2.3):
+
+#+begin_src elisp
+(nl-defun read-config (path)
+  (nl-let* ((text (nl-? (nl-read-file path)))
+            (data (nl-? (nl-parse-json text))))
+    (nl-ok data)))
+#+end_src
+
+* Errors
+
+| Symbol            | Parent     | Signaled by                            |
+|-------------------+------------+----------------------------------------|
+| =nl-error=        | =error=    | (never directly — common parent)       |
+| =nl-unwrap-error= | =nl-error= | =nl-unwrap= on err/none                |
+| =nl-type-error=   | =nl-error= | any API given a non-Result/Option value |
+
+* Constraints of =nl-?=
+
+- =nl-?= is only valid inside the body of =nl-defun= / =nl-lambda=.
+  Any other use is an *expansion-time* error, not a runtime
+  =cl-return-from= failure.
+- =nl-?= must not cross a nested plain =lambda= (including
+  =#'(lambda ...)=): the value would escape the defining function's
+  return block.  This is rejected when the enclosing =nl-defun=
+  expands.  A nested =nl-lambda= is fine — it opens its own block.
+- The constraint checker walks the *unexpanded* body.  An =nl-?=
+  produced by another macro's expansion inside the body is not seen by
+  the walker (it will still expand correctly when it appears directly
+  in the body of the =nl-defun=; inside a macro-generated =lambda= it
+  would misbehave).  Keep =nl-?= textually visible in =nl-defun=
+  bodies.
+- =nl-?= handles =Result= only.  Convert Options first with
+  =nl-option->ok=.
+
+* Non-goals
+
+- No ADT / pattern matching here — that is Phase 2a (Doc 169
+  section 3).
+- No change to plain Elisp semantics; nothing is advised or globally
+  modified.
+- Not a monad framework: only Result/Option, no generic typeclass
+  machinery.
+
+* Testing
+
+Host Emacs (part of =make test= at the repo root; the root Makefile
+globs =packages/*/test/nl-*-test.el=):
+
+#+begin_src sh
+emacs --batch -Q -L packages/nl-prelude/src -L packages/nl-prelude/test \
+  -l ert -l nl-prelude-test -f ert-run-tests-batch-and-exit
+#+end_src
+
+Standalone NeLisp (no Emacs, no ert — a minimal shim runs the same
+test bodies):
+
+#+begin_src sh
+./target/nelisp --load packages/nl-prelude/test/nl-prelude-standalone-smoke.el
+#+end_src
