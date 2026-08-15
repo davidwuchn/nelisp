@@ -1,0 +1,102 @@
+#+TITLE: nl-parens — actionable Emacs Lisp parenthesis diagnostics
+
+* What it does
+
+=nl-parens= finds unbalanced physical top-level forms and reports the file,
+form name, depth, swallowed following forms, and the precise insertion point
+for a missing closer.  A positive depth means that many closing parens are
+missing; a negative depth means that many are extra.
+
+#+begin_example
+path/to/file.el:218:1: error: nl-ns-quoted-member-is-reported-for-backquote-template is missing 1 closing paren
+#+end_example
+
+The analysis API is =nl-parens-check-buffer=, =nl-parens-check-file=,
+=nl-parens-check-files=, =nl-parens-report=, and =nl-parens-fix-file=.  The
+separate =nl-parens-cmd= layer supplies =M-x nl-parens-report-buffer= and
+=M-x nl-parens-fix-buffer=.  The report accepts =compact= (the batch default),
+=rich= (the interactive default), and =sexp= styles.
+
+* The docstring trap
+
+A regex that calls every column-zero =(= a top-level form is wrong.  A
+docstring may legitimately contain such a line, for example:
+
+#+begin_example
+(symbol/form pairs), `:requires' and `:provides' ...
+#+end_example
+
+The scanner threads =parse-partial-sexp= state one line at a time and accepts a
+physical boundary only when it is outside a string and comment.  That means the
+line above remains docstring text, rather than splitting the surrounding
+=defun=.  Using =emacs-lisp-mode= syntax also makes character literals such as
+=?\(= and =?\)= safe to scan.
+
+* Indentation-aware repairs
+
+=nl-parens= does not blindly append a closer to the end of a broken form.
+For an opener at column C, its closer goes at the end of the last significant
+line whose indentation is greater than C: scanning forward stops at the first
+nonblank, non-comment line indented C or less.  The innermost missing closer
+is planned first, then the same rule is applied outward.  The finding records
+this as =:insert-line= and =:insert-column= and marks an explicit indentation
+boundary as =:inferred t=.
+
+This prevents a particularly dangerous repair.  In a =setq=/=cons=/=list=
+shape such as the one below, a missing closer for =list= must go after the
+=:end-line= expression, before =findings=:
+
+#+begin_example
+          (cons (list :kind 'thing
+                      :end-line 1)
+                findings)
+#+end_example
+
+Putting that closer at the end of the enclosing form can parse successfully
+while making =findings= another =list= argument and changing the program.
+When indentation gives no signal, such as a one-line form, nl-parens falls
+back to that line's code end and marks =:inferred nil= so the report makes
+clear that the placement is a guess.
+
+The rich report gives the same compiler-jumpable first line used by
+=compilation-mode= and Flymake, followed by the source line and caret:
+
+#+begin_example
+path/to/file.el:232:36: error: nl-ns-private-escape-is-reported is missing 1 closing paren
+  240 |                     'mine--secret))
+    |                                   ^ insert `)' here
+#+end_example
+
+=nl-parens-fix-file= accepts an optional DRY-RUN argument and then returns
+plists with the planned =:position=, =:line=, =:column=, and =:text= without
+writing.  A real repair is
+verified by a fresh scan; if *any* finding remains, the original contents are
+restored and an error is signaled.  It never removes extra closers.  Removing
+one can silently change which form later code belongs to, so that decision is
+deliberately left to the author.
+
+* Live feedback
+
+The host-only command layer can publish the same findings through Flymake:
+
+#+begin_src emacs-lisp
+(add-hook 'emacs-lisp-mode-hook #'nl-parens-flymake-setup)
+#+end_src
+
+The backend is guarded, so loading =nl-parens-cmd= remains safe on a runtime
+without Flymake.  The standalone analysis package has no Flymake dependency.
+
+* Dependency direction
+
+Like =nl-check=, this is a checking-only package.  Nothing may depend on it;
+call it explicitly from a batch gate or an editor command.
+
+* Host-only, and why
+
+This package is a development and CI tool, not runtime code.  The
+analysis is built on Emacs's syntax parser -- =parse-partial-sexp= and
+=emacs-lisp-mode= -- and neither exists on =target/nelisp=, so there is
+no standalone smoke for it and there cannot be one without
+reimplementing the reader's syntax handling.  That is a deliberate
+boundary: the value here is at authoring and gate time, where a full
+Emacs is present by definition.
