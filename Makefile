@@ -718,10 +718,10 @@ standalone-reader-cond-let-shape-smoke: standalone-reader
 standalone-reader-mod-float-smoke: standalone-reader
 	@mkdir -p target
 	@printf '%s\n' \
-	  '(list (= (mod 5.5 2) 1.5) (= (mod -5.5 2) 0.5) (= (mod 5.5 -2) -0.5) (= (mod -5.5 -2) -1.5) (= (mod 5 2.0) 1.0) (= (mod -5 2.0) 1.0) (= (mod 5 -2.0) -1.0) (= (mod -5 -2.0) -1.0) (= (mod 5.5 2.5) 0.5) (= (mod -5.5 2.5) 2.0) (= (mod 5.5 -2.5) -2.0) (= (mod -5.5 -2.5) -0.5) (= (mod 7 -3) -2) (= (mod -7 3) 2) (= (mod 7 3) 1) (= (mod -7 -3) -1) (= (mod 10 3) 1) (floatp (mod 5.5 0.0)) (floatp (mod 5.0 0)) (eq (condition-case nil (progn (mod 5 0) (quote no-error)) (error (quote caught-error))) (quote caught-error)))' \
+	  '(list (= (mod 5.5 2) 1.5) (= (mod -5.5 2) 0.5) (= (mod 5.5 -2) -0.5) (= (mod -5.5 -2) -1.5) (= (mod 5 2.0) 1.0) (= (mod -5 2.0) 1.0) (= (mod 5 -2.0) -1.0) (= (mod -5 -2.0) -1.0) (= (mod 5.5 2.5) 0.5) (= (mod -5.5 2.5) 2.0) (= (mod 5.5 -2.5) -2.0) (= (mod -5.5 -2.5) -0.5) (= (mod 7 -3) -2) (= (mod -7 3) 2) (= (mod 7 3) 1) (= (mod -7 -3) -1) (= (mod 10 3) 1) (floatp (mod 5.5 0.0)) (floatp (mod 5.0 0)) (eq (condition-case nil (progn (mod 5 0) (quote no-error)) (error (quote caught-error))) (quote caught-error)) (= (+ 1.5 2.5) 4.0) (= (- 1.5 0.5) 1.0) (= (* 2.0 3.0) 6.0) (= (float 3) 3.0) (= (/ 1.0 3.0) 0.3333333333333333) (= (/ 10.0 2.0) 5.0))' \
 	  > target/standalone-reader-mod-float-smoke.el
 	@out="$$(./target/nelisp --load target/standalone-reader-mod-float-smoke.el)"; \
-	if [ "$$out" = "(t t t t t t t t t t t t t t t t t t t t)" ]; then \
+	if [ "$$out" = "(t t t t t t t t t t t t t t t t t t t t t t t t t t)" ]; then \
 	  echo "[standalone-reader-mod-float-smoke] PASS: -> $$out"; \
 	else \
 	  echo "[standalone-reader-mod-float-smoke] FAIL: -> $$out"; \
