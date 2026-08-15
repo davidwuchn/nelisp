@@ -78,7 +78,7 @@ anvil 側の機能マップ (参考):
 - =src/nelisp-load.el= (Phase 5-A) — =nelisp-load= / =nelisp-require=
 - =src/nelisp-buffer.el= (Phase 5-B.1-2) — gap-buffer + marker +
   overlay + text-property
-- =src/nelisp-redisplay.el= (Phase 5-B.3) — terminal dirty-region
+- =nelisp-emacs= 兄弟リポジトリの =src/nelisp-redisplay.el= (Phase 5-B.3) — terminal dirty-region
 - =src/nelisp-eventloop.el= (Phase 5-B.4) — =nelisp-event= + binding
   + dispatch + main actor + timer
 - =src/nelisp-process.el= (Phase 5-C.1) — subprocess substrate

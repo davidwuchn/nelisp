@@ -53,15 +53,15 @@ false credibility to the incorrect hypothesis.
 
 This document inventories every case of that pattern found in the
 standalone-reader codebase, confirms or refutes each by reading the
-implementation, and proposes replacement names. **No renames are applied
-in this branch** — this is audit-only, per task scope.
+implementation, and records the replacement names applied in the batches
+above.
 
 * Scope swept
 
-- ~scripts/nelisp-standalone-build.el~ (15,618 lines)
+- ~scripts/nelisp-standalone-build.el~ (16,728 lines)
 - ~lisp/nelisp-cc-*.el~ (188 files), ~lisp/nelisp-lexframe.el~,
   ~lisp/nelisp-stdlib-*.el~ (20 files), ~lisp/nelisp-aot-compiler.el~
-  (17,217 lines), ~src/nelisp-cc.el~ (2,097 lines)
+  (19,063 lines), ~src/nelisp-cc.el~ (2,097 lines)
 - Builtin surface (~nelisp--*~ names reachable from the reader),
   ~Makefile~ targets, ~lisp/nelisp-cli.el~ flags
 
