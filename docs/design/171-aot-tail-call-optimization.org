@@ -9,7 +9,7 @@
 | 項目     | 値                                                    |
 |----------+-------------------------------------------------------|
 | Doc 番号 | 171                                                   |
-| 状態     | DRAFT（設計のみ、実装なし）                           |
+| 状態     | ACTIVE（5.1 / 5.2 / G3 SHIPPED、G4 は CI 実測待ち）   |
 | 親       | Doc 168 §5 Phase 5（L2: 末尾呼び出し最適化）          |
 | 兄弟     | Doc 169 §5（L1 =nl-loop= / =nl-recur=、出荷済）       |
 | 対象     | =lisp/nelisp-aot-compiler.el=（フロントエンド pass）  |
@@ -445,3 +445,10 @@ Rust LOC 増加はゼロ（全 phase が elisp のみ。Doc 137 invariants の
 | 2026-08-15 | 実装方式は案 S（preprocess 段 source 書き換え）（§8.1）      | DRAFT |
 | 2026-08-15 | special let / catch / condition-case / unwind-protect 内は非末尾（§5-6） | DRAFT |
 | 2026-08-15 | flag =nelisp-aot-compiler-tco-enabled= 既定 nil、G2 byte-identity を gate に | DRAFT |
+| 2026-08-15 | Phase 5.1 実装 SHIPPED — pass 本体 + ERT 16。cond は preprocess 段で残るため walker が直接処理 (blueprint §5 の脱糖前提を訂正) | DONE |
+| 2026-08-15 | Phase 5.2 SHIPPED — NELISP_TCO 配線、unit cache の =-tco= 分離、監査行。**G2 byte-identity 実証** (同一パスで pre-pass と flag-off が cmp 一致。cross-worktree cmp はビルドパス埋込のため無効) | DONE |
+| 2026-08-15 | G3 compile-time 半分 SHIPPED — artifact 経路に flag 配線。同一 user defun が :text-size 124 (再帰) → 279 (ループ)、host と standalone で一致 | DONE |
+| 2026-08-15 | **G3 runtime 半分 PASS** — Linux CI で 20 万段末尾再帰が native 実行で 0.13s 完走 (=native-exec-general-deep-tail-recursion-smoke=)。Windows では native-exec が cc+objcopy 必須のため測定不可 | DONE |
+| 2026-08-15 | G4 で生成形の欠陥を発見・修正 — back-edge 毎の一時 =let= を廃し、ループ外で 1 回束縛した temp を全 back-edge で共有 (単一 setq に集約)。ホスト計測 0.901x → 1.289x | DONE |
+| 2026-08-15 | G4 判定はネイティブレーン専任。ホストレーンは INFORMATIONAL (byte-code VM は別コストモデルで 0.83-1.06x と揺れる) | LOCKED |
+| 2026-08-15 | 5.3 既定 ON は G4 ネイティブ実測が CI で 0.95x 以上を示してから判断 | PENDING |
