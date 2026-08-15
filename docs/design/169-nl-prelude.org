@@ -9,7 +9,7 @@
 | 項目     | 値                        |
 |----------+---------------------------|
 | Doc 番号 | 169                       |
-| 状態     | DRAFT                     |
+| 状態     | ACTIVE (Phase 1/2a/4 SHIPPED 2026-08-15) |
 | 親       | Doc 168                   |
 | 対象     | packages/nl-prelude, packages/nl-condition |
 
@@ -177,6 +177,11 @@ Clojure の syntax-quote 方式。=nl-defmacro= 本体のバッククォート�
 ;; result# は展開ごとに一意な nl--result-1234 になる
 #+end_src
 
+*実装ノート (2026-08-15)*: host Emacs (30.2 実測) のリーダーは素の
+=result#= を読めない (invalid-read-syntax)。host でもロードするソース
+は =result\#= とエスケープして書く。NeLisp standalone のリーダーは
+両表記を受理し、実装はシンボル名末尾 =#= で判定するため挙動は同一。
+
 ** 4.2 実装
 
 =nl-defmacro= が本体のバッククォート式を走査し、=#= で終わるシンボルを
@@ -263,3 +268,8 @@ L1 で書けるが、動的束縛とスタック巻き戻しの相互作用は�
 | 行数             | src 400 行以内（スコープ規律の指標）          |
 | README.org       | 動機・API 一覧・非目標・=nl-?= の制約         |
 | パッケージ規約   | =packages/nl-prelude/{src,test,README.org}=   |
+
+*達成記録 (2026-08-15)*: Phase 1 全条件達成 (ERT 52 件 → Phase 2a 込みで
+83 件、standalone 全 green、非侵襲 A/B 失敗集合一致、src 400 行以内)。
+Phase 2a・Phase 4 (nl-condition、ERT 29 件) も同日 SHIPPED。
+nl-trampoline は見送り (Phase 5 AOT TCO = Doc 171 blueprint へ)。

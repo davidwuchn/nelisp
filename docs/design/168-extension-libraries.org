@@ -9,7 +9,7 @@
 | 項目       | 値                                        |
 |------------+-------------------------------------------|
 | Doc 番号   | 168                                       |
-| 状態       | DRAFT                                     |
+| 状態       | ACTIVE (Phase 1/2a/2b/3-Stage1/4 SHIPPED) |
 | 対象       | NeLisp v0.6.0 以降                        |
 | 子ドキュメント | Doc 169 (nl-prelude / nl-condition), Doc 170 (nl-safe) |
 | 関連       | Doc 27 (自己実装ランタイム), Doc 102 (環境モデル) |
@@ -189,3 +189,11 @@ Phase 1 を独立に出荷して一度手を止め、継続判断を行うこと
 | 2026-08-15 | nl-check を独立・一方向依存                | LOCKED |
 | 2026-08-15 | 名前空間のリーダーサポートは Doc 90 送り   | LOCKED |
 | 2026-08-15 | Phase 1 スコープ = Result/Option/nl-? のみ | LOCKED |
+| 2026-08-15 | 原本 Doc 120/121/122 を 168/169/170 に付番替えして取込 | DONE |
+| 2026-08-15 | Phase 1 (nl-prelude v0.1) SHIPPED — ERT 52, 非侵襲 A/B 一致 | DONE |
+| 2026-08-15 | Phase 2a (v0.2 ADT/gensym/loop) SHIPPED — ERT 計 83   | DONE |
+| 2026-08-15 | Phase 2b (検証アロケータ) SHIPPED — 59万 alloc 違反 0  | DONE |
+| 2026-08-15 | Phase 3 Stage 1 (nl-safe) SHIPPED — ERT 89            | DONE |
+| 2026-08-15 | Phase 4 (nl-condition) SHIPPED — ERT 29               | DONE |
+| 2026-08-15 | CI: checked smoke は Windows レーン限定 (env probe 制約) | DONE |
+| 2026-08-15 | Phase 5 は blueprint (Doc 171) を先行起案             | DRAFT  |

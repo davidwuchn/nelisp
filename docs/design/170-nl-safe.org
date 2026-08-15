@@ -9,7 +9,7 @@
 | 項目     | 値                                              |
 |----------+-------------------------------------------------|
 | Doc 番号 | 170                                             |
-| 状態     | DRAFT                                           |
+| 状態     | ACTIVE (Stage 1/2 SHIPPED 2026-08-15)           |
 | 親       | Doc 168                                         |
 | 対象     | packages/nl-safe, packages/nl-contract, packages/nl-check |
 | 関連     | Doc 79 v7 (GC), Doc 76 (OS 面移行)              |
@@ -167,6 +167,14 @@ CI で増加を検出する。Rust の safe core / unsafe kernel と同じ構造
 =NELISP_ALLOC_CHECK=1= 環境変数、またはビルドターゲット
 =make standalone-reader-checked= で有効化する。既定は無効。
 
+*実装ノート (2026-08-15)*: env probe を持つのは windows-x86_64 target
+のみ (macos-aarch64 の =nl_os_environ_init= は nil を書く)。従って
+boot 時 arming は Windows 限定で、CI の checked smoke も Windows
+レーンに配線。mid-run の =(nelisp--debug-switch 19)= は stamping+
+poison のみで verify は arm しない (pre-enable block の偽陽性回避)。
+Linux/macOS の env 継承・自動 call-site 捕捉・exit 時 leak 自動出力は
+deferred。
+
 ** 5.3 CI ゲート
 
 既存の soak テスト（1h / RSS 増加 5MB 未満）を、
@@ -286,3 +294,10 @@ Stage 5 は条件付きであり、着手を既定としない。
 | standalone     | =target/nelisp= 上で green                     |
 | 性能           | §9 の予算内（bench/ に計測を追加）             |
 | 違反ログ       | =nl-safe--violation-log= が Phase 6 判断に足る情報を持つ |
+
+*達成記録 (2026-08-15)*: Stage 1 SHIPPED (ERT 89 件 host+standalone
+green、unsafe 棚卸し 20 個以内テスト付き、raw-memory backend は差替
+可能な間接層として実装 = standalone 実メモリ統合点)。Stage 2 SHIPPED
+(redzone/poison/世代タグ/leak report、5205 行 prelude 全ロードで 59 万
+alloc 検査・違反 0、check-off 時 byte-identical)。bench/ の性能計測
+(§9 予算検証) は follow-up。
