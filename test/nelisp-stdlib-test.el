@@ -437,6 +437,8 @@ and NeLisp-only defuns see (KEY VALUE) — not the raw host callee."
 (ert-deftest nelisp-stdlib-printer-avoids-reverse-list-buffer ()
   "`prin1-to-string' printer helpers should not allocate reversed parts lists."
   (let* ((symbols '(nelisp--prn-string-escaped
+                    nelisp--prn-symbol-escaped
+                    nelisp--prn-symbol-char-needs-escape-p
                     nelisp--prn-chunks-add
                     nelisp--prn-chunks-string
                     nelisp--prn-float
@@ -471,6 +473,8 @@ and NeLisp-only defuns see (KEY VALUE) — not the raw host callee."
                                  (eq (car form) 'defun)
                                  (memq (cadr form)
                                        '(nelisp--prn-string-escaped
+                                         nelisp--prn-symbol-escaped
+                                         nelisp--prn-symbol-char-needs-escape-p
                                          nelisp--prn-chunks-add
                                          nelisp--prn-chunks-string
                                          nelisp--prn-float

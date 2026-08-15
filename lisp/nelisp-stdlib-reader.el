@@ -408,12 +408,23 @@ since the substrate has no `isnan' primitive yet."
 
 (defun nelisp--read-tok-atom (lx pos)
   "Tokenize a non-prefixed atom run starting at LX."
-  (let ((parts nil) (done nil))
+  (let ((parts nil) (done nil) (escaped nil))
     (while (not done)
       (let ((c (nelisp--read-tok-peek lx)))
         (cond
          ((null c) (setq done t))
          ((nelisp--read-tok-atom-terminator-p c) (setq done t))
+         ((eq c ?\\)
+          ;; A symbol backslash quotes its following character, including an
+          ;; atom terminator or reader prefix, and never becomes part of the
+          ;; symbol name itself.
+          (setq escaped t)
+          (nelisp--read-tok-bump lx)
+          (let ((next (nelisp--read-tok-peek lx)))
+            (if (null next)
+                (nelisp--read-tok-error "unterminated escape in symbol" pos)
+              (nelisp--read-tok-bump lx)
+              (push next parts))))
          (t
           (nelisp--read-tok-bump lx)
           (push c parts)))))
@@ -421,13 +432,13 @@ since the substrate has no `isnan' primitive yet."
       (cond
        ((string= text "")
         (nelisp--read-tok-error "unexpected character" pos))
-       ((string= text ".")
-        (nelisp--read-tok-make 'dot nil pos))
-       (t
-        (let ((iv (nelisp--read-tok-try-int text)))
-          (if iv
-              (nelisp--read-tok-make 'int iv pos)
-            (let ((fv (nelisp--read-tok-try-float text)))
+        ((and (not escaped) (string= text "."))
+         (nelisp--read-tok-make 'dot nil pos))
+        (t
+         (let ((iv (and (not escaped) (nelisp--read-tok-try-int text))))
+           (if iv
+               (nelisp--read-tok-make 'int iv pos)
+            (let ((fv (and (not escaped) (nelisp--read-tok-try-float text))))
               (if fv
                   (nelisp--read-tok-make 'float fv pos)
                 (nelisp--read-tok-make 'symbol text pos))))))))))
@@ -645,14 +656,9 @@ Returns `(cons FORM REMAINING-TOKENS)' or signals on error."
        ((string= value "t")   (cons t rest))
        (t (cons (intern value) rest))))
      ((eq type 'quote)          (nelisp--read-parse-prefix 'quote rest))
-     ((eq type 'backquote)      (nelisp--read-parse-prefix 'backquote rest))
-     ;; `comma' / `comma-at' tag symbols match the names that
-     ;; `nelisp--prn-reader-macro-abbrev' (Stage 7.1, Doc 64) recognizes
-     ;; for the `,X' / `,@X' abbreviated print shape.  Using the literal
-     ;; `,' / `,@' symbols here would print as `(\, X)' since the prn
-     ;; abbrev table is keyed off symbol-name = "comma" / "comma-at".
-     ((eq type 'comma)          (nelisp--read-parse-prefix 'comma rest))
-     ((eq type 'comma-at)       (nelisp--read-parse-prefix 'comma-at rest))
+     ((eq type 'backquote)      (nelisp--read-parse-prefix (intern "`") rest))
+     ((eq type 'comma)          (nelisp--read-parse-prefix (intern ",") rest))
+     ((eq type 'comma-at)       (nelisp--read-parse-prefix (intern ",@") rest))
      ((eq type 'function-quote) (nelisp--read-parse-prefix 'function rest))
      ((eq type 'lparen)         (nelisp--read-parse-list rest tok))
      ((eq type 'lbracket)       (nelisp--read-parse-vector rest tok))
