@@ -109,7 +109,12 @@ case "$PLATFORM" in
 esac
 
 log "building standalone reader for $PLATFORM"
-EMACS="$EMACS_BIN" NELISP_STANDALONE_TARGET="$PLATFORM" make standalone-reader
+# Pass the target as a make VARIABLE, not as a shell environment prefix.
+# Command-line make variables are exported to recipe shells; an
+# environment prefix is not seen by make under MSYS on Windows, so the
+# prefix form silently built the host default (ELF) and the PE check
+# below then failed with "standalone binary missing: target/nelisp.exe".
+make standalone-reader EMACS="$EMACS_BIN" NELISP_STANDALONE_TARGET="$PLATFORM"
 [[ -f "$STANDALONE_BIN" ]] || { err "standalone binary missing: $STANDALONE_BIN"; exit 1; }
 
 # 2. Stage the tarball directory.
