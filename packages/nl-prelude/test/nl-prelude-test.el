@@ -299,6 +299,244 @@ function only; the outer `nl-defun' keeps running."
 (ert-deftest nl-prelude-let*-is-let* ()
   (should (= (nl-let* ((a 1) (b (1+ a))) (+ a b)) 3)))
 
+;;; nl-defdata / nl-match (Phase 2a) ----------------------------------
+
+(nl-defdata nlt-shape
+  (nlt-circle radius)
+  (nlt-rect width height)
+  (nlt-dot))
+
+(ert-deftest nl-prelude-defdata-constructor-and-type ()
+  (let ((c (nlt-circle 3.0)))
+    (should (nlt-shape-p c))
+    (should (nlt-circle-p c))
+    (should-not (nlt-rect-p c))
+    (should (equal (nlt-circle-radius c) 3.0))))
+
+(ert-deftest nl-prelude-defdata-multi-field-accessors ()
+  (let ((r (nlt-rect 2 5)))
+    (should (equal (nlt-rect-width r) 2))
+    (should (equal (nlt-rect-height r) 5))))
+
+(ert-deftest nl-prelude-defdata-zero-field-variant ()
+  (should (nlt-dot-p (nlt-dot)))
+  (should (nlt-shape-p (nlt-dot))))
+
+(ert-deftest nl-prelude-defdata-accessor-type-error ()
+  (should-error (nlt-circle-radius (nlt-rect 1 2)) :type 'nl-type-error)
+  (should-error (nlt-circle-radius 42) :type 'nl-type-error))
+
+(ert-deftest nl-prelude-defdata-predicates-reject-other-values ()
+  (should-not (nlt-shape-p (vector 'nl--data 'nlt-other 'nlt-circle 1)))
+  (should-not (nlt-shape-p [1 2 3]))
+  (should-not (nlt-shape-p nil))
+  (should-not (nlt-circle-p (nl-ok 1))))
+
+(ert-deftest nl-prelude-match-dispatches-all-variants ()
+  (let ((area (lambda (s)
+                (nl-match s
+                  ((nlt-circle r) (* 3 r r))
+                  ((nlt-rect w h) (* w h))
+                  ((nlt-dot) 0)))))
+    (should (equal (funcall area (nlt-circle 2)) 12))
+    (should (equal (funcall area (nlt-rect 3 4)) 12))
+    (should (equal (funcall area (nlt-dot)) 0))))
+
+(ert-deftest nl-prelude-match-missing-variant-is-expansion-error ()
+  (should-error (macroexpand '(nl-match s
+                                ((nlt-circle r) r)
+                                ((nlt-dot) 0)))))
+
+(ert-deftest nl-prelude-match-wildcard-skips-exhaustiveness ()
+  (let ((f (lambda (s)
+             (nl-match s
+               ((nlt-circle r) r)
+               (_ 'other)))))
+    (should (equal (funcall f (nlt-circle 9)) 9))
+    (should (eq (funcall f (nlt-rect 1 2)) 'other))
+    (should (eq (funcall f (nlt-dot)) 'other))))
+
+(ert-deftest nl-prelude-match-arity-mismatch-is-expansion-error ()
+  (should-error (macroexpand '(nl-match s
+                                ((nlt-circle r extra) r)
+                                ((nlt-rect w h) w)
+                                ((nlt-dot) 0))))
+  (should-error (macroexpand '(nl-match s
+                                ((nlt-circle) 1)
+                                ((nlt-rect w h) w)
+                                ((nlt-dot) 0)))))
+
+(nl-defdata nlt-color (nlt-red) (nlt-blue))
+
+(ert-deftest nl-prelude-match-mixed-types-is-expansion-error ()
+  (should-error (macroexpand '(nl-match s
+                                ((nlt-circle r) r)
+                                ((nlt-red) 0)))))
+
+(ert-deftest nl-prelude-match-runtime-error-on-foreign-value ()
+  "Exhaustive over the declared type, but handed a different value."
+  (should-error (nl-match (nlt-red)
+                  ((nlt-circle r) r)
+                  ((nlt-rect w h) w)
+                  ((nlt-dot) 0))
+                :type 'nl-match-error))
+
+(ert-deftest nl-prelude-match-unregistered-falls-back-unchecked ()
+  "Unknown variant heads skip exhaustiveness (non-strict) but still
+dispatch on the variant tag at runtime."
+  (let ((ghost (vector 'nl--data 'nlt-ghost 'nlt-ghost-a 7)))
+    (should (equal (nl-match ghost
+                     ((nlt-ghost-a x) x)
+                     (_ 'other))
+                   7))
+    (should-error (nl-match (nlt-dot)
+                    ((nlt-ghost-a x) x))
+                  :type 'nl-match-error)))
+
+(ert-deftest nl-prelude-match-unregistered-under-strict-errors ()
+  (let ((nl--strict t))
+    (should-error (macroexpand '(nl-match s ((nlt-ghost-b x) x))))))
+
+(ert-deftest nl-prelude-match-underscore-fields-not-bound ()
+  (let ((r (nlt-rect 2 5)))
+    (should (equal (nl-match r
+                     ((nlt-circle _r) 'circle)
+                     ((nlt-rect _w h) h)
+                     ((nlt-dot) 'dot))
+                   5))))
+
+(ert-deftest nl-prelude-defdata-reregistration-replaces-variants ()
+  (eval '(nl-defdata nlt-temp (nlt-temp-a x) (nlt-temp-b)))
+  (eval '(nl-defdata nlt-temp (nlt-temp-a x)))
+  ;; nlt-temp-b is no longer part of the type: matching only nlt-temp-a
+  ;; must now be exhaustive.
+  (should (equal (eval '(nl-match (nlt-temp-a 1) ((nlt-temp-a x) x)))
+                 1)))
+
+;;; nl-defmacro auto-gensym (Phase 2a) --------------------------------
+
+;; NOTE: the host Emacs reader needs the `#' escaped (`v\#'); the
+;; NeLisp standalone reader accepts both `v#' and `v\#'.
+(nl-defmacro nlt-twice (form)
+  `(let ((v\# ,form))
+     (list v\# v\#)))
+
+(defun nl-prelude-test--tree-member (needle tree)
+  "Return non-nil when symbol NEEDLE occurs anywhere in TREE."
+  (cond ((eq tree needle) t)
+        ((consp tree) (or (nl-prelude-test--tree-member needle (car tree))
+                          (nl-prelude-test--tree-member needle (cdr tree))))
+        (t nil)))
+
+(ert-deftest nl-prelude-auto-gensym-no-capture ()
+  "User binding named like the template variable is not captured."
+  (let ((v 1))
+    (should (equal (nlt-twice (+ v 1)) '(2 2)))))
+
+(ert-deftest nl-prelude-auto-gensym-renames-in-expansion ()
+  (should-not (nl-prelude-test--tree-member 'v\# (macroexpand '(nlt-twice x)))))
+
+(ert-deftest nl-prelude-auto-gensym-consistent-within-expansion ()
+  (let* ((e (macroexpand '(nlt-twice x)))
+         (bound (car (car (nth 1 e))))       ; (let ((SYM x)) (list SYM SYM))
+         (body (nth 2 e)))
+    (should (eq bound (nth 1 body)))
+    (should (eq bound (nth 2 body)))))
+
+(ert-deftest nl-prelude-auto-gensym-unique-across-expansions ()
+  (let ((s1 (car (car (nth 1 (macroexpand '(nlt-twice x))))))
+        (s2 (car (car (nth 1 (macroexpand '(nlt-twice x)))))))
+    (should-not (eq s1 s2))))
+
+(nl-defmacro nlt-swap-order (a b)
+  `(let ((x\# ,a) (y\# ,b))
+     (list y\# x\#)))
+
+(ert-deftest nl-prelude-auto-gensym-distinct-names-distinct-gensyms ()
+  (should (equal (nlt-swap-order 1 2) '(2 1)))
+  (let* ((e (macroexpand '(nlt-swap-order 1 2)))
+         (sx (car (car (nth 1 e))))
+         (sy (car (nth 1 (nth 1 e)))))
+    (should-not (eq sx sy))))
+
+;;; nl-loop / nl-recur (Phase 2a) -------------------------------------
+
+(ert-deftest nl-prelude-loop-doc-example ()
+  (should (equal (nl-loop ((acc 0) (n 100))
+                   (if (zerop n)
+                       acc
+                     (nl-recur (+ acc n) (1- n))))
+                 5050)))
+
+(ert-deftest nl-prelude-loop-constant-stack ()
+  "100k iterations must not grow the stack (while-based expansion)."
+  (should (equal (nl-loop ((n 100000) (acc 0))
+                   (if (zerop n) acc (nl-recur (1- n) (1+ acc))))
+                 100000)))
+
+(ert-deftest nl-prelude-loop-simultaneous-rebinding ()
+  "nl-recur rebinds all variables from the pre-recur values."
+  (should (equal (nl-loop ((a 0) (b 1) (i 0))
+                   (if (= i 5) a (nl-recur b (+ a b) (1+ i))))
+                 5)))
+
+(ert-deftest nl-prelude-loop-no-recur-returns-body-value ()
+  (should (equal (nl-loop ((x 7)) (* x 2)) 14)))
+
+(ert-deftest nl-prelude-loop-tail-positions ()
+  (should (equal (nl-loop ((n 3) (out nil))
+                   (cond ((zerop n) out)
+                         (t (nl-recur (1- n) (cons n out)))))
+                 '(1 2 3)))
+  (should (equal (nl-loop ((n 4))
+                   (let ((done (< n 2)))
+                     (if done 'done (nl-recur (- n 2)))))
+                 'done))
+  (should (equal (nl-loop ((n 2))
+                   (progn 'ignored
+                          (if (zerop n) 'end (nl-recur (1- n)))))
+                 'end)))
+
+(ert-deftest nl-prelude-loop-nested-inner-recur ()
+  "nl-recur inside a nested nl-loop targets the inner loop."
+  (should (equal (nl-loop ((i 2) (total 0))
+                   (if (zerop i)
+                       total
+                     (nl-recur (1- i)
+                               (+ total
+                                  (nl-loop ((j 3) (s 0))
+                                    (if (zerop j) s (nl-recur (1- j) (+ s j))))))))
+                 12)))
+
+(ert-deftest nl-prelude-recur-outside-loop-is-expansion-error ()
+  (should-error (macroexpand '(nl-recur 1))))
+
+(ert-deftest nl-prelude-recur-non-tail-is-expansion-error ()
+  (should-error (macroexpand '(nl-loop ((n 1)) (1+ (nl-recur 0)))))
+  (should-error (macroexpand '(nl-loop ((n 1))
+                                (if (nl-recur 0) 'a 'b)))))
+
+(ert-deftest nl-prelude-recur-arity-is-expansion-error ()
+  (should-error (macroexpand '(nl-loop ((a 1) (b 2))
+                                (nl-recur 1)))))
+
+(ert-deftest nl-prelude-loop-bad-binding-is-expansion-error ()
+  (should-error (macroexpand '(nl-loop (a) a)))
+  (should-error (macroexpand '(nl-loop ((a 1 2)) a))))
+
+(ert-deftest nl-prelude-strict-flag-roundtrip ()
+  "The nl-strict macro sets and clears `nl--strict'."
+  (let ((old nl--strict))
+    (unwind-protect
+        ;; nl-strict is a top-level declaration; `eval' models that
+        ;; (inline in a function body, `eval-and-compile' fires during
+        ;; macroexpansion of the whole body, before any `should' runs).
+        (progn (eval '(nl-strict t))
+               (should nl--strict)
+               (eval '(nl-strict nil))
+               (should-not nl--strict))
+      (setq nl--strict old))))
+
 (provide 'nl-prelude-test)
 
 ;;; nl-prelude-test.el ends here

@@ -65,6 +65,83 @@ Example (Doc 169 section 2.3):
     (nl-ok data)))
 #+end_src
 
+* v0.2 — ADT, auto-gensym, tail loop (Doc 169 Phase 2a)
+
+** =nl-defdata= / =nl-match=
+
+#+begin_src elisp
+(nl-defdata shape
+  (circle radius)
+  (rect width height)
+  (dot))
+
+(nl-match s
+  ((circle r)  (* float-pi r r))
+  ((rect w h)  (* w h))
+  ((dot)       0))
+#+end_src
+
+- =nl-defdata= generates constructors (=circle=), predicates
+  (=circle-p=, =shape-p=), and accessors (=circle-radius=), and
+  registers the closed variant set.  Values are vectors
+  =[nl--data TYPE VARIANT FIELD...]=.
+- =nl-match= checks *at expansion time* that every registered variant
+  is covered (missing variants stop the compile) and that pattern
+  arity matches the declaration.  A =_= clause skips the
+  exhaustiveness check; clauses after =_= and duplicate variant
+  clauses draw an unreachable warning.
+- Unregistered variant heads fall back to an unchecked runtime
+  dispatch — or are an expansion error under =(nl-strict t)=.
+- A value no clause matches signals =nl-match-error= at runtime.
+- Pattern variables starting with =_= are not bound.
+
+** =nl-defmacro= auto-gensym
+
+Symbols spelled with a trailing =#= in the produced expansion become
+gensyms, unique per expansion, consistent within one expansion:
+
+#+begin_src elisp
+(nl-defmacro my-unless (test &rest body)
+  `(let ((result\# (not ,test)))
+     (when result\# ,@body)))
+#+end_src
+
+*Reader note*: the host Emacs reader rejects a bare trailing =#=
+(=result#= is read as =result= + syntax error), so source that must
+load on host Emacs writes =result\#=.  The NeLisp standalone reader
+accepts both spellings.  The mechanism keys on the symbol *name*
+ending in =#=, so both spellings behave identically.
+
+This shields let-bound helper variables from capture.  It is *not*
+syntax-case: free-variable and function-position capture are not
+prevented.
+
+** =nl-loop= / =nl-recur=
+
+#+begin_src elisp
+(nl-loop ((acc 0) (n 100))
+  (if (zerop n)
+      acc
+    (nl-recur (+ acc n) (1- n))))  ; => 5050, constant stack
+#+end_src
+
+- Expands to =while= + simultaneous rebinding; 100k+ iterations are
+  fine.
+- =nl-recur= outside tail position (analyzed through =progn= / =if= /
+  =cond= / =when= / =unless= / =let= / =let*= / =and= / =or=) is an
+  expansion-time error, as are arity mismatches.
+- A nested =nl-loop= owns its own =nl-recur=.
+- =nl-trampoline= (mutual recursion) is deferred; the transparent AOT
+  TCO is Doc 168 Phase 5.
+
+** =nl-strict=
+
+=(nl-strict t)= as a *top-level* form tightens expansion-time checks
+for the rest of the load/compile unit (currently: unregistered
+=nl-match= heads become errors).  v0.2 limitation: the flag is
+unit-scoped, not file-scoped, and must be placed at top level (inside
+a function body it fires during macroexpansion, not execution).
+
 * Errors
 
 | Symbol            | Parent     | Signaled by                            |
@@ -72,6 +149,7 @@ Example (Doc 169 section 2.3):
 | =nl-error=        | =error=    | (never directly — common parent)       |
 | =nl-unwrap-error= | =nl-error= | =nl-unwrap= on err/none                |
 | =nl-type-error=   | =nl-error= | any API given a non-Result/Option value |
+| =nl-match-error=  | =nl-error= | =nl-match= value no clause matches      |
 
 * Constraints of =nl-?=
 

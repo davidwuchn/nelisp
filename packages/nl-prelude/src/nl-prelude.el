@@ -276,6 +276,393 @@ intent in code written against the nl-prelude API."
   (declare (indent 1))
   `(let* ,bindings ,@body))
 
+;;;; nl-strict --------------------------------------------------------
+
+(defvar nl--strict nil
+  "Non-nil while expansion-time checks should be strict (Doc 168 sec 3.4).
+Set through the `nl-strict' macro.  v0.2 limitation: the flag is
+load/compile-unit scoped, not file scoped -- a file that sets it
+should not rely on another file resetting it.")
+
+(defmacro nl-strict (flag)
+  "Set strict expansion-time checking to FLAG for the rest of the unit.
+Under strict mode an `nl-match' over unregistered variants is an
+expansion error instead of falling back to an unchecked dispatch."
+  `(eval-and-compile (setq nl--strict ,flag)))
+
+;;;; Warnings ---------------------------------------------------------
+
+(defun nl--warn (format-string &rest args)
+  "Emit an nl-prelude warning built from FORMAT-STRING and ARGS.
+Uses `display-warning' when available (absent on standalone NeLisp)."
+  (let ((msg (apply #'format format-string args)))
+    (if (fboundp 'display-warning)
+        (display-warning 'nl-prelude msg)
+      (message "Warning (nl-prelude): %s" msg))))
+
+;;;; Algebraic data types (Doc 169 section 3, Phase 2a) ---------------
+
+(define-error 'nl-match-error "No nl-match clause matched" 'nl-error)
+
+(defvar nl--data-registry (make-hash-table :test 'eq)
+  "Map of TYPE symbol -> list of (VARIANT . ARITY) in declaration order.")
+
+(defvar nl--data-variants (make-hash-table :test 'eq)
+  "Map of VARIANT symbol -> (TYPE . ARITY) for `nl-match' expansion.")
+
+(defun nl--data-register (type variants)
+  "Register TYPE with VARIANTS, a list of (VARIANT . ARITY).
+Re-registering TYPE replaces its previous variant set."
+  (dolist (old (gethash type nl--data-registry))
+    (let ((rev (gethash (car old) nl--data-variants)))
+      (when (and rev (eq (car rev) type))
+        (remhash (car old) nl--data-variants))))
+  (puthash type variants nl--data-registry)
+  (dolist (v variants)
+    (puthash (car v) (cons type (cdr v)) nl--data-variants))
+  type)
+
+(defun nl--data-p (object)
+  "Return non-nil when OBJECT is an `nl-defdata' value."
+  (and (vectorp object)
+       (>= (length object) 3)
+       (eq (aref object 0) 'nl--data)))
+
+(defun nl--data-type (object)
+  "Return the type tag of the `nl-defdata' value OBJECT."
+  (aref object 1))
+
+(defun nl--data-variant (object)
+  "Return the variant tag of the `nl-defdata' value OBJECT."
+  (aref object 2))
+
+(defun nl--defdata-variant-defs (type variant fields)
+  "Return the defuns for VARIANT of TYPE with FIELDS.
+Generates constructor, predicate, and one accessor per field.
+Representation: [nl--data TYPE VARIANT FIELD...] (Doc 169 sec 3.3)."
+  (let ((pred (intern (format "%s-p" variant)))
+        (defs nil)
+        (idx 3))
+    (push `(defun ,variant ,fields
+             ,(format "Construct an `%s' value of type `%s'." variant type)
+             (vector 'nl--data ',type ',variant ,@fields))
+          defs)
+    (push `(defun ,pred (object)
+             ,(format "Return non-nil when OBJECT is an `%s' value." variant)
+             (and (nl--data-p object)
+                  (eq (nl--data-type object) ',type)
+                  (eq (nl--data-variant object) ',variant)))
+          defs)
+    (dolist (field fields)
+      (let ((accessor (intern (format "%s-%s" variant field)))
+            (i idx))
+        (push `(defun ,accessor (object)
+                 ,(format "Return the `%s' field of an `%s' value." field variant)
+                 (unless (,pred object)
+                   (signal 'nl-type-error (list ',accessor object)))
+                 (aref object ,i))
+              defs))
+      (setq idx (1+ idx)))
+    (nreverse defs)))
+
+(defmacro nl-defdata (type &rest variants)
+  "Declare TYPE as a closed set of VARIANTS (Doc 169 section 3).
+Each variant is (NAME FIELD...).  Generates, per variant, a
+constructor NAME, a predicate NAME-p, and NAME-FIELD accessors, plus a
+TYPE-p predicate; registers the variant set so `nl-match' can check
+exhaustiveness at expansion time."
+  (declare (indent defun))
+  (let ((specs
+         (mapcar (lambda (v)
+                   (unless (and (consp v) (symbolp (car v)) (car v)
+                                (listp (cdr v)))
+                     (error "nl-defdata: bad variant spec %S" v))
+                   v)
+                 variants)))
+    (unless specs
+      (error "nl-defdata: %s needs at least one variant" type))
+    `(progn
+       (eval-and-compile
+         (nl--data-register
+          ',type
+          ',(mapcar (lambda (s) (cons (car s) (length (cdr s)))) specs)))
+       (defun ,(intern (format "%s-p" type)) (object)
+         ,(format "Return non-nil when OBJECT is a `%s' value." type)
+         (and (nl--data-p object) (eq (nl--data-type object) ',type)))
+       ,@(apply #'append
+                (mapcar (lambda (s)
+                          (nl--defdata-variant-defs type (car s) (cdr s)))
+                        specs))
+       ',type)))
+
+;;;; nl-match ---------------------------------------------------------
+
+(defun nl--match-parse-clause (clause)
+  "Parse CLAUSE into (HEAD VARS BODY); HEAD is `_' for the wildcard."
+  (unless (consp clause)
+    (error "nl-match: bad clause %S" clause))
+  (let ((pattern (car clause))
+        (body (cdr clause)))
+    (cond
+     ((eq pattern '_) (list '_ nil body))
+     ((and (consp pattern) (symbolp (car pattern)) (car pattern))
+      (dolist (v (cdr pattern))
+        (unless (symbolp v)
+          (error "nl-match: pattern variable %S is not a symbol" v)))
+      (list (car pattern) (cdr pattern) body))
+     (t (error "nl-match: bad pattern %S" pattern)))))
+
+(defun nl--match-check (parsed)
+  "Check PARSED clauses against the variant registry.
+Return non-nil when the checked (registry-backed) expansion applies;
+nil requests the unchecked fallback (unknown variants, non-strict).
+Signals expansion errors for missing variants, arity mismatches, and
+mixed types; warns about unreachable clauses."
+  (let* ((heads (delq '_ (mapcar #'car parsed)))
+         (wildcard (assq '_ parsed))
+         (unknown (delq nil (mapcar (lambda (h)
+                                      (and (not (gethash h nl--data-variants)) h))
+                                    heads))))
+    (cond
+     (unknown
+      (when nl--strict
+        (error "nl-match: unregistered variant(s) %S under (nl-strict t)"
+               unknown))
+      nil)
+     ((null heads)
+      ;; Only a wildcard clause: nothing to check.
+      (null wildcard))
+     (t
+      (let* ((type (car (gethash (car heads) nl--data-variants)))
+             (registered (gethash type nl--data-registry))
+             (seen nil))
+        (dolist (c parsed)
+          (unless (eq (car c) '_)
+            (let* ((head (car c))
+                   (info (gethash head nl--data-variants)))
+              (unless (eq (car info) type)
+                (error "nl-match: variant %s belongs to type %s, not %s"
+                       head (car info) type))
+              (unless (= (length (nth 1 c)) (cdr info))
+                (error "nl-match: %s takes %d field(s), pattern %S has %d"
+                       head (cdr info) (cons head (nth 1 c))
+                       (length (nth 1 c))))
+              (when (memq head seen)
+                (nl--warn "nl-match: duplicate clause for %s is unreachable"
+                          head))
+              (push head seen))))
+        (when (and wildcard
+                   (not (eq (car (car (last parsed))) '_)))
+          (nl--warn "nl-match: clauses after _ are unreachable"))
+        (let ((missing (delq nil (mapcar (lambda (v)
+                                           (and (not (memq (car v) heads))
+                                                (car v)))
+                                         registered))))
+          (when (and missing (not wildcard))
+            (error "nl-match: non-exhaustive match on %s; missing %S"
+                   type missing)))
+        t)))))
+
+(defun nl--match-emit-clause (clause val)
+  "Emit a `cond' clause for the parsed CLAUSE matching against VAL."
+  (let ((head (car clause))
+        (vars (nth 1 clause))
+        (body (nth 2 clause)))
+    (if (eq head '_)
+        `(t ,@(or body '(nil)))
+      (let ((bindings nil)
+            (idx 3))
+        (dolist (v vars)
+          (unless (string-prefix-p "_" (symbol-name v))
+            (push `(,v (aref ,val ,idx)) bindings))
+          (setq idx (1+ idx)))
+        `((and (nl--data-p ,val)
+               (eq (nl--data-variant ,val) ',head))
+          (let ,(nreverse bindings)
+            ,@(or body '(nil))))))))
+
+(defmacro nl-match (expr &rest clauses)
+  "Match the `nl-defdata' value of EXPR against CLAUSES.
+Each clause is ((VARIANT VAR...) BODY...) or (_ BODY...).  When every
+variant head is registered, exhaustiveness and field arity are checked
+at expansion time: missing variants (without a _ clause) stop the
+compile.  Unregistered heads fall back to an unchecked dispatch, or
+signal under (nl-strict t).  At runtime a value no clause matches
+signals `nl-match-error'."
+  (declare (indent 1))
+  (unless clauses
+    (error "nl-match: needs at least one clause"))
+  (let* ((val (gensym "nl--val"))
+         (parsed (mapcar #'nl--match-parse-clause clauses)))
+    (nl--match-check parsed)
+    `(let ((,val ,expr))
+       (cond
+        ,@(mapcar (lambda (c) (nl--match-emit-clause c val)) parsed)
+        (t (signal 'nl-match-error (list ,val)))))))
+
+;;;; Auto-gensym macros (Doc 169 section 4, Phase 2a) -----------------
+
+(defun nl--auto-gensym-p (object)
+  "Return non-nil when OBJECT is a symbol spelled with a trailing `#'."
+  (and (symbolp object) object
+       (let ((name (symbol-name object)))
+         (and (> (length name) 1)
+              (string-suffix-p "#" name)))))
+
+(defun nl--rename-auto-gensyms-1 (form table)
+  "Rewrite trailing-# symbols in FORM using TABLE for consistency."
+  (cond
+   ((nl--auto-gensym-p form)
+    (or (gethash form table)
+        (puthash form
+                 (gensym (concat "nl--"
+                                 (substring (symbol-name form) 0 -1)
+                                 "-"))
+                 table)))
+   ((consp form)
+    (cons (nl--rename-auto-gensyms-1 (car form) table)
+          (nl--rename-auto-gensyms-1 (cdr form) table)))
+   ((vectorp form)
+    (vconcat (mapcar (lambda (x) (nl--rename-auto-gensyms-1 x table))
+                     form)))
+   (t form)))
+
+(defun nl--rename-auto-gensyms (form)
+  "Replace every trailing-# symbol in FORM with a fresh gensym.
+Occurrences of the same spelling share one gensym within a single call
+(= a single macro expansion), Clojure syntax-quote style."
+  (nl--rename-auto-gensyms-1 form (make-hash-table :test 'eq)))
+
+(defmacro nl-defmacro (name arglist &rest body)
+  "Define macro NAME with ARGLIST and BODY with auto-gensym support.
+Symbols spelled `foo#' anywhere in the produced expansion are replaced
+by gensyms, unique per expansion and consistent within one expansion.
+This shields let-bound helper variables from capturing user bindings;
+it is not a hygienic macro system (free-variable and function-position
+capture are not prevented)."
+  (declare (indent defun) (doc-string 3))
+  (let ((prefix nil))
+    (when (and (stringp (car body)) (cdr body))
+      (push (pop body) prefix))
+    (while (and (consp (car body)) (eq (caar body) 'declare))
+      (push (pop body) prefix))
+    `(defmacro ,name ,arglist
+       ,@(nreverse prefix)
+       (nl--rename-auto-gensyms (progn ,@body)))))
+
+;;;; Tail-recursive loop (Doc 169 section 5, Phase 2a, L1) ------------
+
+(defmacro nl-recur (&rest _args)
+  "Rebind the enclosing `nl-loop' variables and restart the loop.
+Valid only in tail position inside `nl-loop'; reaching this global
+definition means the constraint was violated, so expansion fails."
+  (error "nl-recur: only valid in tail position inside `nl-loop'"))
+
+(defun nl--loop-scan (form)
+  "Signal when FORM contains `nl-recur' outside a nested `nl-loop'.
+Used for non-tail subtrees, which may not contain `nl-recur' at all."
+  (cond
+   ((not (consp form)) nil)
+   ((eq (car form) 'quote) nil)
+   ((eq (car form) 'nl-recur)
+    (error "nl-recur: not in tail position: %S" form))
+   ((eq (car form) 'nl-loop) nil)
+   (t (nl--loop-scan (car form))
+      (nl--loop-scan (cdr form)))))
+
+(defun nl--loop-walk-body (forms vars continue)
+  "Walk an implicit-progn FORMS list: all non-tail but the last."
+  (let ((head (butlast forms))
+        (tail (last forms)))
+    (mapc #'nl--loop-scan head)
+    (append head
+            (list (nl--loop-walk (car tail) vars continue)))))
+
+(defun nl--loop-walk (form vars continue)
+  "Rewrite `nl-recur' calls in tail position of FORM.
+VARS are the `nl-loop' variables; CONTINUE is the loop-again flag
+symbol.  Signals on `nl-recur' in non-tail position or with the wrong
+argument count."
+  (cond
+   ((not (consp form)) form)
+   ((eq (car form) 'quote) form)
+   ((eq (car form) 'nl-loop) form)
+   ((eq (car form) 'nl-recur)
+    (let ((args (cdr form)))
+      (unless (= (length args) (length vars))
+        (error "nl-recur: expects %d value(s) for %S, got %d"
+               (length vars) vars (length args)))
+      (mapc #'nl--loop-scan args)
+      (let ((temps (mapcar (lambda (v) (gensym (format "nl--%s-" v)))
+                           vars)))
+        `(let ,(let ((pairs nil) (ts temps) (as args))
+                 (while ts
+                   (push (list (car ts) (car as)) pairs)
+                   (setq ts (cdr ts) as (cdr as)))
+                 (nreverse pairs))
+           (setq ,@(let ((sets nil) (vs vars) (ts temps))
+                     (while vs
+                       (push (car vs) sets) (push (car ts) sets)
+                       (setq vs (cdr vs) ts (cdr ts)))
+                     (nreverse sets))
+                 ,continue t)
+           nil))))
+   ((memq (car form) '(progn when unless))
+    (if (eq (car form) 'progn)
+        `(progn ,@(nl--loop-walk-body (cdr form) vars continue))
+      (nl--loop-scan (nth 1 form))
+      `(,(car form) ,(nth 1 form)
+        ,@(nl--loop-walk-body (cddr form) vars continue))))
+   ((eq (car form) 'if)
+    (nl--loop-scan (nth 1 form))
+    `(if ,(nth 1 form)
+         ,(nl--loop-walk (nth 2 form) vars continue)
+       ,@(if (cdddr form)
+             (nl--loop-walk-body (cdddr form) vars continue)
+           nil)))
+   ((eq (car form) 'cond)
+    `(cond
+      ,@(mapcar (lambda (clause)
+                  (nl--loop-scan (car clause))
+                  (if (cdr clause)
+                      (cons (car clause)
+                            (nl--loop-walk-body (cdr clause)
+                                                vars continue))
+                    clause))
+                (cdr form))))
+   ((memq (car form) '(let let*))
+    (dolist (b (nth 1 form)) (nl--loop-scan b))
+    `(,(car form) ,(nth 1 form)
+      ,@(nl--loop-walk-body (cddr form) vars continue)))
+   ((memq (car form) '(and or))
+    (mapc #'nl--loop-scan (butlast (cdr form)))
+    `(,(car form) ,@(butlast (cdr form))
+      ,(nl--loop-walk (car (last form)) vars continue)))
+   (t (nl--loop-scan form) form)))
+
+(defmacro nl-loop (bindings &rest body)
+  "Loop with BINDINGS rebound by `nl-recur' in tail position of BODY.
+BINDINGS is a list of (VAR INIT) evaluated like `let'.  BODY is an
+implicit progn; (nl-recur NEW...) in tail position rebinds all VARs
+simultaneously and restarts, in constant stack space; any other value
+ends the loop and is returned (Doc 169 section 5)."
+  (declare (indent 1))
+  (dolist (b bindings)
+    (unless (and (consp b) (symbolp (car b)) (car b)
+                 (consp (cdr b)) (null (cddr b)))
+      (error "nl-loop: binding must be (VAR INIT), got %S" b)))
+  (unless body
+    (error "nl-loop: empty body"))
+  (let* ((vars (mapcar #'car bindings))
+         (continue (gensym "nl--continue"))
+         (result (gensym "nl--result"))
+         (walked (nl--loop-walk-body body vars continue)))
+    `(let (,@bindings (,continue t) (,result nil))
+       (while ,continue
+         (setq ,continue nil)
+         (setq ,result (progn ,@walked)))
+       ,result)))
+
 (provide 'nl-prelude)
 
 ;;; nl-prelude.el ends here
