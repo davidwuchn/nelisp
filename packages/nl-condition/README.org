@@ -1,0 +1,74 @@
+#+TITLE: nl-condition — restartable condition system for NeLisp
+
+* Motivation
+
+Doc 168/169 Phase 4.  Elisp's =condition-case= unwinds the stack
+*before* running its handler, so the dynamic context of the error site
+is gone by handler time.  Common Lisp's =handler-bind= runs handlers
+*before* unwinding, which is what makes restarts possible: a handler,
+still standing on the signaling frame, chooses among recovery
+strategies offered by outer frames.  cl-lib has nothing in this area.
+
+Opt-in library on plain Elisp; runs on NeLisp standalone and host
+Emacs.  Non-invasive: only =nl-signal= consults the handler stack — a
+plain =signal= from arbitrary Elisp is untouched (no global advice).
+
+* API
+
+#+begin_src elisp
+(nl-restart-case
+    (nl-handler-bind ((file-missing
+                       (lambda (c) (nl-invoke-restart 'use-default))))
+      (load-config "/etc/app.conf"))
+  (use-default () default-config)
+  (retry (path) (load-config path)))
+#+end_src
+
+- =(nl-signal SYMBOL DATA)= — signal without unwinding first.
+  Matching handlers (by =error-conditions=, like =condition-case=) run
+  innermost first with the condition object =(SYMBOL . DATA)=.
+- =(nl-handler-bind ((CONDITION FN)...) BODY...)= — bind pre-unwind
+  handlers.  A handler that *returns* declines and the next (outer)
+  matching handler runs; while a handler runs, only handlers outer to
+  it are visible (re-signaling cannot loop).
+- =(nl-restart-case FORM (NAME ARGLIST BODY...)...)= — offer restarts.
+- =(nl-invoke-restart NAME ARGS...)= — unwind to the restart's frame
+  (running =unwind-protect= cleanups on the way), pop the frame, run
+  the restart body; its value becomes the =nl-restart-case= value.
+  Signals =nl-control-error= when NAME is not established.
+- =(nl-find-restart NAME)= / =(nl-compute-restarts)= — introspection,
+  innermost first.
+
+* Semantics and interop
+
+- Execution order on a handled signal:
+  handler (pre-unwind) -> =unwind-protect= cleanups -> restart body.
+- When every handler declines (or none match), =nl-signal= falls back
+  to a plain =signal=, so surrounding =condition-case= works as usual.
+- The restart body runs with the restart frame already popped:
+  invoking the same restart from its own body is =nl-control-error=,
+  not a loop.
+
+* Non-goals
+
+- Hooking plain =signal= / =error= (would need global advice; against
+  the Doc 168 non-invasiveness rule).
+- CL condition *classes*; conditions are Elisp error symbols.
+- Interactive restart selection (a debugger concern).
+
+* Testing
+
+Host: part of =make test= at the repo root, or directly:
+
+#+begin_src sh
+emacs --batch -Q -L packages/nl-prelude/src -L packages/nl-condition/src \
+  -L packages/nl-condition/test \
+  -l ert -l nl-condition-test -f ert-run-tests-batch-and-exit
+#+end_src
+
+Standalone NeLisp (no ert; the runner also re-runs the nl-prelude
+suite first):
+
+#+begin_src sh
+./target/nelisp --load packages/nl-condition/test/nl-condition-standalone-smoke.el
+#+end_src
