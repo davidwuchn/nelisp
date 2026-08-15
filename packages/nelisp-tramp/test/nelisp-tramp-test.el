@@ -186,10 +186,30 @@
 
 ;;; ----- Cycle-1 install probe ---------------------------------------
 
-(defconst nelisp-tramp-test--source-dir
+(defconst nelisp-tramp-test--package-src
   (expand-file-name
-   "../src"
-   (file-name-directory (or load-file-name buffer-file-name))))
+   "../src" (file-name-directory (or load-file-name buffer-file-name)))
+  "This package's own source directory.")
+
+(defconst nelisp-tramp-test--core-src
+  (expand-file-name
+   "../../../src" (file-name-directory (or load-file-name buffer-file-name)))
+  "The repository's core source directory.")
+
+(defun nelisp-tramp-test--source-file (rel)
+  "Return the path the cycle probes should read REL from.
+This package owns `nelisp-tramp.el'; everything else belongs to the
+core and is read from the repository rather than from a copy beside
+this package.  Those copies were meant to be symlinks -- the commit
+that added them says \"shared core symlink\" -- but the checkout had
+core.symlinks off, so regular files landed and then sat still while
+the core moved on.  By the time this was noticed nelisp-eval.el and
+nelisp-load.el were a month behind, so the probes were exercising an
+evaluator the repository no longer ships."
+  (let ((own (expand-file-name rel nelisp-tramp-test--package-src)))
+    (if (file-readable-p own)
+        own
+      (expand-file-name rel nelisp-tramp-test--core-src))))
 
 (defconst nelisp-tramp-test--source-files
   '("nelisp-read.el" "nelisp-eval.el" "nelisp-macro.el"
@@ -217,7 +237,7 @@ this is the load-bearing assertion of Phase 2.5a."
   (nelisp--reset)
   (let ((total 0))
     (dolist (rel nelisp-tramp-test--source-files)
-      (let* ((path (expand-file-name rel nelisp-tramp-test--source-dir))
+      (let* ((path (nelisp-tramp-test--source-file rel))
              (n (nelisp-tramp-test--install-via-tramp path)))
         (should (> n 0))
         (setq total (+ total n))))
@@ -237,7 +257,7 @@ Used by cycle-2 tests as the shared setup."
   (nelisp-bootstrap-shared-tables)
   (dolist (rel nelisp-tramp-test--cycle2-files)
     (nelisp-tramp-test--install-via-tramp
-     (expand-file-name rel nelisp-tramp-test--source-dir))))
+     (nelisp-tramp-test--source-file rel))))
 
 (ert-deftest nelisp-tramp-cycle2-installs-itself ()
   "After bootstrap, nelisp-tramp.el itself installs through the
