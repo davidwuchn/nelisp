@@ -179,6 +179,33 @@ x86_64 Linux."
       (when (file-directory-p temp-dir)
         (delete-directory temp-dir t)))))
 
+(ert-deftest nelisp-artifact/native-exec-general-deep-tail-recursion-smoke ()
+  "Doc 171 G3: USER artifact code reaches native TCO and survives deep recursion."
+  (skip-unless (and (nelisp-artifact-native-exec-test--linux-x86_64-p)
+                    (executable-find "cc")
+                    (executable-find "objcopy")))
+  (let* ((temp-dir (make-temp-file "nelisp-artifact-native-tco-" t))
+         (source-path (expand-file-name "m.el" temp-dir))
+         (artifact-path (concat source-path ".neln"))
+         (depth 200000)
+         (expected (/ (* depth (1+ depth)) 2))
+         (process-environment (cons "NELISP_TCO=1" process-environment))
+         (source
+          "(defun nat-ng-tail-sum (n acc)
+  (if (= n 0) acc
+    (nat-ng-tail-sum (- n 1) (+ acc n))))
+(provide 'nat-ng-tail)\n"))
+    (unwind-protect
+        (progn
+          (write-region source nil source-path nil 'silent)
+          (nelisp-artifact-compile-file
+           source-path artifact-path nil nil nil nil nil 'neln)
+          (should (= (nelisp-artifact-native-exec-general
+                      artifact-path "nat-ng-tail-sum" (list depth 0))
+                     expected)))
+      (when (file-directory-p temp-dir)
+        (delete-directory temp-dir t)))))
+
 (provide 'nelisp-artifact-native-exec-test)
 
 ;;; nelisp-artifact-native-exec-test.el ends here

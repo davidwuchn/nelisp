@@ -214,6 +214,30 @@ bodies and setq values are never rewritten."
     (nelisp-aot-compiler--preprocess-source nelisp-aot-tco-test--fact-defun)
     (should (equal nelisp-aot-compiler--tco-log '(tco-sum)))))
 
+;;; End-to-end codegen evidence (Doc 171 G3) --------------------------
+
+(ert-deftest nelisp-aot-tco-emitted-code-differs-with-flag ()
+  "The pass reaches the real backend, not just the preprocessor.
+Compiling the same self-tail-recursive defun to a link unit with the
+flag off and on must emit different machine code (the loop form
+carries the continue/result slots and the back-edge instead of a
+`call').  This is the codegen half of the user-code path: the
+artifact pipeline binds the same flag around its compile calls."
+  (let* ((form '(seq (defun nelisp-aot-tco-test--sum (n acc)
+                       (if (= n 0)
+                           acc
+                         (nelisp-aot-tco-test--sum (- n 1) (+ acc n))))))
+         (text (lambda (flag)
+                 (let ((nelisp-aot-compiler-tco-enabled flag))
+                   (plist-get (nelisp-aot-compile-to-link-unit
+                               form :arch 'x86_64 :format 'elf)
+                              :text)))))
+    (let ((off (funcall text nil))
+          (on (funcall text t)))
+      (should (> (length off) 0))
+      (should (> (length on) 0))
+      (should-not (equal off on)))))
+
 (provide 'nelisp-aot-tco-test)
 
 ;;; nelisp-aot-tco-test.el ends here
