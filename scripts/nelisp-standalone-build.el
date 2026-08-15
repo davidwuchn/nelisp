@@ -1920,23 +1920,36 @@ arm64 Linux has no legacy x86 numbering)."
     ;; (tag 7) tail-loops `nl_gc_mark_cons' on the child box (= a valid
     ;; Sexp slot, payload @+8 = the next NlConsBox); a non-Cons child is
     ;; a leaf walked via `nl_gc_mark_slot'.
+    ;; The cdr spine is walked ITERATIVELY: recursing per cons cost one
+    ;; native frame per list element and a 3M-element list died silently
+    ;; (exit 127) during mark, while 1.5M survived -- the ~2.48M frame
+    ;; ceiling on windows-x86_64, the same shape that killed
+    ;; `nl_gc_poison_fill'.  The car side stays recursive: its depth is
+    ;; bounded by object nesting, not by list length.
     (defun nl_gc_mark_cons (sp)
-      (let ((box (ptr-read-u64 sp 8)))
-        (if (= (nl_gc_mark_block box) 0)
-            0                                      ; foreign / already marked
-          (nl_seq2
-           ;; car WORD @ box+0
-           (let ((cw (ptr-read-u64 box 0)))
-             (if (= (logand cw 1) 1) 0             ; immediate -> no child
-               (if (= (nl_gc_mark_block cw) 0) 0   ; foreign / already marked
-                 (nl_gc_mark_slot cw))))           ; mark the 32B child box
-           ;; cdr WORD @ box+8
-           (let ((dw (ptr-read-u64 box 8)))
-             (if (= (logand dw 1) 1) 0             ; immediate -> end of list
-               (if (= (nl_gc_mark_block dw) 0) 0   ; foreign / already marked
-                 (if (= (ptr-read-u8 dw 0) 7)
-                     (nl_gc_mark_cons dw)          ; cdr child is a cons -> tail loop
-                   (nl_gc_mark_slot dw)))))))))     ; cdr child atom/other
+      (let ((go 1))
+        (seq
+         (while (= go 1)
+           (seq
+            (setq go 0)
+            (let ((box (ptr-read-u64 sp 8)))
+              (if (= (nl_gc_mark_block box) 0)
+                  0                                ; foreign / already marked
+                (nl_seq2
+                 ;; car WORD @ box+0
+                 (let ((cw (ptr-read-u64 box 0)))
+                   (if (= (logand cw 1) 1) 0       ; immediate -> no child
+                     (if (= (nl_gc_mark_block cw) 0) 0
+                       (nl_gc_mark_slot cw))))     ; mark the 32B child box
+                 ;; cdr WORD @ box+8
+                 (let ((dw (ptr-read-u64 box 8)))
+                   (if (= (logand dw 1) 1) 0       ; immediate -> end of list
+                     (if (= (nl_gc_mark_block dw) 0) 0
+                       (if (= (ptr-read-u8 dw 0) 7)
+                           ;; cdr child is a cons -> continue the spine
+                           (nl_seq2 (setq sp dw) (setq go 1))
+                         (nl_gc_mark_slot dw)))))))))) 
+         0)))
     ;; Mark one Sexp slot at SP (32 bytes).  Pure recursion per type.
     (defun nl_gc_mark_slot (sp)
       (let ((tag (ptr-read-u8 sp 0)))
@@ -2681,16 +2694,22 @@ arm64 Linux has no legacy x86 numbering)."
     ;; tag-8/12 box with a junk `data_ptr', and the 8B walker dereferences
     ;; it directly -> fault before any per-slot guard.  A real vector /
     ;; record buffer is always an in-arena alloc; skip a non-arena DATA.
+    ;; Iterative: one native frame per element would overflow the stack
+    ;; on a large live vector during compaction, which is on by default
+    ;; -- the same shape that killed `nl_gc_poison_fill' (~2.48M frame
+    ;; ceiling on windows-x86_64).  The TCO pass would fix this too, but
+    ;; only in NELISP_TCO=1 builds, so the loop is written out here.
     (defun nl_compact_rw_vec_slots (data i len)
       (if (= (nl_gc_in_arena data) 0) 0
-        (if (< i len)
-            (nl_seq2
-             (if (= (logand (ptr-read-u64 (+ data (* i 8)) 0) 1) 1) 0
-               (let ((vw (nl_compact_rw_edge (+ data (* i 8)))))
-                 (if (= (nl_compact_rw_block vw) 0) 0
-                   (nl_compact_rw_slot vw))))
-             (nl_compact_rw_vec_slots data (+ i 1) len))
-          0)))
+        (seq
+         (while (< i len)
+           (seq
+            (if (= (logand (ptr-read-u64 (+ data (* i 8)) 0) 1) 1) 0
+              (let ((vw (nl_compact_rw_edge (+ data (* i 8)))))
+                (if (= (nl_compact_rw_block vw) 0) 0
+                  (nl_compact_rw_slot vw))))
+            (setq i (+ i 1))))
+         0)))
     ;; Doc 147 Phase 1.5 Group P — RAW reader parse-pool compact arms (mirror
     ;; of the mark arms above; mirror of nl_compact_rw_vec_slots).  Rewrite the
     ;; buffer's own block edge, then walk every 32B slot rewriting its child
