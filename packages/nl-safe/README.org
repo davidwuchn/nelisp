@@ -224,6 +224,49 @@ body.
 - No change to plain Elisp semantics; nothing is advised or globally
   modified.
 
+* Resources and deterministic drop (Doc 170 Stage 3)
+
+=src/nl-resource.el= adds the third safety axis of Doc 170 section 1:
+*resource* safety.  Aliasing and memory are Stage 1's job; this is
+about releasing exactly once.
+
+#+begin_src elisp
+(nl-defresource file-handle :drop (lambda (fd) (nl-close fd)))
+
+(nl-with-resource (fd (nl-resource 'file-handle (nl-open path)))
+  (nl-read (nl-resource-handle fd) 100))   ; released on scope exit
+#+end_src
+
+- Representation: =[nl--resource TYPE HANDLE LIVE]=.  LIVE goes nil the
+  moment the value is consumed, which is what turns double-free and
+  use-after-free in the runtime layer into a signaled
+  =nl-resource-error= instead of silent corruption.
+- =nl-drop= runs the drop function exactly once; a second call signals
+  =nl-double-drop-error=.  =nl-resource-handle= on a consumed resource
+  signals =nl-use-after-drop-error= — a stale fd or mmap address is
+  precisely the value that corrupts quietly.
+- The liveness flag is cleared *before* the drop function runs, so a
+  releaser that signals still leaves the resource consumed rather than
+  droppable again.
+- =nl-with-resource= expands to =unwind-protect=, so the release also
+  happens on =signal= and =throw=.  It skips the drop when the body
+  already consumed the resource, so an explicit =nl-drop= inside the
+  body is not a double free.
+- =nl-with-resources= nests, releasing in reverse acquisition order.
+- =nl-forget= is Rust's =mem::forget=: it consumes without releasing,
+  for the case where ownership moved somewhere this library cannot
+  see.  It is the one operation here that leaks on purpose.
+- Constructing a resource of an unregistered type is refused up front
+  (=nl-unknown-resource-error=): a resource nobody can release is a
+  leak by construction.
+- Violations land in =nl-safe--violation-log= with =:kind= =resource=,
+  feeding the same Doc 168 Phase 6 gate as the Stage 1 kinds.
+
+Static companion: =packages/nl-check= reports resources that are never
+dropped, dropped twice on one path, or that left the checker's sight
+(Doc 170 section 6.3).  It is a separate package on purpose — nothing
+here depends on it.
+
 * Testing
 
 Host Emacs (part of =make test= at the repo root; the root Makefile
@@ -241,6 +284,7 @@ standalone's =require= silently succeeds on missing files):
 
 #+begin_src sh
 ./target/nelisp --load packages/nl-safe/test/nl-safe-standalone-smoke.el
+./target/nelisp --load packages/nl-safe/test/nl-resource-standalone-smoke.el
 #+end_src
 
 * Follow-ups

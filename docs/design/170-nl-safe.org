@@ -9,7 +9,7 @@
 | 項目     | 値                                              |
 |----------+-------------------------------------------------|
 | Doc 番号 | 170                                             |
-| 状態     | ACTIVE (Stage 1/2 SHIPPED 2026-08-15)           |
+| 状態     | ACTIVE (Stage 1/2/3 SHIPPED 2026-08-15)         |
 | 親       | Doc 168                                         |
 | 対象     | packages/nl-safe, packages/nl-contract, packages/nl-check |
 | 関連     | Doc 79 v7 (GC), Doc 76 (OS 面移行)              |
@@ -301,3 +301,21 @@ green、unsafe 棚卸し 20 個以内テスト付き、raw-memory backend は差
 (redzone/poison/世代タグ/leak report、5205 行 prelude 全ロードで 59 万
 alloc 検査・違反 0、check-off 時 byte-identical)。bench/ の性能計測
 (§9 予算検証) は follow-up。
+
+*達成記録 (2026-08-15) — Stage 3*: SHIPPED。=packages/nl-safe/src/nl-resource.el=
+(=nl-defresource= / =nl-resource= / =nl-drop= / =nl-forget= /
+=nl-with-resource= / =nl-with-resources=、二重 drop と use-after-drop
+を signal、liveness flag は drop 関数実行の *前* に落とすので releaser が
+signal しても再 drop 不可) + =packages/nl-check= (§6.2 =nl-must-use=、
+§6.3 資源線形性、§4.3 unsafe 呼出棚卸し、Doc 168 §4.1 の一方向依存を
+維持)。ERT 60 件 (nl-resource 29 + nl-check 31) が host Emacs と
+=target/nelisp= standalone の両方で green、=byte-compile-error-on-warn=
+clean。違反は =:kind= =resource= で既存 =nl-safe--violation-log= に載る
+ので Phase 6 ゲートのデータ源が資源軸にも広がった。
+
+線形性検査の健全性は *限定的であることを明示* する設計にした: lambda
+捕捉・未知関数への引き渡しを検出したら追跡を放棄し =resource-untracked=
+として報告する (黙って解析から落とさない)。=resource-leak= が空である
+ことは「追えた束縛の範囲で漏れ無し」であって「漏れ無し」ではない。
+
+Stage 4 (=nl-contract=) と Stage 5 (静的線形性、§8 のゲート付き) は未着手。
