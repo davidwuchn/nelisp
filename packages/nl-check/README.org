@@ -1,0 +1,163 @@
+#+TITLE: nl-check — expansion-time checks for the nl-* family
+
+* Motivation
+
+Doc 170 section 10.  =nl-safe= catches violations when they happen;
+=nl-check= tries to catch a subset of them before the code runs, by
+reading forms rather than evaluating them.
+
+The package exists separately for one reason, fixed in Doc 168
+section 4.1: *nothing depends on nl-check*.  The feature packages must
+stay usable with the checker deleted, so the dependency arrow only
+ever points inward.  Nothing here runs at run time — you invoke it
+explicitly, from a batch job or from CI.
+
+#+begin_example
+nl-prelude  <-- nl-safe  <-- nl-resource
+     ^             ^              ^
+     |             |              |
+     +------- nl-check -----------+     (checking only; never depended on)
+#+end_example
+
+* What it reports
+
+A finding is a plist =(:kind KIND :subject SYMBOL :form FORM [:count N])=.
+
+| kind                 | meaning                                          |
+|----------------------+--------------------------------------------------|
+| =must-use-discarded= | an =nl-must-use= call's value is thrown away     |
+| =resource-leak=      | a =let=-bound resource is never consumed         |
+| =resource-double=    | one path consumes the same resource twice        |
+| =resource-untracked= | the resource left the checker's sight            |
+| =unsafe-call=        | unsafe primitive called outside =nl-unsafe=      |
+
+* must-use (Doc 170 section 6.2)
+
+The Elisp counterpart of Rust's =#[must_use]=.
+
+#+begin_src elisp
+(nl-must-use nl-open nl-recv)
+
+(nl-check-form '(progn (nl-open "/tmp/x") 1))
+;; => ((:kind must-use-discarded :subject nl-open :form (nl-open "/tmp/x")))
+#+end_src
+
+A form is "discarded" when it sits in statement position: any element
+but the last of a =progn= / =let= body / =when= body / lambda body,
+every element of a =while= body, the tail of =prog1=, and the cleanup
+forms of =unwind-protect=.  Wrap a deliberate discard in =ignore=,
+the way Rust uses =let _ ==:
+
+#+begin_src elisp
+(nl-check-form '(progn (ignore (nl-open "/tmp/x")) 1))   ; => nil
+#+end_src
+
+* Resource linearity (Doc 170 section 6.3)
+
+For each =let= / =let*= binding whose init is =(nl-resource ...)=, the
+pass counts consumptions (=nl-drop= / =nl-forget=) along the worst-case
+path: branches take the maximum of their arms, sequences take the sum,
+and a =while= body that consumes at all scores 2 because a loop can run
+more than once.
+
+#+begin_src elisp
+;; leak — bound, used, never dropped
+(let ((r (nl-resource 'fd 1))) (nl-resource-handle r))
+
+;; clean — one drop, and `if' takes the max of its arms, not the sum
+(let ((r (nl-resource 'fd 1))) (if c (nl-drop r) (nl-drop r)))
+
+;; clean — returning the resource moves ownership to the caller
+(let ((r (nl-resource 'fd 1))) r)
+
+;; double — a loop body can run twice
+(let ((r (nl-resource 'fd 1))) (while c (nl-drop r)))
+#+end_src
+
+* Soundness is partial, and says so
+
+This is the honest part of the design.  The moment a resource is
+captured by a =lambda=, or handed to a function this pass does not
+model, tracking is abandoned and the binding is reported as
+=resource-untracked= rather than quietly dropped from the analysis:
+
+#+begin_src elisp
+(let ((r (nl-resource 'fd 1))) (funcall (lambda () (nl-drop r))))
+;; => resource-untracked
+(let ((r (nl-resource 'fd 1))) (store-somewhere r))
+;; => resource-untracked
+#+end_src
+
+So an empty =resource-leak= list means "no leak among the bindings I
+could follow", never "no leaks".  Doc 168 section 3.4: with =eval= and
+runtime redefinition in the language, soundness is claimed only for a
+declared scope, and everything else is a dynamic check (=nl-safe=) or
+an explicit non-claim (this).
+
+* Unsafe inventory (Doc 170 sections 4.3 and 10)
+
+Every call to a member of =nl-safe-unsafe-primitives= outside an
+=nl-unsafe= block is reported.  This is the CI-facing half of the
+unsafe-boundary rule: Stage 1 gates =nl-ptr-make= at expansion time,
+and this pass covers the raw standalone primitives that no macro can
+gate.
+
+#+begin_src elisp
+(nl-check-form '(progn (ptr-read-u8 p 0)))       ; => unsafe-call
+(nl-check-form '(nl-unsafe (ptr-read-u8 p 0)))   ; => nil
+#+end_src
+
+* API
+
+| function                    | purpose                                 |
+|-----------------------------+-----------------------------------------|
+| =(nl-must-use NAME...)=     | register must-use functions             |
+| =(nl-check-must-use-p S)=   | membership test                         |
+| =(nl-check-must-use-list)=  | registered names, sorted                |
+| =(nl-check-form FORM)=      | findings for one form                   |
+| =(nl-check-forms FORMS)=    | findings for a list of forms            |
+| =(nl-check-file PATH)=      | read a file and check it (no eval)      |
+| =(nl-check-findings-of-kind FINDINGS KIND)= | filter by kind          |
+| =(nl-check-report FINDINGS)=| human-readable report string            |
+
+=nl-check-file= only reads; nothing from the file is evaluated.
+
+* Non-goals
+
+- *Not a type checker.* No inference, no annotations.
+- *Not sound.* See above; the pass names what it could not follow.
+- *Not automatic.* No advice on =defun=, no load hooks.  Wiring it into
+  a build is the caller's decision, which is what keeps the dependency
+  arrow one-way.
+- *Not a replacement for =nl-safe=.* Dynamic checks stay the primary
+  mechanism (Doc 168 section 3.2); this pass is the cheap early half.
+
+* Testing
+
+Host Emacs (part of =make test= at the repo root):
+
+#+begin_src sh
+emacs --batch -Q -L packages/nl-prelude/src -L packages/nl-safe/src \
+  -L packages/nl-check/src -L packages/nl-check/test \
+  -l ert -l nl-check-test -f ert-run-tests-batch-and-exit
+#+end_src
+
+Standalone NeLisp (no Emacs, no ert — the same test bodies run through
+a minimal shim; dependencies are loaded by explicit path because the
+standalone's =require= silently succeeds on missing files):
+
+#+begin_src sh
+./target/nelisp --load packages/nl-check/test/nl-check-standalone-smoke.el
+#+end_src
+
+* Follow-ups
+
+- Doc 170 Stage 4: =nl-contract= boundary contracts with blame.
+- Doc 170 Stage 5: static linearity, *gated* on the Doc 168 Phase 6
+  condition (over half of the dynamically caught violations must be
+  statically decidable).  Do not start it before the
+  =nl-safe--violation-log= data says so.
+- =nl-strict= integration: promote findings to expansion errors inside
+  files that declared =(nl-strict t)=.
+- A repo-wide CI target that runs =nl-check-file= over =lisp/= and
+  =scripts/= and fails on an increase in =unsafe-call= count.

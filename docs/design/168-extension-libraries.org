@@ -9,7 +9,7 @@
 | 項目       | 値                                        |
 |------------+-------------------------------------------|
 | Doc 番号   | 168                                       |
-| 状態       | ACTIVE (Phase 1/2a/2b/3-Stage1/4 SHIPPED) |
+| 状態       | ACTIVE (Phase 1/2a/2b/3-Stage1/3-Stage3/4 SHIPPED) |
 | 対象       | NeLisp v0.6.0 以降                        |
 | 子ドキュメント | Doc 169 (nl-prelude / nl-condition), Doc 170 (nl-safe) |
 | 関連       | Doc 27 (自己実装ランタイム), Doc 102 (環境モデル) |
@@ -197,3 +197,4 @@ Phase 1 を独立に出荷して一度手を止め、継続判断を行うこと
 | 2026-08-15 | Phase 4 (nl-condition) SHIPPED — ERT 29               | DONE |
 | 2026-08-15 | CI: checked smoke は Windows レーン限定 (env probe 制約) | DONE |
 | 2026-08-15 | Phase 5 は blueprint (Doc 171) を先行起案             | DRAFT  |
+| 2026-08-15 | Phase 3 Stage 3 (nl-resource + nl-check) SHIPPED — ERT 60 | DONE |
