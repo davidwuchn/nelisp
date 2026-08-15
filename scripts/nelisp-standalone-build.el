@@ -5014,12 +5014,11 @@ unresolved at link time."
     ;; wf_write_int (tag 2 Int) -> `(+ 2.5 2.5)' returned a huge Int, not 5.0.
     ;; These mirror the tag-aware wf_num_lt family + the reader's nl_str_to_float
     ;; production idiom: the accumulator is carried as u64 BITS (i64-typed, safe
-    ;; across recursion); an f64 value appears ONLY inline as an arg to
-    ;; f64-add/sub/mul + nl_sexp_write_float (no f64 local/param — the same
-    ;; discipline every proven float producer in this layer uses).  There is no
-    ;; f64-to-bits op, so we recover result bits by round-tripping through a
-    ;; scratch slot that nl_sexp_write_float (reader-float.o, linked by the
-    ;; reader build) fills with {tag=3, xmm0 bits @ +8}.
+    ;; across recursion).  A binop result is first reinterpreted with
+    ;; `f64-bits', then restored from a GP local with `bits-to-f64' for the
+    ;; dedicated `sexp-write-float' grammar op.  This is required because a
+    ;; generic call cannot safely marshal a binop result as the f64 argument of
+    ;; nl_sexp_write_float (especially under Win64's positional GP/XMM ABI).
     (defun wf_any_float (list_ptr)
       (if (= (ptr-read-u64 list_ptr 0) 7)
           (if (= (ptr-read-u64 (nl_cons_car_ptr list_ptr) 0) 3)
@@ -5029,27 +5028,30 @@ unresolved at link time."
     (defun wf_elem_fbits (car_ptr scratch)
       (if (= (ptr-read-u64 car_ptr 0) 3)
           (ptr-read-u64 car_ptr 8)
-        (seq (nl_sexp_write_float scratch (i64-to-f64 (ptr-read-u64 car_ptr 8)))
+        (seq (sexp-write-float scratch (i64-to-f64 (ptr-read-u64 car_ptr 8)))
              (ptr-read-u64 scratch 8))))
     (defun wf_int_fbits (n scratch)
-      (seq (nl_sexp_write_float scratch (i64-to-f64 n)) (ptr-read-u64 scratch 8)))
+      (seq (sexp-write-float scratch (i64-to-f64 n)) (ptr-read-u64 scratch 8)))
     (defun wf_fsum (list_ptr acc_bits scratch)
       (if (= (ptr-read-u64 list_ptr 0) 7)
           (let* ((vb (wf_elem_fbits (nl_cons_car_ptr list_ptr) scratch)))
-            (seq (nl_sexp_write_float scratch (f64-add (bits-to-f64 acc_bits) (bits-to-f64 vb)))
-                 (wf_fsum (nl_cons_cdr_ptr list_ptr) (ptr-read-u64 scratch 8) scratch)))
+            (let* ((result-bits (f64-bits (f64-add (bits-to-f64 acc_bits) (bits-to-f64 vb)))))
+              (seq (sexp-write-float scratch (bits-to-f64 result-bits))
+                   (wf_fsum (nl_cons_cdr_ptr list_ptr) (ptr-read-u64 scratch 8) scratch))))
         acc_bits))
     (defun wf_fprod (list_ptr acc_bits scratch)
       (if (= (ptr-read-u64 list_ptr 0) 7)
           (let* ((vb (wf_elem_fbits (nl_cons_car_ptr list_ptr) scratch)))
-            (seq (nl_sexp_write_float scratch (f64-mul (bits-to-f64 acc_bits) (bits-to-f64 vb)))
-                 (wf_fprod (nl_cons_cdr_ptr list_ptr) (ptr-read-u64 scratch 8) scratch)))
+            (let* ((result-bits (f64-bits (f64-mul (bits-to-f64 acc_bits) (bits-to-f64 vb)))))
+              (seq (sexp-write-float scratch (bits-to-f64 result-bits))
+                   (wf_fprod (nl_cons_cdr_ptr list_ptr) (ptr-read-u64 scratch 8) scratch))))
         acc_bits))
     (defun wf_fsubtail (list_ptr acc_bits scratch)
       (if (= (ptr-read-u64 list_ptr 0) 7)
           (let* ((vb (wf_elem_fbits (nl_cons_car_ptr list_ptr) scratch)))
-            (seq (nl_sexp_write_float scratch (f64-sub (bits-to-f64 acc_bits) (bits-to-f64 vb)))
-                 (wf_fsubtail (nl_cons_cdr_ptr list_ptr) (ptr-read-u64 scratch 8) scratch)))
+            (let* ((result-bits (f64-bits (f64-sub (bits-to-f64 acc_bits) (bits-to-f64 vb)))))
+              (seq (sexp-write-float scratch (bits-to-f64 result-bits))
+                   (wf_fsubtail (nl_cons_cdr_ptr list_ptr) (ptr-read-u64 scratch 8) scratch))))
         acc_bits))
     (defun wf_fdiff (list_ptr scratch)
       (let* ((first_b (wf_elem_fbits (nl_cons_car_ptr list_ptr) scratch))
@@ -5058,13 +5060,15 @@ unresolved at link time."
         ;; (sign XOR), NOT 0.0-x, so -(+0.0) yields -0.0 (Doc 159 §12).
         (if (= (ptr-read-u64 rest 0) 7)
             (wf_fsubtail rest first_b scratch)
-          (seq (nl_sexp_write_float scratch (f64-mul (bits-to-f64 first_b) (i64-to-f64 -1)))
-               (ptr-read-u64 scratch 8)))))
+          (let* ((result-bits (f64-bits (f64-mul (bits-to-f64 first_b) (i64-to-f64 -1)))))
+            (seq (sexp-write-float scratch (bits-to-f64 result-bits))
+                 (ptr-read-u64 scratch 8))))))
     ;; float `/' (2-arg, mirroring the integer `/' arity): a/b in f64.
     (defun wf_fdiv2 (args scratch)
       (let* ((ab (wf_elem_fbits (wf_arg_ptr args 0) scratch))
              (bb (wf_elem_fbits (wf_arg_ptr args 1) scratch)))
-        (nl_sexp_write_float scratch (f64-div (bits-to-f64 ab) (bits-to-f64 bb)))))
+        (let* ((result-bits (f64-bits (f64-div (bits-to-f64 ab) (bits-to-f64 bb)))))
+          (sexp-write-float scratch (bits-to-f64 result-bits)))))
     ;; float -> int conversions (each takes a Float Sexp ptr; integer args are
     ;; handled as identity in the dispatch arm).  f64-to-i64-trunc rounds toward
     ;; zero (= truncate); floor rounds toward -inf, ceiling toward +inf.  Cross-
