@@ -63,3 +63,14 @@ rules.
 
 =packages/nelisp-json/= is the pilot extraction.  Doc 45 can reference
 it as the canonical example for future library moves.
+
+* The nl-* extension family (Doc 168)
+
+=nl-prelude= / =nl-condition= / =nl-safe= are opt-in LANGUAGE
+extension libraries (Doc 168-170), not extractions from the core: they
+never ship loaded, and the root Makefile globs both the =nelisp-*= and
+=nl-*= name families for compile and test.  Each follows the same
+layout as above plus a =test/<name>-standalone-smoke.el= runner that
+executes the identical ERT bodies on =target/nelisp= (which has no
+ert) through a minimal shim -- copy that pattern for new nl-*
+packages.
