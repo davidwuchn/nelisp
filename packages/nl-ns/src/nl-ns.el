@@ -26,19 +26,24 @@
 ;;   Analysis:  `nl-ns-analyse' `nl-ns-analyse-files'
 ;;   Checking:  `nl-ns-check' `nl-ns-check-files'
 ;;   Reporting: `nl-ns-report' `nl-ns-summary'
-;;              `nl-ns-findings-of-kind'
+;;              `nl-ns-findings-of-kind' `nl-ns-report-max-severity'
+;;   Baseline:  `nl-ns-load-baseline'
 ;;   Overrides: `nl-ns-declare' `nl-ns-clear-declarations'
 ;;   Internals worth calling: `nl-ns-file-namespace' `nl-ns-read-file'
 ;;
 ;; Findings (same plist shape as nl-check):
 ;;
-;;   ns-collision              symbol defined in more than one file
-;;   ns-collision-divergent    collision whose definitions differ
-;;   ns-prefix-violation       definition outside its file's namespace
-;;   ns-private-escape         another file's `--' name is referenced
-;;   ns-undeclared-dependency  cross-file reference with no `require'
-;;   ns-quoted-member          member name is literal inside `nl-ns-in'
-;;   ns-unreadable             the file could not be read
+;;   ns-partial-override      partial shim can replace a host definition
+;;   ns-unsafe-shim-guard     host shadow behind a non-fboundp guard
+;;   ns-file-shadows-library  file basename masks a host library
+;;   ns-collision             symbol defined in more than one file
+;;   ns-collision-divergent   collision whose definitions differ
+;;   ns-prefix-violation      definition outside its file's namespace
+;;   ns-private-escape        another file's `--' name is referenced
+;;   ns-undeclared-dependency cross-file reference with no `require'
+;;   ns-shadows-host          tree definition also exists in host baseline
+;;   ns-quoted-member         member name is literal inside `nl-ns-in'
+;;   ns-unreadable            the file could not be read
 ;;
 ;; Zero configuration by design.  A file's namespace is inferred as the
 ;; longest hyphen-boundary prefix shared by a majority of the names it
@@ -46,6 +51,11 @@
 ;; defining `car', `princ', ...) has no dominant prefix and opts itself
 ;; out of the prefix check.  `nl-ns-declare' overrides the inference
 ;; where it guesses wrong.
+;;
+;; Host-shadow findings are gated by a checked-in baseline, generated on
+;; a real Emacs and read back as plain data.  With no baseline, nl-ns
+;; emits nothing about host/runtime collisions; no baseline must never
+;; mean guesses.
 ;;
 ;; Nothing here runs at load time and nothing depends on this package,
 ;; the same one-way rule `nl-check' follows (Doc 168 section 4.1).
@@ -60,6 +70,37 @@
 
 (defvar nl-ns--declared (make-hash-table :test 'equal)
   "Map of FILE (string) -> namespace prefix string, overriding inference.")
+
+(defconst nl-ns-definition-heads
+  '(defun defmacro defsubst defalias defvar defconst defcustom
+     define-error define-minor-mode define-derived-mode cl-defun
+     cl-defmacro cl-defstruct cl-defgeneric cl-defmethod)
+  "Heads whose second element names something this pass tracks.")
+
+(defconst nl-ns-variable-definition-heads
+  '(defvar defconst defcustom)
+  "Definition heads that bind variables rather than functions.")
+
+(defconst nl-ns-partial-markers
+  '("does not recognise" "does not recognize" "does not handle"
+    "only handles" "returns nil" "not supported" "unsupported"
+    "approximation" "simplified" "minimal" "partial" "subset"
+    "stub" "no-op" "todo" "fixme")
+  "Case-insensitive markers that admit a partial implementation.")
+
+(defconst nl-ns-finding-severities
+  '((ns-partial-override . 1)
+    (ns-unsafe-shim-guard . 2)
+    (ns-file-shadows-library . 3)
+    (ns-collision-divergent . 4)
+    (ns-private-escape . 5)
+    (ns-prefix-violation . 5)
+    (ns-undeclared-dependency . 5)
+    (ns-collision . 6)
+    (ns-shadows-host . 6)
+    (ns-quoted-member . 6)
+    (ns-unreadable . 6))
+  "Explicit severity ranking for nl-ns findings.")
 
 (defun nl-ns-declare (file prefix)
   "Declare that definitions in FILE belong to namespace PREFIX.
@@ -79,11 +120,85 @@ for example \"nl-safe-\".  Overrides `nl-ns-file-namespace' inference."
 
 ;;;; Reading -----------------------------------------------------------
 
-(defconst nl-ns-definition-heads
-  '(defun defmacro defsubst defalias defvar defconst defcustom
-     define-error define-minor-mode define-derived-mode cl-defun
-     cl-defmacro cl-defstruct cl-defgeneric cl-defmethod)
-  "Heads whose second element names something this pass tracks.")
+(defun nl-ns--string-blank-p (string)
+  "Return non-nil when STRING is nil or only whitespace."
+  (or (null string)
+      (string= string "")
+      (not (string-match "[^ \t\r\n]" string))))
+
+(defun nl-ns--trim-string (string)
+  "Return STRING without leading or trailing ASCII whitespace."
+  (if (null string)
+      nil
+    (let ((start 0)
+          (end (length string)))
+      (while (and (< start end)
+                  (memq (aref string start) '(?\s ?\t ?\r ?\n)))
+        (setq start (1+ start)))
+      (while (and (< start end)
+                  (memq (aref string (1- end)) '(?\s ?\t ?\r ?\n)))
+        (setq end (1- end)))
+      (substring string start end))))
+
+(defun nl-ns--basename (path)
+  "Return PATH's final component."
+  (let ((i (1- (length path))))
+    (while (and (>= i 0)
+                (not (memq (aref path i) '(?/ ?\\))))
+      (setq i (1- i)))
+    (substring path (1+ i))))
+
+(defun nl-ns--library-basename (path)
+  "Return PATH's basename without a final .el suffix."
+  (let ((base (nl-ns--basename path)))
+    (if (and (> (length base) 3)
+             (string= (substring base (- (length base) 3)) ".el"))
+        (substring base 0 (- (length base) 3))
+      base)))
+
+(defun nl-ns--read-file-entry (path)
+  "Return plist metadata for PATH, or `nl-ns--unreadable' on read error."
+  (condition-case nil
+      (with-temp-buffer
+        (insert-file-contents path)
+        (let ((forms nil)
+              (metadata nil)
+              (done nil)
+              (prev-end (point-min)))
+          (goto-char (point-min))
+          (while (not done)
+            (skip-chars-forward " \t\r\n\f")
+            (let* ((start (point))
+                   (leading (buffer-substring-no-properties prev-end start))
+                   (form (condition-case nil
+                             (read (current-buffer))
+                           (end-of-file 'nl-ns--eof))))
+              (if (eq form 'nl-ns--eof)
+                  (setq done t)
+                (let ((end (point)))
+                  (setq forms (cons form forms))
+                  (setq metadata
+                        (cons (list form
+                                    :source (buffer-substring-no-properties
+                                             start end)
+                                    :leading leading)
+                              metadata))
+                  (setq prev-end end)))))
+          (list :forms (nreverse forms)
+                :metadata (nreverse metadata))))
+    (error 'nl-ns--unreadable)))
+
+(defun nl-ns-read-file (path)
+  "Return the top-level forms of PATH, or the symbol `nl-ns--unreadable'.
+Reading only; nothing from PATH is evaluated."
+  (let ((entry (nl-ns--read-file-entry path)))
+    (if (eq entry 'nl-ns--unreadable)
+        entry
+      (plist-get entry :forms))))
+
+(defun nl-ns--metadata-for-form (form metadata)
+  "Return METADATA entry for FORM from file METADATA."
+  (cdr (assq form metadata)))
 
 (defun nl-ns--defined-symbol (form)
   "Return the symbol FORM defines, or nil when FORM defines nothing."
@@ -92,25 +207,56 @@ for example \"nl-safe-\".  Overrides `nl-ns-file-namespace' inference."
        (let ((name (car (cdr form))))
          (cond
           ((symbolp name) name)
-          ;; (defalias 'foo ...) / (define-error 'foo ...)
           ((and (consp name) (eq (car name) 'quote)
                 (symbolp (car (cdr name))))
            (car (cdr name)))
           (t nil)))))
 
-(defun nl-ns--definition-forms-in-form (form)
-  "Return definition symbol/form pairs nested in executable FORM.
-Quoted and backquote data are not executable, so definitions appearing
-there are deliberately ignored."
-  (cond
-   ((not (consp form)) nil)
-   ((nl-ns--defined-symbol form)
-    (list (cons (nl-ns--defined-symbol form) form)))
-   ((or (eq (car form) 'quote) (eq (car form) 'function)
-        (memq (car form) '(\` backquote)))
-    nil)
-   (t (append (nl-ns--definition-forms-in-form (car form))
-              (nl-ns--definition-forms-in-form (cdr form))))))
+(defun nl-ns--definition-host-kind (form)
+  "Return `variable' or `function' for definition FORM."
+  (if (memq (car form) nl-ns-variable-definition-heads)
+      'variable
+    'function))
+
+(defun nl-ns--definition-docstring (form)
+  "Return FORM's docstring, or nil when FORM has none."
+  (let ((head (car form)))
+    (cond
+     ((and (memq head '(defun defmacro defsubst cl-defun cl-defmacro))
+           (stringp (car (cdr (cdr (cdr form))))))
+      (car (cdr (cdr (cdr form)))))
+     ((and (memq head '(defalias defvar defconst defcustom))
+           (stringp (car (cdr (cdr (cdr form))))))
+      (car (cdr (cdr (cdr form)))))
+     ((and (eq head 'define-minor-mode) (stringp (car (cdr form))))
+      (car (cdr form)))
+     ((and (eq head 'define-derived-mode)
+           (stringp (car (cdr (cdr (cdr (cdr form)))))))
+      (car (cdr (cdr (cdr (cdr form))))))
+     (t nil))))
+
+(defun nl-ns--definition-without-docstring (form)
+  "Return definition FORM without its own docstring, when it has one.
+Only the docstring is excluded from divergent-collision equality; all
+other parts of the definition remain significant."
+  (let ((head (car form)))
+    (cond
+     ((and (memq head '(defun defmacro defsubst cl-defun cl-defmacro))
+           (stringp (car (cdr (cdr (cdr form))))))
+      (append (list (car form) (car (cdr form)) (car (cdr (cdr form))))
+              (cdr (cdr (cdr (cdr form))))))
+     ((and (memq head '(defalias defvar defconst defcustom))
+           (stringp (car (cdr (cdr (cdr form))))))
+      (append (list (car form) (car (cdr form)) (car (cdr (cdr form))))
+              (cdr (cdr (cdr (cdr form))))))
+     ((and (eq head 'define-minor-mode) (stringp (car (cdr form))))
+      (cons head (cdr (cdr form))))
+     ((and (eq head 'define-derived-mode)
+           (stringp (car (cdr (cdr (cdr (cdr form)))))))
+      (append (list (car form) (car (cdr form)) (car (cdr (cdr form)))
+                    (car (cdr (cdr (cdr form)))))
+              (cdr (cdr (cdr (cdr (cdr form)))))))
+     (t form))))
 
 (defun nl-ns--quoted-feature (form)
   "Return the feature symbol in FORM's second position, or nil."
@@ -193,87 +339,240 @@ on them."
           (setq out (cons (intern (concat prefix (symbol-name defined))) out)))))
     (nreverse out)))
 
-(defun nl-ns--ns-in-definition-forms (form members prefix)
-  "Return qualified definition/form pairs from `nl-ns-in' FORM.
-MEMBERS and PREFIX have the same meaning as in `nl-ns--ns-in-defines'."
+(defun nl-ns--definition-guard-test-p (predicate symbol variablep)
+  "Return non-nil when PREDICATE checks for SYMBOL's presence.
+VARIABLEP selects `boundp' instead of `fboundp'."
+  (let ((probe (if variablep 'boundp 'fboundp)))
+    (cond
+     ((and (consp predicate)
+           (eq (car predicate) probe)
+           (consp (cdr predicate)))
+      (let ((arg (car (cdr predicate))))
+        (or (eq arg symbol)
+            (and (consp arg)
+                 (eq (car arg) 'quote)
+                 (eq (car (cdr arg)) symbol)))))
+     ((and (consp predicate) (eq (car predicate) 'or))
+      (let ((tail (cdr predicate))
+            (found nil))
+        (while (and tail (not found))
+          (when (nl-ns--definition-guard-test-p (car tail) symbol variablep)
+            (setq found t))
+          (setq tail (cdr tail)))
+        found))
+     (t nil))))
+
+(defun nl-ns--guard-for-when (predicate symbol variablep)
+  "Classify a `when' PREDICATE guarding SYMBOL."
+  (if (and (consp predicate)
+           (eq (car predicate) 'not)
+           (nl-ns--definition-guard-test-p (car (cdr predicate)) symbol variablep))
+      'fboundp
+    'custom))
+
+(defun nl-ns--guard-for-unless (predicate symbol variablep)
+  "Classify an `unless' PREDICATE guarding SYMBOL."
+  (if (nl-ns--definition-guard-test-p predicate symbol variablep)
+      'fboundp
+    'custom))
+
+(defun nl-ns--make-guard (kind predicate)
+  "Return guard plist for KIND and PREDICATE."
+  (list :kind kind
+        :predicate predicate
+        :source (if predicate (prin1-to-string predicate) nil)))
+
+(defun nl-ns--comment-line-p (line)
+  "Return non-nil when LINE is an indented elisp comment."
+  (let ((i 0)
+        (n (length line)))
+    (while (and (< i n)
+                (memq (aref line i) '(?\s ?\t)))
+      (setq i (1+ i)))
+    (and (< i n) (eq (aref line i) ?\;))))
+
+(defun nl-ns--line-start (text pos)
+  "Return the index of the line start in TEXT containing POS."
+  (while (and (> pos 0)
+              (not (eq (aref text (1- pos)) ?\n)))
+    (setq pos (1- pos)))
+  pos)
+
+(defun nl-ns--definition-source-comments (source symbol)
+  "Return contiguous comment lines in SOURCE immediately before SYMBOL."
+  (when (and (stringp source) (symbolp symbol))
+    (let ((match
+           (string-match
+            (concat "(\\(defun\\|defmacro\\|defsubst\\|defalias\\|defvar\\|defconst\\|defcustom\\|"
+                    "define-error\\|define-minor-mode\\|define-derived-mode\\|"
+                    "cl-defun\\|cl-defmacro\\|cl-defstruct\\|cl-defgeneric\\|cl-defmethod\\)"
+                    "[ \t\r\n]+'?"
+                    (regexp-quote (symbol-name symbol))
+                    "\\([ \t\r\n()]\\|$\\)")
+            source)))
+      (when match
+        (let ((line-start (nl-ns--line-start source match))
+              (comments nil)
+              (done nil))
+          (while (and (> line-start 0) (not done))
+            (let* ((prev-end (1- line-start))
+                   (prev-start (nl-ns--line-start source prev-end))
+                   (line (substring source prev-start prev-end)))
+              (cond
+               ((nl-ns--string-blank-p line)
+                (setq done t))
+               ((nl-ns--comment-line-p line)
+                (setq comments (cons line comments))
+                (setq line-start prev-start))
+               (t
+                (setq done t)))))
+          (when comments
+            (mapconcat #'identity comments "\n")))))))
+
+(defun nl-ns--definition-records-in-form (form guard leading-comments source)
+  "Return definition plists nested in executable FORM.
+GUARD is nil or a plist describing the enclosing conditional guard.
+LEADING-COMMENTS comes from the enclosing top-level form metadata.
+SOURCE is the unread top-level source text, used to recover comment
+lines immediately above nested definitions inside conditionals."
+  (cond
+   ((not (consp form)) nil)
+   ((nl-ns--defined-symbol form)
+    (let ((symbol (nl-ns--defined-symbol form)))
+      (list (list :symbol symbol
+                :form form
+                :guard-kind (or (plist-get guard :kind) 'none)
+                :guard-source (plist-get guard :source)
+                  :leading-comments
+                  ;; A blank string is not "there are comments": an empty
+                  ;; `:leading' is truthy in Elisp and would suppress the
+                  ;; source scan that finds the comment a wrapper form
+                  ;; pushed away from the top level.
+                  (if (nl-ns--string-blank-p (or leading-comments ""))
+                      (nl-ns--definition-source-comments source symbol)
+                    leading-comments)))))
+   ((or (eq (car form) 'quote) (eq (car form) 'function)
+        (memq (car form) '(\` backquote)))
+    nil)
+   ((eq (car form) 'when)
+    (let ((predicate (car (cdr form))))
+      (apply #'append
+             (mapcar
+              (lambda (body-form)
+                (let ((defined (nl-ns--defined-symbol body-form)))
+                 (nl-ns--definition-records-in-form
+                   body-form
+                   (and defined
+                        (nl-ns--make-guard
+                         (nl-ns--guard-for-when
+                          predicate defined
+                          (eq (nl-ns--definition-host-kind body-form) 'variable))
+                         predicate))
+                   nil
+                   source)))
+              (cdr (cdr form))))))
+   ((eq (car form) 'unless)
+    (let ((predicate (car (cdr form))))
+      (apply #'append
+             (mapcar
+              (lambda (body-form)
+                (let ((defined (nl-ns--defined-symbol body-form)))
+                 (nl-ns--definition-records-in-form
+                   body-form
+                   (and defined
+                        (nl-ns--make-guard
+                         (nl-ns--guard-for-unless
+                          predicate defined
+                          (eq (nl-ns--definition-host-kind body-form) 'variable))
+                         predicate))
+                   nil
+                   source)))
+              (cdr (cdr form))))))
+   ((memq (car form) '(if cond))
+    (apply #'append
+           (mapcar (lambda (subform)
+                     (nl-ns--definition-records-in-form
+                      subform (nl-ns--make-guard 'custom (car (cdr form))) nil
+                      source))
+                   (cdr (cdr form)))))
+   (t (append (nl-ns--definition-records-in-form (car form) guard nil source)
+              (nl-ns--definition-records-in-form (cdr form) guard nil source)))))
+
+(defun nl-ns--ns-in-definition-records (form members prefix)
+  "Return qualified definition plists from `nl-ns-in' FORM."
   (let ((out nil))
     (dolist (body-form (cdr (cdr form)))
       (let ((defined (nl-ns--defined-symbol body-form)))
         (when (and defined (memq defined members))
           (setq out
-                (cons (cons (intern (concat prefix (symbol-name defined)))
-                            body-form)
+                (cons (list :symbol (intern (concat prefix (symbol-name defined)))
+                            :form body-form
+                            :guard-kind 'none
+                            :guard-source nil
+                            :leading-comments nil)
                       out)))))
     (nreverse out)))
 
-(defun nl-ns-scan-forms (forms)
+(defun nl-ns-scan-forms (forms &optional metadata)
   "Return a plist describing FORMS, the top-level forms of one file.
 Keys: `:defines' (list of symbols, in order), `:definition-forms'
-(symbol/form pairs), `:requires' and `:provides' (lists of feature
-symbols), `:symbols' (hash set of every symbol mentioned), and
-`:quoted-members' (namespace/member pairs)."
-  (let ((defines nil) (definition-forms nil) (requires nil) (provides nil)
-        (quoted-members nil)
+(symbol/form pairs), `:definition-records' (definition metadata plists),
+`:requires' and `:provides' (lists of feature symbols), `:symbols' (hash
+set of every symbol mentioned), and `:quoted-members' (namespace/member
+pairs).  METADATA comes from `nl-ns--read-file-entry'."
+  (let ((defines nil) (definition-forms nil) (definition-records nil)
+        (requires nil) (provides nil) (quoted-members nil)
         (namespaces (make-hash-table :test 'eq))
         (symbols (make-hash-table :test 'eq)))
     (dolist (form forms)
-      (cond
-       ((and (consp form) (eq (car form) 'nl-ns-define)
-             (symbolp (car (cdr form))))
-        (let ((name (car (cdr form))))
-          (puthash name (list :members (nl-ns--ns-members form)
-                              :prefix (nl-ns--ns-prefix form name))
-                   namespaces)))
-       ((and (consp form) (eq (car form) 'nl-ns-in)
-             (symbolp (car (cdr form))))
-        (let* ((name (car (cdr form)))
-               (declaration (gethash name namespaces))
-               (members (plist-get declaration :members))
-               (prefix (plist-get declaration :prefix)))
-          (dolist (defined (nl-ns--ns-in-defines form members prefix))
-            (setq defines (cons defined defines)))
-          (dolist (definition
-                   (nl-ns--ns-in-definition-forms form members prefix))
-            (setq definition-forms (cons definition definition-forms)))
-          (dolist (member (nl-ns--quoted-members-in-form
-                           (cdr (cdr form)) members))
-            (setq quoted-members (cons (cons name member) quoted-members)))))
-       (t
-        (dolist (definition (nl-ns--definition-forms-in-form form))
-          (setq defines (cons (car definition) defines))
-          (setq definition-forms (cons definition definition-forms)))))
-      (when (and (consp form) (eq (car form) 'require))
-        (let ((feature (nl-ns--quoted-feature form)))
-          (when feature (setq requires (cons feature requires)))))
-      (when (and (consp form) (eq (car form) 'provide))
-        (let ((feature (nl-ns--quoted-feature form)))
-          (when feature (setq provides (cons feature provides)))))
-      (nl-ns--collect-symbols form symbols))
+      (let* ((info (nl-ns--metadata-for-form form metadata))
+             (leading (plist-get info :leading))
+             (source (plist-get info :source)))
+        (cond
+         ((and (consp form) (eq (car form) 'nl-ns-define)
+               (symbolp (car (cdr form))))
+          (let ((name (car (cdr form))))
+            (puthash name (list :members (nl-ns--ns-members form)
+                                :prefix (nl-ns--ns-prefix form name))
+                     namespaces)))
+         ((and (consp form) (eq (car form) 'nl-ns-in)
+               (symbolp (car (cdr form))))
+          (let* ((name (car (cdr form)))
+                 (declaration (gethash name namespaces))
+                 (members (plist-get declaration :members))
+                 (prefix (plist-get declaration :prefix)))
+            (dolist (record (nl-ns--ns-in-definition-records form members prefix))
+              (setq defines (cons (plist-get record :symbol) defines))
+              (setq definition-records (cons record definition-records))
+              (setq definition-forms
+                    (cons (cons (plist-get record :symbol)
+                                (plist-get record :form))
+                          definition-forms)))
+            (dolist (member (nl-ns--quoted-members-in-form
+                             (cdr (cdr form)) members))
+              (setq quoted-members (cons (cons name member) quoted-members)))))
+         (t
+          (dolist (record (nl-ns--definition-records-in-form form nil leading source))
+             (setq defines (cons (plist-get record :symbol) defines))
+             (setq definition-records (cons record definition-records))
+             (setq definition-forms
+                   (cons (cons (plist-get record :symbol)
+                               (plist-get record :form))
+                        definition-forms)))))
+        (when (and (consp form) (eq (car form) 'require))
+          (let ((feature (nl-ns--quoted-feature form)))
+            (when feature (setq requires (cons feature requires)))))
+        (when (and (consp form) (eq (car form) 'provide))
+          (let ((feature (nl-ns--quoted-feature form)))
+            (when feature (setq provides (cons feature provides)))))
+        (nl-ns--collect-symbols form symbols)))
     (list :defines (nreverse defines)
           :definition-forms (nreverse definition-forms)
+          :definition-records (nreverse definition-records)
           :requires (nreverse requires)
           :provides (nreverse provides)
           :quoted-members (nreverse quoted-members)
           :symbols symbols)))
-
-(defun nl-ns-read-file (path)
-  "Return the top-level forms of PATH, or the symbol `nl-ns--unreadable'.
-Reading only; nothing from PATH is evaluated."
-  (condition-case nil
-      (let ((forms nil))
-        (with-temp-buffer
-          (insert-file-contents path)
-          (goto-char (point-min))
-          (let ((done nil))
-            (while (not done)
-              (let ((form (condition-case nil
-                              (read (current-buffer))
-                            (end-of-file 'nl-ns--eof))))
-                (if (eq form 'nl-ns--eof)
-                    (setq done t)
-                  (setq forms (cons form forms)))))))
-        (nreverse forms))
-    (error 'nl-ns--unreadable)))
 
 ;;;; Namespace inference ------------------------------------------------
 
@@ -285,8 +584,6 @@ Reading only; nothing from PATH is evaluated."
       (when (eq (aref name i) ?-)
         (setq out (cons (substring name 0 (1+ i)) out)))
       (setq i (1+ i)))
-    ;; The scan runs left to right and conses, so `out' already holds
-    ;; the longest prefix first.
     out))
 
 (defun nl-ns-file-namespace (file defines)
@@ -319,25 +616,26 @@ treated as deliberately global and skips the prefix check."
 
 (defun nl-ns-analyse (entries)
   "Analyse ENTRIES, a list of (FILE . FORMS), and return an analysis plist.
-FORMS may be the symbol `nl-ns--unreadable' for a file that could not
-be read.  Keys of the result: `:files' (list of per-file plists),
-`:owner' (hash symbol -> list of defining files, newest first),
+FORMS may be `nl-ns--unreadable', a plain list of forms, or a plist from
+`nl-ns--read-file-entry'.  Keys of the result: `:files' (list of per-file
+plists), `:owner' (hash symbol -> list of defining files, newest first),
 `:feature-owner' (hash feature symbol -> file that provides it)."
   (let ((files nil)
         (owner (make-hash-table :test 'eq))
         (feature-owner (make-hash-table :test 'eq)))
     (dolist (entry entries)
-      (let ((file (car entry))
-            (forms (cdr entry)))
+      (let* ((file (car entry))
+             (raw (cdr entry))
+             (forms (if (and (listp raw) (plist-get raw :forms))
+                        (plist-get raw :forms)
+                      raw))
+             (metadata (and (listp raw) (plist-get raw :metadata))))
         (if (eq forms 'nl-ns--unreadable)
             (setq files (cons (list :file file :unreadable t) files))
-          (let* ((scan (nl-ns-scan-forms forms))
+          (let* ((scan (nl-ns-scan-forms forms metadata))
                  (defines (plist-get scan :defines))
                  (namespace (nl-ns-file-namespace file defines)))
             (dolist (sym defines)
-              ;; Record each file at most once per symbol: defining a
-              ;; name twice inside one file is a different problem, and
-              ;; this pass is about cross-file ownership.
               (let ((seen (gethash sym owner)))
                 (unless (member file seen)
                   (puthash sym (cons file seen) owner))))
@@ -347,8 +645,9 @@ be read.  Keys of the result: `:files' (list of per-file plists),
                   (cons (list :file file
                               :namespace namespace
                               :defines defines
-                              :definition-forms
-                              (plist-get scan :definition-forms)
+                              :definition-forms (plist-get scan :definition-forms)
+                              :definition-records
+                              (plist-get scan :definition-records)
                               :requires (plist-get scan :requires)
                               :provides (plist-get scan :provides)
                               :quoted-members (plist-get scan :quoted-members)
@@ -362,8 +661,54 @@ be read.  Keys of the result: `:files' (list of per-file plists),
   "Read each of PATHS and return the analysis, as `nl-ns-analyse' does."
   (let ((entries nil))
     (dolist (path paths)
-      (setq entries (cons (cons path (nl-ns-read-file path)) entries)))
+      (setq entries (cons (cons path (nl-ns--read-file-entry path)) entries)))
     (nl-ns-analyse (nreverse entries))))
+
+;;;; Baseline -----------------------------------------------------------
+
+(defun nl-ns--list-to-set (items)
+  "Return a hash set containing ITEMS."
+  (let ((table (make-hash-table :test 'equal)))
+    (dolist (item items)
+      (puthash item t table))
+    table))
+
+(defun nl-ns-load-baseline (path)
+  "Read PATH and return a normalized nl-ns host baseline plist.
+The file must contain one readable plist with keys `:emacs-version',
+`:generated-at', `:functions', `:variables', and `:libraries'."
+  (let ((raw (car (nl-ns-read-file path))))
+    (unless (listp raw)
+      (error "nl-ns-load-baseline: %s did not contain a plist" path))
+    (let ((version (plist-get raw :emacs-version))
+          (generated-at (plist-get raw :generated-at))
+          (functions (plist-get raw :functions))
+          (variables (plist-get raw :variables))
+          (libraries (plist-get raw :libraries)))
+      (unless (stringp version)
+        (error "nl-ns-load-baseline: %s missing :emacs-version" path))
+      (unless (stringp generated-at)
+        (error "nl-ns-load-baseline: %s missing :generated-at" path))
+      (list :source path
+            :emacs-version version
+            :generated-at generated-at
+            :functions (nl-ns--list-to-set functions)
+            :variables (nl-ns--list-to-set variables)
+            :libraries (nl-ns--list-to-set libraries)))))
+
+(defun nl-ns--coerce-baseline (baseline)
+  "Return BASELINE as a normalized baseline plist."
+  (cond
+   ((null baseline) nil)
+   ((stringp baseline) (nl-ns-load-baseline baseline))
+   (t baseline)))
+
+(defun nl-ns--baseline-host-kind (baseline symbol kind)
+  "Return host kind for SYMBOL under BASELINE, or nil."
+  (and baseline
+       (if (eq kind 'variable)
+           (and (gethash symbol (plist-get baseline :variables)) 'variable)
+         (and (gethash symbol (plist-get baseline :functions)) 'function))))
 
 ;;;; Checking ------------------------------------------------------------
 
@@ -390,29 +735,6 @@ be read.  Keys of the result: `:files' (list of per-file plists),
         (setq found t)))
     found))
 
-(defun nl-ns--definition-without-docstring (form)
-  "Return definition FORM without its own docstring, when it has one.
-Only the docstring is excluded from divergent-collision equality; all
-other parts of the definition remain significant."
-  (let ((head (car form)))
-    (cond
-     ((and (memq head '(defun defmacro defsubst cl-defun cl-defmacro))
-           (stringp (car (cdr (cdr (cdr form))))))
-      (append (list (car form) (car (cdr form)) (car (cdr (cdr form))))
-              (cdr (cdr (cdr (cdr form))))))
-     ((and (memq head '(defalias defvar defconst defcustom))
-           (stringp (car (cdr (cdr (cdr form))))))
-      (append (list (car form) (car (cdr form)) (car (cdr (cdr form))))
-              (cdr (cdr (cdr (cdr form))))))
-     ((and (eq head 'define-minor-mode) (stringp (car (cdr form))))
-      (cons head (cdr (cdr form))))
-     ((and (eq head 'define-derived-mode)
-           (stringp (car (cdr (cdr (cdr (cdr form)))))))
-      (append (list (car form) (car (cdr form)) (car (cdr (cdr form)))
-                    (car (cdr (cdr (cdr form)))))
-              (cdr (cdr (cdr (cdr (cdr form)))))))
-     (t form))))
-
 (defun nl-ns--normalise-definition-form (form)
   "Return FORM with equivalent backquote reader heads made identical."
   (cond
@@ -433,10 +755,7 @@ other parts of the definition remain significant."
    (t form)))
 
 (defun nl-ns--definition-forms-equal-p (first second)
-  "Return non-nil when definition forms FIRST and SECOND are equal.
-Equality ignores a definition's own docstring and treats the reader's
-`backquote'/`comma'/`comma-at' heads as equivalent to Emacs's `\\`'/`\\,'/
-`\\,@' heads."
+  "Return non-nil when definition forms FIRST and SECOND are equal."
   (equal (nl-ns--normalise-definition-form
           (nl-ns--definition-without-docstring first))
          (nl-ns--normalise-definition-form
@@ -445,6 +764,16 @@ Equality ignores a definition's own docstring and treats the reader's
 (defun nl-ns--entry-definition (entry symbol)
   "Return ENTRY's first definition form for SYMBOL, or nil."
   (cdr (assq symbol (plist-get entry :definition-forms))))
+
+(defun nl-ns--entry-definition-record (entry symbol)
+  "Return ENTRY's first definition record for SYMBOL, or nil."
+  (let ((records (plist-get entry :definition-records))
+        (found nil))
+    (while (and records (not found))
+      (when (eq (plist-get (car records) :symbol) symbol)
+        (setq found (car records)))
+      (setq records (cdr records)))
+    found))
 
 (defun nl-ns--analysis-file-entry (analysis file)
   "Return ANALYSIS's entry for FILE, or nil."
@@ -455,10 +784,86 @@ Equality ignores a definition's own docstring and treats the reader's
       (setq entries (cdr entries)))
     found))
 
+(defun nl-ns--sentences (text)
+  "Split TEXT into conservative sentences."
+  (let ((i 0)
+        (start 0)
+        (out nil))
+    (while (< i (length text))
+      (when (memq (aref text i) '(?. ?! ?? ?\n))
+        (let ((piece (nl-ns--trim-string (substring text start (1+ i)))))
+          (unless (nl-ns--string-blank-p piece)
+            (setq out (cons piece out))))
+        (setq start (1+ i)))
+      (setq i (1+ i)))
+    (let ((tail (nl-ns--trim-string (substring text start))))
+      (unless (nl-ns--string-blank-p tail)
+        (setq out (cons tail out))))
+    (nreverse out)))
+
+(defun nl-ns--clean-comment-line (line)
+  "Strip leading comment punctuation from LINE."
+  (let ((i 0)
+        (n (length line)))
+    (while (and (< i n)
+                (memq (aref line i) '(?\s ?\t ?\;)))
+      (setq i (1+ i)))
+    (substring line i)))
+
+(defun nl-ns--comment-sentences (text)
+  "Return cleaned comment sentences from TEXT."
+  (let ((start 0)
+        (i 0)
+        (lines nil))
+    (while (< i (length text))
+      (when (eq (aref text i) ?\n)
+        (setq lines (cons (substring text start i) lines))
+        (setq start (1+ i)))
+      (setq i (1+ i)))
+    (when (< start (length text))
+      (setq lines (cons (substring text start) lines)))
+    (setq lines (nreverse lines))
+    (let ((sentences nil))
+      (dolist (line lines)
+        (let ((clean (nl-ns--trim-string (nl-ns--clean-comment-line line))))
+          (unless (nl-ns--string-blank-p clean)
+            (dolist (sentence (nl-ns--sentences clean))
+              (setq sentences (cons sentence sentences))))))
+      (nreverse sentences))))
+
+(defun nl-ns--marker-match (sentence)
+  "Return the first partial marker found in SENTENCE, or nil."
+  (let ((down (downcase sentence))
+        (markers nl-ns-partial-markers)
+        (found nil))
+    (while (and markers (not found))
+      (when (string-match (regexp-quote (car markers)) down)
+        (setq found (car markers)))
+      (setq markers (cdr markers)))
+    found))
+
+(defun nl-ns--definition-partial-evidence (record)
+  "Return partiality evidence plist for RECORD, or nil."
+  (let ((sources nil))
+    (let ((docstring (nl-ns--definition-docstring (plist-get record :form))))
+      (unless (nl-ns--string-blank-p docstring)
+        (setq sources (cons docstring sources))))
+    (let ((comments (plist-get record :leading-comments)))
+      (unless (nl-ns--string-blank-p comments)
+        (dolist (sentence (nl-ns--comment-sentences comments))
+          (setq sources (cons sentence sources)))))
+    (setq sources (nreverse sources))
+    (let ((found nil))
+      (dolist (source sources)
+        (unless found
+          (dolist (sentence (nl-ns--sentences source))
+            (let ((marker (nl-ns--marker-match sentence)))
+              (when (and marker (not found))
+                (setq found (list :marker marker :sentence sentence)))))))
+      found)))
+
 (defun nl-ns--check-collisions (analysis findings)
-  "Add one collision finding per multiply-defined symbol.
-`ns-collision-divergent' replaces `ns-collision' when definition forms
-are not equal after each definition's own docstring is excluded."
+  "Add one collision finding per multiply-defined symbol."
   (let ((owner (plist-get analysis :owner))
         (collisions nil))
     (maphash
@@ -466,7 +871,6 @@ are not equal after each definition's own docstring is excluded."
        (when (cdr files)
          (setq collisions (cons (cons sym (reverse files)) collisions))))
      owner)
-    ;; Stable output: sort by symbol name.
     (setq collisions
           (sort collisions
                 (lambda (a b) (string< (symbol-name (car a))
@@ -484,8 +888,8 @@ are not equal after each definition's own docstring is excluded."
                 (setq reference form)))))
         (setq findings
               (cons (append (list :kind (if divergent
-                                          'ns-collision-divergent
-                                        'ns-collision)
+                                            'ns-collision-divergent
+                                          'ns-collision)
                                   :subject (car collision)
                                   :files (cdr collision)
                                   :count (length (cdr collision)))
@@ -509,9 +913,7 @@ are not equal after each definition's own docstring is excluded."
     findings))
 
 (defun nl-ns--check-references (entry analysis check-deps findings)
-  "Add cross-file reference findings for ENTRY.
-Reports `ns-private-escape' always, and `ns-undeclared-dependency'
-only when CHECK-DEPS is non-nil."
+  "Add cross-file reference findings for ENTRY."
   (let* ((file (plist-get entry :file))
          (owner (plist-get analysis :owner))
          (symbols (plist-get entry :symbols))
@@ -521,7 +923,6 @@ only when CHECK-DEPS is non-nil."
       (maphash
        (lambda (sym _v)
          (let ((definers (gethash sym owner)))
-           ;; Only symbols defined exactly once elsewhere are attributable.
            (when (and definers (null (cdr definers))
                       (not (equal (car definers) file)))
              (let ((other (car definers)))
@@ -561,13 +962,100 @@ only when CHECK-DEPS is non-nil."
                 findings)))
   findings)
 
-(defun nl-ns-check (analysis &optional check-dependencies)
-  "Return the findings for ANALYSIS, in a stable order.
+(defun nl-ns--check-file-shadows-library (entry baseline findings)
+  "Add `ns-file-shadows-library' for ENTRY when it masks BASELINE."
+  (when (and baseline (not (plist-get entry :unreadable)))
+    (let* ((file (plist-get entry :file))
+           (library (nl-ns--library-basename file)))
+      (when (gethash library (plist-get baseline :libraries))
+        (setq findings
+              (cons (list :kind 'ns-file-shadows-library
+                          :subject library
+                          :file file
+                          :host-library library)
+                    findings)))))
+  findings)
+
+(defun nl-ns--check-host-shadows (entry baseline findings)
+  "Add host-shadow findings for ENTRY against BASELINE."
+  (when (and baseline (not (plist-get entry :unreadable)))
+    (dolist (record (plist-get entry :definition-records))
+      (let* ((symbol (plist-get record :symbol))
+             (file (plist-get entry :file))
+             (kind (nl-ns--definition-host-kind (plist-get record :form)))
+             (host-kind (nl-ns--baseline-host-kind baseline symbol kind)))
+        (when host-kind
+          (setq findings
+                (cons (list :kind 'ns-shadows-host
+                            :subject symbol
+                            :file file
+                            :host-kind host-kind)
+                      findings))
+          (let ((guard-kind (plist-get record :guard-kind))
+                (guard-source (plist-get record :guard-source))
+                (partial (nl-ns--definition-partial-evidence record)))
+            (when (memq guard-kind '(none custom))
+              (setq findings
+                    (cons (append (list :kind 'ns-unsafe-shim-guard
+                                        :subject symbol
+                                        :file file
+                                        :host-kind host-kind
+                                        :guard-kind guard-kind)
+                                  (if guard-source
+                                      (list :guard-source guard-source)
+                                    nil)
+                                  (if (and guard-source
+                                           (string-match "autoloadp" guard-source))
+                                      (list :autoloadp t)
+                                    nil))
+                          findings)))
+            (when (and partial (memq guard-kind '(none custom)))
+              (setq findings
+                    (cons (list :kind 'ns-partial-override
+                                :subject symbol
+                                :file file
+                                :host-kind host-kind
+                                :marker (plist-get partial :marker)
+                                :sentence (plist-get partial :sentence)
+                                :guard-kind guard-kind)
+                          findings))))))))
+  findings)
+
+(defun nl-ns--finding-severity (finding)
+  "Return FINDING's severity number."
+  (or (cdr (assq (plist-get finding :kind) nl-ns-finding-severities)) 6))
+
+(defun nl-ns--finding-sort-key (finding)
+  "Return a stable string sort key for FINDING."
+  (let ((subject (plist-get finding :subject)))
+    (cond
+     ((symbolp subject) (symbol-name subject))
+     ((stringp subject) subject)
+     (t (format "%S" subject)))))
+
+(defun nl-ns--sort-findings (findings)
+  "Return FINDINGS sorted by severity, kind, then subject."
+  (sort findings
+        (lambda (a b)
+          (let ((sa (nl-ns--finding-severity a))
+                (sb (nl-ns--finding-severity b)))
+            (if (/= sa sb)
+                (< sa sb)
+              (let ((ka (symbol-name (plist-get a :kind)))
+                    (kb (symbol-name (plist-get b :kind))))
+                (if (string= ka kb)
+                    (string< (nl-ns--finding-sort-key a)
+                             (nl-ns--finding-sort-key b))
+                  (string< ka kb))))))))
+
+(defun nl-ns-check (analysis &optional check-dependencies baseline)
+  "Return the findings for ANALYSIS, in severity order.
 CHECK-DEPENDENCIES additionally reports `ns-undeclared-dependency'.
-That check is off by default because a tree that has always relied on
-load order produces one finding per edge of its real dependency graph;
-turn it on when you are ready to read that graph."
-  (let ((findings nil))
+BASELINE is nil, a baseline plist, or a path accepted by
+`nl-ns-load-baseline'.  With no baseline, host-shadow findings are
+suppressed rather than guessed."
+  (let ((findings nil)
+        (baseline-data (nl-ns--coerce-baseline baseline)))
     (dolist (entry (plist-get analysis :files))
       (if (plist-get entry :unreadable)
           (setq findings
@@ -575,17 +1063,18 @@ turn it on when you are ready to read that graph."
                             :subject (plist-get entry :file)
                             :file (plist-get entry :file))
                       findings))
+        (setq findings (nl-ns--check-file-shadows-library entry baseline-data findings))
+        (setq findings (nl-ns--check-host-shadows entry baseline-data findings))
         (setq findings (nl-ns--check-prefixes entry findings))
         (setq findings (nl-ns--check-quoted-members entry findings))
         (setq findings
-              (nl-ns--check-references entry analysis check-dependencies
-                                       findings))))
+              (nl-ns--check-references entry analysis check-dependencies findings))))
     (setq findings (nl-ns--check-collisions analysis findings))
-    (nreverse findings)))
+    (nl-ns--sort-findings findings)))
 
-(defun nl-ns-check-files (paths &optional check-dependencies)
+(defun nl-ns-check-files (paths &optional check-dependencies baseline)
   "Read PATHS and return their findings.  See `nl-ns-check'."
-  (nl-ns-check (nl-ns-analyse-files paths) check-dependencies))
+  (nl-ns-check (nl-ns-analyse-files paths) check-dependencies baseline))
 
 ;;;; Reporting -----------------------------------------------------------
 
@@ -597,47 +1086,121 @@ turn it on when you are ready to read that graph."
         (setq out (cons finding out))))
     (nreverse out)))
 
+(defun nl-ns-report-max-severity (findings)
+  "Return the highest-priority severity present in FINDINGS, or 0."
+  (if (null findings)
+      0
+    (let ((best 99))
+      (dolist (finding findings)
+        (let ((severity (nl-ns--finding-severity finding)))
+          (when (< severity best)
+            (setq best severity))))
+      best)))
+
+(defun nl-ns--severity-summary (findings)
+  "Return a compact severity-count string for FINDINGS."
+  (let ((counts (make-hash-table :test 'eql))
+        (levels '(1 2 3 4 5 6))
+        (parts nil))
+    (dolist (finding findings)
+      (let* ((severity (nl-ns--finding-severity finding))
+             (old (or (gethash severity counts) 0)))
+        (puthash severity (1+ old) counts)))
+    (dolist (level levels)
+      (let ((count (gethash level counts)))
+        (when count
+          (setq parts (cons (format "%d=%d" level count) parts)))))
+    (if parts
+        (mapconcat #'identity (nreverse parts) " ")
+      "none")))
+
+(defun nl-ns--baseline-label (baseline)
+  "Return a human-readable label for BASELINE."
+  (if (null baseline)
+      "baseline none"
+    (format "baseline %s generated %s from %s"
+            (plist-get baseline :emacs-version)
+            (plist-get baseline :generated-at)
+            (plist-get baseline :source))))
+
 (defun nl-ns--describe (finding)
   "Return a one-line description of FINDING."
   (let ((kind (plist-get finding :kind))
         (subject (plist-get finding :subject)))
     (cond
+     ((eq kind 'ns-partial-override)
+      (format "ns-partial-override [sev %d]: %s defines `%s', replacing a host %s; marker %S in %S"
+              (nl-ns--finding-severity finding)
+              (plist-get finding :file) subject (plist-get finding :host-kind)
+              (plist-get finding :marker) (plist-get finding :sentence)))
+     ((eq kind 'ns-unsafe-shim-guard)
+      (format "ns-unsafe-shim-guard [sev %d]: %s defines `%s' behind %s guard%s%s"
+              (nl-ns--finding-severity finding)
+              (plist-get finding :file) subject (plist-get finding :guard-kind)
+              (if (plist-get finding :guard-source)
+                  (format " %S" (plist-get finding :guard-source))
+                "")
+              (if (plist-get finding :autoloadp)
+                  "; autoloads are real definitions, not absence"
+                "")))
+     ((eq kind 'ns-file-shadows-library)
+      (format "ns-file-shadows-library [sev %d]: %s masks host library `%s' on load-path"
+              (nl-ns--finding-severity finding)
+              (plist-get finding :file) subject))
      ((eq kind 'ns-collision)
-      (format "ns-collision: `%s' defined in %d files: %s"
+      (format "ns-collision [sev %d]: `%s' defined in %d files: %s"
+              (nl-ns--finding-severity finding)
               subject (plist-get finding :count)
               (mapconcat #'identity (plist-get finding :files) ", ")))
      ((eq kind 'ns-collision-divergent)
-      (format "ns-collision-divergent: `%s' differs in %d files: %s"
+      (format "ns-collision-divergent [sev %d]: `%s' differs in %d files: %s"
+              (nl-ns--finding-severity finding)
               subject (plist-get finding :count)
               (mapconcat #'identity (plist-get finding :files) ", ")))
      ((eq kind 'ns-prefix-violation)
-      (format "ns-prefix-violation: %s defines `%s', outside namespace `%s'"
+      (format "ns-prefix-violation [sev %d]: %s defines `%s', outside namespace `%s'"
+              (nl-ns--finding-severity finding)
               (plist-get finding :file) subject
               (plist-get finding :expected)))
      ((eq kind 'ns-private-escape)
-      (format "ns-private-escape: %s references `%s', private to %s"
+      (format "ns-private-escape [sev %d]: %s references `%s', private to %s"
+              (nl-ns--finding-severity finding)
               (plist-get finding :file) subject (plist-get finding :owner)))
      ((eq kind 'ns-undeclared-dependency)
-      (format "ns-undeclared-dependency: %s uses %s without requiring it"
+      (format "ns-undeclared-dependency [sev %d]: %s uses %s without requiring it"
+              (nl-ns--finding-severity finding)
               (plist-get finding :file) subject))
+     ((eq kind 'ns-shadows-host)
+      (format "ns-shadows-host [sev %d]: %s defines `%s', also present in the host baseline as a %s"
+              (nl-ns--finding-severity finding)
+              (plist-get finding :file) subject (plist-get finding :host-kind)))
      ((eq kind 'ns-quoted-member)
-      (format "ns-quoted-member: %s quotes member `%s' in namespace `%s'"
+      (format "ns-quoted-member [sev %d]: %s quotes member `%s' in namespace `%s'"
+              (nl-ns--finding-severity finding)
               (plist-get finding :file) subject (plist-get finding :namespace)))
      ((eq kind 'ns-unreadable)
-      (format "ns-unreadable: %s could not be read" subject))
+      (format "ns-unreadable [sev %d]: %s could not be read"
+              (nl-ns--finding-severity finding) subject))
      (t (format "%s: %s" kind subject)))))
 
-(defun nl-ns-report (findings)
-  "Return a human-readable report string for FINDINGS."
-  (if (null findings)
-      "nl-ns: no findings\n"
-    (let ((lines nil))
-      (dolist (finding findings)
-        (setq lines (cons (concat "  " (nl-ns--describe finding) "\n")
-                          lines)))
-      (apply #'concat
-             (format "nl-ns: %d finding(s)\n" (length findings))
-             (nreverse lines)))))
+(defun nl-ns-report (findings &optional baseline)
+  "Return a human-readable report string for FINDINGS.
+BASELINE is nil, a baseline plist, or a path accepted by
+`nl-ns-load-baseline'; the header reports which baseline was used."
+  (let ((baseline-data (nl-ns--coerce-baseline baseline)))
+    (if (null findings)
+        (format "nl-ns: no findings (%s)\n"
+                (nl-ns--baseline-label baseline-data))
+      (let ((lines nil))
+        (dolist (finding findings)
+          (setq lines (cons (concat "  " (nl-ns--describe finding) "\n")
+                            lines)))
+        (apply #'concat
+               (format "nl-ns: %d finding(s) | severity %s | %s\n"
+                       (length findings)
+                       (nl-ns--severity-summary findings)
+                       (nl-ns--baseline-label baseline-data))
+               (nreverse lines))))))
 
 (defun nl-ns-summary (findings)
   "Return an alist of (KIND . COUNT) for FINDINGS, most frequent first."

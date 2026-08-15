@@ -13,6 +13,28 @@ This package takes the other road.  It does *not* rewrite code, and it
 adds nothing at run time.  It reads files and reports where the
 boundaries that Elisp cannot enforce have actually been crossed.
 
+** The cl-loop failure this is meant to catch
+
+On August 15, 2026 the motivating bug was not "two files in this tree
+define the same name".  It was "a file in this tree replaced a host
+definition with one its own docstring already admitted was partial".
+
+The concrete chain was:
+
+1. =emacs-redisplay-realize-face= returned =nil=.
+2. That led to =emacs-redisplay--face-resolve-spec= returning =nil=.
+3. Its plist branch looked satisfiable, but the body was a =cl-loop=.
+4. The =cl-loop= form returned =nil= in-tree but not in a real Emacs.
+5. The in-tree =cl-loop= was a stub whose own warning said it was
+   "minimal" and "returns nil" for forms it does not recognise.
+6. =cl-lib.el= in the tree shadowed the host library, so =(require
+   'cl-lib)= never loaded the genuine implementation.
+7. The shim guard was a hand-written predicate that treated an
+   autoloaded real definition as absent and clobbered it.
+
+Every link in that chain is statically visible, which is why nl-ns now
+reports it directly instead of making a human walk it with probes.
+
 ** Why not a renaming macro
 
 The obvious library shape is =names.el='s: a =(define-namespace foo- ...)=
@@ -37,13 +59,61 @@ Same plist shape as =nl-check=: =(:kind KIND :subject S ...)=.
 
 | kind                       | meaning                                     |
 |----------------------------+---------------------------------------------|
+| =ns-partial-override=      | partial shim can replace a host definition  |
+| =ns-unsafe-shim-guard=     | host shadow behind a non-=fboundp= guard    |
+| =ns-file-shadows-library=  | file basename masks a host library          |
 | =ns-collision=             | symbol defined in more than one file        |
 | =ns-collision-divergent=   | collision whose definitions differ          |
 | =ns-prefix-violation=      | definition outside its file's namespace     |
 | =ns-private-escape=        | another file's =--= name is referenced      |
 | =ns-undeclared-dependency= | cross-file reference with no =require=      |
+| =ns-shadows-host=          | tree definition also exists in host runtime |
 | =ns-quoted-member=         | =nl-ns-in= leaves a member name as data     |
 | =ns-unreadable=            | the file could not be read                  |
+
+=ns-shadows-host= is the low-severity carrier: a tree definition whose
+name also exists in the targeted host runtime.  That is not an error by
+itself; shim modules do this on purpose.
+
+=ns-partial-override= is the important one.  It fires when a host
+shadow is also self-declared partial, based on the definition's
+docstring and on the comment lines immediately above it.  The lexicon is
+conservative and case-insensitive: =stub=, =minimal=, =subset=,
+=partial=, =simplified=, =approximation=, =unsupported=, =returns nil=,
+=does not handle=, =does not recognise= / =does not recognize=, =TODO=,
+=FIXME=, and similar warnings.  The matched sentence is quoted into the
+finding because the author already wrote the warning; nl-ns's job is to
+put it where it will be read.
+
+=ns-unsafe-shim-guard= fires when a host shadow is bare or hidden behind
+a hand-written conditional instead of =(unless (fboundp 'name) ...)= (or
+=boundp= for variables).  If the predicate text mentions =autoloadp=,
+the report says so explicitly: an autoload is the real definition, not
+evidence that the definition is absent.
+
+=ns-file-shadows-library= is file-level, one finding per file.  It
+reports the precondition that makes the above bugs invisible: when the
+tree is on =load-path=, =cl-lib.el= or =seq.el= in the tree wins before
+the genuine library can load.
+
+* Host baseline
+
+Host-shadow findings are deliberately opt-in.  nl-ns's analysis half
+must keep running on =target/nelisp=, so it cannot ask the host runtime
+questions while analysing.  Instead a host-only generator dumps a
+readable baseline and the analyser reads that data back.
+
+- The checked-in baseline is =baseline/emacs-30.1.el=.
+- Regenerate it with =make baseline=.
+- The generator is =scripts/nl-ns-dump-baseline.el= and is meant to run
+  under =emacs -Q --batch=.
+- The baseline records the Emacs version, generation date, host
+  functions, host variables, and library basenames reachable on
+  =load-path=, including autoloaded definitions.
+
+With no baseline, nl-ns emits none of =ns-partial-override=,
+=ns-unsafe-shim-guard=, =ns-file-shadows-library=, or
+=ns-shadows-host=.  No baseline never means guesses.
 
 * Zero configuration
 
@@ -74,9 +144,11 @@ analysed as it stands.
 #+begin_src elisp
 (require 'nl-ns)
 
-(let ((findings (nl-ns-check-files (file-expand-wildcards "lisp/*.el"))))
-  (princ (nl-ns-report findings))
-  (nl-ns-summary findings))          ; => ((ns-collision . 12) ...)
+(let ((baseline "packages/nl-ns/baseline/emacs-30.1.el")
+      (paths (file-expand-wildcards "lisp/*.el")))
+  (let ((findings (nl-ns-check-files paths nil baseline)))
+    (princ (nl-ns-report findings))
+    (nl-ns-summary findings)))       ; => ((ns-collision . 12) ...)
 #+end_src
 
 Analysis and checking are separate from file I/O, so the pass also runs
@@ -88,6 +160,28 @@ on forms you already have:
                   ("b.el" (defalias 'eql 'equal)))))
 ;; => ((:kind ns-collision :subject eql :files ("a.el" "b.el") :count 2))
 #+end_src
+
+The report header says which baseline was used and prints a one-line
+severity summary first, for example =severity 1=1 2=1 3=1 6=1=.  That is
+intentional: on a noisy tree, the first question is not "how many
+findings exist?" but "is there anything in severities 1-3 at all?".
+
+* Severity and gating
+
+Each finding kind has a fixed severity, and the report is sorted by it:
+
+| severity | kinds |
+|----------+-------|
+|        1 | =ns-partial-override= |
+|        2 | =ns-unsafe-shim-guard= |
+|        3 | =ns-file-shadows-library= |
+|        4 | =ns-collision-divergent= |
+|        5 | =ns-private-escape=, =ns-prefix-violation=, =ns-undeclared-dependency= |
+|        6 | =ns-collision=, =ns-shadows-host=, =ns-quoted-member=, =ns-unreadable= |
+
+=nl-ns-report-max-severity= returns the highest-priority severity present
+or 0 for a clean run.  A build gate can therefore fail on severities
+1-3 only without treating every benign shim as an error.
 
 * What it finds in this tree today
 
@@ -133,6 +227,11 @@ nobody scheduled.
 always relied on load order produces one finding per edge of its real
 dependency graph — worth reading once, useless as a threshold.  Pass a
 non-nil second argument to =nl-ns-check= to see it.
+
+For host-shadow findings, use =nl-ns-report-max-severity=: it lets a
+gate fail on =ns-partial-override=, =ns-unsafe-shim-guard=, and
+=ns-file-shadows-library= while leaving plain =ns-shadows-host= as
+informational noise.
 
 * Limits
 

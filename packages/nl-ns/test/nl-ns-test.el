@@ -19,10 +19,48 @@
 
 ;;; Helpers ------------------------------------------------------------
 
-(defun nl-ns-test--check (entries &optional deps)
+(defconst nl-ns-test--package-root-directory
+  (expand-file-name ".." (file-name-directory
+                          (or load-file-name buffer-file-name)))
+  "Package root, resolved while this file is being loaded.
+`load-file-name' is bound during load and nil by the time a test body
+runs, so resolving it on demand yields nil and every path built from
+it fails with `wrong-type-argument stringp nil'.")
+
+(defun nl-ns-test--package-root ()
+  "Return the package root directory."
+  nl-ns-test--package-root-directory)
+
+(defun nl-ns-test--baseline-file ()
+  "Return the checked-in baseline path."
+  (expand-file-name "baseline/emacs-30.1.el" (nl-ns-test--package-root)))
+
+(defun nl-ns-test--mini-baseline ()
+  "Return a tiny in-memory baseline for host-shadow tests."
+  (list :source "test baseline"
+        :emacs-version "30.1"
+        :generated-at "2026-08-15"
+        :functions (nl-ns--list-to-set '(cl-loop))
+        :variables (nl-ns--list-to-set '(emacs-version))
+        :libraries (nl-ns--list-to-set '("cl-lib"))))
+
+(defun nl-ns-test--fixture (&rest parts)
+  "Return fixture path under test/fixtures."
+  (let ((path (expand-file-name "test/fixtures" (nl-ns-test--package-root))))
+    (while parts
+      (setq path (expand-file-name (car parts) path))
+      (setq parts (cdr parts)))
+    path))
+
+(defun nl-ns-test--check (entries &optional deps baseline)
   "Analyse ENTRIES and return the findings."
   (nl-ns-clear-declarations)
-  (nl-ns-check (nl-ns-analyse entries) deps))
+  (nl-ns-check (nl-ns-analyse entries) deps baseline))
+
+(defun nl-ns-test--check-files (paths &optional deps baseline)
+  "Read PATHS and return findings."
+  (nl-ns-clear-declarations)
+  (nl-ns-check-files paths deps baseline))
 
 (defun nl-ns-test--kinds (entries &optional deps)
   "Return the finding kinds for ENTRIES, in order."
@@ -168,6 +206,82 @@
                                (defun eql (a b) (eq a b))))))))
     (should (= (length (nl-ns-findings-of-kind
                         findings 'ns-collision-divergent)) 1))))
+
+;;; Host shadow baseline findings --------------------------------------
+
+(ert-deftest nl-ns-host-shadow-findings-need-a-baseline ()
+  (let ((findings (nl-ns-test--check
+                   '(("cl-lib.el"
+                      (defun cl-loop (&rest forms)
+                        "Stub: minimal cl-loop supporting subset forms; returns nil for others."
+                        nil))))))
+    (should-not (nl-ns-findings-of-kind findings 'ns-shadows-host))
+    (should-not (nl-ns-findings-of-kind findings 'ns-partial-override))
+    (should-not (nl-ns-findings-of-kind findings 'ns-unsafe-shim-guard))
+    (should-not (nl-ns-findings-of-kind findings 'ns-file-shadows-library))))
+
+(ert-deftest nl-ns-host-shadow-unsafe-fixture-fires-all-four-findings ()
+  (let* ((baseline (nl-ns-test--baseline-file))
+         (findings
+          (nl-ns-test--check-files
+           (list (nl-ns-test--fixture "shadow-unsafe" "cl-lib.el"))
+           nil baseline)))
+    (should (equal (mapcar #'nl-ns--finding-severity findings) '(1 2 3 6)))
+    (should (equal (mapcar (lambda (finding) (plist-get finding :kind)) findings)
+                   '(ns-partial-override ns-unsafe-shim-guard
+                     ns-file-shadows-library ns-shadows-host)))
+    (let ((partial (car findings)))
+      (should (eq (plist-get partial :subject) 'cl-loop))
+      ;; The docstring carries several markers; the reported one is the
+      ;; first marker of the first sentence that has any, so it is
+      ;; "minimal" rather than the "returns nil" further along.
+      (should (equal (plist-get partial :marker) "minimal"))
+      (should (string-match "Stub: minimal cl-loop" (plist-get partial :sentence))))
+    (let ((guard (car (cdr findings))))
+      (should (eq (plist-get guard :guard-kind) 'custom))
+      (should (plist-get guard :autoloadp))
+      (should (string-match "autoloadp" (plist-get guard :guard-source))))
+    (should (= (nl-ns-report-max-severity findings) 1))))
+
+(ert-deftest nl-ns-host-shadow-safe-fixture-stays-at-severity-six ()
+  (let* ((baseline (nl-ns-test--baseline-file))
+         (findings
+          (nl-ns-test--check-files
+           (list (nl-ns-test--fixture "shadow-safe" "safe-loop.el"))
+           nil baseline)))
+    (should (equal (mapcar (lambda (finding) (plist-get finding :kind)) findings)
+                   '(ns-shadows-host)))
+    (should (= (nl-ns-report-max-severity findings) 6))))
+
+(ert-deftest nl-ns-host-shadow-comment-inside-wrapper-counts-as-partial-evidence ()
+  "A marker in a comment must count even when the docstring is silent.
+The fixture's warning sits in a comment that a `when' wrapper has
+pushed away from the top level, which is where real shims put it, and
+its docstring says nothing about being partial.  Reading a file rather
+than hand-building analyser records is deliberate: the hand-built
+version of this test passed metadata the analyser never produces and
+so proved nothing about the real path."
+  (let* ((baseline (nl-ns-test--baseline-file))
+         (findings
+          (nl-ns-test--check-files
+           (list (nl-ns-test--fixture "shadow-comment" "cl-lib.el"))
+           nil baseline)))
+    (should (equal (mapcar (lambda (finding) (plist-get finding :kind)) findings)
+                   '(ns-partial-override ns-unsafe-shim-guard
+                     ns-file-shadows-library ns-shadows-host)))
+    (let ((partial (car findings)))
+      (should (eq (plist-get partial :subject) 'cl-loop))
+      (should (equal (plist-get partial :marker) "returns nil"))
+      (should (string-match "returns nil for others"
+                            (plist-get partial :sentence))))))
+
+(ert-deftest nl-ns-load-baseline-reads-metadata ()
+  (let ((baseline (nl-ns-load-baseline (nl-ns-test--baseline-file))))
+    (should (equal (plist-get baseline :emacs-version) "30.1"))
+    (should (equal (plist-get baseline :generated-at) "2026-08-15"))
+    (should (gethash 'cl-loop (plist-get baseline :functions)))
+    (should (gethash 'emacs-version (plist-get baseline :variables)))
+    (should (gethash "cl-lib" (plist-get baseline :libraries)))))
 
 (ert-deftest nl-ns-collision-divergent-with-three-definers ()
   (let ((findings (nl-ns-test--check
@@ -342,7 +456,8 @@
 ;;; Reporting ------------------------------------------------------------
 
 (ert-deftest nl-ns-report-of-nothing ()
-  (should (equal (nl-ns-report nil) "nl-ns: no findings\n")))
+  (should (equal (nl-ns-report nil)
+                 "nl-ns: no findings (baseline none)\n")))
 
 (ert-deftest nl-ns-report-lists-each-finding ()
   (let ((report (nl-ns-report
@@ -353,6 +468,18 @@
     (should (string-match "ns-collision" report))
     (should (string-match "a.el" report))
     (should (string-match "b.el" report))))
+
+(ert-deftest nl-ns-report-includes-baseline-and-severity-summary ()
+  (let* ((baseline (nl-ns-test--baseline-file))
+         (findings
+          (nl-ns-test--check-files
+           (list (nl-ns-test--fixture "shadow-unsafe" "cl-lib.el"))
+           nil baseline))
+         (report (nl-ns-report findings baseline)))
+    (should (string-match "severity 1=1 2=1 3=1 6=1" report))
+    (should (string-match "baseline 30.1 generated 2026-08-15" report))
+    (should (string-match "ns-partial-override" report))
+    (should (string-match "minimal" report))))
 
 (ert-deftest nl-ns-report-describes-quoted-members ()
   (let ((report (nl-ns-report
