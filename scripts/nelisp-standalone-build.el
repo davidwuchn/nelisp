@@ -660,13 +660,17 @@ cross-unit call) before the freed payload is poisoned."
     ;; Redzone verify on free (called from `nl_gc_free_block_link'
     ;; BEFORE poison-on-free overwrites the suffix).  Armed only via
     ;; the boot env probe, so every freed block carries a guard; the
-    ;; bt < 32 escape is belt-and-suspenders (a checked block's minimum
-    ;; BT is 8 + 8 + 16 = 32).  A corrupted guard bumps the violation
-    ;; counter and records the first bad header for the report.
+    ;; bt < 24 escape is belt-and-suspenders.  A checked block's
+    ;; minimum BT is 24: a 0-byte request pads to 16 payload bytes
+    ;; (guard + site fill it exactly) and `nl_block_total' adds the
+    ;; 8-byte header.  (An earlier bt < 32 escape wrongly skipped
+    ;; verification for that whole size class.)  A corrupted guard
+    ;; bumps the violation counter and records the first bad header
+    ;; for the report.
     (defun nl_alloc_check_verify (hdr)
       (if (= (ptr-read-u64 (data-addr nl_alloc_check) 8) 0) 0
         (let ((bt (nl_hdr_bt hdr)))
-          (if (< bt 32) 0
+          (if (< bt 24) 0
             (seq
              (ptr-write-u64 (data-addr nl_alloc_check) 56
                             (+ (ptr-read-u64 (data-addr nl_alloc_check) 56) 1))
@@ -3760,6 +3764,15 @@ unresolved at link time."
           (seq
            (ptr-write-u64 (data-addr nl_alloc_check) 0 1)
            (ptr-write-u64 (data-addr nl_gc_diag) 32 1)
+           ;; Fresh measurement window per enable: zero the statistics
+           ;; (violations, first-bad-hdr, checked-allocs, verified-
+           ;; frees) so a report after re-enable reflects only the
+           ;; current window.  The generation counter (offset 16) is
+           ;; deliberately kept: live blocks carry stamped generations.
+           (ptr-write-u64 (data-addr nl_alloc_check) 32 0)
+           (ptr-write-u64 (data-addr nl_alloc_check) 40 0)
+           (ptr-write-u64 (data-addr nl_alloc_check) 48 0)
+           (ptr-write-u64 (data-addr nl_alloc_check) 56 0)
            0)
         (if (= (wf_argval args 0) 20)
             (seq
