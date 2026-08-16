@@ -59,7 +59,7 @@ file when a comment is added is the same finding."
   "Return (KEY . (FILE FINDING)) for every gated finding in the tree."
   (let ((out nil))
     (dolist (file (nl-check-gate--files))
-      (dolist (finding (condition-case nil (nl-check-file file) (error nil)))
+      (dolist (finding (condition-case nil (nl-check-file-expanded file) (error nil)))
         (when (memq (plist-get finding :kind) nl-check-gate-kinds)
           (setq out (cons (cons (nl-check-gate--key file finding)
                                 (list file finding))

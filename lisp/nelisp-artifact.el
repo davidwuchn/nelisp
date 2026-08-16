@@ -1773,9 +1773,9 @@ happens cannot change what is emitted."
   ;; of a hard dependency on a package Doc 170 section 10 says nothing
   ;; may depend on.
   (require 'nl-check nil t)
-  (when (fboundp 'nl-check-forms)
+  (when (fboundp 'nl-check-expanded-forms)
     (let ((bad nil))
-      (dolist (finding (nl-check-forms forms))
+      (dolist (finding (nl-check-expanded-forms forms))
         (when (memq (plist-get finding :kind) nelisp-artifact-check-kinds)
           (setq bad (cons finding bad))))
       (when bad

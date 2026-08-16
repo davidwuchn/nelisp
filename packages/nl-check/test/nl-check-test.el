@@ -272,6 +272,79 @@ unsafe-inventory scan of lisp/nelisp-stdlib-os.el)."
                   (unwind-protect (f . 9) (g . 9))
                   (f (g . 9) . 9)))
     (should (listp (nl-check-form form)))))
+;;;; Checking after expansion (the MIR position)
+
+(ert-deftest nl-check-expansion-finds-a-leak-a-reader-cannot-see ()
+  "A leak that exists only after a macro expands must be reported.
+Read-level checking sees `(m-acquire 3)' -- an ordinary call, with no
+resource in sight -- so the violation goes by unreported.  This is why
+Rust checks borrows on MIR rather than on surface syntax: sugar can
+hide a violation from anything that reads the sugar."
+  (nl-check-test--register)
+  (let* ((forms '((defmacro nl-check-test--m-acquire (n)
+                    `(let ((r (nl-resource 'test-fd ,n)))
+                       (nl-resource-handle r)))
+                  (defun nl-check-test--m-user ()
+                    (nl-check-test--m-acquire 3))))
+         (before (mapcar (lambda (f) (plist-get f :kind))
+                         (nl-check-forms forms)))
+         (after (mapcar (lambda (f) (plist-get f :kind))
+                        (nl-check-expanded-forms forms))))
+    (should-not (memq 'resource-leak before))
+    (should (memq 'resource-leak after))))
+
+(ert-deftest nl-check-expansion-keeps-a-correct-macro-clean ()
+  "The same shape, with the expansion dropping, must stay clean."
+  (nl-check-test--register)
+  (should-not
+   (nl-check-expanded-forms
+    '((defmacro nl-check-test--m-with (n &rest body)
+        `(let ((r (nl-resource 'test-fd ,n)))
+           (prog1 (progn ,@body)
+             (nl-drop r))))
+      (defun nl-check-test--m-ok ()
+        (nl-check-test--m-with 3 42))))))
+
+(ert-deftest nl-check-expansion-does-not-define-the-macro-globally ()
+  "A file's macros go into a local environment, not into this Emacs.
+Checking a file must not be able to change the process doing the
+checking."
+  (nl-check-test--register)
+  (nl-check-expanded-forms
+   '((defmacro nl-check-test--m-should-not-exist (n) `(list ,n))))
+  (should-not (fboundp 'nl-check-test--m-should-not-exist)))
+
+(ert-deftest nl-check-expansion-passes-through-an-unexpandable-form ()
+  "One confusing form must not cost the answer for the whole file."
+  (nl-check-test--register)
+  (should (equal (nl-check-expand-forms '((quote (1 . 2))))
+                 '((quote (1 . 2))))))
+
+;;;; Backquote templates are data
+
+(ert-deftest nl-check-macro-template-is-not-code ()
+  "A resource `let' inside a `defmacro' template must not be reported.
+The template is what the macro OUTPUTS; nothing there runs at the
+definition site.  Walking it reported a leak in every macro that builds
+one, and said nothing about the expansion where the resource actually
+appears -- a false alarm standing exactly where the real answer should
+have been."
+  (nl-check-test--register)
+  (should-not (nl-check-test--kinds
+               '(defmacro nl-check-test--acquire (n)
+                  `(let ((r (nl-resource 'test-fd ,n)))
+                     (nl-resource-handle r))))))
+
+(ert-deftest nl-check-unquote-position-is-still-code ()
+  "`,' and `,@' put live code into a template, and it must be walked."
+  (nl-check-test--register)
+  (should (equal (nl-check-test--kinds
+                  '(defmacro nl-check-test--wrap ()
+                     `(progn
+                        ,(let ((r (nl-resource 'test-fd 1)))
+                           (nl-resource-handle r)))))
+                 '(resource-leak))))
+
 
 (provide 'nl-check-test)
 

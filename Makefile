@@ -1,4 +1,4 @@
-.PHONY: unsafe-inventory ns-inventory ns-gate nl-check-gate parens-check test test-fast test-parallel test-one wasm-smoke wasm-runtime-image-smoke wasm-dtw-skeleton-smoke wasm-dtw-transpile wasm-dtw-compile wasm-dtw-smoke wasm-dtw-site wasm-dtw-site-smoke compile clean all bench bench-aot-tco gc-bench actor-bench soak soak-1h soak-full soak-worker \
+.PHONY: unsafe-inventory ns-inventory ns-gate nl-check-gate jit-unverified parens-check test test-fast test-parallel test-one wasm-smoke wasm-runtime-image-smoke wasm-dtw-skeleton-smoke wasm-dtw-transpile wasm-dtw-compile wasm-dtw-smoke wasm-dtw-site wasm-dtw-site-smoke compile clean all bench bench-aot-tco gc-bench actor-bench soak soak-1h soak-full soak-worker \
         sqlite-module sqlite-module-clean \
         release-artifact release-checksum soak-blocker soak-post-ship \
         bench-actual bench-allocator bench-allocator-heavy \
@@ -169,6 +169,15 @@ wasm-dtw-site-smoke: wasm-dtw-site
 nl-check-gate:
 	$(EMACS) --batch -Q -L packages/nl-prelude/src -L packages/nl-safe/src \
 	  -L packages/nl-check/src -l scripts/nl-check-gate.el
+
+# Reports how many bodies reached the JIT, and how many of those carried
+# a finding.  The JIT is the one place code arrives that no build step
+# saw, so this is the measurement behind "nothing executes unverified".
+# It does not gate; it prints.  Turning `count' on costs a walk of every
+# body the JIT sees, which is why it is not the default policy.
+jit-unverified:
+	$(MAKE) test-fast \
+	  EMACS="$(EMACS) -l scripts/nelisp-jit-unverified.el"
 
 compile: nl-check-gate
 	$(EMACS) --batch -Q -L src \

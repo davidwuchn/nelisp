@@ -77,7 +77,15 @@ deliberate discard in `ignore' to silence it, the way Rust uses
 
 (defconst nl-check--resource-observers
   '(nl-resource-handle nl-resource-handle-unchecked nl-resource-live-p
-    nl-resource-type nl-resource-p nl-drop nl-forget)
+    nl-resource-type nl-resource-p nl-drop nl-forget
+    ;; `ignore' is the sanctioned "I am deliberately not using this",
+    ;; the same role `let _ =' plays in Rust, and this file already
+    ;; treats it that way for must-use.  It takes nothing: reading it as
+    ;; a move reported every body of `nl-with-resource' -- the RAII
+    ;; macro whose whole purpose is to get the drop right -- as an
+    ;; untracked resource, once the checks started looking through
+    ;; expansion and could see the `(ignore r)' inside.
+    ignore)
   "Calls that inspect or consume a resource without moving ownership.
 Passing a tracked resource to anything else is treated as a move and
 reported as `resource-untracked'.")
@@ -102,6 +110,37 @@ this."
                  (consp (car (cdr form)))
                  (eq (car (car (cdr form))) 'lambda)))))
 
+(defun nl-check--backquote-p (form)
+  "Return non-nil when FORM is a backquote template."
+  (and (consp form) (memq (car form) '(\` backquote))))
+
+(defun nl-check--unquoted (template acc)
+  "Collect TEMPLATE's unquote-position forms onto ACC.
+A backquote template is data except where `,' and `,@' put live code,
+so those are the only parts a checker may walk.  Walking the whole
+template treats a macro's output as if it ran at the definition site --
+which reported a resource `let' inside every `defmacro' that builds
+one, and, worse, said nothing about the expansion where the resource
+actually appears."
+  (cond
+   ((not (consp template)) acc)
+   ((memq (car template) '(\, \,@ unquote unquote-splicing))
+    (cons (car (cdr template)) acc))
+   (t
+    (let ((rest template))
+      (while (consp rest)
+        (setq acc (nl-check--unquoted (car rest) acc))
+        (setq rest (cdr rest)))
+      acc))))
+
+(defun nl-check--live-parts (form)
+  "Return the parts of FORM a walker should treat as code.
+For a backquote template that is its unquote positions; for anything
+else it is the form itself."
+  (if (nl-check--backquote-p form)
+      (nreverse (nl-check--unquoted (car (cdr form)) nil))
+    (list form)))
+
 (defun nl-check--body-of (form)
   "Return (BODY . VALUE-INDEX) description for FORM, or nil.
 BODY is the list of forms evaluated in sequence; every element but the
@@ -123,6 +162,9 @@ STATEMENT-P is non-nil when FORM's value is discarded."
   (cond
    ((not (consp form)) findings)
    ((nl-check--quoted-p form) findings)
+   ((nl-check--backquote-p form)
+    (dolist (part (nl-check--live-parts form) findings)
+      (setq findings (nl-check--must-use-scan part t findings))))
    ;; `ignore' is the sanctioned discard, like Rust's `let _ ='.
    ((eq (car form) 'ignore) findings)
    (t
@@ -217,6 +259,8 @@ resource observers, counts as an escape (Doc 170 section 6.3)."
   (cond
    ((not (consp form)) nil)
    ((nl-check--quoted-p form) nil)
+   ((nl-check--backquote-p form)
+    (nl-check--escapes-seq (nl-check--live-parts form) var))
    ((memq (car form) '(lambda closure))
     (nl-check--mentions-p (cdr form) var))
    ((and (eq (car form) 'function) (consp (car (cdr form))))
@@ -274,6 +318,8 @@ its body more than once."
   (cond
    ((not (consp form)) 0)
    ((nl-check--quoted-p form) 0)
+   ((nl-check--backquote-p form)
+    (nl-check--consumes-seq (nl-check--live-parts form) var))
    ((and (memq (car form) '(nl-drop nl-forget))
          (eq (car (cdr form)) var))
     1)
@@ -317,6 +363,9 @@ its body more than once."
   (cond
    ((not (consp form)) findings)
    ((nl-check--quoted-p form) findings)
+   ((nl-check--backquote-p form)
+    (dolist (part (nl-check--live-parts form) findings)
+      (setq findings (nl-check--resource-scan part findings))))
    (t
     (when (memq (car form) '(let let*))
       (let ((body (cdr (cdr form))))
@@ -396,6 +445,48 @@ its body more than once."
         (setq all (cons finding all))))
     (nreverse all)))
 
+(defun nl-check-expand-forms (forms)
+  "Return FORMS macroexpanded, so the checks see what will run.
+
+Reading is not enough.  A macro that expands into a resource `let'
+hides the resource from a reader-level check completely -- the caller
+looks like an ordinary call -- so a violation that exists only after
+expansion goes by unreported.  This is the position Rust checks borrows
+at: on MIR, after `for' and `?' and closures have been lowered, rather
+than on the surface syntax where a violation can hide behind sugar.
+
+A `defmacro' in FORMS is added to a LOCAL expansion environment rather
+than evaluated, so a file's own macros are visible to the forms after
+them without this having any effect on the running Emacs.  Macros that
+are neither local nor already loaded stay unexpanded; `macroexpand-all'
+leaves an unknown head alone, so the result is a check that sees less
+rather than one that is wrong.
+
+A form that cannot be expanded is passed through unchanged: refusing to
+check the rest of a file because one form confused the expander would
+trade a complete answer for no answer."
+  (let ((environment nil)
+        (out nil))
+    (dolist (form forms)
+      (when (and (consp form)
+                 (eq (car form) 'defmacro)
+                 (symbolp (car (cdr form)))
+                 (consp (cdr (cdr form))))
+        (setq environment
+              (cons (cons (car (cdr form))
+                          (cons 'lambda (cdr (cdr form))))
+                    environment)))
+      (setq out
+            (cons (condition-case nil
+                      (macroexpand-all form environment)
+                    (error form))
+                  out)))
+    (nreverse out)))
+
+(defun nl-check-expanded-forms (forms)
+  "Return the findings for FORMS after `nl-check-expand-forms'."
+  (nl-check-forms (nl-check-expand-forms forms)))
+
 (defun nl-check-file (path)
   "Read PATH and return the findings for every top-level form in it.
 Reading only; nothing from PATH is evaluated."
@@ -412,6 +503,29 @@ Reading only; nothing from PATH is evaluated."
                 (setq done t)
               (setq forms (cons form forms)))))))
     (nl-check-forms (nreverse forms))))
+
+(defun nl-check-file-forms (path)
+  "Read PATH and return its top-level forms.  Nothing is evaluated."
+  (let ((forms nil))
+    (with-temp-buffer
+      (insert-file-contents path)
+      (goto-char (point-min))
+      (let ((done nil))
+        (while (not done)
+          (let ((form (condition-case nil
+                          (read (current-buffer))
+                        (end-of-file 'nl-check--eof))))
+            (if (eq form 'nl-check--eof)
+                (setq done t)
+              (setq forms (cons form forms)))))))
+    (nreverse forms)))
+
+(defun nl-check-file-expanded (path)
+  "Return the findings for PATH after macro expansion.
+The same depth the artifact path checks at.  Two checkpoints that
+disagree about how deep to look are worse than one, because the shallow
+one reports success on what the deep one would reject."
+  (nl-check-expanded-forms (nl-check-file-forms path)))
 
 ;;;; Reporting ---------------------------------------------------------
 
