@@ -402,6 +402,14 @@ Rust LOC 増加はゼロ（全 phase が elisp のみ。Doc 137 invariants の
 - *相互再帰の AOT 変換*（§3.2。=nl-trampoline= L1 に委譲）
 - *一般末尾呼び出し*（§3.3。Doc 90 送り）
 - *interpreter 経路の TCO*: =rec_max= ガード（§2.4)はそのまま。
+  *実測更新 (2026-08-16)*: そのガードは長らく **到達不能** だった。
+  =rec_max= 300000 が 1 GiB eval スタックの実上限（約 136k rec レベル、
+  自己再帰 elisp 関数で深さ 65000 成功 / 72000 SIGSEGV）を上回っており、
+  深い再帰は =excessive-lisp-nesting= ではなく無言の exit 127 で死んで
+  いた。=rec_max= を実測上限の ~74% = 100000 に再校正し、
+  =make standalone-reader-recursion-guard-smoke= で回帰を固定した。
+  到達可能深度は ~68000 → ~50000。上限そのものの引き上げは引き続き本
+  Doc のスコープ外。
   eval core の while 化は別議論
 - *bytecode VM への TCO*: byte-compile 系は STUB であり本 Doc の対象外
 - *案 B の関数セルガード*（§4.3。AOT が遅延束縛化した将来にのみ再評価）
