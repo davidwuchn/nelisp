@@ -4098,6 +4098,41 @@ helpers and the array access each contributed an Elisp-name relocation."
       (should (member "dc-rel" off))
       (should (equal (nelisp-aot-compiler-test--unbridgeable-externs on) nil)))))
 
+(ert-deftest nelisp-aot-compiler-dynamic-calln-cap-matches-the-provider ()
+  "The emitted argument count cannot exceed what the reader can read.
+`nelisp_aot_builtin_calln' takes its user arguments off the stack and
+reads only the parameters it declares.  Nothing links the compiler's cap
+to the provider's declaration at build time, so a drift here would ship
+units that load and then read uninitialised stack."
+  (require 'nelisp-cc-evalport-aot-builtin-calln)
+  (should (= nelisp-aot-compiler--dynamic-calln-max-args
+             nelisp-cc-evalport-aot-builtin-calln--max-args))
+  ;; And the provider really declares that many, not merely name the
+  ;; number: the parameter list is what the ABI depends on.
+  (let ((params (nth 2 nelisp-cc-evalport-aot-builtin-calln--source)))
+    (should (equal (seq-take params 6)
+                   '(mirror frames name argc out scratch)))
+    (should (= (- (length params) 6)
+               nelisp-cc-evalport-aot-builtin-calln--max-args))))
+
+(ert-deftest nelisp-aot-compiler-dynamic-calln-refuses-an-unreadable-call ()
+  "Over the cap the compiler signals instead of emitting a truncated call."
+  (let ((nelisp-aot-compiler--dynamic-user-calls t)
+        (over (1+ nelisp-aot-compiler--dynamic-calln-max-args)))
+    (should-error
+     (nelisp-aot-compiler--parse-aot-builtinn-call
+      (cons 'dc-wide (make-list over 0)) nil nil nil)
+     :type 'nelisp-aot-compiler-error))
+  ;; The cap binds only the dynamic lowering: the host runtime takes the
+  ;; arguments with `&rest', so the default path must stay unrestricted.
+  ;; A boundary-less fenv fails for its own reason, never for the cap.
+  (let* ((nelisp-aot-compiler--dynamic-user-calls nil)
+         (over (1+ nelisp-aot-compiler--dynamic-calln-max-args))
+         (err (should-error
+               (nelisp-aot-compiler--parse-aot-builtinn-call
+                (cons 'dc-wide (make-list over 0)) nil nil nil))))
+    (should-not (eq (cadr err) :dynamic-calln-too-many-args))))
+
 (provide 'nelisp-aot-compiler-test)
 
 ;;; nelisp-aot-compiler-test.el ends here

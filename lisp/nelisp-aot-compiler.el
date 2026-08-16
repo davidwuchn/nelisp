@@ -291,6 +291,18 @@ through it therefore resolves ordinary Elisp functions and leaves the
 unit's extern set closed over the C runtime symbols, which is what a
 dynamic loader can bridge.")
 
+(defconst nelisp-aot-compiler--dynamic-calln-max-args 8
+  "User arguments a calln call may carry when lowering for dynamic load.
+The standalone reader's `nelisp_aot_builtin_calln' provider reads the
+arguments past the six fixed ABI slots off the stack, and can only read
+the ones it declares.  Refusing to emit a longer call keeps a unit that
+compiles a unit the reader can actually run, instead of one that loads
+and then reads whatever happened to be on the stack.
+
+Kept in step with `nelisp-cc-evalport-aot-builtin-calln--max-args'; the
+two are asserted equal by the test suite because nothing links them at
+build time.")
+
 (defconst nelisp-aot-compiler--external-user-call-reserved-ops
   '(quote function lambda progn seq
     if while cond and or let let*
@@ -4520,6 +4532,18 @@ caller-owned boundary params in the current defun:
 (defun nelisp-aot-compiler--parse-aot-builtinn-call
     (sexp env fenv defuns)
   "Lower a direct vararg builtin call SEXP through the AOT dispatcher."
+  (when (and nelisp-aot-compiler--dynamic-user-calls
+             (> (length (cdr sexp))
+                nelisp-aot-compiler--dynamic-calln-max-args))
+    ;; Fail here rather than emit a call the reader's provider cannot
+    ;; read to the end.  The host runtime takes the arguments with
+    ;; `&rest' and has no such limit, so this only binds the dynamic
+    ;; lowering.
+    (signal 'nelisp-aot-compiler-error
+            (list :dynamic-calln-too-many-args
+                  :call (car sexp)
+                  :argc (length (cdr sexp))
+                  :max nelisp-aot-compiler--dynamic-calln-max-args)))
   (let* ((builtin (car sexp))
          (args (cdr sexp))
          (argc (length args))
