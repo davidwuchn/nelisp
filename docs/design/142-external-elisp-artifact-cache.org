@@ -424,6 +424,85 @@ Future implementation target after bytecode module artifacts are reliable.
 - Do not make native artifacts the only cache lane; bytecode remains the
   portable fallback for faster development loops across targets.
 
+*** 6.4.1 In-process loader (SHIPPED 2026-08-16)
+
+=lisp/nelisp-native-load.el= reads a =.neln= at run time and executes its
+native code inside the running reader: no linker, no =cc=, no subprocess.
+=make neln-loader-test= compiles artifacts and has the reader call them.
+
+The predecessor was a demo.  =--neln-selftest= mapped and ran one function
+whose bytes and extern addresses were baked into the reader at build time, so
+nothing about it varied.  Making it general is what surfaced three defects that
+a single-call, literal-free, 122-byte demo never reached (see §6.4.3).
+
+What it does, given a path and a name:
+
+1. read the artifact -- a =;;;= header line and one plist -- and take
+   =:native='s text, relocations and defun metadata;
+2. mmap a code page sized to the text plus one 16-byte stub per extern, and a
+   page for the boundary slots;
+3. copy the text, lay the stubs after it 16-byte aligned, point each stub at
+   its runtime symbol, patch each plt32 relocation at its stub;
+4. build a trampoline for this defun's arity and slot count, fill the boundary
+   slots, enter the body past its prologue;
+5. box the arguments, =ptr-call= the trampoline, unbox the result.
+
+It is interpreted elisp.  The reader already exposed =syscall-direct= (mmap),
+the pointer accessors, =alloc-bytes= and =ptr-call=; the loader added two
+builtins and no other AOT-surface code:
+
+- =nelisp--native-symbol-addr INDEX= -- a runtime symbol's address.  =data-addr=
+  is a compile-time form, so the addresses come from a chain fixed when the
+  reader is built and are selected by index.  The index is the contract; a test
+  asserts the loader's symbol list matches the reader's, in order.
+- =nelisp--native-env= -- the environment pointer the boundary calls =frames=.
+  The demo took it from the CLI dispatcher's =ctx=, a local nothing interpreted
+  can reach.  =nelisp_apply_function= receives the same pointer as =env= and
+  every dispatch arm runs inside it, so the arm hands it back.
+
+*** 6.4.2 Two calling conventions, not recorded in the artifact
+
+A defun either takes Sexp pointers and returns through =out=, or takes raw i64
+and returns in =rax=.  The metadata does not say which -- =param-class= is =gp=
+for both -- and the CLI decides by trying the integer call and falling back.
+That is not available in-process: a wrong guess corrupts rather than errors.
+
+Measured, on =add3= = =(+ a (+ b c))= with no externs, and =inc1= = =(1+ x)=:
+
+| defun | raw arguments | boxed arguments      |
+|-------+---------------+----------------------|
+| add3  | rax = 6       | 406962619651776      |
+| inc1  | --            | out tag=2 value=42   |
+
+So the loader derives it: reaching the boxed boundary means calling through it,
+and every such call leaves an extern behind.  No externs means the integer ABI.
+Being wrong here is silent arithmetic on the wrong values, so a caller that
+knows better overrides =:abi= in the handle.
+
+*** 6.4.3 Limits, stated rather than discovered
+
+Refused before anything is mapped, by =nelisp-native-load-check=:
+
+- non-x86_64 artifacts, and defuns whose =param-class= is not =gp=;
+- arity past six -- the trampoline passes arguments in registers;
+- externs outside =nelisp-native-load-bridgeable-symbols=.
+
+Refused at the boxing boundary:
+
+- floats.  The payload is raw f64 bits; returning the bit pattern as an integer
+  would be a wrong answer rather than a missing one.
+- strings with a character past 255.  The runtime stores strings UTF-8
+  internally, so writing the low byte would hand it a different string.
+
+That UTF-8 representation also cost a debugging round: =base64-decode-string=
+returns a string whose bytes over 127 are UTF-8 encoded, so =string-byte= walks
+the encoding and the text reached the code page with 137 arriving as 194 137.
+=aref= indexes characters, which for a byte string is the byte.
+
+Not yet done: unmapping (a loaded function stays callable for the life of the
+process, which is what a cache wants), and the §6.4 bullets above about ABI /
+target-triple / hash validation on load, which remain future work.
+
 ** 6.5 Auto artifact
 
 Build tools can request =--kind auto=.  The compiler chooses the best supported
