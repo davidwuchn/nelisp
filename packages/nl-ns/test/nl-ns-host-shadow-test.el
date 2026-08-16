@@ -13,7 +13,11 @@
 
 (require 'ert)
 (require 'nl-ns)
-(require 'nl-ns-test)
+;; No `(require 'nl-ns-test)': the batch runner loads every *-test.el by
+;; name, this file sorts first, and requiring the sibling here made it
+;; load twice -- which ERT reports as "Test ... redefined (or loaded
+;; twice)" and exits 127.  The helpers only have to exist when a test
+;; BODY runs, and by then every file is loaded.
 
 (ert-deftest nl-ns-host-shadow-unsafe-fixture-fires-all-four-findings ()
   (let* ((baseline (nl-ns-test--baseline-file))
