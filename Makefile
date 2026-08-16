@@ -1,4 +1,4 @@
-.PHONY: unsafe-inventory ns-inventory ns-gate nl-check-gate nl-safe-bench jit-unverified parens-check test test-fast test-parallel test-one wasm-smoke wasm-runtime-image-smoke wasm-dtw-skeleton-smoke wasm-dtw-transpile wasm-dtw-compile wasm-dtw-smoke wasm-dtw-site wasm-dtw-site-smoke compile clean all bench bench-aot-tco gc-bench actor-bench soak soak-1h soak-full soak-worker \
+.PHONY: unsafe-inventory nl-violation-corpus jit-unverified nl-safe-bench nl-check-gate ns-gate ns-inventory parens-check test test-fast test-parallel test-one wasm-smoke wasm-runtime-image-smoke wasm-dtw-skeleton-smoke wasm-dtw-transpile wasm-dtw-compile wasm-dtw-smoke wasm-dtw-site wasm-dtw-site-smoke compile clean all bench bench-aot-tco gc-bench actor-bench soak soak-1h soak-full soak-worker \
         sqlite-module sqlite-module-clean \
         release-artifact release-checksum soak-blocker soak-post-ship \
         bench-actual bench-allocator bench-allocator-heavy \
@@ -272,6 +272,19 @@ standalone-reader:
 unsafe-inventory:
 	$(EMACS) --batch -Q -L packages/nl-prelude/src -L packages/nl-safe/src \
 	  -L packages/nl-check/src -l tools/nl-check-inventory.el
+
+# Doc 168 Phase 6 / Doc 170 Stage 5 gate data.  Runs the suites that
+# drive the dynamic checks with violation logging on, appends the
+# records to .nl-violations/corpus.log (git-ignored) and prints the
+# tally.  The corpus comes from tests, so it validates the pipeline
+# and the record shape rather than sampling real usage -- see the
+# header of tools/nl-violation-corpus.el.
+nl-violation-corpus:
+	$(EMACS) --batch -Q -L packages/nl-prelude/src -L packages/nl-safe/src \
+	  -L packages/nl-contract/src -L packages/nl-check/src \
+	  -L packages/nl-safe/test -L packages/nl-contract/test -L tools \
+	  --eval '(setq load-prefer-newer t)' \
+	  -l tools/nl-violation-corpus.el
 
 # Doc 169 defect #6: namespace boundaries, checked instead of enforced
 # by a reader extension.  Counts nl-ns cross-file collisions, stray

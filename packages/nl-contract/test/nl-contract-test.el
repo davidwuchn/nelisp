@@ -506,4 +506,6 @@
         (should (= (apply #'nl-contract-test--id (list 9)) 9)))
     (nl-contract-remove 'nl-contract-test--id)))
 
+(provide 'nl-contract-test)
+
 ;;; nl-contract-test.el ends here

@@ -2,13 +2,19 @@
 
 ;;; Commentary:
 
-;; `scripts/nl-safe-collect.el' runs the safety suites and captures the
-;; violations they provoke.  Those suites exist to trigger the dynamic
-;; checks, so every record they produce is a violation someone wrote on
+;; `make nl-violation-corpus' runs the three suites that drive the
+;; dynamic checks and collects what they provoke.  Those suites exist to
+;; trigger the checks, so every record is a violation someone wrote on
 ;; purpose, in a single small function, with literal constants -- the
 ;; friendliest possible input for a static checker.  Classifying only
-;; those would pass the Doc 170 section 8 gate by measuring the tests
-;; rather than the code.
+;; those would answer the Doc 170 section 8 gate by measuring the tests
+;; rather than the code, which is why that corpus labels itself as
+;; test-derived.
+;;
+;; This is the complement, and the reason it exists separately: the
+;; corpus tool can only ever report test-derived violations, because
+;; test files are all it runs.  The question it cannot answer is whether
+;; anything OUTSIDE those suites produces a violation.
 ;;
 ;; This is the other half: preload it before a full run so logging stays
 ;; on for everything, and see whether real code produces violations at
