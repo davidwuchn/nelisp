@@ -6506,10 +6506,15 @@ unresolved at link time."
       (if (= (str-len a) (str-len b))
           (m5_streq_bytes a b 0 (str-len a))
         0))
+    ;; Iterative: one native frame per element made `length' die silently
+    ;; (exit 127) on a 3M-element list, the same ceiling that killed the
+    ;; GC mark walk.  1.5M survived.
     (defun m5_list_len (p acc)
-      (if (= (ptr-read-u64 p 0) 7)
-          (m5_list_len (nl_cons_cdr_ptr p) (+ acc 1))
-        acc))
+      (seq
+       (while (= (ptr-read-u64 p 0) 7)
+         (seq (setq p (nl_cons_cdr_ptr p))
+              (setq acc (+ acc 1))))
+       acc))
     ;; --- Doc 161 UTF-8 char-aware helpers (storage stays UTF-8 bytes) ---
     (defun nl_u8_clen_at (b)
       (if (< b 128) 1 (if (< b 224) 2 (if (< b 240) 3 4))))
