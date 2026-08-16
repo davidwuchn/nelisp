@@ -1774,6 +1774,58 @@ source changes (stale) or the `.elc' bytes are tampered (integrity)."
                         :type 'nelisp-artifact-stale))
       (when (file-directory-p temp-dir)
         (delete-directory temp-dir t)))))
+;;;; Expansion-time checks (Doc 170 section 10)
+
+(defun nelisp-artifact-test--write (dir name text)
+  "Write TEXT to NAME under DIR and return the path."
+  (let ((path (expand-file-name name dir)))
+    (with-temp-file path (insert text))
+    path))
+
+(ert-deftest nelisp-artifact-check-refuses-a-leaking-source ()
+  "A resource the source acquires and never drops must stop the build.
+Every artifact kind passes through `nelisp-artifact-compile-file', so
+checking there is what puts nelc, neln and the runtime image downstream
+of one check rather than each carrying its own."
+  ;; The soft require happens inside the compile, so ask whether the
+  ;; package can be found rather than whether it is loaded yet.
+  (skip-unless (locate-library "nl-check"))
+  (let* ((dir (make-temp-file "nelisp-artifact-check-" t))
+         (source (nelisp-artifact-test--write
+                  dir "leak.el"
+                  (concat ";;; leak.el\n"
+                          "(defun nelisp-artifact-test--leak ()\n"
+                          "  (let ((r (nl-resource 'test-fd 3)))\n"
+                          "    (nl-resource-live-p r)))\n"
+                          "(provide 'leak)\n")))
+         (artifact (expand-file-name "leak.nelc" dir)))
+    (unwind-protect
+        (progn
+          (should-error (nelisp-artifact-compile-file source artifact))
+          (should-not (file-exists-p artifact)))
+      (delete-directory dir t))))
+
+(ert-deftest nelisp-artifact-check-passes-a-clean-source ()
+  "The same shape with the drop present must compile."
+  ;; The soft require happens inside the compile, so ask whether the
+  ;; package can be found rather than whether it is loaded yet.
+  (skip-unless (locate-library "nl-check"))
+  (let* ((dir (make-temp-file "nelisp-artifact-check-" t))
+         (source (nelisp-artifact-test--write
+                  dir "clean.el"
+                  (concat ";;; clean.el\n"
+                          "(defun nelisp-artifact-test--clean ()\n"
+                          "  (let ((r (nl-resource 'test-fd 3)))\n"
+                          "    (nl-resource-live-p r)\n"
+                          "    (nl-drop r)))\n"
+                          "(provide 'clean)\n")))
+         (artifact (expand-file-name "clean.nelc" dir)))
+    (unwind-protect
+        (progn
+          (nelisp-artifact-compile-file source artifact)
+          (should (file-exists-p artifact)))
+      (delete-directory dir t))))
+
 
 (provide 'nelisp-artifact-test)
 

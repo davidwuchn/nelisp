@@ -1739,6 +1739,50 @@ ABI, and NATIVE metadata (object hash, symbols, arch) is recorded."
         (nelisp-artifact--delete-if-exists artifact-temp)
         (nelisp-artifact--delete-if-exists manifest-temp)))))
 
+(defvar nelisp-artifact-check-kinds
+  '(must-use-discarded resource-untracked resource-leak resource-double)
+  "`nl-check' finding kinds that stop an artifact build.
+`unsafe-call' is absent on purpose: `make unsafe-inventory' ratchets it
+against its own baseline, and failing on it here would mean two files
+to update for one change.")
+
+(defun nelisp-artifact-check-forms (forms source-path)
+  "Run the expansion-time checks over FORMS from SOURCE-PATH.
+Signal when a finding in `nelisp-artifact-check-kinds' is present.
+
+This is the same check `make compile' runs, called from the one place
+every artifact passes through, so `nelc' and `neln' and the runtime
+image are all downstream of it rather than each carrying its own copy.
+Reimplementing the checks per backend is how backends drift apart.
+
+`nl-check' is reached through `fboundp' rather than `require': Doc 170
+section 10 has it depended on by nobody, and a hard dependency from the
+core would invert that.  With the package absent this is a no-op, which
+is also what makes the checks removable at all -- Doc 170 section 9
+wants the disabled build to emit identical code, and a call that never
+happens cannot change what is emitted."
+  ;; A soft require, not `fboundp' alone: nothing else loads nl-check
+  ;; during a build, so an fboundp test would leave this permanently
+  ;; inert -- a check that never runs is worse than no check, because
+  ;; the build reports success either way.  NOERROR keeps the core free
+  ;; of a hard dependency on a package Doc 170 section 10 says nothing
+  ;; may depend on.
+  (require 'nl-check nil t)
+  (when (fboundp 'nl-check-forms)
+    (let ((bad nil))
+      (dolist (finding (nl-check-forms forms))
+        (when (memq (plist-get finding :kind) nelisp-artifact-check-kinds)
+          (setq bad (cons finding bad))))
+      (when bad
+        (error "nelisp-artifact: %d check finding(s) in %s: %s"
+               (length bad) source-path
+               (mapconcat
+                (lambda (finding)
+                  (format "%s %s"
+                          (plist-get finding :kind)
+                          (plist-get finding :subject)))
+                (nreverse bad) ", "))))))
+
 (defun nelisp-artifact-compile-file (source-path artifact-path
                                                  &optional manifest-path target
                                                  load-paths preloads requested-feature
@@ -1777,6 +1821,7 @@ native object for the standalone runtime, Doc 142 §6.4)."
      (list :bytes (length source) :source source-path))
     (setq stage-start (nelisp-artifact--profile-time))
     (setq forms (nelisp-artifact--read-top-level-forms source source-path))
+    (nelisp-artifact-check-forms forms source-path)
     (nelisp-artifact--profile-log
      "read-forms" stage-start
      (list :forms (length forms) :source source-path))
@@ -1899,6 +1944,7 @@ self-contained `.wasm' via `nelisp-aot-compile-to-object'."
     (dolist (preload preloads)
       (load preload nil t))
     (setq forms (nelisp-artifact--runtime-image-forms image-path))
+    (nelisp-artifact-check-forms forms image-path)
     (setq features (nelisp-artifact--collect-features forms))
     (when (and requested-feature (not (memq requested-feature features)))
       (error "compile-runtime-image: source did not provide %S" requested-feature))
