@@ -81,6 +81,19 @@ this list to that one.  They are asserted equal by the test suite.")
 (defconst nelisp-native-load-tag-symbol 4)
 (defconst nelisp-native-load-tag-string 5)
 
+(defconst nelisp-native-load-tag-vector 8)
+
+(defconst nelisp-native-load-scratch-slots 16
+  "Elements in the boundary scratch vector.
+
+`scratch' is not a spare Sexp slot: compiled code reaches interior
+storage through `nelisp-aot-compiler--scratch-slot', which emits
+`(vector-ref-ptr SCRATCH INDEX)' and lowers to `nl_vector_slot_ptr'.
+Handing it a zeroed slot makes that dereference a null payload, which is
+a fault inside the runtime rather than a diagnosable error.
+
+Sized past the ten levels `--top-level-literal-write-forms' can nest.")
+
 (defconst nelisp-native-load-payload-ptr 16
   "Offset of the byte pointer in a symbol or string Sexp.")
 
@@ -391,6 +404,44 @@ as an integer would be a wrong answer rather than a missing one."
 
 ;;;; Loading ----------------------------------------------------------
 
+(defun nelisp-native-load--make-scratch-vector (addr)
+  "Write a fresh scratch vector Sexp into the slot at ADDR.
+
+`nl_alloc_vector' returns the NlVector box; the Sexp that names it is
+tag 8 with the box at payload+8, which is the shape the reader's own
+`nl_logic_build_scratch' builds and the shape `nl_vector_slot_ptr'
+expects -- it derefs payload+8 to reach the box."
+  (let ((box (ptr-call (nelisp-native-load--symbol-addr "nl_alloc_vector")
+                       nelisp-native-load-scratch-slots 0 0 0 0 0))
+        (set-slot (nelisp-native-load--symbol-addr "nl_vector_set_slot"))
+        (i 0))
+    (when (or (not (integerp box)) (= box 0))
+      (error "nelisp-native-load: scratch vector allocation returned %S" box))
+    ;; Every element has to hold a POINTER, not an immediate.
+    ;;
+    ;; `nl_vector_slot_ptr' returns the stored word when it is a pointer
+    ;; and a FRESH temporary box when it is an immediate.  Compiled code
+    ;; fills an element by calling it once to get somewhere to write the
+    ;; value, then again to hand that same storage to
+    ;; `nl_vector_set_slot' -- which only works if the two calls return
+    ;; the same address.  Over an immediate they return two throwaways,
+    ;; the value is written into the first and the second is copied out,
+    ;; and `(vector 7 8 9)' comes back as three Nils.
+    ;;
+    ;; So the element cannot be nil, t or an integer: `nl_val_clone_into'
+    ;; folds exactly those three back into an immediate word.  A string
+    ;; takes the rebox path instead and leaves a pointer behind.
+    (while (< i nelisp-native-load-scratch-slots)
+      (let ((cell (alloc-bytes 32 8)))
+        (nelisp-native-load-box cell "s")
+        (ptr-call set-slot box i cell 0 0 0))
+      (setq i (1+ i)))
+    (ptr-write-u64 addr 0 nelisp-native-load-tag-vector)
+    (ptr-write-u64 addr 8 box)
+    (ptr-write-u64 addr 16 0)
+    (ptr-write-u64 addr 24 0)
+    addr))
+
 (defun nelisp-native-load-abi (native)
   "Return `boxed' or `integer' for the unit NATIVE's calling convention.
 
@@ -502,6 +553,9 @@ what a cache wants and what the demo did."
       (while (< i (+ 5 nelisp-native-load-callback-slots))
         (nelisp-native-load--zero-slot (+ slots (* 32 i)))
         (setq i (1+ i)))
+      ;; ...except scratch, which has to be a vector.  See
+      ;; `nelisp-native-load-scratch-slots'.
+      (nelisp-native-load--make-scratch-vector (+ slots 32))
       ;; Trampoline: bytes, then the boundary immediates and the entry.
       (nelisp-native-load--poke-bytes trampage 0 tramp-bytes)
       (let ((values (append
@@ -521,6 +575,9 @@ what a cache wants and what the demo did."
           (setq offsets (cdr offsets))
           (setq values (cdr values))))
       (list :entry trampage
+            :codepage codepage
+            :stubs stub-offsets
+            :body-entry body-entry
             :slots slots
             :out slots
             :arity arity
@@ -566,8 +623,14 @@ answer 406962619651776 and leave `out' untouched."
       (while (< (length passed) (length nelisp-native-load--arg-regs))
         (setq passed (append passed (list 0))))
       (setq raw (apply (function ptr-call) (plist-get handle :entry) passed))
+      ;; The result is what rax holds, not what `out' holds.  For a body
+      ;; that ends in a delegated call the two are the same pointer --
+      ;; the dispatcher returns `out' -- which is why reading `out'
+      ;; looked right until a body ended in something else.  `(let ((v
+      ;; (vector 7 8 9))) n)' leaves the vector in `out' and returns the
+      ;; boxed `n' in rax, so reading `out' answered with the vector.
       (if boxed
-          (nelisp-native-load-unbox (plist-get handle :out))
+          (nelisp-native-load-unbox raw)
         raw))))
 
 (defun nelisp-native-load-exec (path name args)

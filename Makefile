@@ -1,4 +1,4 @@
-.PHONY: unsafe-inventory nl-violation-corpus test-jit test-nojit jit-unverified nl-safe-bench nl-check-gate ns-gate ns-inventory parens-check test test-fast test-parallel test-one wasm-smoke wasm-runtime-image-smoke wasm-dtw-skeleton-smoke wasm-dtw-transpile wasm-dtw-compile wasm-dtw-smoke wasm-dtw-site wasm-dtw-site-smoke compile clean all bench bench-aot-tco gc-bench actor-bench soak soak-1h soak-full soak-worker \
+.PHONY: unsafe-inventory nl-violation-corpus test-jit test-nojit jit-unverified nl-safe-bench nl-safe-native-bench neln-loader-test nl-check-gate ns-gate ns-inventory parens-check test test-fast test-parallel test-one wasm-smoke wasm-runtime-image-smoke wasm-dtw-skeleton-smoke wasm-dtw-transpile wasm-dtw-compile wasm-dtw-smoke wasm-dtw-site wasm-dtw-site-smoke compile clean all bench bench-aot-tco gc-bench actor-bench soak soak-1h soak-full soak-worker \
         sqlite-module sqlite-module-clean \
         release-artifact release-checksum soak-blocker soak-post-ship \
         bench-actual bench-allocator bench-allocator-heavy \
@@ -186,6 +186,30 @@ nl-safe-bench:
 	  -L lisp -L src -L bench \
 	  -L packages/nl-prelude/src -L packages/nl-safe/src \
 	  -l bench/nl-safe-bench.el -f nl-safe-bench-run
+
+# Doc 170 section 9 on the path the budget belongs to.  `nl-safe-bench'
+# measures on host Emacs, where the borrow SHAPE alone costs 2.69x before
+# anything is checked, so it can only ever report "over budget".  This
+# compiles both sides to .neln with the dynamic-user-call lowering (which
+# is what closes their extern sets) and runs them through the in-process
+# loader inside the reader.
+nl-safe-native-bench: standalone-reader
+	@mkdir -p target/nl-safe-native-bench
+	NELISP_ARTIFACT_DIR=$(CURDIR)/target/nl-safe-native-bench \
+	  $(EMACS) --batch -Q -L lisp -L src -L scripts \
+	  -L packages/nl-prelude/src -L packages/nl-safe/src \
+	  --eval '(setq load-prefer-newer t)' \
+	  -l nl-safe-native-bench-fixtures \
+	  -f nl-safe-native-bench-fixtures-main
+	@prelude=target/nl-safe-native-bench/prelude.el; \
+	{ echo '(load "$(CURDIR)/packages/nl-prelude/src/nl-prelude.el")'; \
+	  echo '(load "$(CURDIR)/packages/nl-safe/src/nl-safe.el")'; \
+	  echo '(load "$(CURDIR)/lisp/nelisp-native-load.el")'; \
+	  echo '(defvar nl-safe-native-bench-dir "$(CURDIR)/target/nl-safe-native-bench")'; \
+	  echo '(load "$(CURDIR)/bench/nl-safe-native-bench.el")'; \
+	  echo '(nl-safe-native-bench-run)'; \
+	} > "$$prelude"; \
+	./target/nelisp --load "$$prelude"
 
 # Reports how many bodies reached the JIT, and how many of those carried
 # a finding.  The JIT is the one place code arrives that no build step
