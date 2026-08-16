@@ -1984,7 +1984,22 @@ MCP Parameters:
       ;; code slot is a host-compiled lambda.  Apply directly, skip
       ;; VM setup entirely.  Outer `nelisp--apply' dispatch arm is the
       ;; same (bcl-tagged callable) so self-host path stays unchanged.
-      (apply (nelisp-bc-code bcl) args)
+      ;;
+      ;; The host lambda enforces arity with the HOST's error, so a
+      ;; wrong argument count came back as `wrong-number-of-arguments'
+      ;; instead of the `nelisp-eval-error' the interpreter signals
+      ;; ("too few args" / "too many args", nelisp-eval.el).  A JIT that
+      ;; changes which error a program sees is not a fast path, it is a
+      ;; different language, so translate it back.
+      (condition-case err
+          (apply (nelisp-bc-code bcl) args)
+        (wrong-number-of-arguments
+         (signal 'nelisp-eval-error
+                 (list (if (< (length args)
+                              (length (help-function-arglist
+                                       (nelisp-bc-code bcl))))
+                           "too few args"
+                         "too many args")))))
     (let* ((code (nelisp-bc-code bcl))
          (consts (nelisp-bc-consts bcl))
          (closure-env (nelisp-bc-env bcl))

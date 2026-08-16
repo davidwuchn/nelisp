@@ -1,4 +1,4 @@
-.PHONY: unsafe-inventory nl-violation-corpus jit-unverified nl-safe-bench nl-check-gate ns-gate ns-inventory parens-check test test-fast test-parallel test-one wasm-smoke wasm-runtime-image-smoke wasm-dtw-skeleton-smoke wasm-dtw-transpile wasm-dtw-compile wasm-dtw-smoke wasm-dtw-site wasm-dtw-site-smoke compile clean all bench bench-aot-tco gc-bench actor-bench soak soak-1h soak-full soak-worker \
+.PHONY: unsafe-inventory nl-violation-corpus test-jit jit-unverified nl-safe-bench nl-check-gate ns-gate ns-inventory parens-check test test-fast test-parallel test-one wasm-smoke wasm-runtime-image-smoke wasm-dtw-skeleton-smoke wasm-dtw-transpile wasm-dtw-compile wasm-dtw-smoke wasm-dtw-site wasm-dtw-site-smoke compile clean all bench bench-aot-tco gc-bench actor-bench soak soak-1h soak-full soak-worker \
         sqlite-module sqlite-module-clean \
         release-artifact release-checksum soak-blocker soak-post-ship \
         bench-actual bench-allocator bench-allocator-heavy \
@@ -195,6 +195,16 @@ nl-safe-bench:
 jit-unverified:
 	$(MAKE) test-fast \
 	  EMACS="$(EMACS) -l scripts/nelisp-jit-unverified.el"
+
+# Runs the suite with the JIT on.  `nelisp-jit-enabled' is nil by
+# default and the only bindings of it are two of the JIT's own tests, so
+# a whole translation path is exercised by the tests written for it and
+# by nothing that uses it.  This puts every closure the suite builds
+# through it.  Unlike `jit-unverified' it adds no per-body work -- that
+# one is the measurement, this one is the coverage.
+test-jit:
+	$(MAKE) test-fast \
+	  EMACS="$(EMACS) -l scripts/nelisp-jit-enable.el"
 
 compile: nl-check-gate
 	$(EMACS) --batch -Q -L src \

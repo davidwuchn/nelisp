@@ -66,6 +66,17 @@ jobs:
       - name: Run smoke tests
         shell: bash
         run: make test
+      # `nelisp-jit-enabled' is nil by default and the only bindings of
+      # it were two of the JIT's own tests, so the translation path was
+      # exercised by the tests written for it and by nothing that uses
+      # it.  Turning it on for a full run found three semantic
+      # differences from the interpreter -- untranslated special forms
+      # routed to the user-call arm and mistranslated rather than
+      # declined, and arity violations surfacing as the host's error
+      # instead of nelisp-eval-error.  This keeps that honest.
+      - name: Run smoke tests with the JIT enabled
+        shell: bash
+        run: make test-jit
       - name: Standalone NeLisp eval (pure-elisp AOT, zero Rust; x86_64 Linux)
         if: runner.os == 'Linux'
         shell: bash

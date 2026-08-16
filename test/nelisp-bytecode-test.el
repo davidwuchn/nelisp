@@ -1196,12 +1196,23 @@ a label.  Returns the resolved int vector."
       (should (= (nelisp--apply bcl '(41)) 42)))))
 
 (ert-deftest nelisp-bc-3b5c-try-compile-respects-flag ()
-  (let ((nelisp-bc-auto-compile nil))
+  ;; `nelisp-bc-auto-compile' is BCL's switch, checked inside
+  ;; `nelisp-bc-try-compile-lambda'.  The JIT advises that same function
+  ;; and runs ahead of the check by design, so this test has to say which
+  ;; path it is about.
+  (let ((nelisp-jit-enabled nil)
+        (nelisp-bc-auto-compile nil))
     (should (eq (nelisp-bc-try-compile-lambda nil '(x) '(x)) nil))))
 
 (ert-deftest nelisp-bc-3b5c-try-compile-rejects-non-nil-env ()
   ;; ENV is non-nil (closure with captures) — top-level only for now.
-  (let ((nelisp-bc-auto-compile t))
+  ;; This is about what BCL declines, and the JIT does not share the
+  ;; limitation (it embeds captures as an aref-in-let), so it is bound
+  ;; off here rather than left to whatever the ambient flag happens to
+  ;; be.  A test that only passes while a global is nil is a test that
+  ;; will surprise whoever flips it.
+  (let ((nelisp-jit-enabled nil)
+        (nelisp-bc-auto-compile t))
     (should (eq (nelisp-bc-try-compile-lambda
                  '((y . 10)) '(x) '((+ x y)))
                 nil))))
@@ -1224,7 +1235,10 @@ a label.  Returns the resolved int vector."
       (should (= (nelisp-eval '(nelisp-bc-test--ac1 7)) 21)))))
 
 (ert-deftest nelisp-bc-3b5c-defun-installs-closure-when-off ()
-  (let ((nelisp-bc-auto-compile nil))
+  ;; About what BCL does with its switch off; see
+  ;; `nelisp-bc-3b5c-try-compile-respects-flag'.
+  (let ((nelisp-jit-enabled nil)
+        (nelisp-bc-auto-compile nil))
     (nelisp--reset)
     (nelisp-eval '(defun nelisp-bc-test--ac2 (x) (* x 3)))
     (let ((fn (gethash 'nelisp-bc-test--ac2 nelisp--functions)))
@@ -1259,7 +1273,10 @@ a label.  Returns the resolved int vector."
   ;; the outer compile too (no partial-compile fallback yet), so the
   ;; whole defun lands as an interpreter closure — and crucially the
   ;; runtime semantics are still correct.
-  (let ((nelisp-bc-auto-compile t))
+  ;; Also about a BCL fallback specifically; see the note on
+  ;; `nelisp-bc-3b5c-try-compile-rejects-non-nil-env'.
+  (let ((nelisp-jit-enabled nil)
+        (nelisp-bc-auto-compile t))
     (nelisp--reset)
     (nelisp-eval '(defun nelisp-bc-test--counter (start)
                     (let ((n start))

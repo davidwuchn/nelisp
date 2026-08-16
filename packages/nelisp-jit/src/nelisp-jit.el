@@ -45,6 +45,18 @@
   "When non-nil, `nelisp--make-closure' tries JIT compilation first.
 Failure on unsupported forms falls through to bcl / interpreter.")
 
+(defvar nelisp-jit-untranslated-special-forms
+  '(and or progn when unless
+    catch throw unwind-protect condition-case
+    defun defmacro defvar defconst defvar-local cl-defun)
+  "NeLisp special forms the JIT does not translate.
+These must DECLINE rather than reach the user-call arm: a special form
+does not evaluate its arguments, so translating one as a call is not a
+fallback but a mistranslation that runs.  Every name the interpreter
+treats specially belongs here until the JIT grows a case for it -- the
+list is the complement of the heads `nelisp-jit--translate-compound'
+handles, taken from `nelisp-eval.el'.")
+
 (define-error 'nelisp-jit-unsupported
   "NeLisp JIT cannot translate this form"
   'nelisp-eval-error)
@@ -274,6 +286,16 @@ for constructs the MVP does not handle."
          ,@(nelisp-jit--translate-body
             sub-body
             (append (nelisp-jit--param-symbols sub-params) env)))))
+   ;; ----- special forms this MVP does not translate ---------------------
+   ;; A special form does not evaluate its arguments, so routing one to
+   ;; the user-call arm below is not a fallback -- it is a mistranslation
+   ;; that runs.  `(condition-case err (/ a b) (arith-error :x))' became a
+   ;; call with `err' evaluated as a variable, which signalled
+   ;; `nelisp-unbound-variable' where the interpreter returns :x.  Decline
+   ;; instead, and the caller falls through to bcl / interpreter, which
+   ;; handle these correctly.
+   ((and (symbolp head) (memq head nelisp-jit-untranslated-special-forms))
+    (signal 'nelisp-jit-unsupported (list (cons head rest))))
    ;; ----- call dispatch -------------------------------------------------
    ((and (symbolp head) (nelisp-jit--primitive-p head))
     ;; Direct host call on an assumed-stable primitive.
@@ -372,6 +394,13 @@ captured-env closures that mutate their captures."
 On unsupported forms the JIT returns nil and we fall through to
 the original bcl path (which itself may fall through to
 interpreter closure via `nelisp--make-closure')."
+  ;; Deliberately does NOT consult `nelisp-bc-auto-compile'.  That flag
+  ;; is bcl's own -- its docstring scopes it to materialising bodies as
+  ;; "bytecode closures" -- and it is checked inside
+  ;; `nelisp-bc-try-compile-lambda', which this advice runs ahead of.
+  ;; The JIT has its own switch.  Making the JIT honour the bcl flag was
+  ;; tried and broke `nelisp-jit-compile-runs-fib', which sets
+  ;; auto-compile nil precisely to isolate the JIT from bcl.
   (if nelisp-jit-enabled
       (or (nelisp-jit-try-compile-lambda env params body)
           (funcall orig-fn env params body))

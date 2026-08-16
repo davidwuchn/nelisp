@@ -60,9 +60,14 @@
       (should (= (nelisp--apply fn '(40)) 42)))))
 
 (ert-deftest nelisp-eval-function-lambda ()
-  (nelisp--reset)
-  (let ((cl (nelisp-eval '(function (lambda (x) x)))))
-    (should (eq (car cl) 'nelisp-closure))))
+  ;; Asserts the INTERPRETER's closure representation, so it says so:
+  ;; with the JIT on, `(function (lambda ...))' comes back bcl-shaped and
+  ;; the tag differs.  Leaving it to the ambient flag makes the test pass
+  ;; or fail on a global it never mentions.
+  (let ((nelisp-jit-enabled nil))
+    (nelisp--reset)
+    (let ((cl (nelisp-eval '(function (lambda (x) x)))))
+      (should (eq (car cl) 'nelisp-closure)))))
 
 ;;; if / progn --------------------------------------------------------
 
