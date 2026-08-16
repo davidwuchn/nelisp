@@ -4520,13 +4520,24 @@ caller-owned boundary params in the current defun:
            (mirror (plist-get boundary :mirror))
            (frames (plist-get boundary :frames))
            (scratch (plist-get boundary :scratch))
-           (name-slot (plist-get boundary :name-slot)))
+           (name-slot (plist-get boundary :name-slot))
+           (arg-slot (nelisp-aot-compiler--gensym "aot-builtin1-arg")))
+      ;; The argument is evaluated BEFORE the name is written.
+      ;;
+      ;; `name-slot' is a boundary slot shared by every delegated call in
+      ;; the frame.  Writing the name first and letting the argument be
+      ;; evaluated as part of the call meant a nested delegated call
+      ;; overwrote it with its own name, and the outer call dispatched on
+      ;; the inner one: `(1- (1+ x))' returned x+2, `(1- (1+ (1+ x)))'
+      ;; returned x+3.  Single calls were right, which is why a
+      ;; single-call demo never showed it.
       (nelisp-aot-compiler--parse-value
-       `(seq
-         (sexp-write-symbol-lit ,name-slot ,(symbol-name builtin))
-         (extern-call nelisp_aot_builtin_call1
-                      ,mirror ,frames ,name-slot ,arg ,out ,scratch)
-         ,out)
+       `(let (((,arg-slot :type sexp) ,arg))
+          (seq
+           (sexp-write-symbol-lit ,name-slot ,(symbol-name builtin))
+           (extern-call nelisp_aot_builtin_call1
+                        ,mirror ,frames ,name-slot ,arg-slot ,out ,scratch)
+           ,out))
        env fenv defuns))))
 
 (defun nelisp-aot-compiler--parse-aot-builtinn-call
@@ -4668,15 +4679,38 @@ caller-owned boundary params in the current defun:
                   (t nil))))
              designator-entries
              callback-slots)))))
-    (nelisp-aot-compiler--parse-value
-     `(seq
-       (sexp-write-symbol-lit ,name-slot ,(symbol-name builtin))
-       ,@arg-prefix
-       (extern-call nelisp_aot_builtin_calln
-                    ,mirror ,frames ,name-slot ,argc ,out ,scratch
-                    ,@lowered-args)
-       ,out)
-     env fenv defuns)))
+    ;; Same hazard as builtin1: `name-slot' is shared across the frame,
+    ;; so an argument that is itself a delegated call overwrote the name
+    ;; between the write and the dispatch.  Evaluate the arguments into
+    ;; their own slots first, then write the name, then call.
+    ;;
+    ;; Designator and keyword positions are skipped: `lowered-args' has
+    ;; already replaced those with the slot `arg-prefix' writes into, and
+    ;; binding a slot reference here would capture it before that write.
+    (let* ((prewritten (append (mapcar #'cdr designator-slot-alist)
+                               (mapcar #'cdr keyword-slot-alist)))
+           (bindings nil)
+           (call-args
+            (mapcar
+             (lambda (form)
+               (if (memq form prewritten)
+                   form
+                 (let ((slot (nelisp-aot-compiler--gensym "aot-calln-arg")))
+                   (push (list (list slot :type 'sexp) form) bindings)
+                   slot)))
+             lowered-args))
+           (body `(seq
+                   (sexp-write-symbol-lit ,name-slot ,(symbol-name builtin))
+                   ,@arg-prefix
+                   (extern-call nelisp_aot_builtin_calln
+                                ,mirror ,frames ,name-slot ,argc ,out ,scratch
+                                ,@call-args)
+                   ,out)))
+      ;; Wrap innermost-last so argument 0 is the outermost binding and
+      ;; the arguments still evaluate left to right.
+      (dolist (binding bindings)
+        (setq body `(let (,binding) ,body)))
+      (nelisp-aot-compiler--parse-value body env fenv defuns))))
 
 (defun nelisp-aot-compiler--aot-funcall1-boundary-symbols (fenv sexp)
   "Return boundary symbols for direct `(funcall FN ARG)' lowering in FENV."

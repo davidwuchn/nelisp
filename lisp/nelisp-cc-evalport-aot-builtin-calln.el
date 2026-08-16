@@ -81,12 +81,19 @@ out-parameter and cannot accumulate in place."
 
 (defun nelisp-cc-evalport-aot-builtin-calln--dispatch ()
   "Return the `argc' if-chain selecting an argument-list shape.
-The final else builds the longest list this provider can read.  It is
-unreachable for units the compiler accepted, which caps `argc' at
-`nelisp-cc-evalport-aot-builtin-calln--max-args'."
-  (let ((form (nelisp-cc-evalport-aot-builtin-calln--build-list
-               nelisp-cc-evalport-aot-builtin-calln--max-args))
-        (n nelisp-cc-evalport-aot-builtin-calln--max-args))
+
+Every count from 0 to the maximum gets its own arm.  The final else is
+reached only when `argc' is outside that range, which the compiler
+refuses to emit, so it builds an EMPTY list rather than the longest one:
+an out-of-range `argc' means the parameters past it hold whatever was on
+the stack, and consing those produces a list with garbage pointers in
+it.  Applying to an empty list gives a wrong answer; applying to garbage
+pointers dereferences them."
+  (let ((form '(seq (ptr-write-u64 args_list 0 0)
+                    (ptr-write-u64 (+ args_list 8) 0 0)
+                    (ptr-write-u64 (+ args_list 16) 0 0)
+                    (ptr-write-u64 (+ args_list 24) 0 0)))
+        (n (1+ nelisp-cc-evalport-aot-builtin-calln--max-args)))
     (while (> n 0)
       (setq n (1- n))
       (setq form `(if (= argc ,n)

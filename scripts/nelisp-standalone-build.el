@@ -13171,8 +13171,82 @@ never recurse through one enormous `seq' cdr chain."
 (defvar nelisp-standalone--reader-neln-demo-cache nil
   "Cached embedded `.neln' demo metadata for the standalone reader.")
 
+(defconst nelisp-standalone--reader-neln-bridgeable-symbols
+  '("nelisp_aot_builtin_call1"
+    "nelisp_aot_builtin_calln"
+    "nl_alloc_symbol"
+    "nl_alloc_str"
+    "nl_alloc_mut_str"
+    "nl_mut_str_push_byte"
+    "nl_mut_str_finalize"
+    "nl_alloc_vector"
+    "nl_vector_slot_ptr"
+    "nl_vector_set_slot")
+  "Runtime symbols the in-process loader can point a stub at.
+
+A stub is `movabs rax, ADDR; jmp rax', and ADDR comes from `data-addr',
+which records a cross-unit pc32 the static linker patches against the
+symbol's section VA.  That works for a FUNC symbol exactly as it does
+for data -- verified in both directions: the demo returns 42 with the
+right symbol and takes SIGSEGV with the wrong one.  So no per-extern
+bridge defun is needed; the name only has to be one the reader defines.
+
+This is the set an artifact's externs must fall inside to be loadable,
+and it is finite because `nelisp-aot-compiler--dynamic-user-calls'
+closes a unit's extern set over exactly these.")
+
+(defconst nelisp-standalone--reader-neln-stub-bytes 16
+  "Bytes reserved per PLT-style stub (`movabs rax, imm64; jmp rax' = 12).")
+
+(defun nelisp-standalone--reader-neln-stub-specs (externs text-length)
+  "Return stub placements for EXTERNS after TEXT-LENGTH bytes of code.
+Stubs sit immediately after the text, 16-byte aligned, rather than at a
+fixed offset: the demo's hardcoded 256 held only because `inc1' compiles
+to 176 bytes, and any real function would have overwritten its own code."
+  (let ((unsupported
+         (seq-remove (lambda (name)
+                       (member name
+                               nelisp-standalone--reader-neln-bridgeable-symbols))
+                     externs)))
+    (when unsupported
+      (error "neln loader has no bridge for extern(s) %S" unsupported)))
+  (let ((base (* 16 (/ (+ text-length 15) 16))))
+    (cl-loop for name in externs
+             for idx from 0
+             collect (list :name name
+                           :offset (+ base
+                                      (* idx
+                                         nelisp-standalone--reader-neln-stub-bytes))))))
+
+(defun nelisp-standalone--reader-neln-page-round (n)
+  "Round N up to a whole 4096-byte page, with a floor of one page."
+  (max 4096 (* 4096 (/ (+ n 4095) 4096))))
+
+(defconst nelisp-standalone--reader-neln-demo-body
+  "(1- (1+ (1+ x)))"
+  "Body of the `inc1' function the loader self-test executes natively.
+
+Chosen so the self-test can fail.  At 298 bytes of text it is longer
+than the 256-byte offset the stubs used to be pinned at, so the old
+layout would have had the stub overwrite the function's own code.  And
+it nests delegated calls, which returned x+3 instead of x+1 until the
+outer call stopped dispatching on the inner call's name.
+
+`inc1(41) = 42' either way, so only the value distinguishes them.
+
+A `calln' body -- `(car (list (1+ x) 0))' -- would exercise more, and
+does not work yet: a literal argument to a delegated call is passed as a
+raw untagged word, and the reader's apply path takes its arguments as
+Sexp pointers, so it dereferences the literal.  The host proof harness
+hides this because its C driver calls `neln_raw_to_sexp' on each
+argument.  Boxing literal arguments in the calln lowering is the fix;
+until then this body keeps the self-test honest about what does work.")
+
 (defun nelisp-standalone--reader-neln-demo-build-spec ()
-  "Compile the embedded `(defun inc1 (x) (1+ x))' demo and extract its metadata."
+  "Compile the embedded `inc1' demo and extract its native metadata.
+The demo is one fixed function, but the placement and sizing below are
+derived from it rather than assumed, so the same code services an
+artifact of any size once the bytes come from a file instead of here."
   (require 'nelisp-artifact)
   (let* ((dir (make-temp-file "nelisp-reader-neln-demo-" t))
          (src (expand-file-name "inc1.el" dir))
@@ -13180,7 +13254,8 @@ never recurse through one enormous `seq' cdr chain."
     (unwind-protect
         (progn
           (with-temp-file src
-            (insert "(defun inc1 (x) (1+ x))\n(provide 'inc1)\n"))
+            (insert (format "(defun inc1 (x) %s)\n(provide 'inc1)\n"
+                            nelisp-standalone--reader-neln-demo-body)))
           (nelisp-artifact-compile-file src out nil nil nil nil nil 'neln)
           (let* ((native (plist-get (nelisp-artifact--read-payload out) :native))
                  (defun0 (car (plist-get native :defuns)))
@@ -13192,24 +13267,35 @@ never recurse through one enormous `seq' cdr chain."
                  (trampoline
                   (nelisp-standalone--native-trampoline-bytes defun0))
                  (stub-specs
-                  '((:name "nelisp_aot_builtin_call1"
-                     :bridge nl_neln_demo_call1_bridge
-                     :offset 256)
-                    (:name "nl_alloc_symbol"
-                     :bridge nl_neln_demo_alloc_symbol_bridge
-                     :offset 272))))
+                  (nelisp-standalone--reader-neln-stub-specs
+                   externs (length text-bytes)))
+                 (code-bytes
+                  (+ (if stub-specs
+                         (plist-get (car (last stub-specs)) :offset)
+                       (length text-bytes))
+                     nelisp-standalone--reader-neln-stub-bytes))
+                 (trampoline-bytes (plist-get trampoline :bytes)))
             (unless (equal (plist-get defun0 :name) "inc1")
               (error "embedded neln demo expected inc1, got %S"
                      (plist-get defun0 :name)))
-            (unless (equal (sort (copy-sequence externs) #'string<)
-                           '("nelisp_aot_builtin_call1" "nl_alloc_symbol"))
-              (error "embedded neln demo externs drifted: %S" externs))
+            ;; Each reloc must land inside the text, never in the stub
+            ;; region it points at -- a patch past the end would silently
+            ;; rewrite a stub and the failure would look like a bad call.
+            (dolist (reloc relocs)
+              (let ((offset (plist-get reloc :offset)))
+                (unless (and (>= offset 0)
+                             (<= (+ offset 4) (length text-bytes)))
+                  (error "neln reloc at %d outside %d bytes of text"
+                         offset (length text-bytes)))))
             (list :text-bytes text-bytes
                   :relocs relocs
                   :defun0 defun0
-                  :trampoline-bytes (plist-get trampoline :bytes)
+                  :trampoline-bytes trampoline-bytes
                   :imm64-offsets (plist-get trampoline :imm64-offsets)
                   :stub-specs stub-specs
+                  :code-size (nelisp-standalone--reader-neln-page-round code-bytes)
+                  :trampoline-size (nelisp-standalone--reader-neln-page-round
+                                    (length trampoline-bytes))
                   :body-entry (+ (plist-get defun0 :offset)
                                  (plist-get defun0 :body-offset)))))
       (delete-directory dir t))))
@@ -13233,10 +13319,19 @@ never recurse through one enormous `seq' cdr chain."
            (imm64-offsets (plist-get spec :imm64-offsets))
            (stub-specs (plist-get spec :stub-specs))
            (body-entry (plist-get spec :body-entry))
+           (code-size (plist-get spec :code-size))
+           (trampoline-size (plist-get spec :trampoline-size))
            (stub-template-bytes '(#x48 #xb8 0 0 0 0 0 0 0 0 #xff #xe0))
            (callback-slot-exprs
             (cl-loop for i from 0 below 12
                      collect `(+ slots ,(+ 96 (* i 32)))))
+           ;; out/mirror-copy/frames-copy occupy 0/32/64; the twelve
+           ;; callback slots follow at 96; the boxed argument goes after
+           ;; the last of them.  Spelled out so the page grows with the
+           ;; layout instead of a literal that has to be kept in step.
+           (arg-slot-offset (+ 96 (* 12 32)))
+           (slots-size (nelisp-standalone--reader-neln-page-round
+                        (+ arg-slot-offset 32)))
            (text-writes
             (nelisp-standalone--ptr-write-u8-forms 'codepage text-bytes))
            (stub-writes
@@ -13251,9 +13346,16 @@ never recurse through one enormous `seq' cdr chain."
            (stub-patches
             (mapcar
              (lambda (stub)
+               ;; Address the runtime symbol directly.  `addr-of' is
+               ;; intra-object, which is why this used to go through a
+               ;; per-extern bridge defun; `data-addr' records a cross-unit
+               ;; pc32 the static linker patches against the symbol's
+               ;; section VA, and a FUNC symbol is an address like any
+               ;; other.  Checked in both directions: the right symbol
+               ;; returns 42, a wrong one takes SIGSEGV.
                `(ptr-write-u64 (+ codepage ,(plist-get stub :offset))
                                2
-                               (addr-of ,(plist-get stub :bridge))))
+                               (data-addr ,(intern (plist-get stub :name)))))
              stub-specs))
            (reloc-forms
             (mapcar
@@ -13298,16 +13400,12 @@ never recurse through one enormous `seq' cdr chain."
       (cons
        'seq
        (append
-        '((defun nl_neln_demo_alloc_symbol_bridge (bytes-ptr len result-slot)
-            (seq
-             (extern-call nl_alloc_symbol bytes-ptr len result-slot)
-             result-slot))
-          (defun nl_neln_demo_call1_bridge (mirror frames name arg out scratch)
-            (seq
-             (extern-call nelisp_aot_builtin_call1
-                          mirror frames name arg out scratch)
-             out))
-          (defun nl_neln_demo_zero_slot (slot)
+        ;; No per-extern bridge defuns: `data-addr' reaches the runtime
+        ;; symbols directly, so a stub can be pointed at one without a
+        ;; same-unit forwarder.  That also removes the one shape that
+        ;; would have been painful to write -- a calln forwarder has to
+        ;; redeclare and pass on every stack argument.
+        '((defun nl_neln_demo_zero_slot (slot)
             (seq
              (ptr-write-u64 slot 0 0)
              (ptr-write-u64 (+ slot 8) 0 0)
@@ -13326,14 +13424,19 @@ never recurse through one enormous `seq' cdr chain."
                 (ptr-read-u64 slot 8)
               98)))
         (list
+         ;; Page sizes come from the artifact rather than a fixed 4096.
+         ;; The code page in particular held only because `inc1' compiles
+         ;; to 176 bytes and the stubs were pinned at 256: any function
+         ;; longer than that would have had its own code overwritten by
+         ;; the stub it needs.
          `(defun nl_neln_demo_exec (ctx x)
-            (let ((codepage (syscall-direct 9 0 4096 7 34 -1 0)))
+            (let ((codepage (syscall-direct 9 0 ,code-size 7 34 -1 0)))
               (if (< codepage 4096)
                   90
-                (let ((slots (syscall-direct 9 0 4096 3 34 -1 0)))
+                (let ((slots (syscall-direct 9 0 ,slots-size 3 34 -1 0)))
                   (if (< slots 4096)
                       91
-                    (let ((trampage (syscall-direct 9 0 4096 7 34 -1 0)))
+                    (let ((trampage (syscall-direct 9 0 ,trampoline-size 7 34 -1 0)))
                       (if (< trampage 4096)
                           92
                         (seq
@@ -13344,8 +13447,8 @@ never recurse through one enormous `seq' cdr chain."
                          ,@reloc-forms
                          ,@trampoline-writes
                          ,@imm64-patches
-                         (nl_neln_demo_write_int_slot (+ slots 480) x)
-                         (call-ptr trampage (+ slots 480))
+                         (nl_neln_demo_write_int_slot (+ slots ,arg-slot-offset) x)
+                         (call-ptr trampage (+ slots ,arg-slot-offset))
                          (nl_neln_demo_read_int_slot slots)))))))))))))))
 
 (defun nelisp-standalone--reader-install-builtins-forms ()
