@@ -278,10 +278,14 @@ from `(defvar X nil)'."
 (defun nthcdr (n list)
   (if (= n 0) list (if (null list) nil (nthcdr (1- n) (cdr list)))))
 
+;;; nelisp-stdlib-list.el --- Sweep 9 G1 list operations  -*- lexical-binding: t; -*-
+
 (defun car-safe (object)
+  "Return the car of OBJECT if it is a cons cell, otherwise nil."
   (if (consp object) (car object) nil))
 
 (defun cdr-safe (object)
+  "Return the cdr of OBJECT if it is a cons cell, otherwise nil."
   (if (consp object) (cdr object) nil))
 
 ;; Doc 143 worklist A (WRITE): delq/delete were void in the reader runtime
@@ -354,11 +358,18 @@ from `(defvar X nil)'."
   (let ((acc x)) (while rest (if (< (car rest) acc) (setq acc (car rest))) (setq rest (cdr rest))) acc))
 (defun abs (x) (if (< x 0) (- 0 x) x))
 
-;; Doc 143 string ops (self-contained: funcall/aref/char-to-string/concat).
 (defun mapconcat (fn seq &optional sep)
-  (let ((out "") (first t) (tail seq) (s (or sep "")))
+  "Apply FN to each element of SEQ; concat the resulting strings,
+joined by SEP (default empty string).  SEQ is iterated as a list
+(matching the Rust builtin's MVP contract — vector / string SEQ
+forms are out of scope)."
+  (let ((out "")
+        (first t)
+        (joiner (or sep ""))
+        (tail seq))
     (while tail
-      (unless first (setq out (concat out s)))
+      (unless first
+        (setq out (concat out joiner)))
       (setq out (concat out (funcall fn (car tail))))
       (setq first nil)
       (setq tail (cdr tail)))
@@ -396,24 +407,48 @@ from `(defvar X nil)'."
     (while (< i n) (when (eq (aref path i) ?/) (setq idx i)) (setq i (1+ i)))
     (if (< idx 0) path (substring path (1+ idx)))))
 (defun file-name-as-directory (path)
-  (cond ((= (length path) 0) "/")
-        ((eq (aref path (1- (length path))) ?/) path)
-        (t (concat path "/"))))
+  "Return PATH with a trailing `/' appended if not already present."
+  (cond
+   ((= (length path) 0) "/")
+   ((eq (aref path (1- (length path))) ?/) path)
+   (t (concat path "/"))))
 (defun directory-file-name (path)
   (let ((n (length path)))
     (cond ((<= n 1) path)
           ((eq (aref path (1- n)) ?/) (substring path 0 (1- n)))
           (t path))))
+;; Rust-min batch 7d (2026-05-07, Doc 50 stage 2): `expand-file-name'
+;; and `file-truename' migrated from Rust to elisp.  expand-file-name
+;; is pure path arithmetic + a `default-directory' lookup; it needs
+;; ZERO new primitives (= file-name-as-directory + concat + aref are
+;; all elisp-side).  file-truename adds 1 syscall primitive
+;; (`nelisp--syscall-canonicalize' = std::fs::canonicalize wrapper)
+;; for the symlink-resolve sliver, with elisp fall-back-on-error
+;; matching the prior Rust `unwrap_or(full)' behaviour.
+;;
+;; The Rust impl had a `current_dir()' fallback for the case where
+;; both BASE arg and `default-directory' were nil; NeLisp always
+;; sets `default-directory' at startup so that fallback never fired
+;; in practice and is dropped here.
+
 (defun expand-file-name (path &optional base)
-  ;; MVP (from nelisp-stdlib-misc.el): absolute paths pass through; relative
-  ;; paths anchor on BASE or default-directory.  No ~ / . / .. resolution.
+  "Convert PATH to absolute, anchoring against BASE (or `default-directory').
+Already-absolute paths (starting with `/') are returned unchanged."
   (cond
+   ;; Empty path: return as-is (= mirrors Rust `Path::new(\"\").to_path_buf()').
    ((or (null path) (= (length path) 0)) path)
+   ;; Already absolute.
    ((eq (aref path 0) ?/) path)
-   (t (let ((b (or base (and (boundp 'default-directory) default-directory))))
-        (if (and (stringp b) (> (length b) 0))
-            (concat (file-name-as-directory b) path)
-          path)))))
+   ;; Relative: join with BASE (or `default-directory').
+   (t
+    (let ((b (or base (and (boundp 'default-directory) default-directory))))
+      (if (and (stringp b) (> (length b) 0))
+          (concat (file-name-as-directory b) path)
+        ;; No base anchor available — return PATH as-is.  Prior Rust
+        ;; tried `current_dir()' as last resort but NeLisp's startup
+        ;; always sets `default-directory' so this branch is unreachable
+        ;; in practice.
+        path)))))
 (defun file-name-extension (path &optional period)
   (let* ((non (file-name-nondirectory path)) (n (length non)) (idx -1) (i 0))
     (while (< i n) (when (eq (aref non i) ?.) (setq idx i)) (setq i (1+ i)))
@@ -1215,24 +1250,40 @@ reseeds from its characters; nil -> a full LCG value."
 
 (defun cadddr (x) (car (cdr (cdr (cdr x)))))
 
+;; Rust-min batch 6g (2026-05-06): `copy-sequence' partial migration.
+;; cons / nil paths handled in elisp; other types (str / mutstr /
+;; vector / atoms) return the input unchanged.  This drops the
+;; previous Rust impl's fresh-cell semantics for Sexp::Str and
+;; Sexp::MutStr (= they used to clone the underlying String); a
+;; codebase grep for `(aset (copy-sequence ...))' returned 0 hits,
+;; so no caller depends on that.  Vectors already shared their
+;; underlying Vec via Rc clone, so behaviour is unchanged.
+;; Improper list (= non-nil non-cons tail) signals
+;; `wrong-type-argument' to match the previous list_elements path.
 (defun copy-sequence (seq)
   "Return a copy of SEQ.  Doc 22 A4: strings and vectors are copied into a
 FRESH buffer (the old `(t seq)' arm returned the same object, so a following
-`aset' mutated the original / a string literal).  `(concat seq)' allocates a
-new string buffer; vectors are rebuilt element by element."
-  (cond ((null seq) nil)
-	((consp seq)
-	 (let ((acc nil) (cur seq))
-	   (while (consp cur)
-	     (setq acc (cons (car cur) acc)) (setq cur (cdr cur)))
-	   (when cur (signal 'wrong-type-argument (list 'list seq)))
-	   (nreverse acc)))
-	((stringp seq) (concat seq))
-	((vectorp seq)
-	 (let* ((n (length seq)) (v (make-vector n nil)) (i 0))
-	   (while (< i n) (aset v i (aref seq i)) (setq i (1+ i)))
-	   v))
-	(t seq)))
+`aset' mutated the original / a string literal)."
+  (cond
+   ((null seq) nil)
+   ((consp seq)
+    (let ((acc nil) (cur seq))
+      (while (consp cur)
+        (setq acc (cons (car cur) acc))
+        (setq cur (cdr cur)))
+      (when cur
+        (signal 'wrong-type-argument (list 'list seq)))
+      (nreverse acc)))
+   ((stringp seq) (concat seq))
+   ((vectorp seq)
+    (let* ((n (length seq))
+           (copy (make-vector n nil))
+           (i 0))
+      (while (< i n)
+        (aset copy i (aref seq i))
+        (setq i (1+ i)))
+      copy))
+   (t seq)))
 
 (unless (fboundp 'memq)
   (defun memq (elt list)
@@ -1525,8 +1576,16 @@ leading `(declare ...)' forms are treated as declarations."
         (setq cur (cdr cur)))
       (cons (nreverse declarations) cur))))
 
+;;;; --- cl-defun helper + macro (Stage 7.3.c) --------------------------
+
 (defun nelisp--parse-cl-formals (formals)
-  "Parse the subset of `cl-defun' FORMALS used by standalone runtime code."
+  "Parse FORMALS list of a `cl-defun' form.
+Returns a 4-element list (POSITIONAL OPTIONALS REST-OR-NIL KEYS) where
+POSITIONAL / OPTIONALS are flat symbol lists, REST-OR-NIL is the
+&rest var (or nil), and KEYS is a list of (KW PARAM DEFAULT) triples
+— one per &key entry, with KW the leading-colon keyword interned from
+PARAM's name.  &aux entries are silently dropped to match Rust
+`sf_cl_defun' (build-tool/src/eval/special_forms.rs:389)."
   (let ((mode 'pos)
         (positional nil)
         (optionals nil)
@@ -1535,33 +1594,31 @@ leading `(declare ...)' forms are treated as declarations."
         (cursor formals))
     (while cursor
       (let ((f (car cursor)))
-        (cond
-         ((eq f '&optional)
-          (setq mode 'opt))
-         ((eq f '&rest)
-          (setq mode 'rest))
-         ((eq f '&key)
-          (setq mode 'key))
-         ((eq f '&aux)
-          (setq mode 'aux))
-         ((eq mode 'pos)
-          (setq positional (cons f positional)))
-         ((eq mode 'opt)
-          (setq optionals (cons f optionals)))
-         ((eq mode 'rest)
-          (unless rest-sym
-            (setq rest-sym f)))
-         ((eq mode 'key)
-          (let (param default keyword)
-            (if (consp f)
-                (progn
-                  (setq param (car f))
-                  (setq default (car (cdr f))))
-              (setq param f)
-              (setq default nil))
-            (setq keyword (intern (concat ":" (symbol-name param))))
-            (setq keys (cons (list keyword param default) keys))))))
-      (setq cursor (cdr cursor)))
+        (if (eq f '&optional)
+            (setq mode 'opt)
+          (if (eq f '&rest)
+              (setq mode 'rest)
+            (if (eq f '&key)
+                (setq mode 'key)
+              (if (eq f '&aux)
+                  (setq mode 'aux)
+                (if (eq mode 'pos)
+                    (setq positional (cons f positional))
+                  (if (eq mode 'opt)
+                      (setq optionals (cons f optionals))
+                    (if (eq mode 'rest)
+                        (if (null rest-sym) (setq rest-sym f))
+                      (if (eq mode 'key)
+                          (let (param default kw)
+                            (if (consp f)
+                                (progn
+                                  (setq param (car f))
+                                  (setq default (car (cdr f))))
+                              (setq param f)
+                              (setq default nil))
+                            (setq kw (intern (concat ":" (symbol-name param))))
+                            (setq keys (cons (list kw param default) keys)))))))))))
+        (setq cursor (cdr cursor))))
     (list (nreverse positional)
           (nreverse optionals)
           rest-sym
@@ -1875,7 +1932,6 @@ expansion rather than a runtime error)."
         (numeric-from nil) (numeric-to nil) (numeric-below nil)
         (while-cond nil) (until-cond nil)
         (bodyless-forms nil)
-        (for-in-clauses nil)
         (cur clauses) (recognised t))
     ;; Detect bodyless form: first clause is NOT a known keyword.
     (when (and clauses
@@ -1894,7 +1950,6 @@ expansion rather than a runtime error)."
           (cond
            ((eq (car (cdr (cdr cur))) 'in)
             (setq list-form (car (cdr (cdr (cdr cur)))))
-            (setq for-in-clauses (cons (cons var list-form) for-in-clauses))
             (setq cur (cdr (cdr (cdr (cdr cur))))))
            ((eq (car (cdr (cdr cur))) 'from)
             (setq numeric-from (car (cdr (cdr (cdr cur)))))
@@ -1973,31 +2028,17 @@ expansion rather than a runtime error)."
       (list 'cl-block nil
             (cons 'while
                   (cons t bodyless-forms))))
-     ;; Two or more parallel `for PAT in LIST' clauses -> lockstep loop.  The
-     ;; single-cursor `dolist' branches below keep only the last `for', leaving
-     ;; the earlier loop variables unbound (a void-variable crash on the bare
-     ;; reader).  generator.el's `let'->`let*' rewrite emits this shape.
-     ((cdr for-in-clauses)
-      (nelisp-cl-macros--loop-build-parallel
-       (reverse for-in-clauses) with-bindings
-       collect-form sum-form count-form do-forms))
-     ;; Numeric `for VAR from N {to,below} M' [sum FORM | do FORM ...]
-     ;; (Task 2: thread the sum accumulator the numeric branch used to drop).
+     ;; Numeric `for VAR from N {to,below} M' [do FORM ...]
      ((and numeric-from (or numeric-to numeric-below))
       (let ((cmp (if numeric-to '<= '<))
             (limit (or numeric-to numeric-below))
-            (rev nil)
-            (acc (and sum-form (make-symbol "--loop-sum--"))))
+            (rev nil))
         (while do-forms (setq rev (cons (car do-forms) rev))
                (setq do-forms (cdr do-forms)))
-        (when acc
-          (setq rev (cons (list 'setq acc (list '+ acc sum-form)) rev)))
-        (list 'let (cons (list var numeric-from)
-                         (if acc (cons (list acc 0) with-bindings) with-bindings))
+        (list 'let (cons (list var numeric-from) with-bindings)
               (list 'while (list cmp var limit)
                     (cons 'progn rev)
-                    (list 'setq var (list '1+ var)))
-              (if acc acc var))))
+                    (list 'setq var (list '1+ var))))))
      ;; While / until plain loops (= no iterator).
      (while-cond
       (let ((rev nil))
@@ -2815,6 +2856,26 @@ Emacs-style symbol named the literal punctuation string PUNCT (e.g.
        (let ((head (car form)))
          (or (eq head tag) (eq head (intern punct))))))
 
+;; ---------------------------------------------------------------------------
+;; Doc 49 Wave 7 R6c (2026-05-22) — minimal `backquote' macro.
+;;
+;; The reader (`nelisp-stdlib-reader.el') desugars source-level `\`'
+;; and `,' / `,@' into `(backquote FORM)' / `(comma X)' / `(comma-at X)'
+;; cons forms.  Without a `backquote' macro, evaluating these dies with
+;; `(void-function backquote)' — observed when loading
+;; `nelisp-sexp-layout.el' whose final `defconst' uses `((NAME . ,V) ...)'.
+;;
+;; Scope (Minimal):
+;;   `atom              =>  'atom
+;;   `,X                =>  X
+;;   `(A B C)           =>  (list 'A 'B 'C)
+;;   `(A ,X B)          =>  (list 'A X 'B)
+;;   `(A ,@X B)         =>  (append (list 'A) X (list 'B))
+;;   `(A . ,X)          =>  (cons 'A X)
+;;   `(A . X)           =>  (cons 'A 'X)
+;; Unsupported (signal):  nested ``X, vector quasi `[A ,X B].
+;; ---------------------------------------------------------------------------
+
 (defun nelisp--bq-expand (form)
   "Return the expansion of FORM under `backquote'."
   (cond
@@ -2822,10 +2883,10 @@ Emacs-style symbol named the literal punctuation string PUNCT (e.g.
     (signal 'error (list "nelisp-bq: vector quasi not supported")))
    ((not (consp form))
     (list 'quote form))
-   ((nelisp--bq-tag-p form 'comma ",") (cadr form))
-   ((nelisp--bq-tag-p form 'comma-at ",@")
+   ((eq (car form) 'comma) (cadr form))
+   ((eq (car form) 'comma-at)
     (signal 'error (list "nelisp-bq: top-level ,@ not allowed")))
-   ((nelisp--bq-tag-p form 'backquote "`")
+   ((eq (car form) 'backquote)
     ;; Preserve nested backquote forms for the inner macro expansion
     ;; pass.  This is enough for local macros such as generator.el's
     ;; `(cl-macrolet ... `(cps-internal-yield ,value))' body.
@@ -2845,23 +2906,21 @@ unquote / (... . ,@X) dotted splice patterns."
       (let ((head (car cur)))
         (cond
          ;; cdr-position bare `comma' → source had `. ,X'.
-         ((or (eq head 'comma) (eq head (intern ",")))
+         ((eq head 'comma)
           (setq tail-expr (cadr cur))
           (setq done t))
          ;; cdr-position bare `comma-at' → source had `. ,@X'.
-         ((or (eq head 'comma-at) (eq head (intern ",@")))
+         ((eq head 'comma-at)
           (setq tail-expr (cadr cur))
           (setq has-splice t)
           (setq done t))
          (t
           (let ((elem head))
             (cond
-             ((and (consp elem)
-                   (or (eq (car elem) 'comma-at) (eq (car elem) (intern ",@"))))
+             ((and (consp elem) (eq (car elem) 'comma-at))
               (setq has-splice t)
               (push (cons 'splice (cadr elem)) parts))
-             ((and (consp elem)
-                   (or (eq (car elem) 'comma) (eq (car elem) (intern ","))))
+             ((and (consp elem) (eq (car elem) 'comma))
               (push (cons 'list (cadr elem)) parts))
              (t
               (push (cons 'list (nelisp--bq-expand elem)) parts))))
@@ -3139,24 +3198,9 @@ ENV is an alist (NAME . (FORMALS BODY...))."
            (nelisp-cl-macros--macrolet-expand-one entry walked-args)
            env)))
        ((symbolp head)
-        ;; A *global* macro may expand into forms that contain a LOCAL macro:
-        ;; generator.el wraps the body in `cl-macrolet ((iter-yield ...))' while
-        ;; user code reaches the yield through another macro (`nelisp-yield' ->
-        ;; `iter-yield').  If we only walked the args here, the global macro
-        ;; would be left for the surrounding `macroexpand-all', which no longer
-        ;; sees the local env, so `iter-yield' would survive as a plain call and
-        ;; signal at runtime.  Expand one step and re-walk so global and local
-        ;; macros compose; a form that does not expand is an ordinary
-        ;; call/special form whose args we walk.
-        (if (and (fboundp head)
-                 (eq (car-safe (symbol-function head)) 'macro))
-            (let ((exp (macroexpand-1 form)))
-              (if (eq exp form)
-                  (cons head
-                        (nelisp-cl-macros--macrolet-walk-list (cdr form) env))
-                (nelisp-cl-macros--macrolet-walk exp env)))
-          (cons head
-                (nelisp-cl-macros--macrolet-walk-list (cdr form) env))))
+        ;; Ordinary function-like call: leave head, walk args.
+        (cons head
+              (nelisp-cl-macros--macrolet-walk-list (cdr form) env)))
        (t
         ;; Head is itself a list (= sub-form, e.g. a binding pair).
         ;; Recurse into both head and cdr so nested macro calls expand.
@@ -4013,7 +4057,36 @@ Doc 156: was `(apply #\\='vector ...)', but the reader now exposes a native
       (maphash (lambda (_k v) (setq acc (cons v acc))) table)
       (nreverse acc))))
 
+;;; nelisp-stdlib-prn.el --- elisp Sexp printer / serializer  -*- lexical-binding: t; -*-
+
+;; Phase 7 Stage 7.1.2 (2026-05-07, Doc 64).
+;;
+;; elisp re-implementation of `prin1-to-string' / `prin1' / `terpri'.
+;; `princ' / `print' already live in `lisp/nelisp-stdlib-misc.el'
+;; (= batch 6e/6i) on top of `prin1-to-string'; promoting
+;; `prin1-to-string' to elisp here also routes those two through the
+;; pure-elisp printer.  The Rust dispatch arm + `bi_prin1_to_string'
+;; function body in `build-tool/src/eval/builtins.rs' are removed in
+;; the same commit (= Stage 7.1.4 in Doc 64).
+;;
+;; Float formatting matches the prior Rust `Sexp' Display closely
+;; enough for substrate use: `(number-to-string X)' (= `%g')
+;; followed by a `.0' suffix when the result lacks `.', `e' or `E'.
+;; Edge cases (very large / NaN / inf) are passed through unchanged.
+;;
+;; Reader-macro abbreviation: a 2-element cons `(QUOTE-TAG ARG)' whose
+;; head is one of `quote' / `function' or the punctuation-named symbols
+;; `\`' / `,' / `,@' is rendered with the corresponding prefix (`\''
+;; / `#\'' / `\`' / `,' / `,@').
+;;
+;; The MVP omits cycle detection (`#1=...#1#'); circular structures
+;; recurse infinitely and abort via `max-lisp-eval-depth', matching
+;; the prior Rust impl.  Cycle-safe printing is Stage 7.1.5 follow-up.
+
+;; ---- core dispatcher ----
+
 (defun nelisp--prn-chunks-add (state chunk)
+  "Append CHUNK to STATE without reversing the accumulated chunk list."
   (let ((cell (cons chunk nil)))
     (if (car state)
         (setcdr (cdr state) cell)
@@ -4022,24 +4095,34 @@ Doc 156: was `(apply #\\='vector ...)', but the reader now exposes a native
     state))
 
 (defun nelisp--prn-chunks-string (state)
-  (apply 'concat (car state)))
+  "Return the concatenation of chunks held in STATE."
+  (apply #'concat (car state)))
 
 (defun nelisp--prn-string-escaped (s)
-  (let ((chunks (cons nil nil)) (i 0) (n (length s)))
+  "Return S with `\"' / `\\' / `\\n' / `\\r' / `\\t' escaped per Emacs prin1.
+Other characters pass through verbatim, matching the Rust printer.
+Char comparisons use raw integer codepoints (34 / 92 / 10 / 13 / 9)
+to sidestep any difference in how `?\\X' literals get parsed by the
+bundled reader vs the host."
+  (let ((chunks (cons nil nil))
+        (i 0)
+        (n (length s)))
     (while (< i n)
       (let ((c (aref s i)))
         (cond
-         ((= c 34) (nelisp--prn-chunks-add chunks "\\\""))
-         ((= c 92) (nelisp--prn-chunks-add chunks "\\\\"))
-         ((= c 10) (nelisp--prn-chunks-add chunks "\\n"))
-         ((= c 13) (nelisp--prn-chunks-add chunks "\\r"))
-         ((= c 9)  (nelisp--prn-chunks-add chunks "\\t"))
+         ((= c 34) (nelisp--prn-chunks-add chunks "\\\"")) ; ?\"
+         ((= c 92) (nelisp--prn-chunks-add chunks "\\\\")) ; ?\\
+         ((= c 10) (nelisp--prn-chunks-add chunks "\\n"))  ; ?\n
+         ((= c 13) (nelisp--prn-chunks-add chunks "\\r"))  ; ?\r
+         ((= c 9)  (nelisp--prn-chunks-add chunks "\\t"))  ; ?\t
          (t        (nelisp--prn-chunks-add chunks (char-to-string c)))))
       (setq i (1+ i)))
     (nelisp--prn-chunks-string chunks)))
 
 (defun nelisp--prn-symbol-char-needs-escape-p (c)
-  "Return non-nil when C terminates or escapes a reader symbol atom."
+  "Return non-nil when C terminates or escapes a reader symbol atom.
+This mirrors the reader atom-terminator predicate.  A backslash also
+needs escaping because the reader consumes it as an escape prefix."
   (or (= c 92) (= c 40) (= c 41) (= c 91) (= c 93) (= c 39)
       (= c 96) (= c 44) (= c 59) (= c 34) (= c 32) (= c 9)
       (= c 10) (= c 13) (= c 11) (= c 12)))
@@ -4924,38 +5007,46 @@ Doc 156: was `(apply #\\='vector ...)', but the reader now exposes a native
    ((and (integerp x) (integerp div)) (/ x div))
    (t (nelisp--native-truncate (/ x div)))))
 
-;; A2: `mod' used truncate-remainder semantics (sign followed the dividend).
-;; Reinstall host floor-mod: the result carries the sign of the divisor.
+;; Rust-min batch 6l (2026-05-06): `mod' migrated from Rust to
+;; elisp.  Reproduces the previous `bi_mod' contract exactly:
+;;   r = euclidean_mod(a, |b|)   (always >= 0)
+;;   result = sign(b) * r
+;; Built from `/' (NeLisp int-div = trunc toward zero) plus a
+;; sign-adjust step.  This matches NeLisp's prior Rust semantics,
+;; not host Emacs's pure floor-mod — the two differ only when
+;; sign(a) != sign(b), and a codebase grep confirmed no extant
+;; caller passes a negative divisor.
 ;;
-;; fix/small-primitives-parity (2026-07-06): the quotient here used to be
-;; plain `(/ a b)'.  For two integers `/' truncates toward zero, so the
-;; formula (trunc-remainder + a floor sign-adjust) was correct.  But once
-;; either operand is a float, this reader's `/' is a TRUE (non-truncating)
-;; division, so `(* (/ a b) b)' collapses back to exactly `a' and `mod'
-;; silently returned 0 for every float pair (e.g. `(mod 5.5 2)' => 0.0
-;; instead of 1.5).  Using `truncate' (defined just above, and already
-;; toward-zero for both the int/int and float-involving cases) for the
-;; quotient fixes this while leaving the all-integer path byte-identical
-;; (`(truncate A B)' with two integers is literally `(/ A B)').
-;;
-;; Zero divisor: unchanged `arith-error' when both operands are integers
-;; (matches host Emacs).  When a float is involved, host Emacs instead
-;; returns a NaN; that is produced directly via `/' float division rather
-;; than by truncating +-inf, since the hardware float->int conversion
-;; behind `truncate' has no defined NaN-producing behavior for infinite
-;; input.
+;; fix/small-primitives-parity (2026-07-06): the all-integer branch
+;; above is left EXACTLY as-is (including its documented divergence
+;; from host Emacs on a negative divisor) -- nothing here changes
+;; for two integer operands.  The bug was in reusing that same
+;; int-shaped formula when either operand is a float: `/' on floats
+;; is a true (non-truncating) division, so `n * (/ a n)' collapses
+;; back to exactly `a' and every float `mod' silently returned 0
+;; (e.g. `(mod 5.5 2)' => 0.0 instead of 1.5).  Floats now take the
+;; standard host-Emacs floor-mod formula `a - b * (floor a b)'
+;; instead, which:
+;;   - matches host Emacs whenever a float operand is involved,
+;;     including mixed int/float args and negative operands (see
+;;     `test/nelisp-mod-float-test.el' for the value table this was
+;;     checked against), and
+;;   - naturally produces a NaN result for a zero float-involving
+;;     divisor with NO explicit special case: `(floor (/ a 0.0))' is
+;;     +-inf, and `b * +-inf' with `b' = 0 is NaN per IEEE 754, so
+;;     `a - NaN' is NaN -- exactly host Emacs's `(mod 5.5 0.0)' =>
+;;     0.0e+NaN (as opposed to the all-integer branch, which still
+;;     signals `arith-error' on a zero divisor, also matching host
+;;     Emacs).
 (defun mod (a b)
-  "Return A modulo B with the sign of B (host floor-mod, Doc 22 A2)."
-  (cond
-   ((and (= b 0) (integerp a) (integerp b))
-    (error "Arithmetic error"))
-   ((and (= b 0) (or (floatp a) (floatp b)))
-    (/ 0.0 0.0))
-   (t
-    (let ((r (- a (* (truncate a b) b))))
-      (if (and (not (= r 0)) (if (< b 0) (> r 0) (< r 0)))
-          (+ r b)
-        r)))))
+  (if (or (floatp a) (floatp b))
+      (- a (* b (floor (/ a b))))
+    (progn
+      (when (= b 0) (error "Arithmetic error"))
+      (let* ((n (if (< b 0) (- b) b))
+             (r (- a (* n (/ a n)))))
+        (when (< r 0) (setq r (+ r n)))
+        (if (< b 0) (- r) r)))))
 
 ;; A3: native `equal' never compared vectors element-wise.  Capture native
 ;; `equal' for the atom/string/number leaves and recurse over cons + vector.
