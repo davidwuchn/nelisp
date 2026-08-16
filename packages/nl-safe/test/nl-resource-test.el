@@ -83,7 +83,11 @@
   (let ((r (nl-resource-test--fd 7)))
     (should (eq (nl-resource-type r) 'test-fd))
     (should (nl-resource-live-p r))
-    (should (= (nl-resource-handle r) 7))))
+    (should (= (nl-resource-handle r) 7))
+    ;; Drop it: a resource this function acquires and never releases is
+    ;; the exact thing `nl-check' reports as resource-untracked, and a
+    ;; checker the tree's own tests violate is one nobody will trust.
+    (nl-drop r)))
 
 (ert-deftest nl-resource-accessors-reject-non-resources ()
   (should-error (nl-resource-type 5) :type 'nl-resource-error)

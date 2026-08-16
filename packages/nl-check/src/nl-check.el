@@ -243,8 +243,20 @@ resource observers, counts as an escape (Doc 170 section 6.3)."
         (memq (car form) '(when unless while if and or not
                            prog1 unwind-protect setq progn)))
     (nl-check--escapes-seq (cdr form) var))
-   ;; Unknown call: ownership may move through any argument.
-   (t (nl-check--mentions-p (cdr form) var))))
+   ;; Unknown call: ownership moves through an argument handed over
+   ;; directly.  An argument that merely CONTAINS var does not hand it
+   ;; over -- `(eq (nl-resource-type r) 'test-fd)' observes r and keeps
+   ;; it -- so recurse into the arguments instead of treating the whole
+   ;; subtree as an escape.  Treating containment as escape reported
+   ;; every resource a test reads through an accessor.
+   (t
+    (let ((args (cdr form))
+          (found nil))
+      (while (and (consp args) (not found))
+        (setq found (or (eq (car args) var)
+                        (nl-check--escapes-p (car args) var)))
+        (setq args (cdr args)))
+      found))))
 
 (defun nl-check--escapes-seq (forms var)
   "Return non-nil when VAR escapes in any element of FORMS."
