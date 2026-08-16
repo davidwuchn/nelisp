@@ -883,19 +883,29 @@ accepted by `nelisp--apply'."
   (puthash symbol definition nelisp--functions)
   symbol)
 
-(defun nelisp--builtin-require (feature &optional _filename _noerror)
+;; `nelisp-load.el' owns the real one -- circular detection, NOERROR,
+;; a provide check.  This is the Phase 2 placeholder from before that
+;; existed, and it is unconditional, so the winner is decided by load
+;; order: today nelisp-load.el loads second and the real one wins, but
+;; anything that pulls nelisp-eval in afterwards silently gets a
+;; `require' that loads nothing and returns the feature.  Yield instead.
+(unless (fboundp 'nelisp--builtin-require)
+  (defun nelisp--builtin-require (feature &optional _filename _noerror)
   "Phase 2 NeLisp `require' stub.
 NeLisp does not yet maintain a module table; the dependents are
 expected to have been loaded by the host before NeLisp evaluates
 the source.  Return FEATURE unchanged so callers see the same
 shape as Elisp's own `require'."
-  feature)
+  feature))
 
-(defun nelisp--builtin-provide (feature &optional _subfeatures)
-  "Phase 2 NeLisp `provide' stub.
+;; Same story as `nelisp--builtin-require' above: nelisp-load.el owns
+;; the registry-backed one, this is the placeholder from before it.
+(unless (fboundp 'nelisp--builtin-provide)
+  (defun nelisp--builtin-provide (feature &optional _subfeatures)
+    "Phase 2 NeLisp `provide' stub.
 No module registry yet; just acknowledge the symbol so source files
 that end with `(provide ...)' work as-is."
-  feature)
+    feature))
 
 (defun nelisp--install-primitives ()
   "Bind every primitive symbol in `nelisp--functions'.

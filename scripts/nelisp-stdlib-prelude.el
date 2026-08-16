@@ -2856,26 +2856,6 @@ Emacs-style symbol named the literal punctuation string PUNCT (e.g.
        (let ((head (car form)))
          (or (eq head tag) (eq head (intern punct))))))
 
-;; ---------------------------------------------------------------------------
-;; Doc 49 Wave 7 R6c (2026-05-22) — minimal `backquote' macro.
-;;
-;; The reader (`nelisp-stdlib-reader.el') desugars source-level `\`'
-;; and `,' / `,@' into `(backquote FORM)' / `(comma X)' / `(comma-at X)'
-;; cons forms.  Without a `backquote' macro, evaluating these dies with
-;; `(void-function backquote)' — observed when loading
-;; `nelisp-sexp-layout.el' whose final `defconst' uses `((NAME . ,V) ...)'.
-;;
-;; Scope (Minimal):
-;;   `atom              =>  'atom
-;;   `,X                =>  X
-;;   `(A B C)           =>  (list 'A 'B 'C)
-;;   `(A ,X B)          =>  (list 'A X 'B)
-;;   `(A ,@X B)         =>  (append (list 'A) X (list 'B))
-;;   `(A . ,X)          =>  (cons 'A X)
-;;   `(A . X)           =>  (cons 'A 'X)
-;; Unsupported (signal):  nested ``X, vector quasi `[A ,X B].
-;; ---------------------------------------------------------------------------
-
 (defun nelisp--bq-expand (form)
   "Return the expansion of FORM under `backquote'."
   (cond
@@ -2883,10 +2863,10 @@ Emacs-style symbol named the literal punctuation string PUNCT (e.g.
     (signal 'error (list "nelisp-bq: vector quasi not supported")))
    ((not (consp form))
     (list 'quote form))
-   ((eq (car form) 'comma) (cadr form))
-   ((eq (car form) 'comma-at)
+   ((nelisp--bq-tag-p form 'comma ",") (cadr form))
+   ((nelisp--bq-tag-p form 'comma-at ",@")
     (signal 'error (list "nelisp-bq: top-level ,@ not allowed")))
-   ((eq (car form) 'backquote)
+   ((nelisp--bq-tag-p form 'backquote "`")
     ;; Preserve nested backquote forms for the inner macro expansion
     ;; pass.  This is enough for local macros such as generator.el's
     ;; `(cl-macrolet ... `(cps-internal-yield ,value))' body.
@@ -2906,21 +2886,23 @@ unquote / (... . ,@X) dotted splice patterns."
       (let ((head (car cur)))
         (cond
          ;; cdr-position bare `comma' → source had `. ,X'.
-         ((eq head 'comma)
+         ((or (eq head 'comma) (eq head (intern ",")))
           (setq tail-expr (cadr cur))
           (setq done t))
          ;; cdr-position bare `comma-at' → source had `. ,@X'.
-         ((eq head 'comma-at)
+         ((or (eq head 'comma-at) (eq head (intern ",@")))
           (setq tail-expr (cadr cur))
           (setq has-splice t)
           (setq done t))
          (t
           (let ((elem head))
             (cond
-             ((and (consp elem) (eq (car elem) 'comma-at))
+             ((and (consp elem)
+                   (or (eq (car elem) 'comma-at) (eq (car elem) (intern ",@"))))
               (setq has-splice t)
               (push (cons 'splice (cadr elem)) parts))
-             ((and (consp elem) (eq (car elem) 'comma))
+             ((and (consp elem)
+                   (or (eq (car elem) 'comma) (eq (car elem) (intern ","))))
               (push (cons 'list (cadr elem)) parts))
              (t
               (push (cons 'list (nelisp--bq-expand elem)) parts))))

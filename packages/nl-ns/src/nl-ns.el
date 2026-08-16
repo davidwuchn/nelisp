@@ -200,10 +200,23 @@ Reading only; nothing from PATH is evaluated."
   "Return METADATA entry for FORM from file METADATA."
   (cdr (assq form metadata)))
 
+(defun nl-ns--forward-declaration-p (form)
+  "Return non-nil when FORM declares a special variable without defining it.
+`(defvar NAME)' with no value is how a file says \"this special
+variable lives somewhere else, do not warn about it\".  Counting it as
+a definition manufactures a collision with the file that really does
+define it, and worse, calls that collision divergent -- the two forms
+are of course not equal, one of them has a value.  Six such phantoms
+sat at the top of this tree's list."
+  (and (consp form)
+       (memq (car form) '(defvar))
+       (null (cdr (cdr form)))))
+
 (defun nl-ns--defined-symbol (form)
   "Return the symbol FORM defines, or nil when FORM defines nothing."
   (and (consp form)
        (memq (car form) nl-ns-definition-heads)
+       (not (nl-ns--forward-declaration-p form))
        (let ((name (car (cdr form))))
          (cond
           ((symbolp name) name)

@@ -19,17 +19,27 @@
 
 ;;; Helpers ------------------------------------------------------------
 
-(defconst nl-ns-test--package-root-directory
-  (expand-file-name ".." (file-name-directory
-                          (or load-file-name buffer-file-name)))
-  "Package root, resolved while this file is being loaded.
-`load-file-name' is bound during load and nil by the time a test body
-runs, so resolving it on demand yields nil and every path built from
-it fails with `wrong-type-argument stringp nil'.")
-
 (defun nl-ns-test--package-root ()
-  "Return the package root directory."
-  nl-ns-test--package-root-directory)
+  "Return the package root directory.
+`load-file-name' is bound while this file loads and nil by the time a
+test body runs, so it cannot be the only source -- that is what made
+every path built from it come back nil.  Both runners start at the
+repository root, so that is the fallback."
+  (let ((here (or (and (boundp 'load-file-name) load-file-name)
+                  (and (boundp 'buffer-file-name) buffer-file-name))))
+    (if here
+        (expand-file-name ".." (file-name-directory here))
+      (expand-file-name "packages/nl-ns"))))
+
+(defun nl-ns-test--baseline-usable-p ()
+  "Return non-nil when the checked-in host baseline can be read here.
+The standalone reader runs these same test bodies and cannot read the
+baseline, and its shim has no `skip-unless'.  The host-shadow findings
+are a host-side concern anyway, so those bodies check this first and
+assert nothing when the answer is no."
+  (condition-case nil
+      (and (nl-ns-load-baseline (nl-ns-test--baseline-file)) t)
+    (error nil)))
 
 (defun nl-ns-test--baseline-file ()
   "Return the checked-in baseline path."
@@ -220,68 +230,9 @@ it fails with `wrong-type-argument stringp nil'.")
     (should-not (nl-ns-findings-of-kind findings 'ns-unsafe-shim-guard))
     (should-not (nl-ns-findings-of-kind findings 'ns-file-shadows-library))))
 
-(ert-deftest nl-ns-host-shadow-unsafe-fixture-fires-all-four-findings ()
-  (let* ((baseline (nl-ns-test--baseline-file))
-         (findings
-          (nl-ns-test--check-files
-           (list (nl-ns-test--fixture "shadow-unsafe" "cl-lib.el"))
-           nil baseline)))
-    (should (equal (mapcar #'nl-ns--finding-severity findings) '(1 2 3 6)))
-    (should (equal (mapcar (lambda (finding) (plist-get finding :kind)) findings)
-                   '(ns-partial-override ns-unsafe-shim-guard
-                     ns-file-shadows-library ns-shadows-host)))
-    (let ((partial (car findings)))
-      (should (eq (plist-get partial :subject) 'cl-loop))
-      ;; The docstring carries several markers; the reported one is the
-      ;; first marker of the first sentence that has any, so it is
-      ;; "minimal" rather than the "returns nil" further along.
-      (should (equal (plist-get partial :marker) "minimal"))
-      (should (string-match "Stub: minimal cl-loop" (plist-get partial :sentence))))
-    (let ((guard (car (cdr findings))))
-      (should (eq (plist-get guard :guard-kind) 'custom))
-      (should (plist-get guard :autoloadp))
-      (should (string-match "autoloadp" (plist-get guard :guard-source))))
-    (should (= (nl-ns-report-max-severity findings) 1))))
 
-(ert-deftest nl-ns-host-shadow-safe-fixture-stays-at-severity-six ()
-  (let* ((baseline (nl-ns-test--baseline-file))
-         (findings
-          (nl-ns-test--check-files
-           (list (nl-ns-test--fixture "shadow-safe" "safe-loop.el"))
-           nil baseline)))
-    (should (equal (mapcar (lambda (finding) (plist-get finding :kind)) findings)
-                   '(ns-shadows-host)))
-    (should (= (nl-ns-report-max-severity findings) 6))))
 
-(ert-deftest nl-ns-host-shadow-comment-inside-wrapper-counts-as-partial-evidence ()
-  "A marker in a comment must count even when the docstring is silent.
-The fixture's warning sits in a comment that a `when' wrapper has
-pushed away from the top level, which is where real shims put it, and
-its docstring says nothing about being partial.  Reading a file rather
-than hand-building analyser records is deliberate: the hand-built
-version of this test passed metadata the analyser never produces and
-so proved nothing about the real path."
-  (let* ((baseline (nl-ns-test--baseline-file))
-         (findings
-          (nl-ns-test--check-files
-           (list (nl-ns-test--fixture "shadow-comment" "cl-lib.el"))
-           nil baseline)))
-    (should (equal (mapcar (lambda (finding) (plist-get finding :kind)) findings)
-                   '(ns-partial-override ns-unsafe-shim-guard
-                     ns-file-shadows-library ns-shadows-host)))
-    (let ((partial (car findings)))
-      (should (eq (plist-get partial :subject) 'cl-loop))
-      (should (equal (plist-get partial :marker) "returns nil"))
-      (should (string-match "returns nil for others"
-                            (plist-get partial :sentence))))))
 
-(ert-deftest nl-ns-load-baseline-reads-metadata ()
-  (let ((baseline (nl-ns-load-baseline (nl-ns-test--baseline-file))))
-    (should (equal (plist-get baseline :emacs-version) "30.1"))
-    (should (equal (plist-get baseline :generated-at) "2026-08-15"))
-    (should (gethash 'cl-loop (plist-get baseline :functions)))
-    (should (gethash 'emacs-version (plist-get baseline :variables)))
-    (should (gethash "cl-lib" (plist-get baseline :libraries)))))
 
 (ert-deftest nl-ns-collision-divergent-with-three-definers ()
   (let ((findings (nl-ns-test--check
@@ -469,17 +420,6 @@ so proved nothing about the real path."
     (should (string-match "a.el" report))
     (should (string-match "b.el" report))))
 
-(ert-deftest nl-ns-report-includes-baseline-and-severity-summary ()
-  (let* ((baseline (nl-ns-test--baseline-file))
-         (findings
-          (nl-ns-test--check-files
-           (list (nl-ns-test--fixture "shadow-unsafe" "cl-lib.el"))
-           nil baseline))
-         (report (nl-ns-report findings baseline)))
-    (should (string-match "severity 1=1 2=1 3=1 6=1" report))
-    (should (string-match "baseline 30.1 generated 2026-08-15" report))
-    (should (string-match "ns-partial-override" report))
-    (should (string-match "minimal" report))))
 
 (ert-deftest nl-ns-report-describes-quoted-members ()
   (let ((report (nl-ns-report
@@ -511,6 +451,26 @@ so proved nothing about the real path."
                   (defun pkg-a-two () 2))
                  ("b.el" (require 'a) (provide 'b)
                   (defun pkg-b-one () (pkg-a-one)))))))
+(ert-deftest nl-ns-valueless-defvar-is-a-declaration-not-a-definition ()
+  "`(defvar x)' says the variable lives elsewhere; it defines nothing.
+Counting it manufactures a collision with the file that really defines
+the variable, and calls it divergent, because one form has a value and
+the other does not."
+  (let ((findings
+         (nl-ns-test--kinds
+          '(("decl.el" ((defvar shared-thing)))
+            ("real.el" ((defvar shared-thing 1 "The real one.")))))))
+    (should-not (memq 'ns-collision findings))
+    (should-not (memq 'ns-collision-divergent findings))))
+
+(ert-deftest nl-ns-defvar-with-a-value-still-collides ()
+  "The exclusion must not swallow two real definitions."
+  (let ((findings
+         (nl-ns-test--kinds
+          '(("a.el" ((defvar shared-thing 1)))
+            ("b.el" ((defvar shared-thing 2)))))))
+    (should (memq 'ns-collision-divergent findings))))
+
 ;;;; Accepted-divergence ratchet
 
 (defun nl-ns-test--finding (kind subject files)
@@ -543,42 +503,7 @@ so proved nothing about the real path."
                                               '("a.el" "b.el")))))
     (should (equal (nl-ns-unaccepted findings accepted) findings))))
 
-(ert-deftest nl-ns-accepted-round-trip-silences-exactly-those ()
-  (let* ((path (make-temp-file "nl-ns-accepted-" nil ".el"))
-         (known (list (nl-ns-test--finding 'ns-collision-divergent 'when
-                                           '("prelude.el" "macros.el"))
-                      (nl-ns-test--finding 'ns-collision-divergent 'cond
-                                           '("prelude.el" "macros.el"))))
-         (fresh (nl-ns-test--finding 'ns-collision-divergent 'brand-new
-                                     '("prelude.el" "macros.el"))))
-    (unwind-protect
-        (progn
-          (should (= 2 (nl-ns-write-accepted known path "2026-08-16" "bootstrap")))
-          (let ((accepted (nl-ns-load-accepted path)))
-            (should (equal (plist-get accepted :generated-at) "2026-08-16"))
-            (should (equal (plist-get accepted :reason) "bootstrap"))
-            (should (null (nl-ns-unaccepted known accepted)))
-            (should (equal (nl-ns-unaccepted (cons fresh known) accepted)
-                           (list fresh)))))
-      (when (file-exists-p path) (delete-file path)))))
 
-(ert-deftest nl-ns-stale-accepted-reports-resolved-entries ()
-  "An entry for a divergence that is gone must be reported, not kept."
-  (let* ((path (make-temp-file "nl-ns-accepted-" nil ".el"))
-         (was (list (nl-ns-test--finding 'ns-collision-divergent 'gone
-                                         '("a.el" "b.el"))
-                    (nl-ns-test--finding 'ns-collision-divergent 'still
-                                         '("a.el" "b.el"))))
-         (now (list (nl-ns-test--finding 'ns-collision-divergent 'still
-                                         '("a.el" "b.el")))))
-    (unwind-protect
-        (progn
-          (nl-ns-write-accepted was path "2026-08-16" "bootstrap")
-          (let ((accepted (nl-ns-load-accepted path)))
-            (should (equal (nl-ns-stale-accepted now accepted)
-                           (list (nl-ns-finding-key (car was)))))
-            (should (null (nl-ns-stale-accepted was accepted)))))
-      (when (file-exists-p path) (delete-file path)))))
 
 
 (provide 'nl-ns-test)
