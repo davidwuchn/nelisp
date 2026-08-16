@@ -7910,6 +7910,38 @@ so registration and dispatch stay in lockstep.  Build-time (see
               nelisp-standalone--applyfn-extern-arms)
     nil))
 
+(defun nelisp-standalone--reader-native-addr-arms ()
+  "Return the dispatch arm exposing runtime symbol addresses to elisp.
+
+The in-process loader points each stub at a runtime symbol, and the
+address comes from `data-addr', which the static linker resolves.  That
+is a compile-time form, so interpreted code cannot ask for an address by
+name -- hence this arm: an index into
+`nelisp-standalone--reader-neln-bridgeable-symbols' selects one
+`data-addr' from a chain fixed at build time.
+
+An index rather than a name because comparing strings in the AOT surface
+costs an allocation per arm, and the caller already has to know the set
+to have compiled against it.  The elisp side keeps its own copy of the
+list; a test asserts the two agree, since nothing links them.
+
+Out-of-range indices return 0, which is not an address, so a caller that
+ignores the check gets a null dereference at the stub rather than a jump
+into whatever the index happened to select."
+  (list
+   (cons '(:u8 "nelisp--native-symbol-addr")
+         `(wf_write_int
+           out
+           ,(let ((form 0)
+                  (idx (length nelisp-standalone--reader-neln-bridgeable-symbols)))
+              (dolist (name (reverse
+                             nelisp-standalone--reader-neln-bridgeable-symbols))
+                (setq idx (1- idx))
+                (setq form `(if (= (wf_argval args 0) ,idx)
+                                (data-addr ,(intern name))
+                              ,form)))
+              form)))))
+
 (defun nelisp-standalone--applyfn-reader-table ()
   "Build the reader dispatch table: the base table with the buggy stock
 `car'/`cdr'/`eq' arms REPLACED (nil-safe car/cdr + tag-aware eq) and `length'
@@ -7931,6 +7963,9 @@ too (they need the dynamic build's PLT/GOT)."
        (t entry)))
     nelisp-standalone--applyfn-dispatch-table)
    nelisp-standalone--applyfn-bf-arms
+   ;; Reader-only: the baked eval link set has no reader runtime symbols
+   ;; for `data-addr' to resolve against.
+   (nelisp-standalone--reader-native-addr-arms)
    ;; Step C: dynamic builds gain the PLT-backed `nl-ffi-call' arms.
    (if (nelisp-standalone--reader-dynamic-p)
        nelisp-standalone--applyfn-extern-arms
@@ -11258,7 +11293,12 @@ value (matches the binary's M8 read+eval-loop driver)."
     "nelisp-process-read-output" "nelisp-process-write"
     "nelisp-process-close-stdin" "nelisp-process-poll"
     "nelisp-process-wait" "nelisp-process-delete" "nelisp-portable-syscall"
-    "ptr-call" "thread-spawn" "thread-join" "fork-spawn")
+    "ptr-call" "thread-spawn" "thread-join" "fork-spawn"
+    ;; Runtime symbol addresses for the in-process native loader.  With
+    ;; this, mmap (`syscall-direct'), the pointer accessors and
+    ;; `ptr-call' are all reachable from interpreted elisp, so the loader
+    ;; itself needs no further AOT-surface code.
+    "nelisp--native-symbol-addr")
   "Builtin names installed into the reader binary's mirror.
 Each is dispatched by the pure-elisp `nelisp_apply_function' (see
 `nelisp-standalone--applyfn-source').  Names > 8 bytes (for example

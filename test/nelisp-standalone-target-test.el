@@ -197,6 +197,45 @@ it needs overwrite its own code."
                   code-size)))
     (should (zerop (% code-size 4096)))))
 
+(ert-deftest nelisp-standalone-target-reader-native-addr-arm-covers-the-set ()
+  "The symbol-address arm indexes exactly the bridgeable symbol list.
+
+Interpreted code asks for a runtime symbol's address by index, because
+`data-addr' is a compile-time form and the chain of them is fixed when
+the reader is built.  Nothing links the index a caller passes to the
+order of that chain, so inserting a name in the middle of the list would
+silently repoint every later index at a different function -- and a stub
+aimed at the wrong function is a jump, not a diagnosable error."
+  (let* ((arms (nelisp-standalone--reader-native-addr-arms))
+         (arm (car arms))
+         (chain (nth 2 (cdr arm)))
+         (seen nil))
+    (should (= (length arms) 1))
+    (should (equal (car arm) '(:u8 "nelisp--native-symbol-addr")))
+    ;; Walk the if-chain, collecting (INDEX . SYMBOL) in emitted order.
+    (while (and (consp chain) (eq (car chain) 'if))
+      (let ((test (nth 1 chain))
+            (then (nth 2 chain)))
+        (should (eq (car test) '=))
+        (should (eq (car then) 'data-addr))
+        (push (cons (nth 2 test) (symbol-name (nth 1 then))) seen)
+        (setq chain (nth 3 chain))))
+    ;; The chain ends in 0: an out-of-range index is not an address.
+    (should (equal chain 0))
+    (setq seen (nreverse seen))
+    (should (equal (mapcar #'car seen)
+                   (number-sequence
+                    0 (1- (length
+                           nelisp-standalone--reader-neln-bridgeable-symbols)))))
+    (should (equal (mapcar #'cdr seen)
+                   nelisp-standalone--reader-neln-bridgeable-symbols))))
+
+(ert-deftest nelisp-standalone-target-reader-native-addr-is-registered ()
+  "The arm is reachable: its name is installed as a reader builtin.
+A dispatch arm nothing installs is dead code that still links."
+  (should (member "nelisp--native-symbol-addr"
+                  nelisp-standalone--reader-builtins)))
+
 (ert-deftest nelisp-standalone-target-reader-neln-demo-externs-are-bridgeable ()
   "Every extern the demo needs is one the loader can address."
   (let* ((nelisp-standalone--target 'linux-x86_64)
