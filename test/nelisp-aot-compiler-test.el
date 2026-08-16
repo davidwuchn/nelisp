@@ -3986,6 +3986,118 @@ extern (Doc 06 C-3 function-pointer tables), resolved by the linker."
               (should (equal "105" (string-trim (plist-get res :stdout))))))
         (ignore-errors (delete-directory dir t))))))
 
+;;;; Dynamic user-call lowering ----------------------------------------
+;;
+;; A call the compiler cannot resolve to a same-unit defun or to a
+;; delegation-table builtin becomes a plt32 relocation on the Elisp
+;; function name.  The static-link flow wants that: the linker resolves
+;; the name and a direct call beats a dispatch.  A single `.neln' loaded
+;; in-process has no link step, so the same relocation names a C function
+;; that does not exist and the loader has nothing to point a stub at.
+;;
+;; `nelisp-aot-compiler--dynamic-user-calls' routes those calls through
+;; the calln dispatcher instead.  The property worth testing is not which
+;; instruction is emitted but whether the unit's extern set is CLOSED --
+;; every name in it a C runtime symbol the loader can bridge.
+
+(defconst nelisp-aot-compiler-test--runtime-extern-symbols
+  '("nelisp_aot_builtin_call1" "nelisp_aot_builtin_calln"
+    "nl_alloc_symbol" "nl_alloc_str" "nl_alloc_mut_str"
+    "nl_mut_str_push_byte" "nl_mut_str_finalize"
+    "nl_alloc_vector" "nl_vector_slot_ptr" "nl_vector_set_slot")
+  "C runtime symbols an in-process loader can resolve to a bridge.
+Anything else in an artifact's extern set is an Elisp name, which no
+stub can point at once the unit is loaded rather than linked.")
+
+(defun nelisp-aot-compiler-test--artifact-externs (dir name source)
+  "Compile SOURCE as NAME under DIR and return its native extern symbols."
+  (require 'nelisp-artifact)
+  (let ((el (expand-file-name (concat name ".el") dir))
+        (neln (expand-file-name (concat name ".neln") dir)))
+    (with-temp-file el (insert source))
+    (nelisp-artifact-compile-file el neln nil nil nil nil nil 'neln)
+    (let ((externs (plist-get (plist-get (nelisp-artifact-read-manifest neln)
+                                         :native)
+                              :extern-symbols)))
+      ;; An empty set reads back as the symbol nil, not the empty list.
+      (if (and (symbolp externs) (null externs)) nil externs))))
+
+(defun nelisp-aot-compiler-test--unbridgeable-externs (externs)
+  "Return the EXTERNS no in-process loader bridge can resolve."
+  (seq-remove (lambda (name)
+                (member name nelisp-aot-compiler-test--runtime-extern-symbols))
+              externs))
+
+(defmacro nelisp-aot-compiler-test--with-artifact-dir (var &rest body)
+  "Run BODY with VAR bound to a temporary artifact directory."
+  (declare (indent 1))
+  `(let ((,var (make-temp-file "aot-dyncall-" t)))
+     (unwind-protect (progn ,@body)
+       (ignore-errors (delete-directory ,var t)))))
+
+(defconst nelisp-aot-compiler-test--dyncall-cases
+  '(("crossunit" . "(defun dc-c (x) (dc-absent-helper x))\n(provide 'dc)\n")
+    ("aref" . "(defun dc-r (v) (aref v 0))\n(provide 'dc)\n")
+    ("aset" . "(defun dc-w (v x) (aset v 0 x))\n(provide 'dc)\n"))
+  "Sources whose calls cannot resolve to a same-unit defun.
+`aref' and `aset' are in neither delegation table, so untyped array
+access takes the same path as a call to a function in another unit.")
+
+(ert-deftest nelisp-aot-compiler-dynamic-user-calls-off-keeps-name-relocs ()
+  "Without the mode, unresolvable calls still relocate on the Elisp name.
+This is the static-link lowering and must not change: there the linker
+resolves the symbol and the direct call is cheaper than a dispatch."
+  (nelisp-aot-compiler-test--with-artifact-dir dir
+    (let ((nelisp-aot-compiler--dynamic-user-calls nil))
+      (should (member "dc-absent-helper"
+                      (nelisp-aot-compiler-test--artifact-externs
+                       dir "off-crossunit"
+                       (cdr (assoc "crossunit"
+                                   nelisp-aot-compiler-test--dyncall-cases)))))
+      (should (member "aref"
+                      (nelisp-aot-compiler-test--artifact-externs
+                       dir "off-aref"
+                       (cdr (assoc "aref"
+                                   nelisp-aot-compiler-test--dyncall-cases)))))
+      (should (member "aset"
+                      (nelisp-aot-compiler-test--artifact-externs
+                       dir "off-aset"
+                       (cdr (assoc "aset"
+                                   nelisp-aot-compiler-test--dyncall-cases))))))))
+
+(ert-deftest nelisp-aot-compiler-dynamic-user-calls-close-the-extern-set ()
+  "With the mode, no Elisp name survives in the artifact's extern set."
+  (nelisp-aot-compiler-test--with-artifact-dir dir
+    (let ((nelisp-aot-compiler--dynamic-user-calls t))
+      (dolist (entry nelisp-aot-compiler-test--dyncall-cases)
+        (let* ((externs (nelisp-aot-compiler-test--artifact-externs
+                         dir (concat "on-" (car entry)) (cdr entry)))
+               (unbridgeable
+                (nelisp-aot-compiler-test--unbridgeable-externs externs)))
+          (should externs)
+          (should (equal unbridgeable nil)))))))
+
+(ert-deftest nelisp-aot-compiler-dynamic-user-calls-close-a-borrow ()
+  "A borrow shape closes too: acquire, guarded body, release, all cross-unit.
+This is the case Doc 170 section 9 needs to measure on the native path,
+and the one that could not be compiled to a loadable unit before: the
+helpers and the array access each contributed an Elisp-name relocation."
+  (nelisp-aot-compiler-test--with-artifact-dir dir
+    (let* ((source
+            (concat "(defun dc-rd (c)\n"
+                    "  (let ((v (dc-acq c)))\n"
+                    "    (unwind-protect (aref v 0) (dc-rel c))))\n"
+                    "(provide 'dc)\n"))
+           (off (let ((nelisp-aot-compiler--dynamic-user-calls nil))
+                  (nelisp-aot-compiler-test--artifact-externs
+                   dir "off-borrow" source)))
+           (on (let ((nelisp-aot-compiler--dynamic-user-calls t))
+                 (nelisp-aot-compiler-test--artifact-externs
+                  dir "on-borrow" source))))
+      (should (member "dc-acq" off))
+      (should (member "dc-rel" off))
+      (should (equal (nelisp-aot-compiler-test--unbridgeable-externs on) nil)))))
+
 (provide 'nelisp-aot-compiler-test)
 
 ;;; nelisp-aot-compiler-test.el ends here

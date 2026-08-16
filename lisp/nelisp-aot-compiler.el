@@ -273,6 +273,24 @@ The standalone interpreter still mis-handles `(apply #'unibyte-string
         (push (apply #'unibyte-string (nreverse bytes)) chunks)))
     (apply #'concat (nreverse chunks))))
 
+(defvar nelisp-aot-compiler--dynamic-user-calls nil
+  "Non-nil lowers otherwise-unresolvable user calls through the
+`nelisp_aot_builtin_calln' dispatcher instead of emitting a plt32
+relocation on the Elisp function name.
+
+The default lowering is right for the static-link flow: many `.el'
+objects are linked into one binary, the linker resolves the name, and a
+direct call is cheaper than a dispatch.  It is unresolvable for a single
+`.neln' loaded in-process, where there is no link step and no C function
+of that name exists, so the loader has nothing to point a stub at.
+
+The dispatcher behind `nelisp_aot_builtin_calln' is not a builtin table:
+`nelisp-cc-runtime--aot-default-builtin-dispatchn' looks the symbol up in
+`nelisp--functions', falls back to `fboundp', and applies.  Routing
+through it therefore resolves ordinary Elisp functions and leaves the
+unit's extern set closed over the C runtime symbols, which is what a
+dynamic loader can bridge.")
+
 (defconst nelisp-aot-compiler--external-user-call-reserved-ops
   '(quote function lambda progn seq
     if while cond and or let let*
@@ -10012,22 +10030,36 @@ functions `((NAME . ARITY) ...)'."
    ;; in other `.el' objects.  Same-unit calls still take the `call' IR
    ;; path above; this fallback emits a PLT relocation so the final
    ;; module link can resolve the cross-object function symbol.
+   ;;
+   ;; A dynamically loaded unit has no link step, so that relocation
+   ;; names a C function that does not exist and the loader has nothing
+   ;; to point a stub at.  `nelisp-aot-compiler--dynamic-user-calls'
+   ;; routes the call through the calln dispatcher instead, which
+   ;; resolves the symbol at run time and keeps the unit's extern set
+   ;; closed over the C runtime symbols.  It needs the boxed-boundary
+   ;; slots; without them the direct relocation is still emitted, so a
+   ;; unit compiled in this mode is only self-contained when every such
+   ;; call site had the boundary available.
    ((and nelisp-aot-compiler--allow-external-user-calls
          (consp sexp)
          (symbolp (car sexp))
          (not (keywordp (car sexp)))
          (not (memq (car sexp)
                     nelisp-aot-compiler--external-user-call-reserved-ops)))
-    (let* ((name (car sexp))
-           (raw-args (cdr sexp))
-           (parsed (nelisp-aot-compiler--parse-extern-call-args
-                    'extern-call name raw-args env fenv defuns)))
-      (nelisp-aot-compiler--make-ir 'extern-call
-            :name name
-            :ret-class 'gp
-            :args (plist-get parsed :args)
-            :varargs-p (plist-get parsed :varargs-p)
-            :f64-count (plist-get parsed :f64-count))))
+    (if (and nelisp-aot-compiler--dynamic-user-calls
+             (nelisp-aot-compiler--aot-builtin-boundary-available-p fenv))
+        (nelisp-aot-compiler--parse-aot-builtinn-call
+         sexp env fenv defuns)
+      (let* ((name (car sexp))
+             (raw-args (cdr sexp))
+             (parsed (nelisp-aot-compiler--parse-extern-call-args
+                      'extern-call name raw-args env fenv defuns)))
+        (nelisp-aot-compiler--make-ir 'extern-call
+              :name name
+              :ret-class 'gp
+              :args (plist-get parsed :args)
+              :varargs-p (plist-get parsed :varargs-p)
+              :f64-count (plist-get parsed :f64-count)))))
    ;; (let ((VAR VAL)) BODY) — value context (= inside defun body).
    ;; Compile-time-foldable values fold into ENV (= compile-time fold
    ;; path, same as `--parse-stmt'); non-foldable values allocate a
