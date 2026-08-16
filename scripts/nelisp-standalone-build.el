@@ -10880,12 +10880,16 @@ KERNEL32!ExitProcess with the driver return already in x0/w0."
           (nl_sexp_clone_into globals (+ ctx 0))
           (nl_sexp_clone_into frames (+ ctx 32))
           (nl_sexp_clone_into unbound (+ ctx 64))
-          ;; rec_max 300000: the `_start' trampoline now runs the driver on a 1 GiB
-;; mmap'd native stack whose ceiling is ~404k rec levels (each eval level ~5 KiB of
-;; native frames; a self-recursive call burns ~2 rec increments).  300000 is ~74% of
-;; that ceiling, so deep recursion (cnt(100000) -> 42) succeeds while still erroring
-;; at the guard -- never SIGSEGV -- once it exceeds the budget.
-(ptr-write-u64 ctx 96 0) (ptr-write-u64 ctx 104 300000)
+          ;; rec_max 100000.  RE-MEASURED 2026-08-16: the real ceiling on the 1 GiB
+;; mmap'd native stack is ~136k rec levels, not the ~404k this comment used to
+;; claim -- a self-recursive elisp function survives depth 65000 and SIGSEGVs by
+;; 72000 (~2 rec increments per call).  rec_max 300000 therefore sat ABOVE the
+;; ceiling, so deep recursion died as a silent exit 127 instead of signalling
+;; `excessive-lisp-nesting': the guard could never fire.  100000 is ~74% of the
+;; measured ceiling, restoring the original intent (error at the guard, never
+;; SIGSEGV).  The budget is best-effort, not a proof: a body with fatter frames
+;; costs more native stack per level, so re-measure when the eval frame grows.
+(ptr-write-u64 ctx 96 0) (ptr-write-u64 ctx 104 100000)
           (nl_alloc_symbol opbuf 1 op_sym)
           (ptr-write-u64 int1 0 2) (ptr-write-u64 int1 8 ,a) (ptr-write-u64 int1 16 0) (ptr-write-u64 int1 24 0)
           (ptr-write-u64 int2 0 2) (ptr-write-u64 int2 8 ,b) (ptr-write-u64 int2 16 0) (ptr-write-u64 int2 24 0)
@@ -14816,12 +14820,16 @@ correctly."
         ;; per-target-real/per-target-identity idiom as `nl_os_argv_init' above.
         (nl_os_environ_init environ_list)
         (nl_env_set_value ctx environ_sym environ_list)
-        ;; rec_max 300000: the `_start' trampoline now runs the driver on a 1 GiB
-;; mmap'd native stack whose ceiling is ~404k rec levels (each eval level ~5 KiB of
-;; native frames; a self-recursive call burns ~2 rec increments).  300000 is ~74% of
-;; that ceiling, so deep recursion (cnt(100000) -> 42) succeeds while still erroring
-;; at the guard -- never SIGSEGV -- once it exceeds the budget.
-(ptr-write-u64 ctx 96 0) (ptr-write-u64 ctx 104 300000)
+        ;; rec_max 100000.  RE-MEASURED 2026-08-16: the real ceiling on the 1 GiB
+;; mmap'd native stack is ~136k rec levels, not the ~404k this comment used to
+;; claim -- a self-recursive elisp function survives depth 65000 and SIGSEGVs by
+;; 72000 (~2 rec increments per call).  rec_max 300000 therefore sat ABOVE the
+;; ceiling, so deep recursion died as a silent exit 127 instead of signalling
+;; `excessive-lisp-nesting': the guard could never fire.  100000 is ~74% of the
+;; measured ceiling, restoring the original intent (error at the guard, never
+;; SIGSEGV).  The budget is best-effort, not a proof: a body with fatter frames
+;; costs more native stack per level, so re-measure when the eval frame grows.
+(ptr-write-u64 ctx 96 0) (ptr-write-u64 ctx 104 100000)
         ;; M11 env inherit: stash the initial-stack envp (= sp0 + (argc+2)*8,
         ;; the char** right after argv's NULL) in arena slot +144 (268435600)
         ;; so the process substrate's execve passes the parent environment to

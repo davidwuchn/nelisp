@@ -1,4 +1,4 @@
-.PHONY: unsafe-inventory nl-violation-corpus test-jit test-nojit jit-unverified nl-safe-bench nl-check-gate ns-gate ns-inventory parens-check test test-fast test-parallel test-one wasm-smoke wasm-runtime-image-smoke wasm-dtw-skeleton-smoke wasm-dtw-transpile wasm-dtw-compile wasm-dtw-smoke wasm-dtw-site wasm-dtw-site-smoke compile clean all bench bench-aot-tco gc-bench actor-bench soak soak-1h soak-full soak-worker \
+.PHONY: unsafe-inventory nl-violation-corpus standalone-reader-recursion-guard-smoke test-jit test-nojit jit-unverified nl-safe-bench nl-check-gate ns-gate ns-inventory parens-check test test-fast test-parallel test-one wasm-smoke wasm-runtime-image-smoke wasm-dtw-skeleton-smoke wasm-dtw-transpile wasm-dtw-compile wasm-dtw-smoke wasm-dtw-site wasm-dtw-site-smoke compile clean all bench bench-aot-tco gc-bench actor-bench soak soak-1h soak-full soak-worker \
         sqlite-module sqlite-module-clean \
         release-artifact release-checksum soak-blocker soak-post-ship \
         bench-actual bench-allocator bench-allocator-heavy \
@@ -517,6 +517,20 @@ alloc-check-collect: $(if $(wildcard target/nelisp target/nelisp.exe),,standalon
 # CONSECUTIVE `intern-soft' calls -- proving `intern-soft' itself has no
 # interning side effect (a bug in `nl_intern_lookup' that accidentally
 # inserted on a miss would turn the second nil into a symbol).
+# Deep recursion must SIGNAL, not die.  The `excessive-lisp-nesting'
+# guard was always implemented, but rec_max sat above the real native
+# ceiling, so recursion past it was a silent exit 127 instead of a
+# catchable error (2026-08-16: measured ceiling ~136k rec levels
+# against a comment claiming ~404k).  This asserts the guard fires and
+# the process survives, so a future rec_max or frame-size change
+# cannot quietly restore the silent death.
+standalone-reader-recursion-guard-smoke: standalone-reader
+	@bin=./target/nelisp; \
+	case "$(NELISP_STANDALONE_TARGET)$$NELISP_STANDALONE_TARGET" in \
+	  windows*) bin=./target/nelisp.exe;; \
+	esac; \
+	timeout 180 $$bin --load tools/recursion-guard-smoke.el
+
 standalone-reader-intern-soft-smoke: standalone-reader
 	@mkdir -p target
 	@printf '%s\n' \
