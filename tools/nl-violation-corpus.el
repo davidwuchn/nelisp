@@ -35,7 +35,12 @@
 (defconst nl-violation-corpus--file ".nl-violations/corpus.log")
 
 (defconst nl-violation-corpus--suites
-  '("nl-safe-test" "nl-resource-test" "nl-contract-test")
+  '("nl-safe-test" "nl-resource-test" "nl-contract-test"
+    ;; The one suite that drives a REAL module boundary rather than a
+    ;; synthetic fixture (Doc 170 section 7.2): contracts on the
+    ;; nelisp-json public API.  Records from here are the only part of
+    ;; the corpus that reflects adoption instead of test scaffolding.
+    "nl-contract-nelisp-json-test")
   "ERT files whose bodies exercise the dynamic checks.")
 
 (defun nl-violation-corpus-run ()
@@ -72,9 +77,10 @@
   Doc 168 Phase 6 gate (>50%) cannot be computed until some are.\n")
         (princ (format "  gate: %.1f%% of classified records are statically decidable (threshold 50%%)\n"
                        (/ (* 100.0 yes) classified))))
-      (princ "  NOTE: this corpus comes from the test suites, which provoke
-  violations deliberately.  It validates the pipeline and the record
-  shape; it is not a sample of real usage.\n"))))
+      (princ "  NOTE: most of this corpus comes from test suites, which provoke
+  violations deliberately.  Only the nelisp-json contract records come
+  from a real module boundary; the rest validates the pipeline and the
+  record shape rather than sampling usage.\n"))))
 
 (nl-violation-corpus-run)
 

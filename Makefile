@@ -302,6 +302,7 @@ unsafe-inventory:
 nl-violation-corpus:
 	$(EMACS) --batch -Q -L packages/nl-prelude/src -L packages/nl-safe/src \
 	  -L packages/nl-contract/src -L packages/nl-check/src \
+	  -L packages/nelisp-json/src \
 	  -L packages/nl-safe/test -L packages/nl-contract/test -L tools \
 	  --eval '(setq load-prefer-newer t)' \
 	  -l tools/nl-violation-corpus.el
