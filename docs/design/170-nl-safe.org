@@ -355,8 +355,27 @@ BCE、LLVM の最適化）。15% は「検査を軽くする」目標ではな�
 | =(defun f (c) (nl-safe--cell-value c))= — Elisp ヘルパ 1 呼び出し | *link failed* |
 | 借用あり                                     | *link failed*  |
 
-nl-safe 固有の問題ではない。原因は =nelisp-artifact-native-exec= の
-設計上の範囲で、その docstring が明言している:
+nl-safe 固有の問題ではない。そして *本節が当初書いた「in-process ローダ
+が無い」も、次に書いた「統合が残っている」も、どちらも誤りだった*
+（2026-08-16 訂正）。実機で確かめた結果:
+
+: ./target/nelisp --neln-selftest   →  exit 42   （inc1(41) = 42）
+
+外部シンボルを持つ =.neln= のネイティブコードが、実リーダの中で
+in-process 実行されている。gate 6 は *統合済み* である。
+
+| 要素 | 状態 |
+|------+------|
+| mmap / PLT 風スタブ / plt32 再配置 / 境界スロット 17 個 / =call-ptr= | 実証済（3 テスト、x86_64 Linux） |
+| 実 =nelisp_aot_builtin_call1= へのブリッジ | =reader-neln-demo.o= としてリーダにリンク済み |
+| リーダ内での実行 | =--neln-selftest= が通る |
+
+=nl_neln_demo_call1_bridge= の "demo" はデモ *プログラム* の意味で、
+ブリッジ自体は =(extern-call nelisp_aot_builtin_call1 ...)= と実物を
+呼ぶ。名前から代替物と推測すると間違える。
+
+以下の =nelisp-artifact-native-exec= はこれとは *別物* で、docstring が
+設計上の範囲を明言している:
 
 #+begin_quote
 This is the first native-execution spike: it works for the reloc-free
@@ -379,8 +398,11 @@ case is the remaining §6.4 work.
 
 したがって着手順序はこうなる:
 
-1. Doc 142 §6.4 の in-process mmap+reloc ローダを実装する ← *ここが最初*
-2. ネイティブ経路で本節の予算を測定可能にする
+1. ~~Doc 142 §6.4 gate 6~~ — *統合済み*（=--neln-selftest= が通る）
+2. ネイティブ経路のベンチを、=native-exec= ではなく *リーダ内 in-process
+   ローダ* の上に載せ替える ← *ここが最初*。=bench/nl-safe-native-bench.el=
+   は整数 ABI 葉関数用の =native-exec= を使っており、ヘルパを呼ぶ関数を
+   測れない
 3. 検査除去パスを実装し 15% を目指す
 4. nl-safe を実コードに導入する
 5. 違反データが集まり §8 のゲートが判定可能になる
