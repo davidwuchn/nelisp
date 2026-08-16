@@ -511,6 +511,75 @@ so proved nothing about the real path."
                   (defun pkg-a-two () 2))
                  ("b.el" (require 'a) (provide 'b)
                   (defun pkg-b-one () (pkg-a-one)))))))
+;;;; Accepted-divergence ratchet
+
+(defun nl-ns-test--finding (kind subject files)
+  "Return a minimal finding plist for ratchet tests."
+  (list :kind kind :subject subject :files files))
+
+(ert-deftest nl-ns-finding-key-ignores-file-order ()
+  "The key must survive a reordered scan, or the accepted set rots."
+  (should (equal (nl-ns-finding-key
+                  (nl-ns-test--finding 'ns-collision-divergent 'cl-loop
+                                       '("b.el" "a.el")))
+                 (nl-ns-finding-key
+                  (nl-ns-test--finding 'ns-collision-divergent 'cl-loop
+                                       '("a.el" "b.el"))))))
+
+(ert-deftest nl-ns-finding-key-separates-kind-and-subject ()
+  (should-not (equal (nl-ns-finding-key
+                      (nl-ns-test--finding 'ns-collision 'x '("a.el")))
+                     (nl-ns-finding-key
+                      (nl-ns-test--finding 'ns-collision-divergent 'x '("a.el")))))
+  (should-not (equal (nl-ns-finding-key
+                      (nl-ns-test--finding 'ns-collision 'x '("a.el")))
+                     (nl-ns-finding-key
+                      (nl-ns-test--finding 'ns-collision 'y '("a.el"))))))
+
+(ert-deftest nl-ns-missing-accepted-file-accepts-nothing ()
+  "No accepted file must mean no suppression, not an error."
+  (let* ((accepted (nl-ns-load-accepted "/nl-ns/no/such/file.el"))
+         (findings (list (nl-ns-test--finding 'ns-collision-divergent 'a
+                                              '("a.el" "b.el")))))
+    (should (equal (nl-ns-unaccepted findings accepted) findings))))
+
+(ert-deftest nl-ns-accepted-round-trip-silences-exactly-those ()
+  (let* ((path (make-temp-file "nl-ns-accepted-" nil ".el"))
+         (known (list (nl-ns-test--finding 'ns-collision-divergent 'when
+                                           '("prelude.el" "macros.el"))
+                      (nl-ns-test--finding 'ns-collision-divergent 'cond
+                                           '("prelude.el" "macros.el"))))
+         (fresh (nl-ns-test--finding 'ns-collision-divergent 'brand-new
+                                     '("prelude.el" "macros.el"))))
+    (unwind-protect
+        (progn
+          (should (= 2 (nl-ns-write-accepted known path "2026-08-16" "bootstrap")))
+          (let ((accepted (nl-ns-load-accepted path)))
+            (should (equal (plist-get accepted :generated-at) "2026-08-16"))
+            (should (equal (plist-get accepted :reason) "bootstrap"))
+            (should (null (nl-ns-unaccepted known accepted)))
+            (should (equal (nl-ns-unaccepted (cons fresh known) accepted)
+                           (list fresh)))))
+      (when (file-exists-p path) (delete-file path)))))
+
+(ert-deftest nl-ns-stale-accepted-reports-resolved-entries ()
+  "An entry for a divergence that is gone must be reported, not kept."
+  (let* ((path (make-temp-file "nl-ns-accepted-" nil ".el"))
+         (was (list (nl-ns-test--finding 'ns-collision-divergent 'gone
+                                         '("a.el" "b.el"))
+                    (nl-ns-test--finding 'ns-collision-divergent 'still
+                                         '("a.el" "b.el"))))
+         (now (list (nl-ns-test--finding 'ns-collision-divergent 'still
+                                         '("a.el" "b.el")))))
+    (unwind-protect
+        (progn
+          (nl-ns-write-accepted was path "2026-08-16" "bootstrap")
+          (let ((accepted (nl-ns-load-accepted path)))
+            (should (equal (nl-ns-stale-accepted now accepted)
+                           (list (nl-ns-finding-key (car was)))))
+            (should (null (nl-ns-stale-accepted was accepted)))))
+      (when (file-exists-p path) (delete-file path)))))
+
 
 (provide 'nl-ns-test)
 

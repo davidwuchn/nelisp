@@ -1212,6 +1212,95 @@ BASELINE is nil, a baseline plist, or a path accepted by
             (setcdr cell (1+ (cdr cell)))
           (setq counts (cons (cons kind 1) counts)))))
     (sort counts (lambda (a b) (> (cdr a) (cdr b))))))
+;;;; Accepted-divergence ratchet ------------------------------------------
+
+;; Some collisions are structural and will not go away.  A bootstrap
+;; prelude has to define `when' and `cond' before the file that defines
+;; them properly can be read, so its copies necessarily differ.  Telling
+;; a reader "93 findings" every run trains them to ignore the number,
+;; and the one new finding that matters arrives inside it unnoticed.
+;;
+;; So record the set that is known and accepted, and report only what is
+;; not in it.  The accepted file is written once from a green tree and
+;; reviewed like any other source; after that a gate can fail on anything
+;; new.  Removing a divergence is also visible -- the entry goes stale --
+;; so the list cannot quietly grow stale in the other direction either.
+
+(defun nl-ns-finding-key (finding)
+  "Return a stable string key for FINDING.
+Built from kind, subject and the sorted file list, so it survives a
+reordering of the scan and changes only when the finding itself does."
+  (let ((files nil))
+    (dolist (f (plist-get finding :files))
+      (setq files (cons f files)))
+    (format "%s\t%s\t%s"
+            (plist-get finding :kind)
+            (plist-get finding :subject)
+            (mapconcat #'identity (sort files #'string<) " "))))
+
+(defun nl-ns-load-accepted (path)
+  "Read the accepted-divergence file at PATH.
+Return a plist with `:generated-at', `:reason' and `:keys' (a hash
+table of key -> t).  A missing file yields an empty set rather than an
+error: a tree that has not adopted the ratchet still reports normally."
+  (let ((keys (make-hash-table :test 'equal))
+        (generated nil)
+        (reason nil))
+    (when (and (stringp path) (file-readable-p path))
+      (let ((entry (car (nl-ns-read-file path))))
+        (when (consp entry)
+          (setq generated (plist-get entry :generated-at))
+          (setq reason (plist-get entry :reason))
+          (dolist (key (plist-get entry :keys))
+            (puthash key t keys)))))
+    (list :generated-at generated :reason reason :keys keys)))
+
+(defun nl-ns-unaccepted (findings accepted)
+  "Return the FINDINGS whose key is absent from ACCEPTED.
+ACCEPTED is what `nl-ns-load-accepted' returned."
+  (let ((keys (plist-get accepted :keys))
+        (out nil))
+    (dolist (finding findings)
+      (unless (and keys (gethash (nl-ns-finding-key finding) keys))
+        (setq out (cons finding out))))
+    (nreverse out)))
+
+(defun nl-ns-stale-accepted (findings accepted)
+  "Return accepted keys that no longer match any of FINDINGS.
+A key here means a divergence that has since been resolved, so the
+entry should be dropped -- an accepted list that keeps stale entries
+stops describing the tree."
+  (let ((present (make-hash-table :test 'equal))
+        (out nil))
+    (dolist (finding findings)
+      (puthash (nl-ns-finding-key finding) t present))
+    (maphash (lambda (key _v)
+               (unless (gethash key present)
+                 (setq out (cons key out))))
+             (plist-get accepted :keys))
+    (sort out #'string<)))
+
+(defun nl-ns-write-accepted (findings path &optional generated-at reason)
+  "Write FINDINGS as the accepted-divergence set at PATH.
+GENERATED-AT and REASON are recorded verbatim so the file says when it
+was taken and why its contents are considered settled."
+  (let ((keys nil))
+    (dolist (finding findings)
+      (setq keys (cons (nl-ns-finding-key finding) keys)))
+    (setq keys (sort keys #'string<))
+    (with-temp-buffer
+      (insert ";; nl-ns accepted divergences -- generated, review before commit.\n")
+      (insert ";; Regenerate with the make target that produced it; do not\n")
+      (insert ";; hand-add keys to silence a finding.\n")
+      (prin1 (list :generated-at generated-at
+                   :reason reason
+                   :keys keys)
+             (current-buffer))
+      (insert "\n")
+      (let ((coding-system-for-write 'utf-8-unix))
+        (write-region (point-min) (point-max) path nil 'quiet)))
+    (length keys)))
+
 
 (provide 'nl-ns)
 

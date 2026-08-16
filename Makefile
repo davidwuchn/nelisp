@@ -1,4 +1,4 @@
-.PHONY: unsafe-inventory ns-inventory parens-check test test-fast test-parallel test-one wasm-smoke wasm-runtime-image-smoke wasm-dtw-skeleton-smoke wasm-dtw-transpile wasm-dtw-compile wasm-dtw-smoke wasm-dtw-site wasm-dtw-site-smoke compile clean all bench bench-aot-tco gc-bench actor-bench soak soak-1h soak-full soak-worker \
+.PHONY: unsafe-inventory ns-inventory ns-gate parens-check test test-fast test-parallel test-one wasm-smoke wasm-runtime-image-smoke wasm-dtw-skeleton-smoke wasm-dtw-transpile wasm-dtw-compile wasm-dtw-smoke wasm-dtw-site wasm-dtw-site-smoke compile clean all bench bench-aot-tco gc-bench actor-bench soak soak-1h soak-full soak-worker \
         sqlite-module sqlite-module-clean \
         release-artifact release-checksum soak-blocker soak-post-ship \
         bench-actual bench-allocator bench-allocator-heavy \
@@ -241,6 +241,18 @@ unsafe-inventory:
 ns-inventory:
 	$(EMACS) --batch -Q -L packages/nl-prelude/src -L packages/nl-ns/src \
 	  -l tools/nl-ns-inventory.el
+
+# Fails on a cross-file name collision that is not in the accepted set,
+# and on an accepted entry that no longer matches anything.  Reaching
+# zero findings is not the goal: the bootstrap prelude has to define
+# `when' before the file defining it can be read.  Catching the NEXT one
+# is the goal -- a stale evaluator sat in packages/nelisp-tramp/src for a
+# month, and ten Doc 22 fixes lived only in the prelude, because nobody
+# could see either inside a list this long.
+ns-gate:
+	$(EMACS) --batch -Q -L packages/nl-prelude/src -L packages/nl-condition/src \
+	  -L packages/nl-ns/src -l scripts/nl-ns-gate.el
+
 parens-check:
 	$(EMACS) --batch -Q -L packages/nl-parens/src -l tools/nl-parens-check.el
 
