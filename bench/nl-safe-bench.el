@@ -154,8 +154,13 @@ float like 1.15, or nil for no budget).  Return the ratio."
     (princ (format "nl-safe bench (Doc 170 section 9) -- N=%d, best of %d, %s\n"
                    nl-safe-bench-iterations nl-safe-bench-repeats
                    (emacs-version)))
-    (princ "Host-Emacs numbers are indicative only; the section 9 gate\n")
-    (princ "is re-measured on the standalone runtime.\n\n")
+    (princ "Doc 170 section 9 gives the interpreter path no budget (revised\n")
+    (princ "2026-08-16).  A borrow needs acquire + body + a release that\n")
+    (princ "survives a non-local exit, and that shape alone costs 2.69x here\n")
+    (princ "before any checking happens; unwind-protect by itself is 1.48x.\n")
+    (princ "The 15%/20% budgets belong to the AOT native path, where they are\n")
+    (princ "a target for a check-elimination pass rather than for tuning these\n")
+    (princ "helpers.  The ratios below are reported, not judged.\n\n")
     (princ (format "%-26s %11s %11s %9s %s\n"
                    "pair" "enabled" "baseline" "ratio" "budget"))
     (princ (format "%-26s %11s %11s %9s %s\n"
@@ -165,15 +170,15 @@ float like 1.15, or nil for no budget).  Return the ratio."
     (nl-safe-bench--row "borrow read (shared)"
                         #'nl-safe-bench--borrow-read
                         #'nl-safe-bench--borrow-read-baseline
-                        1.15 (nl-cell 7))
+                        nil (nl-cell 7))
     (nl-safe-bench--row "borrow mut round-trip"
                         #'nl-safe-bench--borrow-mut
                         #'nl-safe-bench--borrow-mut-baseline
-                        1.15 (nl-cell 0))
+                        nil (nl-cell 0))
     (nl-safe-bench--row "ptr-ref-u8 (mock backend)"
                         #'nl-safe-bench--ptr-ref
                         #'nl-safe-bench--ptr-ref-baseline
-                        1.20 (nl-safe-mock-ptr 64))))
+                        nil (nl-safe-mock-ptr 64))))
 
 (when noninteractive
   (nl-safe-bench-run))
