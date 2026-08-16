@@ -1,4 +1,4 @@
-.PHONY: unsafe-inventory nl-violation-corpus test-jit jit-unverified nl-safe-bench nl-check-gate ns-gate ns-inventory parens-check test test-fast test-parallel test-one wasm-smoke wasm-runtime-image-smoke wasm-dtw-skeleton-smoke wasm-dtw-transpile wasm-dtw-compile wasm-dtw-smoke wasm-dtw-site wasm-dtw-site-smoke compile clean all bench bench-aot-tco gc-bench actor-bench soak soak-1h soak-full soak-worker \
+.PHONY: unsafe-inventory nl-violation-corpus test-jit test-nojit jit-unverified nl-safe-bench nl-check-gate ns-gate ns-inventory parens-check test test-fast test-parallel test-one wasm-smoke wasm-runtime-image-smoke wasm-dtw-skeleton-smoke wasm-dtw-transpile wasm-dtw-compile wasm-dtw-smoke wasm-dtw-site wasm-dtw-site-smoke compile clean all bench bench-aot-tco gc-bench actor-bench soak soak-1h soak-full soak-worker \
         sqlite-module sqlite-module-clean \
         release-artifact release-checksum soak-blocker soak-post-ship \
         bench-actual bench-allocator bench-allocator-heavy \
@@ -205,6 +205,16 @@ jit-unverified:
 test-jit:
 	$(MAKE) test-fast \
 	  EMACS="$(EMACS) -l scripts/nelisp-jit-enable.el"
+
+# The mirror.  With `nelisp-jit-enabled' defaulting to t, the ordinary
+# suite exercises the JIT and the bcl / interpreter paths stop being
+# covered unless something turns it back off.  Whichever way the default
+# points, the other path needs a run of its own or it rots -- which is
+# how the JIT reached a default-off state with three semantic
+# differences from the interpreter still in it.
+test-nojit:
+	$(MAKE) test-fast \
+	  EMACS="$(EMACS) -l scripts/nelisp-jit-disable.el"
 
 compile: nl-check-gate
 	$(EMACS) --batch -Q -L src \

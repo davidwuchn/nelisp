@@ -41,9 +41,19 @@
 
 (declare-function nelisp-bc-run "nelisp-bytecode" (bcl &optional args))
 
-(defvar nelisp-jit-enabled nil
+(defvar nelisp-jit-enabled t
   "When non-nil, `nelisp--make-closure' tries JIT compilation first.
-Failure on unsupported forms falls through to bcl / interpreter.")
+Failure on unsupported forms falls through to bcl / interpreter.
+
+Default became t on 2026-08-16.  It was nil while the translation path
+had never been run over the suite: the first full run with it on found
+three semantic differences from the interpreter -- untranslated special
+forms mistranslated as calls, and arity violations carrying the host's
+error.  Those are fixed and both paths run in CI (`make test-jit' and
+`make test-nojit'), which is what the default rests on.
+
+Bind it nil around anything that asserts the interpreter's or bcl's own
+representation; several tests do, and say why.")
 
 (defvar nelisp-jit-untranslated-special-forms
   '(and or progn when unless
@@ -425,6 +435,15 @@ Set `nelisp-jit-enabled' to toggle JIT on/off without uninstalling."
   (and (consp obj)
        (eq (car obj) 'nelisp-bcl)
        (eq (cadr obj) 'nelisp-jit-marker)))
+
+;; Install on load.  `nelisp-jit-enabled' alone decides nothing until
+;; the advice is in place, so leaving installation to an explicit call
+;; would make the default a value nobody acts on.  The advice itself
+;; reads the flag on every call, so installing here does not commit the
+;; session to the JIT -- binding the flag nil still takes the bcl path.
+(unless (advice-member-p #'nelisp-jit--bc-try-advice
+                         'nelisp-bc-try-compile-lambda)
+  (nelisp-jit-install))
 
 (provide 'nelisp-jit)
 ;;; nelisp-jit.el ends here

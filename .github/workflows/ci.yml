@@ -77,6 +77,15 @@ jobs:
       - name: Run smoke tests with the JIT enabled
         shell: bash
         run: make test-jit
+      # `nelisp-jit-enabled' defaults to t, so the step above and the
+      # ordinary suite both take the JIT path.  This one keeps bcl and
+      # the interpreter covered.  Whichever way the default points, the
+      # other path needs a run of its own -- the JIT sat default-off with
+      # three semantic differences from the interpreter in it precisely
+      # because nothing ran it.
+      - name: Run smoke tests with the JIT disabled
+        shell: bash
+        run: make test-nojit
       - name: Standalone NeLisp eval (pure-elisp AOT, zero Rust; x86_64 Linux)
         if: runner.os == 'Linux'
         shell: bash

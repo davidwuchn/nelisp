@@ -1991,7 +1991,7 @@ MCP Parameters:
       ;; ("too few args" / "too many args", nelisp-eval.el).  A JIT that
       ;; changes which error a program sees is not a fast path, it is a
       ;; different language, so translate it back.
-      (condition-case err
+      (condition-case nil
           (apply (nelisp-bc-code bcl) args)
         (wrong-number-of-arguments
          (signal 'nelisp-eval-error
@@ -2258,6 +2258,13 @@ the bytecode path or fall back to source loading."
          (insert-file-contents path nil 0 (length nelisp-bc--elc-magic))
          (goto-char (point-min))
          (looking-at (regexp-quote nelisp-bc--elc-magic)))))
+
+;; Soft-require the JIT so its default-on flag has an advice to act
+;; through.  NOERROR keeps this a one-way, optional edge: the package
+;; advises `nelisp-bc-try-compile-lambda' above, so this is the module
+;; that has to reach for it, and a tree without the package still loads
+;; and runs on bcl exactly as before.
+(require 'nelisp-jit nil t)
 
 (provide 'nelisp-bytecode)
 ;;; nelisp-bytecode.el ends here
