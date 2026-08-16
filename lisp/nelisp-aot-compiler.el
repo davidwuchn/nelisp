@@ -4420,6 +4420,40 @@ calln dispatch."
           (push slot slots)))
       (nreverse slots))))
 
+(defun nelisp-aot-compiler--aot-literal-slot-symbols (fenv count start)
+  "Return COUNT callback slots from index START, or nil if unavailable.
+
+Literal arguments to a delegated call need real Sexp storage: the AOT
+passes an integer literal as a raw untagged word, and the runtime's
+apply path takes its arguments as Sexp pointers, so it dereferences the
+literal.  (The host proof harness hides this -- its C driver runs
+`neln_raw_to_sexp' over every argument -- which is why it only shows up
+once an artifact is loaded in the real reader.)
+
+The callback pool is the per-frame supply of caller-owned Sexp slots.
+Reusing it is safe here because the literals are written immediately
+before the dispatch, after every argument has been evaluated: a nested
+delegated call that borrowed the same slots has already finished, and
+its result lives in `out', not in a callback slot.
+
+Returns nil rather than signalling when the pool runs out, leaving those
+arguments lowered as before.  That is no worse than the status quo for
+them, whereas an error would reject code that compiles today."
+  (let ((slots nil)
+        (ok t))
+    (dotimes (idx count)
+      (let* ((candidates
+              (list (intern (format "callback-slot-%d" (+ start idx)))
+                    (intern (format "callback_slot_%d" (+ start idx)))))
+             (slot (cl-find-if
+                    (lambda (sym)
+                      (nelisp-aot-compiler--fenv-has-symbol-p fenv sym))
+                    candidates)))
+        (if slot
+            (push slot slots)
+          (setq ok nil))))
+    (and ok (nreverse slots))))
+
 (defun nelisp-aot-compiler--aot-function-designator-symbol (form)
   "Return FORM's quoted/function symbol designator, or nil.
 Recognizes `(quote SYMBOL)' and `(function SYMBOL)' only.  Lambda
@@ -4635,8 +4669,32 @@ caller-owned boundary params in the current defun:
                 fenv (length keyword-positions) sexp)))
          (keyword-slot-alist
           (cl-mapcar #'cons keyword-positions keyword-slots))
+         ;; Remaining literal arguments -- an integer, string, nil, t or
+         ;; quoted value that no designator or keyword handling already
+         ;; claimed.  Left alone these reach the runtime as raw untagged
+         ;; words where it expects Sexp pointers.
+         (literal-positions
+          (cl-loop for arg in args
+                   for idx from 0
+                   unless (or (assq idx keyword-slot-alist)
+                              (assq idx designator-slot-alist))
+                   when (nelisp-aot-compiler--top-level-literal-value arg)
+                   collect idx))
+         (literal-slots
+          (and literal-positions
+               (nelisp-aot-compiler--aot-literal-slot-symbols
+                fenv (length literal-positions)
+                ;; Start past the designator slots so the two uses of the
+                ;; callback pool cannot land on each other.  One
+                ;; designator takes `scratch' instead of an indexed slot,
+                ;; so it costs nothing here.
+                (if (> (length designator-entries) 1)
+                    (length designator-entries)
+                  0))))
+         (literal-slot-alist
+          (cl-mapcar #'cons literal-positions literal-slots))
          (lowered-args
-          (if (or designator-entries keyword-positions)
+          (if (or designator-entries keyword-positions literal-slot-alist)
               (cl-loop for arg in args
                        for idx from 0
                        collect (cond
@@ -4644,6 +4702,8 @@ caller-owned boundary params in the current defun:
                                  (cdr (assq idx keyword-slot-alist)))
                                 ((assq idx designator-slot-alist)
                                  (cdr (assq idx designator-slot-alist)))
+                                ((assq idx literal-slot-alist)
+                                 (cdr (assq idx literal-slot-alist)))
                                 (t arg)))
             args))
          (arg-prefix
@@ -4653,6 +4713,18 @@ caller-owned boundary params in the current defun:
                     collect `(sexp-write-symbol-lit
                               ,slot
                               ,(symbol-name (nth idx args))))
+           (cl-loop
+            for idx in literal-positions
+            for slot = (cdr (assq idx literal-slot-alist))
+            when slot
+            append (or (nelisp-aot-compiler--top-level-literal-write-forms
+                        slot
+                        (cdr (nelisp-aot-compiler--top-level-literal-value
+                              (nth idx args)))
+                        scratch 0)
+                       (signal 'nelisp-aot-compiler-error
+                               (list :aot-literal-arg-unsupported
+                                     (nth idx args) :form sexp))))
            (apply
             #'append
             (cl-mapcar
@@ -4688,7 +4760,8 @@ caller-owned boundary params in the current defun:
     ;; already replaced those with the slot `arg-prefix' writes into, and
     ;; binding a slot reference here would capture it before that write.
     (let* ((prewritten (append (mapcar #'cdr designator-slot-alist)
-                               (mapcar #'cdr keyword-slot-alist)))
+                               (mapcar #'cdr keyword-slot-alist)
+                               (mapcar #'cdr literal-slot-alist)))
            (bindings nil)
            (call-args
             (mapcar

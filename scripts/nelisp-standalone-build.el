@@ -13223,7 +13223,7 @@ to 176 bytes, and any real function would have overwritten its own code."
   (max 4096 (* 4096 (/ (+ n 4095) 4096))))
 
 (defconst nelisp-standalone--reader-neln-demo-body
-  "(1- (1+ (1+ x)))"
+  "(car (list (1+ x) 0))"
   "Body of the `inc1' function the loader self-test executes natively.
 
 Chosen so the self-test can fail.  At 298 bytes of text it is longer
