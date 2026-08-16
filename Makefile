@@ -62,8 +62,16 @@ test: clean
 
 # Fast TDD loop: same test load graph as `test' but skips `clean';
 # use `test' as the clean verification gate before trusting results.
+# EMACS_PRELOAD carries the extra `-l FILE' arguments the JIT variants
+# below need.  They used to pass them by overriding EMACS itself, but
+# make exports command-line variables into every recipe subprocess, so
+# a multi-word EMACS leaked into the environment of the tests' OWN
+# child processes -- packages/nelisp-sys/bin/nelisp-sys reads
+# "${EMACS}" and invokes it as a single word, which cannot execute.
+# That is what turned the macOS JIT lane red while the plain suite
+# passed.  Keep EMACS a program name; put flags here.
 test-fast:
-	$(EMACS) --batch -Q -L lisp -L src -L test -L bench \
+	$(EMACS) $(EMACS_PRELOAD) --batch -Q -L lisp -L src -L test -L bench \
 	  $(PACKAGE_SRC_LOADS) \
 	  $(PACKAGE_TEST_LOADS) \
 	  --eval '(setq load-prefer-newer t)' \
@@ -194,7 +202,7 @@ nl-safe-bench:
 # body the JIT sees, which is why it is not the default policy.
 jit-unverified:
 	$(MAKE) test-fast \
-	  EMACS="$(EMACS) -l scripts/nelisp-jit-unverified.el"
+	  EMACS_PRELOAD="-l scripts/nelisp-jit-unverified.el"
 
 # Runs the suite with the JIT on.  `nelisp-jit-enabled' is nil by
 # default and the only bindings of it are two of the JIT's own tests, so
@@ -204,7 +212,7 @@ jit-unverified:
 # one is the measurement, this one is the coverage.
 test-jit:
 	$(MAKE) test-fast \
-	  EMACS="$(EMACS) -l scripts/nelisp-jit-enable.el"
+	  EMACS_PRELOAD="-l scripts/nelisp-jit-enable.el"
 
 # The mirror.  With `nelisp-jit-enabled' defaulting to t, the ordinary
 # suite exercises the JIT and the bcl / interpreter paths stop being
@@ -214,7 +222,7 @@ test-jit:
 # differences from the interpreter still in it.
 test-nojit:
 	$(MAKE) test-fast \
-	  EMACS="$(EMACS) -l scripts/nelisp-jit-disable.el"
+	  EMACS_PRELOAD="-l scripts/nelisp-jit-disable.el"
 
 compile: nl-check-gate
 	$(EMACS) --batch -Q -L src \
