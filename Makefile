@@ -1,4 +1,4 @@
-.PHONY: unsafe-inventory ns-inventory ns-gate nl-check-gate jit-unverified parens-check test test-fast test-parallel test-one wasm-smoke wasm-runtime-image-smoke wasm-dtw-skeleton-smoke wasm-dtw-transpile wasm-dtw-compile wasm-dtw-smoke wasm-dtw-site wasm-dtw-site-smoke compile clean all bench bench-aot-tco gc-bench actor-bench soak soak-1h soak-full soak-worker \
+.PHONY: unsafe-inventory ns-inventory ns-gate nl-check-gate nl-safe-bench jit-unverified parens-check test test-fast test-parallel test-one wasm-smoke wasm-runtime-image-smoke wasm-dtw-skeleton-smoke wasm-dtw-transpile wasm-dtw-compile wasm-dtw-smoke wasm-dtw-site wasm-dtw-site-smoke compile clean all bench bench-aot-tco gc-bench actor-bench soak soak-1h soak-full soak-worker \
         sqlite-module sqlite-module-clean \
         release-artifact release-checksum soak-blocker soak-post-ship \
         bench-actual bench-allocator bench-allocator-heavy \
@@ -169,6 +169,23 @@ wasm-dtw-site-smoke: wasm-dtw-site
 nl-check-gate:
 	$(EMACS) --batch -Q -L packages/nl-prelude/src -L packages/nl-safe/src \
 	  -L packages/nl-check/src -l scripts/nl-check-gate.el
+
+# Doc 170 section 9 sets budgets -- 15% for a borrow, 20% for a fat
+# pointer access -- and bench/nl-safe-bench.el measures them.  Nothing
+# ran it: no make target, no CI.  So the budgets were written, the
+# measurement was written, and the result went unread.  It is 11.66x,
+# 15.93x and 3.63x against those budgets, which is why nl-safe has no
+# users outside its own tests, which is why there is no violation data,
+# which is why the Doc 170 section 8 gate cannot be answered.
+#
+# This reports; it does not gate.  Gating on a budget nothing meets
+# would just be a red build nobody can act on until the overhead comes
+# down, and the number is the thing worth watching meanwhile.
+nl-safe-bench:
+	$(EMACS) --batch -Q --eval '(setq load-prefer-newer t)' \
+	  -L lisp -L src -L bench \
+	  -L packages/nl-prelude/src -L packages/nl-safe/src \
+	  -l bench/nl-safe-bench.el -f nl-safe-bench-run
 
 # Reports how many bodies reached the JIT, and how many of those carried
 # a finding.  The JIT is the one place code arrives that no build step
