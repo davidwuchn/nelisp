@@ -210,7 +210,8 @@ aimed at the wrong function is a jump, not a diagnosable error."
          (arm (car arms))
          (chain (nth 2 (cdr arm)))
          (seen nil))
-    (should (= (length arms) 1))
+    (should (equal (mapcar (lambda (a) (cadr (car a))) arms)
+                   '("nelisp--native-symbol-addr" "nelisp--native-env")))
     (should (equal (car arm) '(:u8 "nelisp--native-symbol-addr")))
     ;; Walk the if-chain, collecting (INDEX . SYMBOL) in emitted order.
     (while (and (consp chain) (eq (car chain) 'if))
@@ -231,10 +232,10 @@ aimed at the wrong function is a jump, not a diagnosable error."
                    nelisp-standalone--reader-neln-bridgeable-symbols))))
 
 (ert-deftest nelisp-standalone-target-reader-native-addr-is-registered ()
-  "The arm is reachable: its name is installed as a reader builtin.
+  "Every loader arm is reachable: its name is installed as a builtin.
 A dispatch arm nothing installs is dead code that still links."
-  (should (member "nelisp--native-symbol-addr"
-                  nelisp-standalone--reader-builtins)))
+  (dolist (arm (nelisp-standalone--reader-native-addr-arms))
+    (should (member (cadr (car arm)) nelisp-standalone--reader-builtins))))
 
 (ert-deftest nelisp-standalone-target-reader-neln-demo-externs-are-bridgeable ()
   "Every extern the demo needs is one the loader can address."

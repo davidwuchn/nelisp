@@ -1018,6 +1018,27 @@ standalone-reader-realrt-smoke: standalone-reader
 	  exit 1; \
 	fi
 
+# Doc 142 section 6.4: the general in-process loader.  Where
+# `standalone-reader-realrt-smoke' runs ONE function whose bytes and extern
+# addresses were baked into the reader at build time, this compiles a set of
+# artifacts and has the reader read, map and call them at run time through
+# `lisp/nelisp-native-load.el' -- interpreted elisp, no linker, no cc, no
+# subprocess.  Covers both calling conventions, arity 0 through 6, and
+# non-integer values in and out.
+neln-loader-test: standalone-reader
+	@mkdir -p target/neln-loader
+	NELISP_ARTIFACT_DIR=$(CURDIR)/target/neln-loader \
+	  $(EMACS) --batch -Q -L lisp -L src -L scripts \
+	  --eval '(setq load-prefer-newer t)' \
+	  -l nelisp-native-load-fixtures \
+	  -f nelisp-native-load-fixtures-main
+	@prelude=target/neln-loader/prelude.el; \
+	{ echo '(load "$(CURDIR)/lisp/nelisp-native-load.el")'; \
+	  echo '(defvar nelisp-native-load-driver-dir "$(CURDIR)/target/neln-loader")'; \
+	  echo '(load "$(CURDIR)/test/nelisp-native-load-driver.el")'; \
+	} > "$$prelude"; \
+	./target/nelisp --load "$$prelude"
+
 # Fast focused loop for REPL work.  Builds/relinks target/nelisp with the
 # incremental unit cache, then runs only the REPL smoke used by the full reader
 # test.

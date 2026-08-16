@@ -7940,7 +7940,21 @@ into whatever the index happened to select."
                 (setq form `(if (= (wf_argval args 0) ,idx)
                                 (data-addr ,(intern name))
                               ,form)))
-              form)))))
+              form)))
+   ;; The environment pointer the boundary calls it `frames'.
+   ;;
+   ;; A loaded function's boundary slots have to carry one, because
+   ;; `nelisp_aot_builtin_call1' / `_calln' forward it to
+   ;; `nelisp_apply_function' as the environment to dispatch in.  The
+   ;; demo took it from the CLI dispatcher's `ctx', a local no
+   ;; interpreted code can reach -- but `nelisp_apply_function' receives
+   ;; the very same pointer as its `env' parameter, and every dispatch
+   ;; arm runs inside it.  So the arm just hands `env' back.
+   ;;
+   ;; The `mirror' slot has no such source.  Both providers ignore it,
+   ;; so a loader may pass this pointer there too rather than a wild
+   ;; one; that stops being safe if a boundary callee ever reads mirror.
+   (cons '(:u8 "nelisp--native-env") '(wf_write_int out env))))
 
 (defun nelisp-standalone--applyfn-reader-table ()
   "Build the reader dispatch table: the base table with the buggy stock
@@ -11294,11 +11308,12 @@ value (matches the binary's M8 read+eval-loop driver)."
     "nelisp-process-close-stdin" "nelisp-process-poll"
     "nelisp-process-wait" "nelisp-process-delete" "nelisp-portable-syscall"
     "ptr-call" "thread-spawn" "thread-join" "fork-spawn"
-    ;; Runtime symbol addresses for the in-process native loader.  With
-    ;; this, mmap (`syscall-direct'), the pointer accessors and
-    ;; `ptr-call' are all reachable from interpreted elisp, so the loader
-    ;; itself needs no further AOT-surface code.
-    "nelisp--native-symbol-addr")
+    ;; Runtime symbol addresses and the environment pointer for the
+    ;; in-process native loader.  With these, mmap (`syscall-direct'),
+    ;; the pointer accessors, `alloc-bytes' and `ptr-call' are all
+    ;; reachable from interpreted elisp, so the loader itself needs no
+    ;; further AOT-surface code.
+    "nelisp--native-symbol-addr" "nelisp--native-env")
   "Builtin names installed into the reader binary's mirror.
 Each is dispatched by the pure-elisp `nelisp_apply_function' (see
 `nelisp-standalone--applyfn-source').  Names > 8 bytes (for example
