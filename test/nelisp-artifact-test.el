@@ -1826,6 +1826,28 @@ of one check rather than each carrying its own."
           (should (file-exists-p artifact)))
       (delete-directory dir t))))
 
+(ert-deftest nelisp-artifact-manifest-records-what-was-checked ()
+  "The artifact must be able to say whether it was verified.
+Recording the kinds rather than a bare flag is what makes a later build
+that narrows the set distinguishable from this one -- otherwise
+`checked' would mean whatever the build that wrote it happened to
+cover."
+  (skip-unless (locate-library "nl-check"))
+  (let* ((dir (make-temp-file "nelisp-artifact-check-" t))
+         (source (nelisp-artifact-test--write
+                  dir "plain.el"
+                  ";;; plain.el\n(defun nelisp-artifact-test--plain () 42)\n(provide 'plain)\n"))
+         (artifact (expand-file-name "plain.nelc" dir)))
+    (unwind-protect
+        (progn
+          (nelisp-artifact-compile-file source artifact)
+          (let ((checked (plist-get (nelisp-artifact-read-manifest artifact)
+                                    :checked)))
+            (should checked)
+            (should (memq 'resource-leak (plist-get checked :kinds)))
+            (should (integerp (plist-get checked :forms)))))
+      (delete-directory dir t))))
+
 
 (provide 'nelisp-artifact-test)
 

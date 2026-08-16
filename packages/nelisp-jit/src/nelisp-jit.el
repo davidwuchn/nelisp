@@ -49,6 +49,69 @@ Failure on unsupported forms falls through to bcl / interpreter.")
   "NeLisp JIT cannot translate this form"
   'nelisp-eval-error)
 
+;;;; Unverified code (Doc 170 section 10)
+
+;; The JIT is the one place code arrives that no build step ever saw.
+;; `nelisp-artifact-compile-file' checks every artifact, and `make
+;; compile' checks every source, but a body reaching the JIT may have
+;; come from `eval' or been assembled at runtime, so neither ran on it.
+;;
+;; Refusing to JIT such a body would not prevent the defect -- the
+;; fallback interpreter runs the same code -- so refusal is not the
+;; default.  What the default does is make the gap measurable: count
+;; what goes by unchecked, so "nothing executes unverified" is a claim
+;; with a number behind it rather than a hope.  A build that wants the
+;; stricter answer sets the policy to `refuse'.
+
+(defvar nelisp-jit-check-policy 'ignore
+  "What the JIT does with a body carrying a `nl-check' finding.
+
+`ignore'  do not check at all -- the default, and free.
+`count'   check and tally, but compile anyway.
+`refuse'  check and decline to JIT, falling through to bcl.
+
+Checking costs a walk of every body the JIT sees, which is a hot path,
+so it is off unless asked for.")
+
+(defvar nelisp-jit-check-kinds
+  '(must-use-discarded resource-untracked resource-leak resource-double)
+  "Finding kinds the JIT counts.  Mirrors `nelisp-artifact-check-kinds'.")
+
+(defvar nelisp-jit-check-seen 0
+  "Bodies the JIT has examined since the last `nelisp-jit-check-reset'.")
+
+(defvar nelisp-jit-check-flagged 0
+  "Of those, how many carried a finding.")
+
+(defun nelisp-jit-check-reset ()
+  "Zero the unverified-code counters."
+  (setq nelisp-jit-check-seen 0)
+  (setq nelisp-jit-check-flagged 0))
+
+(defun nelisp-jit-check-report ()
+  "Return (:seen N :flagged N :policy SYM)."
+  (list :seen nelisp-jit-check-seen
+        :flagged nelisp-jit-check-flagged
+        :policy nelisp-jit-check-policy))
+
+(defun nelisp-jit-check-body (body)
+  "Return non-nil when BODY carries a gated `nl-check' finding.
+Returns nil under the `ignore' policy without looking, and nil when
+`nl-check' is absent -- a soft require, as in the artifact path, so
+this package gains no hard dependency on one Doc 170 section 10 says
+nothing may depend on."
+  (when (not (eq nelisp-jit-check-policy 'ignore))
+    (require 'nl-check nil t)
+    (when (fboundp 'nl-check-forms)
+      (setq nelisp-jit-check-seen (1+ nelisp-jit-check-seen))
+      (let ((flagged nil))
+        (dolist (finding (nl-check-forms body))
+          (when (memq (plist-get finding :kind) nelisp-jit-check-kinds)
+            (setq flagged t)))
+        (when flagged
+          (setq nelisp-jit-check-flagged (1+ nelisp-jit-check-flagged)))
+        flagged))))
+
 (defconst nelisp-jit--inline-primitives
   '(+ - * / mod 1+ 1- < > = <= >=
     eq equal null not
@@ -280,7 +343,15 @@ captured-env closures that mutate their captures."
          ;; call, so a `setq' would not persist).  Fall through to bcl /
          ;; interpreter which handle the counter pattern correctly.
          ((and env (nelisp-jit--body-mutates-env-p body env-syms)) nil)
+         ;; Under the `refuse' policy a body carrying a finding falls
+         ;; through to bcl / interpreter, the same way an untranslatable
+         ;; form does.  Under `count' the tally is kept and we compile.
+         ((and (eq nelisp-jit-check-policy 'refuse)
+               (nelisp-jit-check-body body))
+          nil)
          (t
+          (unless (eq nelisp-jit-check-policy 'refuse)
+            (nelisp-jit-check-body body))
           (let* ((translated (nelisp-jit--translate-body body full-env))
                  (host-form
                   (if env

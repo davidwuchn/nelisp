@@ -1642,8 +1642,12 @@ large parsed forms."
                                                     artifact-size
                                                     preload-records load-paths
                                                     kind native native-report
-                                                    native-policy module-policy)
+                                                    native-policy module-policy
+                                                    checked)
   "Build the Doc 142 v1 manifest plist.
+CHECKED is what `nelisp-artifact-check-forms' returned, or nil when the
+checks did not run; it is recorded so a consumer can ask the artifact
+whether it was verified rather than trusting the command that built it.
 ARTIFACT-SHA256 is the integrity hash of the serialized artifact;
 PRELOAD-RECORDS and LOAD-PATHS, plus the artifact/source/compiler/ABI
 fields, are the cache-key participants enforced by
@@ -1653,6 +1657,7 @@ ABI, and NATIVE metadata (object hash, symbols, arch) is recorded."
   (append
    (list :format nelisp-artifact--manifest-format
          :kind kind
+         :checked checked
          :artifact-format nelisp-artifact--format
          :artifact-class (if (eq kind 'neln)
                              nelisp-artifact--native-class
@@ -1781,7 +1786,12 @@ happens cannot change what is emitted."
                   (format "%s %s"
                           (plist-get finding :kind)
                           (plist-get finding :subject)))
-                (nreverse bad) ", "))))))
+                (nreverse bad) ", ")))
+      ;; Reaching here means the checks ran and found nothing.  Say which
+      ;; kinds were covered, not just "checked": a later build that
+      ;; narrows the set must not look the same as this one.
+      (list :kinds nelisp-artifact-check-kinds
+            :forms (length forms)))))
 
 (defun nelisp-artifact-compile-file (source-path artifact-path
                                                  &optional manifest-path target
@@ -1813,6 +1823,7 @@ native object for the standalone runtime, Doc 142 §6.4)."
          (native-report nil)
          (artifact-payload nil)
          (artifact-content nil)
+         (checked nil)
          (manifest nil))
     (setq stage-start (nelisp-artifact--profile-time))
     (setq source (nelisp-artifact--read-file-as-string source-path))
@@ -1821,7 +1832,7 @@ native object for the standalone runtime, Doc 142 §6.4)."
      (list :bytes (length source) :source source-path))
     (setq stage-start (nelisp-artifact--profile-time))
     (setq forms (nelisp-artifact--read-top-level-forms source source-path))
-    (nelisp-artifact-check-forms forms source-path)
+    (setq checked (nelisp-artifact-check-forms forms source-path))
     (nelisp-artifact--profile-log
      "read-forms" stage-start
      (list :forms (length forms) :source source-path))
@@ -1878,7 +1889,7 @@ native object for the standalone runtime, Doc 142 §6.4)."
            (length artifact-content)
 	           (nelisp-artifact--preload-records preloads)
 	           load-paths kind native native-report native-policy
-                   module-policy))
+                   module-policy checked))
     (nelisp-artifact--profile-log
      "manifest" stage-start
      (list :kind kind :module-policy module-policy))

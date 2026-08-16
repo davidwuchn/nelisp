@@ -184,6 +184,45 @@ dispatch correctly through `nelisp--apply'."
 We use a raw non-symbol head — lambda-head application path is not in
 the MVP."
   (should (null (nelisp-jit-try-compile-lambda nil '(x) '((#'foo x))))))
+;;;; Unverified code (Doc 170 section 10)
+
+(ert-deftest nelisp-jit-check-is-free-under-the-default-policy ()
+  "`ignore' must not look at the body at all.
+The JIT is a hot path; a check that runs by default would be paid for
+by every closure whether or not anyone wanted it."
+  (let ((nelisp-jit-check-policy 'ignore))
+    (nelisp-jit-check-reset)
+    (should-not (nelisp-jit-check-body
+                 '((let ((r (nl-resource 'test-fd 3)))
+                     (nl-resource-live-p r)))))
+    (should (= 0 (plist-get (nelisp-jit-check-report) :seen)))))
+
+(ert-deftest nelisp-jit-check-counts-a-body-that-carries-a-finding ()
+  (skip-unless (locate-library "nl-check"))
+  (let ((nelisp-jit-check-policy 'count))
+    (nelisp-jit-check-reset)
+    (should (nelisp-jit-check-body
+             '((let ((r (nl-resource 'test-fd 3)))
+                 (nl-resource-live-p r)))))
+    (should-not (nelisp-jit-check-body '((+ 1 2))))
+    (let ((report (nelisp-jit-check-report)))
+      (should (= 2 (plist-get report :seen)))
+      (should (= 1 (plist-get report :flagged))))))
+
+(ert-deftest nelisp-jit-refuse-policy-declines-the-compile ()
+  "Under `refuse' the body falls through, as an untranslatable form does.
+Refusing does not prevent the defect -- the interpreter runs the same
+code -- so this is about not putting the fast path behind unverified
+input, not about safety."
+  (skip-unless (locate-library "nl-check"))
+  (let ((nelisp-jit-check-policy 'refuse))
+    (nelisp-jit-check-reset)
+    (should-not (nelisp-jit-try-compile-lambda
+                 nil '(x)
+                 '((let ((r (nl-resource 'test-fd 3)))
+                     (nl-resource-live-p r)))))
+    (should (= 1 (plist-get (nelisp-jit-check-report) :flagged)))))
+
 
 (provide 'nelisp-jit-test)
 
