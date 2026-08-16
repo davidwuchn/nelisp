@@ -6,27 +6,32 @@
 ;; passes `make compile', so both are checked.  A body arriving at the
 ;; JIT may have come from `eval' or been assembled at runtime, and
 ;; neither ran on it -- that is the one gap building earlier cannot
-;; close.
+;; close.  This measures the size of that gap over a whole run.
 ;;
-;; This preload turns on `count' for a whole run and prints the tally at
-;; exit.  The number is the point.  The argument for skipping Doc 170
-;; Stage 5 is that real code produces no violations; a claim like that
-;; should keep being checked rather than being made once, and this is
-;; what keeps checking it.
+;; Two things the first version of this got wrong, both of which made
+;; the number it printed meaningless:
 ;;
-;; `count' is not the default policy and this does not make it one: the
-;; JIT is a hot path and the check costs a walk of every body it sees.
+;; - It read `nelisp-jit-check-seen' / `-flagged', which the JIT's own
+;;   tests reset.  The report was whatever the last test left behind.
+;;   Counting happens here now, in variables nothing else touches.
+;;
+;; - It left `nelisp-jit-enabled' alone, and that is nil by default, so
+;;   the JIT never ran and almost nothing reached it.  A rate over a
+;;   sample of one is not a rate.  The JIT is enabled here.
+;;
+;; The same mistake underneath both: reporting a percentage of a
+;; population that was an artifact of the measurement rather than of the
+;; code.  That is exactly how the Doc 170 section 8 gate would have been
+;; answered wrongly, so it is worth being blunt about.
 ;;
 ;; Usage:
-;;   make test-fast EMACS="emacs -Q --batch -l scripts/nelisp-jit-unverified.el"
-;; or the wrapper target:
 ;;   make jit-unverified
 
 ;;; Code:
 
 ;; This preload runs before the Makefile's own
-;; `(setq load-prefer-newer t)', so without setting it here the require
-;; below picks up a stale .elc and every function added since it was
+;; `(setq load-prefer-newer t)', so without setting it here the requires
+;; below pick up stale .elc files and anything added since they were
 ;; compiled reads as void.
 (setq load-prefer-newer t)
 
@@ -36,22 +41,55 @@
   (add-to-list 'load-path (expand-file-name dir)))
 
 (require 'nelisp-jit nil t)
+(require 'nl-check nil t)
 
-(when (boundp 'nelisp-jit-check-policy)
-  (setq nelisp-jit-check-policy 'count)
-  (when (fboundp 'nelisp-jit-check-reset)
-    (nelisp-jit-check-reset))
+(defvar nelisp-jit-unverified-seen 0
+  "Bodies that reached the JIT.  Nothing but this file touches it.")
+
+(defvar nelisp-jit-unverified-flagged 0
+  "Of those, how many carried a finding.")
+
+(defvar nelisp-jit-unverified-kinds
+  '(must-use-discarded resource-untracked resource-leak resource-double)
+  "Finding kinds counted.  Mirrors the artifact and compile gates.")
+
+(defun nelisp-jit-unverified--tally (body)
+  "Count BODY, and whether it carries a finding."
+  (setq nelisp-jit-unverified-seen (1+ nelisp-jit-unverified-seen))
+  (when (fboundp 'nl-check-expanded-forms)
+    (let ((flagged nil))
+      (dolist (finding (condition-case nil
+                           (nl-check-expanded-forms body)
+                         (error nil)))
+        (when (memq (plist-get finding :kind) nelisp-jit-unverified-kinds)
+          (setq flagged t)))
+      (when flagged
+        (setq nelisp-jit-unverified-flagged
+              (1+ nelisp-jit-unverified-flagged))
+        ;; Print it: a rate with no examples cannot be acted on, and
+        ;; whether the flagged body is real code or a test's own fixture
+        ;; is the entire difference between "the gap bites" and "the gap
+        ;; is empty".
+        (princ (format "[jit-unverified] flagged: %S
+" (car body)))))))
+
+(when (fboundp 'nelisp-jit-try-compile-lambda)
+  ;; Turn the JIT on: with it off the measurement has no population.
+  (when (boundp 'nelisp-jit-enabled)
+    (setq nelisp-jit-enabled t))
+  (advice-add 'nelisp-jit-try-compile-lambda :before
+              (lambda (_env _params body)
+                (nelisp-jit-unverified--tally body)))
   (add-hook
    'kill-emacs-hook
    (lambda ()
-     (when (fboundp 'nelisp-jit-check-report)
-       (let* ((report (nelisp-jit-check-report))
-              (seen (plist-get report :seen))
-              (flagged (plist-get report :flagged)))
-         (princ (format "\n[jit-unverified] %d body(s) reached the JIT, %d carried a finding\n"
-                        seen flagged))
-         (when (and (integerp seen) (> seen 0))
-           (princ (format "[jit-unverified] %.1f%% flagged\n"
-                          (/ (* 100.0 flagged) seen)))))))))
+     (let ((seen nelisp-jit-unverified-seen)
+           (flagged nelisp-jit-unverified-flagged))
+       (princ (format "\n[jit-unverified] %d body(s) reached the JIT, %d carried a finding\n"
+                      seen flagged))
+       (if (= seen 0)
+           (princ "[jit-unverified] no population -- nothing reached the JIT\n")
+         (princ (format "[jit-unverified] %.1f%% flagged\n"
+                        (/ (* 100.0 flagged) seen))))))))
 
 ;;; nelisp-jit-unverified.el ends here
