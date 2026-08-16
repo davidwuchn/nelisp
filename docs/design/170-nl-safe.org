@@ -350,17 +350,31 @@ BCE、LLVM の最適化）。15% は「検査を軽くする」目標ではな�
 | =(defun f (c) (nl-safe--cell-value c))= — Elisp ヘルパ 1 呼び出し | *link failed* |
 | 借用あり                                     | *link failed*  |
 
-nl-safe 固有の問題ではない。*AOT ネイティブ経路は Elisp ヘルパを呼ぶ
-関数をリンクできない* のであり、素のプリミティブで閉じた関数しか実行
-できない。借用ありとなしの両方をネイティブ実行しなければ比率は出せない
-が、なし側すらリンクできない。
+nl-safe 固有の問題ではない。原因は =nelisp-artifact-native-exec= の
+設計上の範囲で、その docstring が明言している:
 
-（Windows ホストではプリミティブのみの関数も link failed になる。上表は
-WSL 上の測定。ホスト差ではなくヘルパ呼び出しの有無が効いている。）
+#+begin_quote
+This is the first native-execution spike: it works for the reloc-free
+leaf functions AOT emits today (plain C integer ABI, no boundary
+slots).  The host C toolchain (cc + objcopy) acts as the loader; an
+in-process standalone mmap+reloc loader for the general boundary-ABI
+case is the remaining §6.4 work.
+#+end_quote
+
+つまりこの API は「整数 ABI の *葉関数* を C ドライバにリンクして走らせ
+る spike」であり、生成した C ドライバはオブジェクト単体をリンクする。
+外部シンボル（Elisp ヘルパ）は未解決のままなのでリンクが落ちる。引数も
+=atol= 経由の整数に限られるため、そもそも =nl-cell= を渡せない。
+
+*本番のネイティブ実行経路ではない*。欠けているのは AOT のリンク能力では
+なく、*Doc 142 §6.4 の残作業である in-process mmap+reloc ローダ* である。
+
+（Windows ホストではプリミティブのみの葉関数も link failed。上表は WSL
+上の測定。ホストの C ツールチェーン差であり、境界とは別の話。）
 
 したがって着手順序はこうなる:
 
-1. AOT が Elisp ヘルパ呼び出しをリンクできるようにする ← *ここが最初*
+1. Doc 142 §6.4 の in-process mmap+reloc ローダを実装する ← *ここが最初*
 2. ネイティブ経路で本節の予算を測定可能にする
 3. 検査除去パスを実装し 15% を目指す
 4. nl-safe を実コードに導入する
@@ -368,6 +382,7 @@ WSL 上の測定。ホスト差ではなくヘルパ呼び出しの有無が効�
 6. Stage 5 の可否を実データで決める
 
 =bench/nl-safe-native-bench.el= は 1 が済んだ時点で動く形で置いてある。
+現状では =native-exec= の整数 ABI 制約に当たって落ちる。
 
 ** 位置づけ
 
