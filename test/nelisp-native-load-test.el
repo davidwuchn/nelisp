@@ -175,6 +175,36 @@ host half of that: `aref' per index, not a byte walk."
   ;; A kind that is not neln.
   (should (assq :not-neln (nelisp-native-load-check '(:kind nelc) "f"))))
 
+(ert-deftest nelisp-native-load/check-refuses-a-mismatched-artifact ()
+  "Doc 142 section 6.4: reject on version or shape before mapping anything.
+
+A mismatched bytecode artifact misbehaves; a mismatched native one is
+machine code entered with the wrong frame layout, so these are refusals
+rather than warnings.  `:format' and `:object-format' read back as
+symbols while `:arch' reads back as a string -- comparing the wrong one
+rejects every artifact, which is what a first cut of this did."
+  (skip-unless (nelisp-native-load-test--linux-x86_64-p))
+  (nelisp-native-load-test--with-artifact path "(defun nlt-inc (x) (1+ x))"
+    (let ((manifest (nelisp-native-load-manifest path)))
+      (should-not (nelisp-native-load-check manifest "nlt-inc"))
+      (cl-flet ((tampered (key value &optional top)
+                  ;; Copy far enough that the original manifest is intact.
+                  (let ((m (copy-sequence manifest)))
+                    (if top
+                        (plist-put m key value)
+                      (plist-put m :native
+                                 (plist-put (copy-sequence
+                                             (plist-get manifest :native))
+                                            key value)))
+                    (nelisp-native-load-check m "nlt-inc"))))
+        (should (assq :artifact-format (tampered :format 'bogus-v9 t)))
+        (should (assq :object-format (tampered :object-format 'elf-v0)))
+        (should (assq :native-section-version
+                      (tampered :native-section-version 99)))
+        ;; A truncated or mangled text reaches the code page as a partial
+        ;; function, which is a jump into whatever follows it.
+        (should (assq :text-size-mismatch (tampered :text-size 1)))))))
+
 ;;;; Calling convention -----------------------------------------------
 
 (ert-deftest nelisp-native-load/abi-follows-the-externs ()

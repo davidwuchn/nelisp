@@ -564,3 +564,72 @@ every execution, so this is a whole-program cost, and fixing it also
 removes the per-iteration leak that made the bench OOM.
 
 After this, `length` (+0.67x) is the next rung.
+
+---
+
+## 11. The arena has no reclamation, and every operation costs ~560 bytes (2026-08-17)
+
+Loading an artifact repeatedly OOMs: 5 and 20 load/call/unload cycles
+complete, 60 is killed on a 3.9 GB host. `nelisp-native-load-unload`
+munmaps all three regions and that does not help, because the mappings
+were never the cost.
+
+Measured with `nelisp--arena-stats` across one load of a 2.9 KB `.neln`:
+
+```
+baseline                      37,247,568
+after read-file (2949 chars)  38,093,816    +846 KB
+after manifest parse         104,402,128    +66 MB
+after text decode (144 B)    110,760,984     +6 MB
+after object decode (1152 B) 154,750,736    +44 MB
+after full artifact load     268,435,448   +114 MB
+```
+
+~230 MB per load. But the decoder is not at fault -- **every interpreted
+operation allocates, and nothing is ever reclaimed**:
+
+```
+char-to-string   1911 bytes/op      aref         1991 bytes/op
+cons             2744 bytes/op      arithmetic   2753 bytes/op
+concat           2151 bytes/op      funcall      6031 bytes/op
+```
+
+Isolating the per-operation cost from the per-iteration cost:
+
+```
+empty while (condition only)   1502 bytes/iteration
++ one extra setq               2062   (+560)
++ two extra setq               2622   (+560)
++ nested arithmetic            3894   (+1832 for three more ops)
+```
+
+**~560 bytes per interpreted operation**, and `garbage-collect` is fbound
+but frees nothing: 20,000 iterations of `(setq s (+ s i))` grow the arena
+by 54 MB and a `garbage-collect` call afterwards releases none of it.
+
+So the standalone reader is a bump allocator with no working reclamation.
+That is the real ceiling on anything long-running in it, including this
+loader, `make nl-safe-native-bench`, and the §9 attribution ladder (which
+had to be split into separate processes for exactly this reason).
+
+### Two separable problems
+
+1. **No reclamation.** `garbage-collect` exists and is a no-op against
+   the arena. Fixing it is a GC over the arena with root discovery
+   through the interpreter's frames -- Doc 79 territory, a subsystem.
+2. **~560 bytes per operation.** A `Sexp` is 32 bytes, so this is ~17
+   Sexps' worth per operation. Even without reclamation, cutting this
+   moves the ceiling by whatever factor it recovers.
+
+(2) is worth attacking first: it is bounded, and it does not depend on
+(1). A hypothesis worth checking, **not verified**: 17 × 32 = 544, close
+to the measured 560, and 17 is exactly the boundary slot count
+(`out mirror frames scratch name_slot` + 12 callbacks). If the evaluator
+allocates a fresh boundary block per operation, pooling it per frame
+would collapse the cost. A grep for a matching `alloc-bytes` in the eval
+path did not find one, so treat the numeric coincidence as a lead, not a
+finding.
+
+Anyone measuring here: `(nth 2 (nelisp--arena-stats))` is the used-bytes
+field, and the difference across a `while` loop divided by the iteration
+count gives a clean per-operation figure.

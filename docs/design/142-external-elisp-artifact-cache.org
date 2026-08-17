@@ -499,9 +499,55 @@ returns a string whose bytes over 127 are UTF-8 encoded, so =string-byte= walks
 the encoding and the text reached the code page with 137 arriving as 194 137.
 =aref= indexes characters, which for a byte string is the byte.
 
-Not yet done: unmapping (a loaded function stays callable for the life of the
-process, which is what a cache wants), and the §6.4 bullets above about ABI /
-target-triple / hash validation on load, which remain future work.
+*** 6.4.4 Load-time validation and unmapping (SHIPPED 2026-08-17)
+
+The §6.4 bullets asking for a pre-execution reject and for release are
+implemented.  =nelisp-native-load-check= refuses, before anything is mapped:
+
+- =:format= other than =nelisp-private-nelc-v2=;
+- =:object-format= other than =nelisp-aot-elf-v1=;
+- a =:native-section-version= the loader does not agree with;
+- a decoded text whose length differs from =:text-size=;
+
+alongside the earlier arch / param-class / arity / extern checks.  A
+mismatched bytecode artifact merely misbehaves; a mismatched native one is
+machine code entered with the wrong frame layout, so these are refusals.
+
+A trap worth recording: =:format= and =:object-format= read back as *symbols*
+while =:arch= reads back as a *string*.  Comparing all three as strings
+rejects every artifact, including valid ones.
+
+=nelisp-native-load-unload= munmaps the three regions and blanks the handle's
+addresses, so a stale call dereferences 0 rather than entering whatever the
+kernel maps next.
+
+*Unmapping alone does not bound memory.* Each load also makes arena
+allocations that nothing frees -- the manifest read, the base64 decode, the
+scratch vector and its cells.  Measured with unload in the loop: 5 and 20
+cycles complete, 60 is OOM-killed on a 3.9 GB host.  So the practical ceiling
+is a few tens of loads per process, and it lives in the arena, not in the
+mappings.  This is also why =make nl-safe-native-bench= could not carry more
+pairs.
+
+Not yet done: hash validation.  =:object-sha256= is present in the manifest,
+and the reader *does* have a digest -- =nelisp--sha256=, over the native
+=m5_sha256=.  It is correct for ASCII (=sha256("abc")= matches the host
+exactly) but *not for binary*: strings are UTF-8 internally, so a decoded
+object hashes its encoded form and disagrees with the host on any byte over
+127.  Measured:
+
+| input                     | reader     | host       |
+|---------------------------+------------+------------|
+| ="abc"=                   | =ba7816bf= | =ba7816bf= |
+| =base64-decode "AAGC/w=="=| =a5d68054= | =ddc6b64d= |
+
+So artifact-hash validation needs a digest that takes a pointer and a length
+rather than a string -- the same shape the loader already uses to write the
+code page.  A =nelisp--sha256-bytes ADDR LEN= builtin would close it.
+
+(An earlier revision of this section said the reader exposes no digest at all.
+That was wrong: it was concluded from probing =secure-hash= / =sha256= / =md5=
+and not the name the reader actually uses.)
 
 ** 6.5 Auto artifact
 

@@ -75,6 +75,25 @@ this list to that one.  They are asserted equal by the test suite.")
 
 (defconst nelisp-native-load-page-bytes 4096)
 
+(defconst nelisp-native-load-artifact-format 'nelisp-private-nelc-v2
+  "The artifact container format this loader reads.
+
+A symbol, not a string: `:format' and `:object-format' read back as
+symbols while `:arch' reads back as a string, and comparing the wrong
+one rejects every artifact.")
+
+(defconst nelisp-native-load-object-format 'nelisp-aot-elf-v1
+  "The embedded object layout this loader knows how to map.")
+
+(defconst nelisp-native-load-native-section-versions '(2)
+  "Native-section versions whose field meanings this loader agrees with.
+
+Doc 142 section 6.4 asks that a cache be rejected before executing any of
+it when the ABI, target or artifact version does not match.  Checking the
+version matters more here than for a bytecode lane: a mismatched
+`.nelc' misbehaves, a mismatched `.neln' is machine code entered with the
+wrong frame layout.")
+
 ;;;; Tags -------------------------------------------------------------
 
 (defconst nelisp-native-load-tag-nil 0)
@@ -170,9 +189,34 @@ every problem at once rather than the first one hit."
       (setq problems (cons (list :not-neln (plist-get manifest :kind)) problems)))
      ((null native)
       (setq problems (cons (list :no-native-object) problems))))
+    ;; Container format, before anything inside it is trusted.
+    (unless (equal (plist-get manifest :format)
+                   nelisp-native-load-artifact-format)
+      (setq problems (cons (list :artifact-format (plist-get manifest :format))
+                           problems)))
     (when native
       (unless (equal (plist-get native :arch) "x86_64")
         (setq problems (cons (list :arch (plist-get native :arch)) problems)))
+      (unless (equal (plist-get native :object-format)
+                     nelisp-native-load-object-format)
+        (setq problems (cons (list :object-format
+                                   (plist-get native :object-format))
+                             problems)))
+      (unless (memq (plist-get native :native-section-version)
+                    nelisp-native-load-native-section-versions)
+        (setq problems (cons (list :native-section-version
+                                   (plist-get native :native-section-version))
+                             problems)))
+      ;; The decoded text must be exactly as long as the artifact says.  A
+      ;; short read or a mangled base64 otherwise reaches the code page as
+      ;; a truncated function, which is a jump into whatever follows it.
+      (let ((declared (plist-get native :text-size))
+            (actual (and (plist-get native :text-base64)
+                         (length (base64-decode-string
+                                  (plist-get native :text-base64))))))
+        (unless (and (integerp declared) actual (= declared actual))
+          (setq problems (cons (list :text-size-mismatch declared actual)
+                               problems))))
       ;; An empty extern set reads back as the symbol nil, not the empty list.
       (when (and externs (not (and (symbolp externs) (null externs))))
         (let ((rest externs)
@@ -581,6 +625,11 @@ what a cache wants and what the demo did."
             :codepage codepage
             :stubs stub-offsets
             :body-entry body-entry
+            ;; Sizes so `nelisp-native-load-unload' can hand munmap the
+            ;; same extents mmap was given.
+            :code-size code-size
+            :slots-size slots-size
+            :entry-size (nelisp-native-load--page-round (length tramp-bytes))
             :slots slots
             :out slots
             :arity arity
@@ -637,6 +686,35 @@ answer 406962619651776 and leave `out' untouched."
               (and boxed (eq (plist-get handle :return-repr) 'unknown)))
           (nelisp-native-load-unbox raw)
         raw))))
+
+(defun nelisp-native-load-unload (handle)
+  "Unmap HANDLE's pages and return the number of regions released.
+
+A loaded function otherwise stays mapped for the life of the process,
+which is what a cache wants but not what a caller loading many artifacts
+wants -- the section 9 bench mapped enough of them to be killed.
+
+Calling a handle after unloading it jumps into an unmapped page, so this
+blanks the handle's addresses: a stale call then dereferences 0 at the
+trampoline rather than executing whatever the kernel maps there next."
+  (let ((released 0))
+    (dolist (pair (list (cons :entry :entry-size)
+                        (cons :codepage :code-size)
+                        (cons :slots :slots-size)))
+      (let ((addr (plist-get handle (car pair)))
+            (size (plist-get handle (cdr pair))))
+        (when (and (integerp addr) (> addr 0) (integerp size) (> size 0))
+          ;; munmap(2) is syscall 11 on x86_64.
+          (let ((rc (syscall-direct 11 addr size 0 0 0 0)))
+            (unless (= rc 0)
+              (error "nelisp-native-load: munmap of %d bytes at %d failed (%d)"
+                     size addr rc))
+            (setq released (1+ released))))))
+    (plist-put handle :entry 0)
+    (plist-put handle :codepage 0)
+    (plist-put handle :slots 0)
+    (plist-put handle :out 0)
+    released))
 
 (defun nelisp-native-load-exec (path name args)
   "Map NAME from PATH and call it with ARGS, in one step."
