@@ -160,6 +160,22 @@ ratchet.
 3. Move its name above the comment block in `gates.expected`.
 4. Run `nelisp-ai.sh verify` and confirm the gate appears in the table.
 
+## The harness is held to its own standard
+
+`test/nelisp-ai-gate-test.el` runs in the normal ERT suite and covers
+the rule everything else rests on: zero cases is a failure, a reasoned
+skip is neither pass nor fail, a reason does not mask failures, reports
+survive quotes and newlines in their text, and an unreadable report is a
+finding rather than a crash.
+
+Writing those tests found a real defect on the first run. The Elisp
+`nelisp-gate-derive-status` tested the skip reason *before* the failure
+count, so a gate that explained itself while failing reported `skip` —
+while `gate-report.sh`, which implements the same rule in shell, had the
+guard. Two implementations of one rule had silently diverged, and the
+rule in question is the one that decides whether anything else is
+believed.
+
 ## Files
 
 | file | role |

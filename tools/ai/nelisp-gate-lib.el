@@ -70,8 +70,16 @@ whole mechanism exists to surface.
 A gate may declare itself skipped by passing a non-empty SKIP-REASON —
 for example a Linux-only smoke invoked on Windows.  The reason is
 mandatory, because a skip without one is indistinguishable from a gate
-that quietly stopped working."
-  (cond ((and (stringp skip-reason) (> (length skip-reason) 0)) "skip")
+that quietly stopped working.
+
+A reason does not mask failures.  The first version of this function
+tested SKIP-REASON before FAILED, so any gate that explained itself
+while failing reported `skip'; `gate-report.sh' had the guard and this
+did not, which is precisely the sort of divergence that makes two
+implementations of one rule worth testing."
+  (cond ((and (stringp skip-reason) (> (length skip-reason) 0)
+              (= failed 0))
+         "skip")
         ((> failed 0) "fail")
         ((= ran 0) "fail")
         (t "pass")))

@@ -28,6 +28,7 @@ pkg-load-lists
 
 # Developer-loop gates: useful, but not evidence about the whole tree.
 ert-focus?
+ns?
 
 # Namespace boundaries for the recipe skeletons.  Whole-tree namespace
 # checking is `make ns-inventory', which ratchets against a baseline;
