@@ -529,25 +529,36 @@ is a few tens of loads per process, and it lives in the arena, not in the
 mappings.  This is also why =make nl-safe-native-bench= could not carry more
 pairs.
 
-Not yet done: hash validation.  =:object-sha256= is present in the manifest,
-and the reader *does* have a digest -- =nelisp--sha256=, over the native
-=m5_sha256=.  It is correct for ASCII (=sha256("abc")= matches the host
-exactly) but *not for binary*: strings are UTF-8 internally, so a decoded
-object hashes its encoded form and disagrees with the host on any byte over
-127.  Measured:
+*** 6.4.5 Artifact-hash validation (SHIPPED 2026-08-17)
 
-| input                     | reader     | host       |
-|---------------------------+------------+------------|
-| ="abc"=                   | =ba7816bf= | =ba7816bf= |
-| =base64-decode "AAGC/w=="=| =a5d68054= | =ddc6b64d= |
+=:object-sha256= is now verified before anything is mapped: the loader digests
+the embedded object and refuses on a mismatch, so an artifact edited or
+corrupted between compile and load is rejected rather than executed.
 
-So artifact-hash validation needs a digest that takes a pointer and a length
-rather than a string -- the same shape the loader already uses to write the
-code page.  A =nelisp--sha256-bytes ADDR LEN= builtin would close it.
+This needed a new reader builtin.  =nelisp--sha256= exists and is correct for
+ASCII -- =sha256("abc")= matches the host exactly -- but it takes a *string*,
+and strings are UTF-8 internally, so it digests the encoded form of any byte
+over 127.  Measured before the fix:
 
-(An earlier revision of this section said the reader exposes no digest at all.
-That was wrong: it was concluded from probing =secure-hash= / =sha256= / =md5=
-and not the name the reader actually uses.)
+| input                      | reader     | host       |
+|----------------------------+------------+------------|
+| ="abc"=                    | =ba7816bf= | =ba7816bf= |
+| =base64-decode "AAGC/w=="= | =a5d68054= | =ddc6b64d= |
+
+=nelisp--sha256-bytes ADDR LEN= digests raw memory instead, which is the
+shape the loader already works in -- it writes the decoded text to a page
+byte by byte.  =m5_sha256= was split so both entry points share the padding
+and compression (=m5_sha256_run=); only the input copy differs
+(=str-byte-at= vs =ptr-read-u8=).  The pointer copy iterates rather than
+recursing like its string sibling: a short symbol name is bounded, an
+artifact is not.  All three cases now match the host, binary included.
+
+On host Emacs the builtin does not exist, so the check is skipped rather
+than failing closed against a digest it cannot compute.
+
+That closes four of the five §6.4 load-validation bullets -- ABI, target
+triple, artifact version, artifact hash.  Source/preload freshness is the
+=.nelc= lane's (§7) and is not duplicated here.
 
 ** 6.5 Auto artifact
 

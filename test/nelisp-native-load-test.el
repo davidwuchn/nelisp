@@ -203,7 +203,16 @@ rejects every artifact, which is what a first cut of this did."
                       (tampered :native-section-version 99)))
         ;; A truncated or mangled text reaches the code page as a partial
         ;; function, which is a jump into whatever follows it.
-        (should (assq :text-size-mismatch (tampered :text-size 1)))))))
+        (should (assq :text-size-mismatch (tampered :text-size 1)))
+        ;; The artifact hash.  Only checkable where the byte digest exists
+        ;; -- `nelisp--sha256-bytes' is a reader builtin, so on host Emacs
+        ;; the check is skipped rather than failing against a digest it
+        ;; cannot compute.
+        (if (fboundp 'nelisp--sha256-bytes)
+            (should (assq :object-hash-mismatch
+                          (tampered :object-sha256 "deadbeef")))
+          (should-not (assq :object-hash-mismatch
+                            (tampered :object-sha256 "deadbeef"))))))))
 
 ;;;; Calling convention -----------------------------------------------
 

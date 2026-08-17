@@ -3479,6 +3479,17 @@ argument (reachability + in-arena bounds checks).")
                                  (seq (mut-str-make-empty ms 64)
                                       (m5_sha256 ms (wf_arg_ptr args 0))
                                       (mut-str-finalize ms out) 0)))
+    ;; Digest LEN bytes at an ADDRESS.  `nelisp--sha256' takes a string and
+    ;; hashes its internal UTF-8, so it agrees with other implementations on
+    ;; ASCII and disagrees on any byte over 127 -- which makes it unusable
+    ;; for validating an artifact.  This is the shape the in-process loader
+    ;; already works in: it writes the decoded text to a page byte by byte.
+    ((:lit "nelisp--sha256-bytes") . (let* ((ms (alloc-bytes 32 8)))
+                                       (seq (mut-str-make-empty ms 64)
+                                            (m5_sha256_ptr ms
+                                                           (wf_argval args 0)
+                                                           (wf_argval args 1))
+                                            (mut-str-finalize ms out) 0)))
     ((:lit "nelisp--string-search") . (let* ((idx (m5_string_search
                                                     (wf_arg_ptr args 1)
                                                     (wf_arg_ptr args 0)
@@ -6232,17 +6243,27 @@ unresolved at link time."
            (m5_sha_hexnib ms (logand (/ w 1048576) 15)) (m5_sha_hexnib ms (logand (/ w 65536) 15))
            (m5_sha_hexnib ms (logand (/ w 4096) 15)) (m5_sha_hexnib ms (logand (/ w 256) 15))
            (m5_sha_hexnib ms (logand (/ w 16) 15)) (m5_sha_hexnib ms (logand w 15))))
-    (defun m5_sha256 (ms hay)
-      (let* ((len (str-len hay))
-             (padlen (* (+ (/ (+ len 8) 64) 1) 64))
-             (msg (alloc-bytes padlen 1))
-             (kbuf (alloc-bytes 512 8))
+    ;; Copy LEN bytes from a RAW POINTER rather than from a string.
+    ;; `m5_sha_copy' reads through `str-byte-at', which walks the string's
+    ;; internal UTF-8 -- so hashing a decoded binary through it digests the
+    ;; encoded form and disagrees with every other sha256 on any byte over
+    ;; 127.  Iterative, not recursive like its string sibling: an artifact
+    ;; is not bounded the way a short name is.
+    (defun m5_sha_copy_ptr (msg src n)
+      (let* ((i 0))
+        (seq (while (< i n)
+               (seq (ptr-write-u8 msg i (ptr-read-u8 src i))
+                    (setq i (+ i 1))))
+             0)))
+    ;; Padding and compression, shared by both entry points.  MSG already
+    ;; holds LEN bytes and has room for PADLEN.
+    (defun m5_sha256_run (ms msg len padlen)
+      (let* ((kbuf (alloc-bytes 512 8))
              (wbuf (alloc-bytes 512 8))
              (hbuf (alloc-bytes 64 8))
              (bitlen (* len 8))
              (blk 0))
         (seq
-         (m5_sha_copy msg hay 0 len)
          (ptr-write-u8 msg len 128)
          (m5_sha_zero msg (+ len 1) (- padlen 4))
          (ptr-write-u8 msg (- padlen 4) (logand (/ bitlen 16777216) 255))
@@ -6263,6 +6284,17 @@ unresolved at link time."
          (m5_sha_hexword ms (ptr-read-u64 (+ hbuf 16) 0)) (m5_sha_hexword ms (ptr-read-u64 (+ hbuf 24) 0))
          (m5_sha_hexword ms (ptr-read-u64 (+ hbuf 32) 0)) (m5_sha_hexword ms (ptr-read-u64 (+ hbuf 40) 0))
          (m5_sha_hexword ms (ptr-read-u64 (+ hbuf 48) 0)) (m5_sha_hexword ms (ptr-read-u64 (+ hbuf 56) 0)))))
+    (defun m5_sha256 (ms hay)
+      (let* ((len (str-len hay))
+             (padlen (* (+ (/ (+ len 8) 64) 1) 64))
+             (msg (alloc-bytes padlen 1)))
+        (seq (m5_sha_copy msg hay 0 len)
+             (m5_sha256_run ms msg len padlen))))
+    (defun m5_sha256_ptr (ms src len)
+      (let* ((padlen (* (+ (/ (+ len 8) 64) 1) 64))
+             (msg (alloc-bytes padlen 1)))
+        (seq (m5_sha_copy_ptr msg src len)
+             (m5_sha256_run ms msg len padlen))))
     ;; ---- m5_string_search: native substring search (byte compare, no
     ;; per-position allocation).  Backs `nelisp--string-search'; replaces the
     ;; interpreted O(n*m)-with-`substring'-allocation scans that dominate the
@@ -11263,7 +11295,7 @@ value (matches the binary's M8 read+eval-loop driver)."
     ;; M5 strings + format
     "length" "string-byte" "concat" "substring" "make-string" "string="
     "char-to-string" "string-to-char" "number-to-string" "string-to-number" "format"
-    "nelisp--repr" "nelisp--json-encode" "nelisp--sha256" "nelisp--string-search" "nelisp--arena-stats" "garbage-collect"
+    "nelisp--repr" "nelisp--json-encode" "nelisp--sha256" "nelisp--sha256-bytes" "nelisp--string-search" "nelisp--arena-stats" "garbage-collect"
     "nelisp--fmt-float"
     "nelisp--debug-switch" "nelisp--gc-diag" "nelisp--arena-force-grow-smoke" "nelisp--size-census" "nelisp--arena-walk-verify"
     "nelisp--alloc-check-report"

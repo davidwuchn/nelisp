@@ -603,20 +603,45 @@ empty while (condition only)   1502 bytes/iteration
 + nested arithmetic            3894   (+1832 for three more ops)
 ```
 
-**~560 bytes per interpreted operation**, and `garbage-collect` is fbound
-but frees nothing: 20,000 iterations of `(setq s (+ s i))` grow the arena
-by 54 MB and a `garbage-collect` call afterwards releases none of it.
+**~560 bytes per interpreted operation.** Nothing observed reclaims it:
 
-So the standalone reader is a bump allocator with no working reclamation.
-That is the real ceiling on anything long-running in it, including this
-loader, `make nl-safe-native-bench`, and the §9 attribution ladder (which
-had to be split into separate processes for exactly this reason).
+- `garbage-collect` is fbound and frees none of it;
+- neither does crossing a top-level form boundary. Three identical pure
+  loops, each its own top-level form in a `--load`ed file, add 54.7 MB
+  apiece and none is given back:
+
+```
+baseline                 23,628,152
+after pure loop #1       78,312,320   (+54.7 MB)
+after pure loop #2      132,996,496   (+54.7 MB)
+after pure loop #3      187,680,680   (+54.7 MB)
+```
+
+The arena caps at 256 MB (268,435,456), which is where a run dies.
+
+**On the mechanism, be careful.** The sources describe reclamation that
+this probing could not observe: a comment on the native buffer-scan
+helpers says GC runs "only at form boundaries", and `wf_dirty` maintains
+a mutation-epoch counter at 268435544 described as a NO-ESCAPE gate so
+that "the per-eval arena reset never frees a still-reachable escapee".
+So a per-form reset exists in the design. Three successive models built
+from outside -- "no reclamation at all", "reset at form boundaries",
+"reset suppressed by escapes" -- were each contradicted by the next
+measurement. Whoever continues should read the reset logic in the
+evaluator rather than probe from elisp; the numbers above are reliable,
+the explanation for them is not yet.
+
+Either way it is the real ceiling on anything long-running in the
+reader, including this loader, `make nl-safe-native-bench`, and the §9
+attribution ladder (which had to be split into separate processes for
+exactly this reason).
 
 ### Two separable problems
 
-1. **No reclamation.** `garbage-collect` exists and is a no-op against
-   the arena. Fixing it is a GC over the arena with root discovery
-   through the interpreter's frames -- Doc 79 territory, a subsystem.
+1. **Reclamation does not fire on this path.** A per-form reset exists in
+   the design (see above) but was not observed releasing anything.
+   Finding out why is a read of the evaluator's reset logic, not more
+   black-box probing.
 2. **~560 bytes per operation.** A `Sexp` is 32 bytes, so this is ~17
    Sexps' worth per operation. Even without reclamation, cutting this
    moves the ceiling by whatever factor it recovers.

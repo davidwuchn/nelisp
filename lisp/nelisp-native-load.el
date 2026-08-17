@@ -143,6 +143,27 @@ which for a byte string is the byte, on both this runtime and host
 Emacs."
   (logand (aref string index) #xff))
 
+(defun nelisp-native-load--digest (bytes)
+  "Return the sha256 of BYTES as a lowercase hex string, or nil.
+
+Goes through a raw buffer and `nelisp--sha256-bytes' rather than handing
+the string to `nelisp--sha256'.  Strings are UTF-8 internally here, so
+the string entry point digests the encoded form: it matches other
+sha256 implementations on ASCII and diverges on any byte over 127, which
+is most of a compiled object.
+
+Returns nil where the byte digest is unavailable -- on host Emacs, and on
+a reader built before it existed -- so a caller can skip the check rather
+than fail closed against a digest it cannot compute."
+  (when (fboundp 'nelisp--sha256-bytes)
+    (let* ((n (length bytes))
+           (buf (alloc-bytes (if (> n 0) n 1) 1))
+           (i 0))
+      (while (< i n)
+        (ptr-write-u8 buf i (nelisp-native-load--byte bytes i))
+        (setq i (1+ i)))
+      (nelisp--sha256-bytes buf n))))
+
 (defun nelisp-native-load--read-file (path)
   "Return the contents of PATH as a string."
   (cond
@@ -217,6 +238,25 @@ every problem at once rather than the first one hit."
         (unless (and (integerp declared) actual (= declared actual))
           (setq problems (cons (list :text-size-mismatch declared actual)
                                problems))))
+      ;; Doc 142 section 6.4's artifact-hash check.  `:object-sha256'
+      ;; covers the embedded object, so this verifies the artifact was not
+      ;; corrupted or edited between compile and load -- the text the
+      ;; loader maps comes out of the same manifest.
+      ;;
+      ;; Through `nelisp--sha256-bytes', never `nelisp--sha256': the latter
+      ;; takes a string and digests its internal UTF-8, so it agrees on
+      ;; ASCII and disagrees on any byte over 127.  Measured before this
+      ;; existed: an object hashed the string way gave a5d68054... where
+      ;; every other sha256 gives ddc6b64d...
+      (let ((declared (plist-get native :object-sha256))
+            (encoded (plist-get native :object-base64)))
+        (when (and (stringp declared) (stringp encoded)
+                   (fboundp 'nelisp--sha256-bytes))
+          (let ((actual (nelisp-native-load--digest
+                         (base64-decode-string encoded))))
+            (unless (equal declared actual)
+              (setq problems (cons (list :object-hash-mismatch declared actual)
+                                   problems))))))
       ;; An empty extern set reads back as the symbol nil, not the empty list.
       (when (and externs (not (and (symbolp externs) (null externs))))
         (let ((rest externs)

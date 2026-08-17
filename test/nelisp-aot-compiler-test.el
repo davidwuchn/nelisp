@@ -4406,6 +4406,39 @@ units that load and then read uninitialised stack."
                 (cons 'dc-wide (make-list over 0)) nil nil nil))))
     (should-not (eq (cadr err) :dynamic-calln-too-many-args))))
 
+(ert-deftest nelisp-aot-compiler/test-position-stops-at-a-value-argument ()
+  "A tag predicate lowers raw only where its value is read as truth.
+
+With the boundary available a tag predicate delegates to builtin1 and
+returns a boxed Sexp; the direct `sexp-tag' lowering returns a raw i64.
+The raw form is admissible in an `if' test, where only the branch reads
+it, and through the boolean connectives, whose arms are tests too.  It
+is NOT admissible as an argument: `(if (foo (vectorp x)) ...)' hands
+`(vectorp x)' to `foo', which reads it as a value.
+
+Binding the flag across a whole test expression instead of re-checking
+it one level at a time let it reach exactly that argument.  The JIT is
+on by default, so this lowering applies to ordinary runtime closures and
+not only to compiled artifacts."
+  ;; In test position, and through the connectives.
+  (should (nelisp-aot-compiler--aot-test-form-p '(vectorp c)))
+  (should (nelisp-aot-compiler--aot-test-form-p '(not (consp c))))
+  (should (nelisp-aot-compiler--aot-test-form-p '(and (vectorp c) (integerp n))))
+  (should (nelisp-aot-compiler--aot-test-form-p '(or (null c) (stringp c))))
+  ;; Not in test position: a call reads its arguments as values, and a
+  ;; bare variable or literal is not a predicate to lower at all.
+  (should-not (nelisp-aot-compiler--aot-test-form-p '(foo (vectorp c))))
+  (should-not (nelisp-aot-compiler--aot-test-form-p '(aref c 0)))
+  (should-not (nelisp-aot-compiler--aot-test-form-p 'c))
+  (should-not (nelisp-aot-compiler--aot-test-form-p 42))
+  (should-not (nelisp-aot-compiler--aot-test-form-p nil)))
+
+(ert-deftest nelisp-aot-compiler/test-position-is-off-by-default ()
+  "Nothing is in test position unless a test put it there.
+`--parse-value' is entered from many places; a stale non-nil would lower
+a predicate raw in a value position."
+  (should-not nelisp-aot-compiler--aot-test-position))
+
 (provide 'nelisp-aot-compiler-test)
 
 ;;; nelisp-aot-compiler-test.el ends here

@@ -4646,8 +4646,12 @@ Measured on the Doc 170 section 9 bench: `nl-cell-p' is
 it in test position, and routing its predicates through the dispatcher
 took the checked borrow from 1.43x to 6.36x.
 
-Bound to nil again around anything that is not itself a test, so a
-predicate appearing as an argument keeps the boxed path.")
+Set only for the form that IS the test, never for what is nested inside
+it.  `(if (foo (vectorp x)) A B)' must keep `(vectorp x)' boxed -- it is
+an argument to `foo', which reads it as a value.  Binding this across a
+whole test expression instead broke `nelisp-daemon-three-layer-integration',
+because the JIT is on by default and so this lowering reaches ordinary
+runtime code rather than only compiled artifacts.")
 
 (defconst nelisp-aot-compiler--aot-direct-tag-predicate-symbols
   '(not null atom consp listp symbolp numberp integerp float stringp vectorp)
@@ -4656,6 +4660,23 @@ These produce raw i64 booleans through `sexp-tag' comparisons.  They are
 used when the current defun does not expose the dispatcher boundary
 slots, and -- see `nelisp-aot-compiler--aot-test-position' -- when the
 value is consumed only as a truth test.")
+
+(defun nelisp-aot-compiler--aot-test-form-p (form)
+  "Return non-nil when FORM, in a test position, may lower as a raw bool.
+
+Test position propagates through the boolean connectives and stops at
+anything else.  `(if (and (vectorp c) (= (length c) 3)) ...)' has three
+forms in test position -- the `and' and both of its arms -- while
+`(if (foo (vectorp x)) ...)' has one: `foo' reads its argument as a
+value, so the predicate inside it must stay boxed.
+
+Checked one level at a time at each propagation point, which is what
+keeps the flag from leaking into an argument several frames down."
+  (and (consp form)
+       (or (memq (car form)
+                 nelisp-aot-compiler--aot-direct-tag-predicate-symbols)
+           (memq (car form) '(and or)))
+       t))
 
 (defun nelisp-aot-compiler--aot-builtin-boundary-available-p (fenv)
   "Return non-nil when FENV has the standard AOT builtin boundary slots."
@@ -9053,7 +9074,14 @@ functions `((NAME . ARITY) ...)'."
               (list :if-arity sexp)))
     (nelisp-aot-compiler--make-ir 'if
           :id (nelisp-aot-compiler--gensym "if")
-          :test (let ((nelisp-aot-compiler--aot-test-position t))
+          ;; Test position is a property of the form that IS the test, not
+          ;; of everything inside it.  Binding it across the whole test
+          ;; expression lowered `(vectorp x)' raw inside `(if (foo (vectorp
+          ;; x)) ...)', where it is an argument to `foo' and `foo' wants
+          ;; the boxed Sexp.  With the JIT on by default that reaches
+          ;; ordinary runtime code, not just artifacts.
+          :test (let ((nelisp-aot-compiler--aot-test-position
+                       (nelisp-aot-compiler--aot-test-form-p (nth 1 sexp))))
                   (nelisp-aot-compiler--parse-value
                    (nth 1 sexp) env fenv defuns))
           ;; The arms produce the `if''s value, so they are not tests.
@@ -9124,9 +9152,17 @@ functions `((NAME . ARITY) ...)'."
       (nelisp-aot-compiler--make-ir 'logic
             :op op
             :id (nelisp-aot-compiler--gensym (symbol-name op))
+            ;; In a test position the connective's arms are tests too --
+            ;; only their truth is read.  In a value position they are
+            ;; not: `and' yields its last arm's VALUE.  So propagate the
+            ;; flag rather than assume it, and re-check each arm, which
+            ;; is what stops it reaching an argument nested inside one.
             :forms (mapcar (lambda (e)
-                             (nelisp-aot-compiler--parse-value
-                              e env fenv defuns))
+                             (let ((nelisp-aot-compiler--aot-test-position
+                                    (and nelisp-aot-compiler--aot-test-position
+                                         (nelisp-aot-compiler--aot-test-form-p e))))
+                               (nelisp-aot-compiler--parse-value
+                                e env fenv defuns)))
                            args))))
    ;; Doc 129.1: value-context sequence, produced by macro-expanded
    ;; multi-form `progn'.  Every child must itself be value-producing;
