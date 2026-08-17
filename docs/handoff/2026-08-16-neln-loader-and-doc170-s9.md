@@ -441,16 +441,42 @@ fills slots `arity..arity+16` and enters at `body-offset`. A normal call
 enters at offset 0 and gets uninitialised stack in those slots. Nothing
 in the unit establishes them.
 
-Three ways out, in decreasing order of preference:
+### What the fix has to be
 
-- **(a) each defun's prologue establishes its own boundary.** Self
-  contained, the caller needs no change, and the AOT already emits
-  `(alloc-bytes 32 8)` for Sexp slots. Costs an allocation per call.
-- **(b) a second entry point** that establishes the boundary and falls
-  into the body; normal calls enter there, the trampoline keeps entering
-  at `body-offset`. Same work as (a), emitted elsewhere.
-- **(c) pass the boundary as real hidden parameters.** Touches every
-  defun's signature.
+A callee **cannot** establish its whole boundary by itself. `out`,
+`scratch`, `name_slot` and the callbacks are storage, and it could
+allocate those. `mirror` and `frames` are *context* — the environment the
+dispatcher resolves in — and a defun has no way to synthesize them. Any
+callee that reaches a builtin through `calln` needs `frames`, and
+`bp-probe` does, for its `aref`.
+
+So the boundary has to be threaded, which means hidden parameters. Note
+there is no existing mechanism to lean on: the `&rest` arm of the
+same-unit call lowering appends `scratch` to the argument list, but that
+lands in the *rest parameter's* slot, not an extra hidden one.
+
+Four places have to move together:
+
+1. `--object-hidden-boundary-fenv` (lisp/nelisp-aot-compiler.el:1069) —
+   give `mirror` / `frames` a `:reg` so the prologue spills them, instead
+   of the frame-only `:slot` they get now.
+2. `--defun-signature` (:8650) — arity has to count the hidden params so
+   call sites agree with callees.
+3. The same-unit call arm of `--parse-value` (:10698) — append the
+   caller's `mirror` / `frames`; today it passes source args padded to
+   arity and nothing else.
+4. **The loader's trampoline** (`nelisp-native-load--trampoline`) — it
+   currently writes all 17 boundary values into frame slots and enters at
+   `body-offset`. Whatever the new ABI is, the trampoline has to match it.
+
+Point 4 is the risk: that ABI is what the 20 passing loader cases depend
+on. A half-finished change here breaks everything that currently works,
+so it wants doing in one go with `make neln-loader-test` after each step.
+
+An earlier draft of this section proposed "each defun's prologue
+establishes its own boundary" as the cheap option. That does not work,
+for the `mirror` / `frames` reason above; it is recorded here so the idea
+is not re-derived and re-tried.
 
 Note for whoever picks this up: two earlier readings of this same fault
 were wrong, both from disassembling without pinning down which function
