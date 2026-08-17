@@ -487,3 +487,80 @@ eyeballing it. `§4.4` has the recipe.
 Until this is fixed, a benchmark or fixture that needs helper functions
 has to inline them into one defun -- which is what
 `scripts/nl-safe-native-bench-fixtures.el` does, and says so.
+
+---
+
+## 10. Cache quoted symbol literals (next perf lever, 2026-08-17)
+
+The Doc 170 §9 checked borrow is 4.99x against a 1.15x budget after tag
+predicates were lowered natively in test position (`7b90a98f`). The
+remaining cost is attributed, one predicate per rung:
+
+```
+state bookkeeping only   1.36x
++ vectorp                1.77x   (+0.41)
++ length                 2.44x   (+0.67)
++ eq                     4.90x   (+2.46)
+```
+
+`eq` dominates, and **not as a comparison**. `(eq (aref c 0) 'nl--cell)`
+materialises a symbol on every iteration -- twice, in fact: `eq` is a
+delegated builtin so the dispatcher needs a symbol for the name `"eq"`,
+and the quoted literal `'nl--cell` needs another. Each goes through
+`nl_alloc_symbol`, which heap-allocates the name buffer. The
+disassembly shows the pattern inline:
+
+```asm
+movabs rax, <name bytes>
+push   rax
+call   nl_alloc_symbol
+```
+
+Nothing frees them. Adding two more pairs to `make nl-safe-native-bench`
+made the reader OOM (`Killed`, rc=137, on a 3.9 GB box) for this reason;
+the attribution ladder had to be run as a standalone probe instead
+(kept at `scratchpad/ladder.sh` in the session scratch, trivial to
+rewrite).
+
+### Design
+
+Give each distinct symbol literal in a unit one zeroed 32-byte `bss`
+blob, initialise it on first use, and copy from it afterwards. The
+runtime's own hand-written elisp already uses exactly this idiom -- see
+`nl_logic_build_scratch` in `lisp/nelisp-cc-evalport-env-leaves-logic.el`:
+
+```elisp
+(if (= (ptr-read-u64 <cache-slot> 0) 0)
+    (let* ((s (alloc-bytes 32 8)))
+      (seq (nl_logic_write_symentry s) (ptr-write-u64 <cache-slot> 0 s)))
+  0)
+```
+
+Compiled user code has no equivalent.
+
+The pieces exist: `(data-blob NAME BYTES bss)` declares a same-unit
+static blob (`lisp/nelisp-aot-compiler.el:10990`) and `(data-addr NAME)`
+takes its address. A symbol Sexp is immutable and name buffers are
+already shared by the rebox path, so copying from a cache is not a new
+aliasing risk.
+
+Do the rewrite where `sexp-write-symbol-lit` is **parsed**, not at its
+ten-plus construction sites and not in the per-architecture emitters:
+one place, and it stays ordinary IR so x86_64 / aarch64 / wasm all get
+it.
+
+Three parts have to come together:
+
+1. a per-unit registry of symbol name -> blob name, filled during parse;
+2. a hook to append the collected `data-blob` declarations to the unit's
+   top-level node list before layout -- **this is the piece not yet
+   located**; `data-blob` is a statement-only top-level form and parsing
+   happens per defun;
+3. the parse-time rewrite of `sexp-write-symbol-lit`.
+
+Worth doing: it is not a benchmark artifact. Every delegated builtin
+call in every compiled unit allocates a symbol for the callee's name on
+every execution, so this is a whole-program cost, and fixing it also
+removes the per-iteration leak that made the bench OOM.
+
+After this, `length` (+0.67x) is the next rung.
