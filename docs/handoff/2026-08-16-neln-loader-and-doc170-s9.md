@@ -1038,3 +1038,65 @@ boxes a raw value with `(let ((s (alloc-bytes 32 8))) (seq (sexp-int-make
 s FORM) s))`. Since the lattice is monotone (`raw` -> `sexp-ptr` only),
 adding to a promotion set and re-parsing converges in finitely many
 rounds. That pairing, not the refusal, is the real fix.
+
+## 18. Both the refusal and the promotion were withdrawn (2026-08-18)
+
+Neither survived contact with the build that actually consumes the
+compiler. Recorded here because the mechanism above is real and the
+reason these particular answers fail is the useful part.
+
+**Promotion** broke `make standalone-reader` and 24 tests, one of them a
+`Segmentation fault (exit 139)` in `nat-ng-tail-sum`. Two causes, both
+structural rather than incidental:
+
+- It boxed what `--aot-dispatcher-arg-form` can box and left the rest, so
+  a variable it promoted could still receive an extern-call result it
+  could not box. The mismatch then survived its own promotion and the
+  retry gave up -- on `nl_runtime_image_copy_argv_forms`, where `off` is
+  a byte offset, `:then sexp-ptr :else unknown`.
+- GC roots are collected from `ref` nodes carrying `:root-p`
+  (`--gc-root-slots-for-defun`), and `:root-p` is decided at binding time
+  from the source form. A promoted slot holds a fresh Sexp and is not
+  marked, so nothing scans it.
+
+**The refusal**, kept on its own, then failed the same build as soon as
+anything else got more precise. Declaring parameters `sexp-ptr` -- which
+is correct, and fixes `(defun p7 (n) (integerp n) (+ n 1))` answering
+134637738934817 instead of 4 -- turned the very form that had justified
+comparing boxedness rather than exact symbols,
+
+```
+(if (< bt 8) (setq hdr end) (nl_seq2 (ptr-write-u64 hdr 0 bt)
+                                     (setq hdr (+ hdr bt))))
+```
+
+from `unknown` vs `raw-i64` (no mismatch) into `sexp-ptr` vs `raw-i64`
+(mismatch), and the reader stopped building. 25 tests failed.
+
+### What that says about where to look
+
+These are not three bugs. A frame slot's representation is not a
+property the compiler computes; it is a side effect of the order a
+single-pass parser walked the tree, written into a mutable annotation
+that 27 sites read and 13 branch on -- over a vocabulary that includes
+`unknown`, meaning "nobody classified this yet". Precision added at any
+one site changes what every other site sees. Patching per construct
+therefore yields one new failure per construct, which is what happened
+twice.
+
+The target is one analysis that gives each frame slot a single
+representation for its whole lifetime, removes `unknown` from the
+vocabulary, and derives GC rooting from the same result. `if`, `while`,
+`cond`, `and`/`or` and parameters are then consequences rather than
+cases.
+
+The parameter change is parked in `param-repr-wip.patch` -- correct on
+its own terms, and not landable until the analysis exists.
+
+Method note: every fixture in this document was hand-built to test a
+shape guessed in advance. That found real defects but one at a time, and
+each "verified" claim rested on those fixtures rather than on `make
+standalone-reader`, which is the compiler's actual consumer. The next
+step is a differential harness -- the same source through the
+interpreter and through AOT, answers compared -- so the population is
+enumerated rather than guessed.
