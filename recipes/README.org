@@ -68,6 +68,20 @@ Absent or stubbed:
 - =json-encode=, =sqlite-open= — not in the base runtime; they live in
   =packages/nelisp-json= and =packages/nelisp-sqlite=.
 
+Two more, both measured on 2026-08-17 and both silent:
+
+- =(load "missing.el" nil t)= *returns t*.  NOERROR is nil in that call,
+  so Emacs would signal; this runtime does not.  A wrong path in a
+  hand-written load list therefore produces no error and no output —
+  just a program in which nothing is defined, failing later as
+  =void-function= somewhere unrelated.  After loading by path, assert
+  =featurep=.
+- Emacs batch on Windows prints *CRLF*, so a shell loop over a
+  generated file list (=for f in $(make -s pkg-load-order ...)=) keeps
+  the carriage return in each path.  Combined with the point above, the
+  whole sequence loads nothing and says nothing.  Tools that emit paths
+  should call =(set-binary-mode 'stdout t)=.
+
 Changed between builds, and worth knowing:
 
 - =(require 'missing-feature)= now signals =file-missing=.  An older

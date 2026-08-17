@@ -132,6 +132,61 @@ in them."
       (should (null (nelisp-pkg-findings-of-kind findings 'pkg-stale-dependency)))
       (should (null (nelisp-pkg-findings-of-kind findings 'pkg-missing-manifest))))))
 
+(ert-deftest nelisp-pkg-load-sequence-puts-dependencies-first ()
+  (nelisp-pkg-test--with-tree
+      '(("alpha" ("alpha.el" . "(require 'beta)\n(provide 'alpha)\n"))
+        ("beta"  ("beta.el"  . "(provide 'beta)\n")))
+    (let ((sequence (mapcar #'file-name-nondirectory
+                            (nelisp-pkg-load-sequence "alpha" (nelisp-pkg-scan)))))
+      (should (equal sequence '("beta.el" "alpha.el"))))))
+
+(ert-deftest nelisp-pkg-load-sequence-orders-files-inside-a-package ()
+  "A package's own files are ordered by their intra-package requires."
+  (nelisp-pkg-test--with-tree
+      '(("alpha" ("a-top.el"  . "(require 'a-base)\n(provide 'a-top)\n")
+                 ("a-base.el" . "(provide 'a-base)\n")))
+    (let ((sequence (mapcar #'file-name-nondirectory
+                            (nelisp-pkg-load-sequence "alpha" (nelisp-pkg-scan)))))
+      ;; Alphabetically a-base precedes a-top, so make the dependency the
+      ;; later name to prove the order comes from requires, not sorting.
+      (should (equal sequence '("a-base.el" "a-top.el"))))))
+
+(ert-deftest nelisp-pkg-load-sequence-orders-against-alphabetical ()
+  (nelisp-pkg-test--with-tree
+      '(("alpha" ("a-first.el" . "(require 'z-last)\n(provide 'a-first)\n")
+                 ("z-last.el"  . "(provide 'z-last)\n")))
+    (let ((sequence (mapcar #'file-name-nondirectory
+                            (nelisp-pkg-load-sequence "alpha" (nelisp-pkg-scan)))))
+      (should (equal sequence '("z-last.el" "a-first.el"))))))
+
+(ert-deftest nelisp-pkg-load-sequence-is-transitive ()
+  (nelisp-pkg-test--with-tree
+      '(("alpha" ("alpha.el" . "(require 'beta)\n(provide 'alpha)\n"))
+        ("beta"  ("beta.el"  . "(require 'gamma)\n(provide 'beta)\n"))
+        ("gamma" ("gamma.el" . "(provide 'gamma)\n"))
+        ("delta" ("delta.el" . "(provide 'delta)\n")))
+    (let ((sequence (mapcar #'file-name-nondirectory
+                            (nelisp-pkg-load-sequence "alpha" (nelisp-pkg-scan)))))
+      (should (equal sequence '("gamma.el" "beta.el" "alpha.el")))
+      ;; An unrelated package is not dragged in.
+      (should-not (member "delta.el" sequence)))))
+
+(ert-deftest nelisp-pkg-load-sequence-refuses-a-cycle ()
+  (nelisp-pkg-test--with-tree
+      '(("alpha" ("alpha.el" . "(require 'beta)\n(provide 'alpha)\n"))
+        ("beta"  ("beta.el"  . "(require 'alpha)\n(provide 'beta)\n")))
+    (should-error (nelisp-pkg-load-sequence "alpha" (nelisp-pkg-scan)))))
+
+(ert-deftest nelisp-pkg-load-sequence-keeps-unorderable-files ()
+  "A file whose intra-package requires cannot be met is still loaded.
+Dropping it would move the failure somewhere else and make it harder to
+read; the sequence is doubtful, not shorter."
+  (nelisp-pkg-test--with-tree
+      '(("alpha" ("one.el" . "(require 'two)\n(provide 'one)\n")
+                 ("two.el" . "(require 'one)\n(provide 'two)\n")))
+    (let ((sequence (nelisp-pkg-load-sequence "alpha" (nelisp-pkg-scan))))
+      (should (= 2 (length sequence))))))
+
 (ert-deftest nelisp-pkg-rejects-a-malformed-manifest ()
   (should (nelisp-pkg-validate-manifest '(:name "a")))
   (should (nelisp-pkg-validate-manifest '(:name a :version "1" :requires ())))

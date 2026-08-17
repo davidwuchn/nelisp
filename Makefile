@@ -334,6 +334,15 @@ pkg-graph:
 	$(EMACS) --batch -Q -L packages/nelisp-pkg/src \
 	  -l tools/nelisp-pkg-graph.el
 
+# Prints the files to load for PKG and its dependencies, in order, for
+# the standalone runtime (which loads by path rather than through
+# `require').  Use -s to get only the paths:
+#   make -s pkg-load-order PKG=nl-safe
+.PHONY: pkg-load-order
+pkg-load-order:
+	@$(EMACS) --batch -Q -L packages/nelisp-pkg/src \
+	  -l tools/nelisp-pkg-load-order.el
+
 # Fails on a cross-file name collision that is not in the accepted set,
 # and on an accepted entry that no longer matches anything.  Reaching
 # zero findings is not the goal: the bootstrap prelude has to define

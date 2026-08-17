@@ -152,15 +152,20 @@ would put a guess into the graph."
          (files (and (file-directory-p src)
                      (directory-files src t "\\.el\\'")))
          (provides nil)
-         (requires nil))
+         (requires nil)
+         (per-file nil))
     (dolist (file files)
       (let ((pair (nelisp-pkg-file-features file)))
+        (push (list :file file :provides (car pair) :requires (cdr pair))
+              per-file)
         (dolist (p (car pair)) (cl-pushnew p provides))
         (dolist (r (cdr pair)) (cl-pushnew r requires))))
+    (setq per-file (nreverse per-file))
     (let ((manifest (nelisp-pkg-read-manifest dir)))
       (list :name name
             :dir dir
             :files (length files)
+            :file-features per-file
             :provides (nreverse provides)
             :requires (nreverse requires)
             :manifest (car manifest)
@@ -234,6 +239,92 @@ the call site can work around it."
             (setq pending (delete name pending))
             (setq progress t)))))
     (list :order order :cycles pending)))
+
+;;;; Load sequences -------------------------------------------------------
+
+;; Why this exists: on the standalone runtime, dependencies are loaded by
+;; explicit path rather than through `require', and every smoke and
+;; recipe that does so carries a hand-written list of files in a
+;; hand-worked-out order.  Add a dependency and each of those lists is
+;; silently wrong until someone runs it.  The order is derivable from the
+;; same provide/require data as the package graph, so it should be
+;; derived.
+
+(defun nelisp-pkg--order-files (entries package-name)
+  "Order ENTRIES (from `:file-features') so providers come first.
+
+Only intra-package features are ordered on: a require satisfied outside
+this package is somebody else's file, and is handled by ordering the
+packages themselves.  Files whose intra-package requires cannot all be
+satisfied are appended in their original order rather than dropped --
+a load list that silently omits a file is worse than one in a doubtful
+order, because the failure moves somewhere else."
+  (let* ((within (make-hash-table :test #'eq))
+         (pending (copy-sequence entries))
+         (ordered nil)
+         (done (make-hash-table :test #'eq))
+         (progress t))
+    (dolist (entry entries)
+      (dolist (feature (plist-get entry :provides))
+        (puthash feature t within)))
+    (while (and pending progress)
+      (setq progress nil)
+      (dolist (entry (copy-sequence pending))
+        (let ((needed (cl-remove-if-not
+                       (lambda (feature) (gethash feature within))
+                       (plist-get entry :requires))))
+          (when (cl-every (lambda (feature)
+                            (or (gethash feature done)
+                                (memq feature (plist-get entry :provides))))
+                          needed)
+            (setq ordered (append ordered (list entry)))
+            (dolist (feature (plist-get entry :provides))
+              (puthash feature t done))
+            (setq pending (delq entry pending))
+            (setq progress t)))))
+    (ignore package-name)
+    (append ordered pending)))
+
+(defun nelisp-pkg-load-sequence (name packages)
+  "Return the absolute file paths to load for package NAME, in order.
+
+Dependencies first, each package's own files ordered so that a file
+comes after the ones providing what it requires.  Signals when NAME is
+not among PACKAGES, or when the packages it needs form a cycle -- in
+both cases there is no sequence, and returning a plausible one would
+be the failure this function exists to prevent."
+  (let* ((by-name (let ((table (make-hash-table :test #'equal)))
+                    (dolist (package packages)
+                      (puthash (plist-get package :name) package table))
+                    table))
+         (package (gethash name by-name))
+         (resolution (nelisp-pkg-resolve packages))
+         (edges (nelisp-pkg-edges packages)))
+    (unless package
+      (error "nelisp-pkg: no package named %s" name))
+    (when (member name (plist-get resolution :cycles))
+      (error "nelisp-pkg: %s is in a dependency cycle; no load order exists"
+             name))
+    ;; Transitive dependencies, in the global load order.
+    (let ((needed (list name))
+          (frontier (list name)))
+      (while frontier
+        (let ((current (pop frontier)))
+          (dolist (edge edges)
+            (when (equal (car edge) current)
+              (unless (member (cdr edge) needed)
+                (push (cdr edge) needed)
+                (push (cdr edge) frontier))))))
+      (let ((sequence nil))
+        (dolist (candidate (plist-get resolution :order))
+          (when (member candidate needed)
+            (let ((entry (gethash candidate by-name)))
+              (dolist (file (nelisp-pkg--order-files
+                             (plist-get entry :file-features)
+                             candidate))
+                (setq sequence (append sequence
+                                       (list (plist-get file :file))))))))
+        sequence))))
 
 ;;;; Checking ------------------------------------------------------------
 

@@ -83,6 +83,43 @@ birth, which is how a gate becomes decoration.
 The load order exists, which is the useful part: the graph is acyclic
 today, and this gate is what keeps it that way.
 
+* Load sequences
+
+On the standalone runtime, dependencies are loaded by explicit path
+rather than through =require=, and every smoke and recipe that does so
+carries a hand-written list in a hand-worked-out order.  Add a
+dependency and each of those lists is silently wrong until someone runs
+it — silently, because =(load "missing.el" nil t)= *returns t* in that
+runtime instead of signalling.
+
+#+begin_src sh
+make -s pkg-load-order PKG=nl-contract
+#+end_src
+
+#+begin_example
+packages/nelisp-json/src/nelisp-json.el
+packages/nl-prelude/src/nl-prelude.el
+packages/nl-safe/src/nl-safe.el
+packages/nl-safe/src/nl-resource.el
+packages/nl-safe/src/nl-safe-report.el
+packages/nl-contract/src/nl-contract.el
+packages/nl-contract/src/nl-contract-nelisp-json.el
+#+end_example
+
+Dependencies first, then each package's own files ordered so that a
+file follows what it provides for.  Verified end to end: that sequence
+loads in the standalone binary with =nelisp-json=, =nl-prelude=,
+=nl-safe= and =nl-contract= all present afterwards.
+
+The generated order for =nl-safe= matches the one hand-written in
+=packages/nl-safe/test/nl-safe-standalone-smoke.el=, and adds
+=nl-resource.el=, which that smoke does not need.
+
+A file whose intra-package requires cannot be satisfied is kept, at the
+end, rather than dropped: a load list that silently omits a file is
+worse than one in a doubtful order, because the failure moves somewhere
+else.
+
 * Dependencies
 
 - Host: =cl-lib=, =subr-x=.  No NeLisp packages.

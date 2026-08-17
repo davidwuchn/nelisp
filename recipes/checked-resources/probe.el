@@ -51,6 +51,15 @@ did not run cannot look like one that did."
 
 (defun probe-behaviour ()
   "Check that the borrow discipline does what it claims."
+  ;; First, that the dependencies are actually here.  `load' on a
+  ;; missing file returns t in this runtime -- even with NOERROR nil --
+  ;; so a wrong path above produces no error at all, just a program with
+  ;; nothing defined in it.  Assert the features rather than assume the
+  ;; loads worked.
+  (probe-report "loaded"
+                (if (and (featurep 'nl-prelude) (featurep 'nl-safe))
+                    "yes"
+                  "no"))
   (checked-fill 3)
   (probe-report "sum" (checked-sum))
   ;; The important one: a recipe that only exercises the legal path

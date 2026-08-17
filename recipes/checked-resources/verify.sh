@@ -67,6 +67,10 @@ printf 'checked-resources: %s\n' "$NELISP"
 
 probe behaviour 0 > "$work/behaviour.txt" || true
 
+grep -q '^RESULT loaded=yes$' "$work/behaviour.txt" \
+    && check ok "dependencies actually loaded (features present)" \
+    || check no "nl-prelude / nl-safe are not loaded -- a load that found no file returns t here, so a wrong path is silent"
+
 grep -q '^RESULT sum=24$' "$work/behaviour.txt" \
     && check ok "shared borrow reads the filled buffer (8 slots x 3)" \
     || check no "shared borrow did not return 24: $(grep '^RESULT sum=' "$work/behaviour.txt" || echo 'no result line')"

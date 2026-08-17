@@ -33,6 +33,24 @@ borrow checking works. `checked-conflict` exists to provoke a real
 violation and require `nl-borrow-error`. It is the second check in
 `verify.sh` and it is the load-bearing one.
 
+## A wrong path in the load list is completely silent
+
+`(load "packages/nl-safe/src/nl-safe.el" nil t)` with a path that does
+not exist **returns t**. NOERROR is nil in that call, so Emacs would
+signal `file-missing`; this runtime does not. Nothing is printed, the
+script continues, and the first symptom is a `void-function` somewhere
+that looks unrelated.
+
+`probe.el` therefore asserts `featurep` after loading, and `verify.sh`
+checks that assertion first. Keep both when you adapt this: the whole
+point of loading by path is that you chose the paths, and nothing else
+will tell you when one is wrong.
+
+Relatedly, if you generate the list — `make -s pkg-load-order PKG=...` —
+be aware that Emacs batch on Windows prints CRLF, so `for f in $(...)`
+keeps a carriage return in every path. The two behaviours compose into
+a script that loads nothing and reports success.
+
 ## `require` versus `load` for the nl-* packages
 
 The skeleton loads its dependencies by explicit path. That is the
@@ -53,10 +71,10 @@ differently.
 
 ## Do not carry the ratio anywhere
 
-Four valid runs on one machine gave 1.45x, 1.50x, 1.58x and 1.64x — a
-13% spread, the widest taken while other work was running (drift 0.15,
-still inside the limit). One binary, one loop shape, in the
-interpreter.
+Five valid runs on one machine gave 1.40x, 1.45x, 1.50x, 1.58x and
+1.64x — a 17% spread, the widest taken while other work was running
+(drift 0.15 and 0.22, both inside the limit). One binary, one loop
+shape, in the interpreter.
 
 The Doc 170 §9 figure (4.99x against a ≤1.15x budget) measures
 AOT-compiled borrows where type checks dominate. Quoting either number
