@@ -16362,29 +16362,44 @@ loader when it is absent."
   "Build the reader binary, run it, assert exit == eval(NELISP_SRC).  Exits 0/1."
   (if (not (nelisp-standalone--target-runnable-on-host-p))
       (progn
+        ;; A gate that cannot run says so out loud.  This branch used to
+        ;; exit 0 silently, which is indistinguishable from a pass; the
+        ;; GATE-SKIP line lets `tools/ai/nelisp-ai.sh gate' record it as
+        ;; an explicit, reasoned skip instead.
+        (message "GATE-SKIP target %S cannot run on host %S"
+                 nelisp-standalone--target system-configuration)
         (message "[standalone-reader] SKIP: target %S cannot run on host %S"
                  nelisp-standalone--target system-configuration)
         (kill-emacs 0))
     (let* ((out (nelisp-standalone-build-reader))
            (code (call-process out nil nil nil "--embedded"))
-           (expected (nelisp-standalone--reader-expected)))
+           (expected (nelisp-standalone--reader-expected))
+           ;; The exit-code assertion is the first check; each smoke that
+           ;; completes is another.  Counting them is what makes a run
+           ;; that stopped early distinguishable from a clean one.
+           (checked 1))
       (if (= code expected)
           (condition-case err
               (let ((nelisp-standalone--reader-out out))
-                (nelisp-standalone--reader-hash-table-literal-smoke)
-                (nelisp-standalone--reader-large-quoted-alist-mutation-smoke)
-                (nelisp-standalone--reader-setcar-setcdr-type-smoke)
-                (nelisp-standalone--reader-runtime-image-smoke)
-                (nelisp-standalone--reader-cli-smoke)
-                (nelisp-standalone--reader-neln-selftest-smoke)
-                (nelisp-standalone--reader-repl-smoke)
+                (dolist (smoke '(nelisp-standalone--reader-hash-table-literal-smoke
+                                 nelisp-standalone--reader-large-quoted-alist-mutation-smoke
+                                 nelisp-standalone--reader-setcar-setcdr-type-smoke
+                                 nelisp-standalone--reader-runtime-image-smoke
+                                 nelisp-standalone--reader-cli-smoke
+                                 nelisp-standalone--reader-neln-selftest-smoke
+                                 nelisp-standalone--reader-repl-smoke))
+                  (funcall smoke)
+                  (setq checked (1+ checked)))
+                (message "GATE-COUNT checked=%d findings=0" checked)
                 (message "[standalone-reader] PASS: %S -> exit %d (expected %d)"
                          (nelisp-standalone--reader-src) code expected)
                 (kill-emacs 0))
             (error
+             (message "GATE-COUNT checked=%d findings=1" checked)
              (message "[standalone-reader] FAIL: command smoke: %s"
                       (error-message-string err))
              (kill-emacs 1)))
+        (message "GATE-COUNT checked=%d findings=1" checked)
         (message "[standalone-reader] FAIL: %S -> exit %d (expected %d)"
                  (nelisp-standalone--reader-src) code expected)
         (kill-emacs 1)))))

@@ -222,6 +222,13 @@ cmd_gate() {
     # it examined cannot be believed when it says nothing is wrong.
     # `make parens-check' prints nothing at all on a clean run, so an
     # empty file list and a clean tree looked identical from outside.
+    #
+    # A gate that cannot run on this host prints instead
+    #
+    #   GATE-SKIP <reason>
+    #
+    # which is recorded as a reasoned skip.  The standalone gates used to
+    # exit 0 on the wrong platform, which reads exactly like a pass.
     [ $# -ge 3 ] || { echo 'usage: nelisp-ai.sh gate NAME -- COMMAND...' >&2; exit 2; }
     gate_name=$1
     shift
@@ -234,6 +241,14 @@ cmd_gate() {
     code=$?
     set -e
     cat "$log"
+    skip=$(grep -E '^GATE-SKIP ' "$log" | tail -1 | sed 's/^GATE-SKIP //' || true)
+    if [ -n "$skip" ]; then
+        duration=$(( ($(date +%s) - started) * 1000 ))
+        rm -f "$log"
+        "$here/gate-report.sh" --name "$gate_name" --kind wrapped \
+            --duration-ms "$duration" --reason "$skip" --command "$*"
+        return 0
+    fi
     line=$(grep -E '^GATE-COUNT ' "$log" | tail -1 || true)
     checked=$(printf '%s' "$line" | sed -n 's/.*checked=\([0-9][0-9]*\).*/\1/p')
     findings=$(printf '%s' "$line" | sed -n 's/.*findings=\([0-9][0-9]*\).*/\1/p')
