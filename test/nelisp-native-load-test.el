@@ -216,14 +216,35 @@ rejects every artifact, which is what a first cut of this did."
 
 ;;;; Calling convention -----------------------------------------------
 
-(ert-deftest nelisp-native-load/abi-follows-the-externs ()
-  "No externs means the integer ABI; any extern means the boxed boundary.
+(ert-deftest nelisp-native-load/abi-follows-the-dispatcher-externs ()
+  "A DISPATCHER extern means the boxed boundary; other externs do not.
 
 Measured on the two shapes: `add3', an extern-less `(+ a (+ b c))',
 answers 6 from raw arguments and garbage from boxed ones, while `inc1'
-answers through `out' only when its argument is a Sexp."
+answers through a Sexp only when its argument is one.
+
+Taking any extern as boxed was wrong, and not harmlessly.  A defun that
+allocates a vector carries `nl_alloc_vector' and friends without ever
+delegating, and answers in a raw register:
+
+  (defun c1 (n) (let ((v (vector 7 8 9)) (i 0)) (if (< i n) 111 222)))
+
+read as boxed, its raw 111 was dereferenced as a Sexp pointer -- a fault
+at address 111, surfacing in whatever the caller did with the result
+rather than anywhere near the cause.  `(c1 0)' now answers 222."
   (should (eq (nelisp-native-load-abi '(:extern-symbols nil)) 'integer))
+  ;; Allocation helpers alone: still the integer ABI.
+  (should (eq (nelisp-native-load-abi
+               '(:extern-symbols ("nl_alloc_vector" "nl_vector_set_slot")))
+              'integer))
   (should (eq (nelisp-native-load-abi '(:extern-symbols ("nl_alloc_symbol")))
+              'integer))
+  ;; Either dispatcher: boxed.
+  (should (eq (nelisp-native-load-abi
+               '(:extern-symbols ("nl_alloc_symbol" "nelisp_aot_builtin_call1")))
+              'boxed))
+  (should (eq (nelisp-native-load-abi
+               '(:extern-symbols ("nelisp_aot_builtin_calln")))
               'boxed))
   (skip-unless (nelisp-native-load-test--linux-x86_64-p))
   (nelisp-native-load-test--with-artifact path "(defun nlt-add (a b) (+ a b))"

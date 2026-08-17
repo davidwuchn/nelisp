@@ -553,13 +553,30 @@ and every such call leaves an extern behind.  With no externs there is
 nothing for the boundary to do, and the parameters arrive as raw i64
 with the result in rax.
 
-The consequence of the derivation being wrong is silent arithmetic on
-the wrong values, so a caller that knows better should override :abi in
-the handle rather than trust this."
-  (let ((externs (plist-get native :extern-symbols)))
-    (if (or (null externs) (and (symbolp externs) (null externs)))
-        'integer
-      'boxed)))
+It is the DISPATCHER externs that mean boxed --
+`nelisp_aot_builtin_call1' / `_calln' -- not any extern at all.  A defun
+that allocates a vector carries `nl_alloc_vector' and friends without
+ever delegating, and answers in a raw register:
+
+  (defun c1 (n) (let ((v (vector 7 8 9)) (i 0)) (if (< i n) 111 222)))
+
+reads as boxed under an any-extern rule, and its raw 111 is then dereferenced
+as a Sexp pointer -- a fault at address 111, inside whatever the caller
+does with the result rather than anywhere near the cause.  The defun
+metadata's `:return-repr' agrees (`raw-i64' / `sexp-ptr' for the cases
+that have one), and this matches it on every artifact to hand.
+
+The consequence of the derivation being wrong is a wrong value or a
+fault, so a caller that knows better should override :abi in the handle
+rather than trust this."
+  (let* ((externs (plist-get native :extern-symbols))
+         (list (and (listp externs) externs))
+         (dispatches
+          (seq-find (lambda (name)
+                      (and (stringp name)
+                           (string-match-p "aot_builtin_call" name)))
+                    list)))
+    (if dispatches 'boxed 'integer)))
 
 (defun nelisp-native-load--symbol-addr (name)
   "Return the runtime address of NAME."
