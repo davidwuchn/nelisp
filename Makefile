@@ -324,6 +324,16 @@ ns-inventory:
 	$(EMACS) --batch -Q -L packages/nl-prelude/src -L packages/nl-ns/src \
 	  -l tools/nl-ns-inventory.el
 
+# Derives the cross-package dependency graph from provide/require and
+# fails on a cycle or an unreadable manifest.  Declared here rather than
+# in the .PHONY block at the top of this file: that list has produced a
+# merge conflict on every integration branch so far, and a one-line
+# .PHONY beside its target costs nothing.
+.PHONY: pkg-graph
+pkg-graph:
+	$(EMACS) --batch -Q -L packages/nelisp-pkg/src \
+	  -l tools/nelisp-pkg-graph.el
+
 # Fails on a cross-file name collision that is not in the accepted set,
 # and on an accepted entry that no longer matches anything.  Reaching
 # zero findings is not the goal: the bootstrap prelude has to define

@@ -90,6 +90,7 @@ wrap them yet.
 | `src/` | NeLisp core (reader, eval, allocator, ...) |
 | `lisp/` | AOT compiler, assemblers, code generation |
 | `packages/` | optional libraries: json, http, sqlite, network, process, x11, ... |
+| `packages/nelisp-pkg/` | the package graph: `make pkg-graph` derives it and fails on a cycle |
 | `test/` | ERT, `*-test.el` only — other names are not collected |
 | `docs/design/` | numbered design documents; declare state with `#+STATUS:` |
 | `docs/runtime-limitations.md` | what compiled code does *not* do like C |

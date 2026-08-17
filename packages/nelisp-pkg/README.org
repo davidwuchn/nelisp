@@ -1,0 +1,88 @@
+#+TITLE: nelisp-pkg — package manifests checked against the real graph
+
+* Summary
+
+NeLisp has packages but no package system.  =packages/<name>/= is a
+layout convention, the Makefile puts every =src= directory on the load
+path, and =require= finds whatever is there.  That holds until two
+questions need answering — *what does this package depend on*, and *in
+what order may these be loaded* — and today both are answered by trying
+it.
+
+=nelisp-pkg= derives the answer from the code, lets a package declare
+it, and checks the declaration against the derivation.
+
+* Why derive before declaring
+
+A manifest format adopted before the graph is known would be 34 files of
+guesses.  Worse, a package system whose metadata is unverified is one
+that lies, which is more expensive than having none, because it is
+believed.  So the derivation is the source of truth about what the code
+does, the manifest is a statement of intent, and the output that matters
+is where the two disagree.
+
+* Public API
+
+- =nelisp-pkg-scan= — derive every package's provides / requires
+- =nelisp-pkg-edges= — cross-package dependency edges
+- =nelisp-pkg-resolve= — load order, or the cycle that prevents one
+- =nelisp-pkg-check= — findings (see below)
+- =nelisp-pkg-validate-manifest= / =nelisp-pkg-read-manifest=
+- =nelisp-pkg-report= / =nelisp-pkg-summary= / =nelisp-pkg-findings-of-kind=
+
+* Manifest
+
+=packages/<name>/manifest.el=, one plist:
+
+#+begin_src elisp
+(:name "nelisp-http"
+ :version "1.0"
+ :requires ("nelisp-process" "nelisp-state" "nelisp-sys"))
+#+end_src
+
+=:requires= names *packages*, not features.  Host libraries (=cl-lib=,
+=dom=, =url=) are not listed: they are not in the tree, so the checker
+classifies them separately rather than pretending they are edges.
+
+* Findings
+
+| kind                        | meaning                                     |
+|-----------------------------+---------------------------------------------|
+| =pkg-cycle=                 | packages that require each other in a ring  |
+| =pkg-undeclared-dependency= | the code requires it, the manifest does not |
+| =pkg-stale-dependency=      | the manifest requires it, the code does not |
+| =pkg-missing-manifest=      | no =manifest.el= (informational for now)    |
+| =pkg-invalid-manifest=      | =manifest.el= unreadable or malformed       |
+| =pkg-unresolved-require=    | feature provided nowhere in the tree        |
+
+* Gate
+
+#+begin_src sh
+make pkg-graph
+tools/ai/nelisp-ai.sh gate pkg-graph -- make pkg-graph
+#+end_src
+
+Two findings fail the build and both are structural: =pkg-cycle=,
+because a ring of requires has no load order at all and no care at the
+call site can work around it; and =pkg-invalid-manifest=, because a
+manifest that cannot be read is worse than one that is absent.
+
+Everything else is reported.  =pkg-missing-manifest= fires for every
+package that has not adopted one yet, and =pkg-unresolved-require= is
+mostly host libraries; gating on either would make the check red from
+birth, which is how a gate becomes decoration.
+
+* What the tree looks like today (2026-08-17)
+
+#+begin_example
+34 packages, 20 cross-package edges, no cycles
+13 requires provided nowhere in the tree:
+  compile dom flymake generator subr-x url url-http url-parse
+#+end_example
+
+The load order exists, which is the useful part: the graph is acyclic
+today, and this gate is what keeps it that way.
+
+* Dependencies
+
+- Host: =cl-lib=, =subr-x=.  No NeLisp packages.

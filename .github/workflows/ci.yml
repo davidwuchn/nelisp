@@ -66,6 +66,14 @@ jobs:
         if: runner.os == 'Linux'
         shell: bash
         run: make reader-surface-audit
+      # Derives the cross-package graph from provide/require.  Fails only
+      # on a cycle (no load order exists) or an unreadable manifest (worse
+      # than an absent one, because it is believed).  34 packages, 20
+      # edges, acyclic today.
+      - name: "Package dependency graph (nelisp-pkg); Linux lane only"
+        if: runner.os == 'Linux'
+        shell: bash
+        run: make pkg-graph
       # Reports the ratio on every run but does not fail the build: the
       # measurement is 0.885x-0.905x, below the 0.95 floor, and Doc 171
       # sec 11.1 blocks 5.3 (default-on) until that is closed.  Keeping
