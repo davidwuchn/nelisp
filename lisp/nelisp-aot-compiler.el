@@ -4921,6 +4921,58 @@ for builtins that can consume more than one static callback.")
   "Return non-nil when FENV binds SYM."
   (and (symbolp sym) (assq sym fenv)))
 
+;; A frame slot holds one machine word, and the compiler remembers in the
+;; slot's FENV cell whether that word is a raw integer or a Sexp pointer.
+;; `setq' overwrites that record, and parsing runs in evaluation order, so
+;; without care the record after a branch describes whichever arm was
+;; parsed LAST.  Reading the slot on the other path then reinterprets the
+;; word -- a pointer read as an integer, silently, because both are just
+;; words.  These helpers let branch parsing give both arms the same entry
+;; state and compare what they leave behind.
+
+(defun nelisp-aot-compiler--fenv-repr-snapshot (fenv)
+  "Return the representation currently recorded for each cell of FENV.
+Keys are the FENV cells themselves, so shadowed bindings of the same
+symbol stay distinct."
+  (let ((acc nil))
+    (dolist (cell fenv)
+      (when (consp cell)
+        (push (cons cell (plist-get (cdr cell) :repr)) acc)))
+    acc))
+
+(defun nelisp-aot-compiler--fenv-repr-restore (snapshot)
+  "Restore the representations SNAPSHOT recorded."
+  (dolist (entry snapshot)
+    (let ((cell (car entry)))
+      (setcdr cell (plist-put (cdr cell) :repr (cdr entry))))))
+
+(defun nelisp-aot-compiler--check-arm-reprs (then-snap else-snap sexp)
+  "Signal when the arms of SEXP disagree on whether a frame slot is boxed.
+THEN-SNAP and ELSE-SNAP are `--fenv-repr-snapshot' results taken after
+parsing each arm from the same entry state.  Refusing the unit makes the
+caller fall back to byte code, which is slower and correct; accepting it
+would emit a load that misreads the value the untaken arm never wrote.
+
+The comparison is on boxedness, not on the exact representation symbol.
+`sexp-ptr' is the one distinction that decides whether reading the slot
+dereferences the word, which is what turns a pointer into a nonsense
+integer.  `unknown' is the lattice's default for IR kinds nobody has
+classified yet, so demanding exact equality rejects code that is fine
+today: the reader corpus fails to build on the first `if' it reaches,
+\(if (< bt 8) (setq hdr end) (nl_seq2 ... (setq hdr (+ hdr bt)))), whose
+arms record `unknown' against `raw-i64' while both are raw words."
+  (dolist (entry then-snap)
+    (let ((other (assq (car entry) else-snap)))
+      (when (and other
+                 (not (eq (eq (cdr entry) 'sexp-ptr)
+                          (eq (cdr other) 'sexp-ptr))))
+        (signal 'nelisp-aot-compiler-error
+                (list :aot-if-arm-repr-mismatch
+                      :var (car (car entry))
+                      :then (cdr entry)
+                      :else (cdr other)
+                      :form sexp))))))
+
 (defun nelisp-aot-compiler--aot-name-slot-symbol (fenv sexp)
   "Return the caller-owned function-name slot symbol in FENV.
 The boxed-boundary MVP accepts either `name-slot' or `name_slot' to
@@ -9072,25 +9124,39 @@ functions `((NAME . ARITY) ...)'."
     (unless (= (length sexp) 4)
       (signal 'nelisp-aot-compiler-error
               (list :if-arity sexp)))
-    (nelisp-aot-compiler--make-ir 'if
-          :id (nelisp-aot-compiler--gensym "if")
-          ;; Test position is a property of the form that IS the test, not
-          ;; of everything inside it.  Binding it across the whole test
-          ;; expression lowered `(vectorp x)' raw inside `(if (foo (vectorp
-          ;; x)) ...)', where it is an argument to `foo' and `foo' wants
-          ;; the boxed Sexp.  With the JIT on by default that reaches
-          ;; ordinary runtime code, not just artifacts.
-          :test (let ((nelisp-aot-compiler--aot-test-position
-                       (nelisp-aot-compiler--aot-test-form-p (nth 1 sexp))))
-                  (nelisp-aot-compiler--parse-value
-                   (nth 1 sexp) env fenv defuns))
-          ;; The arms produce the `if''s value, so they are not tests.
-          :then (let ((nelisp-aot-compiler--aot-test-position nil))
-                  (nelisp-aot-compiler--parse-value
-                   (nth 2 sexp) env fenv defuns))
-          :else (let ((nelisp-aot-compiler--aot-test-position nil))
-                  (nelisp-aot-compiler--parse-value
-                   (nth 3 sexp) env fenv defuns))))
+    (let* ((test-ir
+            ;; Test position is a property of the form that IS the test,
+            ;; not of everything inside it.  Binding it across the whole
+            ;; test expression lowered `(vectorp x)' raw inside `(if (foo
+            ;; (vectorp x)) ...)', where it is an argument to `foo' and
+            ;; `foo' wants the boxed Sexp.  With the JIT on by default
+            ;; that reaches ordinary runtime code, not just artifacts.
+            (let ((nelisp-aot-compiler--aot-test-position
+                   (nelisp-aot-compiler--aot-test-form-p (nth 1 sexp))))
+              (nelisp-aot-compiler--parse-value
+               (nth 1 sexp) env fenv defuns)))
+           ;; The arms produce the `if''s value, so they are not tests.
+           (nelisp-aot-compiler--aot-test-position nil)
+           ;; At run time the `else' arm never observes the `then' arm's
+           ;; assignments, so it must not observe them while parsing
+           ;; either: both arms start from the frame state the `if' was
+           ;; entered with.
+           (entry-reprs (nelisp-aot-compiler--fenv-repr-snapshot fenv))
+           (then-ir (nelisp-aot-compiler--parse-value
+                     (nth 2 sexp) env fenv defuns))
+           (then-reprs (nelisp-aot-compiler--fenv-repr-snapshot fenv))
+           (_ (nelisp-aot-compiler--fenv-repr-restore entry-reprs))
+           (else-ir (nelisp-aot-compiler--parse-value
+                     (nth 3 sexp) env fenv defuns))
+           (else-reprs (nelisp-aot-compiler--fenv-repr-snapshot fenv)))
+      ;; Code after the `if' reads each slot in one representation, so the
+      ;; arms have to leave the frame in agreement.
+      (nelisp-aot-compiler--check-arm-reprs then-reprs else-reprs sexp)
+      (nelisp-aot-compiler--make-ir 'if
+            :id (nelisp-aot-compiler--gensym "if")
+            :test test-ir
+            :then then-ir
+            :else else-ir)))
    ;; (while TEST BODY...) — returns 0 after loop exit.
    ((and (consp sexp) (eq (car sexp) 'while))
     (unless (>= (length sexp) 2)

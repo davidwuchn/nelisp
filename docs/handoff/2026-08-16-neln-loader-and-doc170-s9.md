@@ -918,3 +918,123 @@ Each produced a wrong report in this section's investigation:
 3. **Inline shell.** `bash -lc '... $n ...'` loses the loop variable to
    an outer expansion, and a missing `--load` file prints usage, which a
    grep for `->` reports as a crash. Write the probe to a file.
+
+---
+
+## 16. Two bugs were tangled; one is fixed (2026-08-17)
+
+**Sections 13-15 characterise the crash wrongly.** Every comparison in
+them was made before the ABI derivation was fixed, so the set of
+"crashing cases" they were fitted to was mostly crashing for a reason
+that has since gone away. Read them for the fixtures, not the rules.
+
+### Bug A -- fixed: a raw result dereferenced as a Sexp pointer
+
+Two shapes, neither settled by the signals available:
+
+```elisp
+(defun c1 (n) (let ((v (vector 7 8 9)) (i 0)) (if (< i n) 111 222)))
+(defun u3 (n) (let ((m 3) (i 0)) (integerp n) (if (< i m) 111 222)))
+```
+
+`c1` allocates a vector without ever delegating, so "any extern means
+boxed" misread it; the derivation now looks for the dispatcher externs
+(`nelisp_aot_builtin_call1` / `_calln`) and gets it right.
+
+`u3` delegates once and *still* answers in a register. Its extern set
+says boxed and its `:return-repr` is `unknown`, so neither signal helps.
+The loader now refuses to dereference a result below the first page --
+nothing there is a Sexp, so 111 is the value.
+
+Both faulted at their own literal's address, inside the caller's
+`ptr-read-u64` rather than anywhere near the defun. Of seventeen
+fixtures accumulated while chasing this, thirteen now run.
+
+### Bug B -- open: a delegated call in a loop with a variable bound
+
+```
+t1  arity 1, `(while (< i 3) ...)'    -> 7      runs
+t2  arity 0, `(while (< i m) ...)'    crash     m is a local
+t3  arity 1, `(while (< i n) ...)'    crash     n is the parameter
+```
+
+Arity is irrelevant; a literal bound runs and a variable bound does not.
+The remaining failures (w3, q1, l1, l2) are all this shape. `l1` faults
+in `nl_vci_store_slot_imm` with a null store -- a different site from
+bug A, which is why fixing A did not move them.
+
+Note the section 9 checked fixture is this shape too and runs, because
+its bound is the literal 2000. Reducing it (s1 -> s2 -> s4) is what
+isolated the bound as the variable.
+
+Also seen while stripping that fixture: `s3` returns a pointer instead of
+7, from `acc` being assigned a boxed read in one `if` arm and a raw `0`
+in the other. That is a third defect, in representation agreement across
+arms -- and the same one worked around when the section 9 fixture was
+written.
+
+## 17. Bug C: the last-parsed arm decides how a slot is read (2026-08-17)
+
+A frame slot holds one machine word. Whether that word is a raw integer
+or a pointer to a Sexp is not in the word; the compiler remembers it in
+the slot's FENV cell. `setq` overwrites that record, and parsing runs in
+evaluation order -- so after an `if`, the record describes whichever arm
+was parsed **last**. Reading the slot on the other path reinterprets the
+word, silently, because both are just words.
+
+Swapping the arms changes the answer, which is the whole proof:
+
+```
+a1  then boxed / else raw   (raw parsed last)     123289510590208   wrong
+a2  the same with a progn                         129410895953248   wrong
+a3  then raw / else boxed   (boxed parsed last)   7                 right
+a4  both arms boxed -- no disagreement            7                 right
+```
+
+`a3` is right by luck: the arm that actually ran happened to match the
+record the other arm left. Nothing about it is more correct than `a1`.
+
+### The rule now enforced
+
+Both arms parse from the frame state the `if` was entered with -- at run
+time the `else` arm never observes the `then` arm's assignments, so it
+must not observe them while parsing either -- and the arms must leave
+every slot in agreement. Disagreement signals, the unit is refused, and
+the caller falls back to byte code. The report names the slot:
+
+```
+:aot-if-arm-repr-mismatch :var acc :then sexp-ptr :else raw-i64
+:form (if (= (length c) 3) (setq acc (aref c 0)) (setq acc 0))
+```
+
+Agreement is on **boxedness**, not on the exact representation symbol.
+The vocabulary is `raw-i64`, `raw-ptr`, `sexp-ptr`, `unknown`, and only
+`sexp-ptr` decides whether reading the slot dereferences. Demanding
+exact equality was tried first and the reader corpus failed to build on
+the first `if` it reached -- `(if (< bt 8) (setq hdr end) (nl_seq2
+... (setq hdr (+ hdr bt))))`, whose arms record `unknown` against
+`raw-i64` while both are raw words.
+
+Cost: `a1`/`a2`/`a3` and `s3` stop compiling natively. `a4`, and the
+section 9 fixtures `s1`/`s2`, still do. Loader driver 20/20, `make
+compile` clean.
+
+### The same hazard is in three more places
+
+`cond`, `and`/`or` and `while` are parsed directly, not lowered to `if`,
+and each has a path that does not run: the unchosen clause, the
+short-circuited arm, and **the zero-iteration loop**. The last one is
+live in this document's own benchmark: section 9's fixture starts `acc`
+at raw `0` and makes it boxed in the loop body, so it is correct only
+because the bound is the literal 2000. `(while (< i 0) ...)` would read
+raw `0` as a pointer.
+
+One rule covers all four: **`setq` may not change a slot's boxedness**,
+since that is where every instance starts. Alone it rejects too much --
+the reader corpus and the section 9 fixture included. Its partner is
+promotion: if a slot is boxed anywhere in the body, allocate it boxed
+from the start. The materials exist; `--aot-dispatcher-arg-form` already
+boxes a raw value with `(let ((s (alloc-bytes 32 8))) (seq (sexp-int-make
+s FORM) s))`. Since the lattice is monotone (`raw` -> `sexp-ptr` only),
+adding to a promotion set and re-parsing converges in finitely many
+rounds. That pairing, not the refusal, is the real fix.
