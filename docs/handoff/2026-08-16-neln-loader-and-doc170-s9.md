@@ -658,3 +658,263 @@ finding.
 Anyone measuring here: `(nth 2 (nelisp--arena-stats))` is the used-bytes
 field, and the difference across a `while` loop divided by the iteration
 count gives a clean per-operation figure.
+
+---
+
+## 12. Symbol-literal cache: compiler side done, two layers left (2026-08-17)
+
+`nelisp-aot-compiler--symbol-literal-cache` (default nil) gives each
+distinct symbol literal in a unit one zeroed 32-byte `data` slot,
+materialises it on first execution and copies from it afterwards. Tag 0
+is the sentinel: a zeroed slot reads as tag 0 and a symbol Sexp never
+does.
+
+Verified at the link-unit level:
+
+```
+(defun sc (n) (if (eq n 'foo) 1 0))   with the cache on
+
+:data len = 64
+sym nl_symcache_1  offset 0   size 32  section data
+sym nl_symcache_0  offset 32  size 32  section data
+```
+
+Two slots for one `eq` — the dispatcher's name `"eq"` and the quoted
+`'foo`. That matches the measurement that motivated this: two symbol
+allocations per iteration.
+
+Design notes worth keeping:
+
+- The rewrite emits `let`, not `let*`. Preprocessing lowers `let*` to
+  nested `let` before `--parse-value`, which rejects the starred form as
+  `:not-value-expr`.
+- The slot is `data`, not `bss`. The ELF writer wants a `:bss-size` this
+  path does not supply, and the slot must be writable so `rodata` is out.
+- Applied only when the destination is a plain variable: the rewrite
+  mentions it five times.
+- `--symbol-literal-inhibit` guards the rewrite's own initialiser, which
+  is itself a `sexp-write-symbol-lit`.
+- The registry is bound per unit in `nelisp-aot-compile-to-link-unit`; a
+  global would carry one unit's slots into the next, naming blobs that
+  are not there.
+
+### What is left
+
+The cache needs writable static data to survive into execution, and two
+layers do not carry it yet:
+
+1. **The artifact does not store `.data`.** `:native` has
+   `:text-base64` / `:text-size` but no data section; the bytes exist
+   only inside `:object-base64`. The link unit already returns `:data`,
+   so this is storing what is already computed.
+2. **The loader maps only the code page.** Every relocation it handles
+   today is extern-to-stub. A `data-addr` against a local data symbol is
+   a new kind: the address has to come from a mapped data page. The
+   symbol table entry (`:name "nl_symcache_0" :value 0 :section data`)
+   gives the offset, so the loader needs a data mapping plus a reloc arm
+   that resolves against it.
+
+Until both exist, an artifact compiled with the cache on loads with
+`relocation for nl_symcache_0 has no stub`. The flag is off by default,
+so nothing changes until they do.
+
+### Fixed on the way
+
+`nelisp-artifact--write-elf-rel-object` forwarded `:text` / `:rodata` /
+`:symbols` / `:relocs` / `:machine` and **not** `:data` / `:bss-size`, so
+a unit carrying a writable blob had its symbol written without its bytes
+and the writer rejected its own output: "symbol references data but
+:data is empty". No artifact had used a data blob before, so nothing had
+exercised it.
+
+---
+
+## 13. Symbol-literal cache works end to end (2026-08-17)
+
+All three layers are in place and the flag still defaults off.
+
+```
+(defun symname (x) (symbol-name 'abc))
+
+cache=nil  text=234  data=0   syms=nil
+cache=t    text=996  data=64  syms=("nl_symcache_1" "nl_symcache_0")
+
+symname[off] -> "abc"
+symname[on]  -> "abc"
+```
+
+Two slots for one call: the dispatcher's name and the quoted literal.
+
+### The data section had to reach the loader
+
+- `nelisp-artifact--native-section-plist` now stores `:data-size`,
+  `:data-base64` and `:data-symbols` (the `data`-section entries of the
+  unit's symbol table). Omitted when empty, so an artifact without a data
+  section is unchanged.
+- The loader places that data **inside the code page**, after the stubs,
+  rather than in a mapping of its own. Compiled code takes a data
+  symbol's address with a pc32, and two independent `mmap(NULL)` results
+  can sit further apart than a signed 32-bit displacement reaches — the
+  same range problem the stubs solve for calls, which an address load
+  cannot solve the same way. The page is already RWX.
+- The relocation arm now resolves a symbol to either a stub or a data
+  offset, and says so when it is neither.
+
+### Not measured
+
+The saving is an allocation per execution turning into a 32-byte copy,
+but there is no number here: every loop-shaped benchmark fixture written
+for it crashes in the loader, with the cache on or off. Do not quote a
+figure until one runs.
+
+### A sharper bisect of the loader's remaining fragility
+
+```
+l0  pure loop                                    -> 20      works
+l1  loop + (integerp i)      [delegated call]    -> crash
+l2  loop + (symbol-name 'abc)[delegated call]    -> crash
+l3  single (symbol-name 'abc), no loop           -> "abc"   works
+```
+
+A delegated call inside a loop crashes even when it allocates almost
+nothing, and the same call outside a loop is fine. **But this is not the
+whole rule**: the §9 checked fixture has a delegated `eq` inside its loop
+and runs (that is where 4.78x comes from). So "delegated call in a loop"
+is necessary to reproduce and not sufficient to explain. Two earlier
+attempts to benchmark the cache were wasted comparing against fixtures
+that crashed with the cache off too — check a baseline runs before
+drawing anything from a comparison against it.
+
+---
+
+## 14. A minimal reproducer for the loader's remaining crash — NOT fixed (2026-08-17)
+
+Five lines:
+
+```elisp
+(defun q1 (n)
+  (let ((v (vector 7 8 9)) (i 0) (a 0))
+    (while (< i n)
+      (setq a (length v))
+      (setq i (+ i 1)))
+    a))
+```
+
+Compiled with `--dynamic-user-calls` and loaded, `(q1 20)` faults at
+`nl_vci_store_slot_imm+0x2b` with `segfault at 0` — a null store into a
+vector slot.
+
+### What runs and what does not
+
+```
+runs                                    crashes
+l0  pure loop                           l1  loop + (integerp i)
+l3  one delegated call, no loop          l2  loop + (symbol-name 'abc)
+n1  single-form while body              m1  result stored in a let slot
+n2  seq while body, no delegation       m2  result discarded
+n3  seq while body, accumulation        m3  arity 0, literal bound
+dispatchint (driver: delegated, no loop) m4  predicate in an `if' test
+nl-safe-native-bench-checked            p1  delegated on a raw integer
+  (delegated calls inside a loop!)      p2  delegated on a vector
+                                        p3  delegated on a literal
+                                        p4  (length v) in a loop
+                                        q1  written in the section 9 shape
+                                        q2  the same, seq-wrapped
+```
+
+### Six hypotheses, all refuted
+
+1. *scratch vector too small* — enlarging it to 64 made things worse, not
+   better.
+2. *`(seq A B)` as a while body* — n2/n3 do that and run.
+3. *arity* — m3 is arity 0 and crashes.
+4. *whether the result is stored* — m2 discards it and crashes.
+5. *argument type* — p1 (raw integer), p2 (vector), p3 (literal) all crash.
+6. *delegated call in a loop* — the closest rule, and
+   `nl-safe-native-bench-checked` refutes it: it has `length` and `eq`
+   inside its loop and returns 7 under the current loader (re-checked, not
+   a stale result).
+
+q1 is written in that fixture's own shape -- several `while` body forms,
+`length` applied to a vector -- and still crashes, so the difference is
+not structural in any way this could find from outside.
+
+### Two traps that cost time here
+
+- **Stale artifacts.** After the manifest grew `:data-*`, previously
+  built fixtures crashed until recompiled, which briefly looked like the
+  loader had broken. `make neln-loader-test` rebuilds its own fixtures;
+  hand-built ones do not.
+- **Concurrent builds.** Two `make test` runs and these probes were live
+  at once, and `make neln-loader-test` relinks `target/nelisp` — so
+  probes were executing a binary being rewritten under them. Every
+  measurement in that window was noise. Check `pgrep make` before
+  believing a loader probe.
+
+The authoritative check is `make neln-loader-test`: 20 cases, and it
+passed throughout, so the loader is not broken in general.
+
+---
+
+## 15. The loader crash, correctly characterised at last (2026-08-17)
+
+Section 14's framing was wrong on every count. It is not about loops, not
+about delegated calls, and several cases were not even crashes.
+
+### The real reproducer
+
+```elisp
+(defun c1 (n) (let ((v (vector 7 8 9)) (i 0)) (if (< i n) 111 222)))
+```
+
+`(c1 0)` faults. No loop. The controls that isolate it:
+
+```
+c2  (let ((v (vector 7 8 9)) (i 0)) n)                      -> 0    works
+c3  (let ((v (vector 7 8 9)) (i 0)) i)                      -> 0    works
+c4  (let ((v (vector 7 8 9)) (i 0)) (while (< i 0) ...) i)  -> 0    works
+c5  (let ((v (vector 7 8 9)) (i 0)) (while (< i 3) ...) i)  -> 3    works
+x5  (let ((i 0)) (while (< i n) ...) i)                     -> 0    works
+```
+
+So `while` is fine, a bound vector is fine, and reading the parameter is
+fine. What breaks is **comparing a local against the PARAMETER while a
+vector literal is bound**; comparing against a literal (c4, c5) works.
+
+### What the fault says
+
+```
+segfault at 6f  ip=0x7e5753  = nelisp_apply_function + 0x1293e
+```
+
+`0x6f` is **111** — the literal in c1's then-branch. A raw integer is
+being dereferenced as a Sexp pointer inside the dispatcher. That is the
+same class as the bug fixed in `e3a702a7` (literal arguments passed as
+raw untagged words), surviving on another path.
+
+### Symptoms that were not what they looked like
+
+- `w2` and `x4` were reported as crashes; they are **timeouts** (rc 124),
+  and `w3` is an **OOM kill** (rc 137). Different failure, possibly
+  different cause.
+- Part of that hang was the loader's own doing: `--payload-string`
+  decoded a result Sexp's claimed length byte by byte, so a wrong length
+  became an unbounded loop rather than a bad value. Now capped at 1 MB
+  (`nelisp-native-load-max-payload-bytes`), which turns that hang into a
+  message naming the address. c1 then reports its fault in seconds
+  instead of appearing to hang.
+
+### Three measurement mistakes to avoid repeating
+
+Each produced a wrong report in this section's investigation:
+
+1. **Concurrent builds.** Two `make test` runs plus probes, with
+   `make neln-loader-test` relinking `target/nelisp` underneath. Check
+   `pgrep make` first. ("scratch=64 makes everything worse" came from
+   this; on an idle machine 16/32/64/128 are identical and the driver
+   passes at all of them.)
+2. **Stale artifacts.** After the manifest grew `:data-*`, hand-built
+   fixtures crashed until recompiled.
+3. **Inline shell.** `bash -lc '... $n ...'` loses the loop variable to
+   an outer expansion, and a missing `--load` file prints usage, which a
+   grep for `->` reports as a crash. Write the probe to a file.

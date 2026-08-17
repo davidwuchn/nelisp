@@ -476,6 +476,15 @@ as an integer would be a wrong answer rather than a missing one."
       (error "nelisp-native-load: float results are not decoded"))
      (t (error "nelisp-native-load: result tag %d is not one this unboxes" tag)))))
 
+(defconst nelisp-native-load-max-payload-bytes 1048576
+  "Longest string or symbol payload this will decode from a result.
+
+A wrong result Sexp carries a wrong length, and decoding it byte by byte
+is a loop that does not end in any time a caller would wait -- the
+failure reads as a hang rather than as a bad value, several layers from
+whatever produced it.  A megabyte is far past any plausible name or
+string a loaded defun returns and far short of a runaway.")
+
 (defun nelisp-native-load--payload-string (addr)
   "Return the byte payload of the symbol or string Sexp at ADDR."
   (let ((ptr (ptr-read-u64 addr nelisp-native-load-payload-ptr))
@@ -484,6 +493,10 @@ as an integer would be a wrong answer rather than a missing one."
         (i 0))
     (when (= ptr 0)
       (error "nelisp-native-load: payload pointer is null"))
+    (when (> len nelisp-native-load-max-payload-bytes)
+      (error "nelisp-native-load: payload claims %d bytes, over the %d cap \
+-- the result Sexp at %d is not a string this can trust"
+             len nelisp-native-load-max-payload-bytes addr))
     (while (< i len)
       (setq chars (cons (ptr-read-u8 ptr i) chars))
       (setq i (1+ i)))
@@ -590,10 +603,29 @@ what a cache wants and what the demo did."
            ;; any length clears the stubs it needs.
            (stub-base (* 16 (/ (+ text-length 15) 16)))
            (stub-offsets nil)
+           ;; The unit's writable static data, when it has any.  A symbol
+           ;; literal's cache slot lives here.
+           (data-bytes (let ((encoded (plist-get native :data-base64)))
+                         (and (stringp encoded)
+                              (base64-decode-string encoded))))
+           ;; Placed IN the code page, after the stubs, rather than in a
+           ;; mapping of its own.  Compiled code takes a data symbol's
+           ;; address with a pc32, and two independent mmap(NULL) results
+           ;; can sit further apart than a signed 32-bit displacement
+           ;; reaches -- the same range problem the stubs exist to solve
+           ;; for calls, which an address load cannot solve the same way.
+           ;; The page is already RWX, so writable data in it is fine.
+           (data-base (+ stub-base
+                         (* nelisp-native-load-stub-bytes (length externs))))
            (code-size (nelisp-native-load--page-round
-                       (+ stub-base
-                          (* nelisp-native-load-stub-bytes (length externs)))))
+                       (+ data-base (if data-bytes (length data-bytes) 0))))
            (codepage (nelisp-native-load--mmap code-size t))
+           (datapage (and data-bytes (+ codepage data-base)))
+           (data-offsets
+            (mapcar (lambda (sym)
+                      (cons (plist-get sym :name)
+                            (+ data-base (plist-get sym :value))))
+                    (plist-get native :data-symbols)))
            (env (nelisp--native-env))
            (arg-slot-base (+ (* 32 5)
                              (* 32 nelisp-native-load-callback-slots)))
@@ -607,6 +639,8 @@ what a cache wants and what the demo did."
            (i 0))
       ;; Code page: text, then one stub per extern pointed at its symbol.
       (nelisp-native-load--poke-string codepage 0 text)
+      (when data-bytes
+        (nelisp-native-load--poke-string codepage data-base data-bytes))
       (let ((rest externs)
             (idx 0))
         (while rest
@@ -618,22 +652,27 @@ what a cache wants and what the demo did."
                            (nelisp-native-load--symbol-addr (car rest))))
           (setq idx (1+ idx))
           (setq rest (cdr rest))))
-      ;; Relocations: each plt32 becomes the displacement to its stub.
+      ;; Relocations.  A call to an extern resolves to its stub; a
+      ;; reference to a local data symbol resolves into the data page.
+      ;; Both are pc32 displacements from the site.
       (let ((rest relocs))
         (while rest
           (let* ((reloc (car rest))
                  (offset (plist-get reloc :offset))
                  (symbol (plist-get reloc :symbol))
                  (addend (or (plist-get reloc :addend) 0))
-                 (stub (assoc symbol stub-offsets)))
-            (unless stub
-              (error "nelisp-native-load: relocation for %s has no stub" symbol))
+                 (stub (assoc symbol stub-offsets))
+                 (datum (assoc symbol data-offsets))
+                 (target (cond
+                          (stub (+ codepage (cdr stub)))
+                          (datum (+ codepage (cdr datum))))))
+            (unless target
+              (error "nelisp-native-load: relocation for %s resolves to neither a stub nor a data symbol" symbol))
             (unless (<= (+ offset 4) text-length)
               (error "nelisp-native-load: relocation at %d is past %d bytes of text"
                      offset text-length))
             (ptr-write-u32 codepage offset
-                           (- (+ codepage (cdr stub) addend)
-                              (+ codepage offset))))
+                           (- (+ target addend) (+ codepage offset))))
           (setq rest (cdr rest))))
       ;; Boundary slots start as nil; the argument slots are filled per call.
       (setq i 0)
@@ -668,6 +707,7 @@ what a cache wants and what the demo did."
             ;; Sizes so `nelisp-native-load-unload' can hand munmap the
             ;; same extents mmap was given.
             :code-size code-size
+            :datapage datapage
             :slots-size slots-size
             :entry-size (nelisp-native-load--page-round (length tramp-bytes))
             :slots slots

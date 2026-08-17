@@ -977,6 +977,12 @@ becomes (:eval FORM) replayed through `nelisp-eval' at load."
    (list :e-type 'rel
          :text (plist-get unit :text)
          :rodata (plist-get unit :rodata)
+         ;; `:data' / `:bss-size' were not forwarded until a unit first
+         ;; carried a writable blob.  Without them the writer emits the
+         ;; symbol and not the bytes, and rejects its own output with
+         ;; "symbol references data but :data is empty".
+         :data (plist-get unit :data)
+         :bss-size (plist-get unit :bss-size)
          :symbols (plist-get unit :symbols)
          :relocs (plist-get unit :relocs)
          :machine (plist-get unit :machine))))
@@ -1282,6 +1288,7 @@ standalone build pipeline."
 (defun nelisp-artifact--native-section-plist (obj unit arch symbols compile-report)
   "Return the serialized native section plist for OBJ/UNIT."
   (let* ((text-bytes (plist-get unit :text))
+         (data-bytes (or (plist-get unit :data) ""))
          (bytes (nelisp-artifact--read-binary obj)))
     (list :native-section-version
           nelisp-artifact--native-section-version
@@ -1293,6 +1300,19 @@ standalone build pipeline."
           :object-base64 (base64-encode-string bytes t)
           :text-size (length text-bytes)
           :text-base64 (base64-encode-string text-bytes t)
+          ;; The writable data section, when the unit has one.  An
+          ;; in-process loader maps `.text' and resolves externs to stubs;
+          ;; a unit that also carries static writable storage -- a symbol
+          ;; literal's cache slot, say -- needs those bytes and the local
+          ;; symbols naming them, which are otherwise reachable only by
+          ;; re-parsing `:object-base64'.  Omitted entirely when empty, so
+          ;; an artifact without one is byte-identical to before.
+          :data-size (length data-bytes)
+          :data-base64 (and (> (length data-bytes) 0)
+                            (base64-encode-string data-bytes t))
+          :data-symbols
+          (seq-filter (lambda (s) (eq (plist-get s :section) 'data))
+                      (plist-get unit :symbols))
           :relocs (plist-get unit :relocs)
           :extern-symbols (plist-get unit :extern-symbols)
           :compile-report compile-report

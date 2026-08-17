@@ -10080,10 +10080,19 @@ functions `((NAME . ARITY) ...)'."
       (unless (stringp lit)
         (signal 'nelisp-aot-compiler-error
                 (list :sexp-write-symbol-lit-literal lit)))
-      (nelisp-aot-compiler--make-ir 'sexp-write-symbol-lit
-            :slot (nelisp-aot-compiler--parse-value
-                   (nth 1 sexp) env fenv defuns)
-            :bytes (string-to-list (encode-coding-string lit 'utf-8 t)))))
+      (let ((cached (nelisp-aot-compiler--symbol-literal-cached-form
+                     (nth 1 sexp) lit)))
+        (if cached
+            ;; The rewrite contains a `sexp-write-symbol-lit' of its own --
+            ;; the slot's first-execution initialiser -- so inhibit while
+            ;; parsing it.
+            (let ((nelisp-aot-compiler--symbol-literal-inhibit t))
+              (nelisp-aot-compiler--parse-value cached env fenv defuns))
+          (nelisp-aot-compiler--make-ir 'sexp-write-symbol-lit
+                :slot (nelisp-aot-compiler--parse-value
+                       (nth 1 sexp) env fenv defuns)
+                :bytes (string-to-list
+                        (encode-coding-string lit 'utf-8 t)))))))
    ;; Doc 129.8I — `(sexp-write-str-lit SLOT LITERAL)' is the string
    ;; sibling used by formatted error lowering.  Like symbol literals,
    ;; it avoids `.rodata' by passing a temporary stack byte buffer to
@@ -11582,6 +11591,81 @@ walk; the emitter substitutes a no-op for the original site."
                (t nil))))))
       (walk ir))
     (nreverse acc)))
+
+(defvar nelisp-aot-compiler--symbol-literal-cache nil
+  "When non-nil, materialise each distinct symbol literal once per unit.
+
+A quoted symbol reaches the runtime through `nl_alloc_symbol', which
+heap-allocates its name buffer.  Compiled code does that on every
+execution, so a loop over `(eq (aref c 0) 'nl--cell)' allocates a symbol
+per iteration -- measured as +2.46x of the Doc 170 section 9 borrow
+ratio, and the reason adding two pairs to that bench made the reader OOM.
+Every delegated builtin call pays it too, for the callee's name.
+
+Off by default: this changes code generation for every symbol literal,
+including in the reader's own build.")
+
+(defvar nelisp-aot-compiler--symbol-literal-registry nil
+  "Alist of LITERAL -> blob symbol for the unit being compiled.
+Bound per unit in `nelisp-aot-compile-to-link-unit'; a global would leak
+one unit's cache slots into the next.")
+
+(defvar nelisp-aot-compiler--symbol-literal-inhibit nil
+  "Non-nil while emitting a cache slot's own initialiser.
+The rewrite contains a `sexp-write-symbol-lit', which would otherwise be
+rewritten again, forever.")
+
+(defun nelisp-aot-compiler--symbol-literal-blob (literal)
+  "Return the cache-slot symbol for LITERAL, registering it if new."
+  (or (cdr (assoc literal nelisp-aot-compiler--symbol-literal-registry))
+      (let ((name (intern (format "nl_symcache_%d"
+                                  (length
+                                   nelisp-aot-compiler--symbol-literal-registry)))))
+        (push (cons literal name) nelisp-aot-compiler--symbol-literal-registry)
+        name)))
+
+(defun nelisp-aot-compiler--symbol-literal-cached-form (slot literal)
+  "Return a cached materialisation of LITERAL into SLOT, or nil.
+
+Nil when caching is off, when re-entered from a cache initialiser, or
+when SLOT is not a plain variable -- the rewrite mentions SLOT five
+times, so an expression with a side effect would run it five times.
+
+Tag 0 is the sentinel: a zeroed bss slot reads as tag 0 and a symbol
+Sexp never does, so the first execution fills it and the rest copy."
+  (when (and nelisp-aot-compiler--symbol-literal-cache
+             (not nelisp-aot-compiler--symbol-literal-inhibit)
+             (symbolp slot))
+    (let ((blob (nelisp-aot-compiler--symbol-literal-blob literal))
+          (cell (nelisp-aot-compiler--gensym "symcache")))
+      ;; `let', not `let*': preprocessing lowers `let*' to nested `let'
+      ;; before this point, so `--parse-value' does not know the starred
+      ;; form and rejects the whole rewrite as :not-value-expr.  One
+      ;; binding, so they mean the same thing anyway.
+      `(let ((,cell (data-addr ,blob)))
+         (seq
+          (if (= (sexp-tag ,cell) 0)
+              (sexp-write-symbol-lit ,cell ,literal)
+            0)
+          (ptr-write-u64 ,slot 0 (ptr-read-u64 ,cell 0))
+          (ptr-write-u64 ,slot 8 (ptr-read-u64 ,cell 8))
+          (ptr-write-u64 ,slot 16 (ptr-read-u64 ,cell 16))
+          (ptr-write-u64 ,slot 24 (ptr-read-u64 ,cell 24))
+          ,slot)))))
+
+(defun nelisp-aot-compiler--symbol-literal-blobs ()
+  "Return `data-blob' descriptors for this unit's registered cache slots."
+  (mapcar (lambda (entry)
+            (list :name (symbol-name (cdr entry))
+                  :bytes (make-string 32 0)
+                  ;; `data', not `bss': the ELF writer wants a
+                  ;; `:bss-size' it is not given here, and a zeroed 32-byte
+                  ;; slot costs the object 32 bytes per distinct symbol.
+                  ;; It has to be writable -- the slot is filled on first
+                  ;; use -- so rodata is out.
+                  :section 'data
+                  :relocs nil))
+          nelisp-aot-compiler--symbol-literal-registry))
 
 (defun nelisp-aot-compiler--collect-data-blobs (ir)
   "Return a list of `(:name STR :bytes UNIBYTE :section SYM)' for every
@@ -19534,6 +19618,9 @@ register budgeting while ELF/Mach-O keep SysV."
          (nelisp-aot-compiler--os
           (if (eq arch 'wasm32) 'wasi nelisp-aot-compiler--os))
          (nelisp-aot-compiler--allow-external-user-calls t)
+         ;; Per unit: a global would carry one unit's cache slots into the
+         ;; next, where the blobs they name do not exist.
+         (nelisp-aot-compiler--symbol-literal-registry nil)
          (source (if auto-frame-roots
                      (nelisp-aot-compiler--select-auto-frame-roots
                       sexp)
@@ -19555,7 +19642,9 @@ register budgeting while ELF/Mach-O keep SysV."
                (memq format '(elf mach-o))
                (nelisp-aot-compiler--object-module-init-metadata source)))
          (defuns (and ir (nelisp-aot-compiler--collect-defuns ir)))
-         (data-blobs (and ir (nelisp-aot-compiler--collect-data-blobs ir))))
+         (data-blobs (append
+                      (and ir (nelisp-aot-compiler--collect-data-blobs ir))
+                      (nelisp-aot-compiler--symbol-literal-blobs))))
     (when empty-source-p
       (dolist (form (plist-get extracted :module-forms))
         (nelisp-aot-compiler--eval-top-level-module-form form))
