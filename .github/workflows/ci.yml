@@ -74,6 +74,14 @@ jobs:
         if: runner.os == 'Linux'
         shell: bash
         run: make pkg-graph
+      # The standalone smokes load dependencies by explicit path.  A
+      # stale list is silent there -- `load' on a missing file returns t
+      # instead of signalling -- so the list is checked here instead:
+      # 9 files, 33 loads today.
+      - name: "Hand-written load lists (nelisp-pkg); Linux lane only"
+        if: runner.os == 'Linux'
+        shell: bash
+        run: make pkg-load-lists
       # Reports the ratio on every run but does not fail the build: the
       # measurement is 0.885x-0.905x, below the 0.95 floor, and Doc 171
       # sec 11.1 blocks 5.3 (default-on) until that is closed.  Keeping

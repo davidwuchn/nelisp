@@ -338,6 +338,15 @@ pkg-graph:
 # the standalone runtime (which loads by path rather than through
 # `require').  Use -s to get only the paths:
 #   make -s pkg-load-order PKG=nl-safe
+# Checks the hand-written load lists in the standalone smokes: a path
+# that does not exist, or a file loaded before something it requires.
+# Both are silent at run time -- `load' on a missing file returns t in
+# the standalone runtime instead of signalling.
+.PHONY: pkg-load-lists
+pkg-load-lists:
+	$(EMACS) --batch -Q -L packages/nelisp-pkg/src \
+	  -l tools/nelisp-pkg-load-lists.el
+
 .PHONY: pkg-load-order
 pkg-load-order:
 	@$(EMACS) --batch -Q -L packages/nelisp-pkg/src \

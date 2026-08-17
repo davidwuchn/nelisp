@@ -96,7 +96,7 @@ cmd_check() {
     # its age.  Run `test' when the age column says the evidence is old.
     failures=0
     for step in compile parens-check unsafe-inventory ns-inventory \
-                reader-surface-audit pkg-graph ns; do
+                reader-surface-audit pkg-graph pkg-load-lists ns; do
         printf '\n=== %s ===\n' "$step"
         case "$step" in
             compile) ( cmd_compile ) || failures=$((failures + 1)) ;;

@@ -120,6 +120,36 @@ end, rather than dropped: a load list that silently omits a file is
 worse than one in a doubtful order, because the failure moves somewhere
 else.
 
+* Checking the lists that already exist
+
+The eight standalone smokes cannot simply switch to a generated list —
+generating one inside the standalone runtime would mean bootstrapping
+this library there first — so their hand-written lists are checked
+instead:
+
+#+begin_src sh
+make pkg-load-lists
+#+end_src
+
+#+begin_example
+   5  packages/nl-check/test/nl-check-standalone-smoke.el
+   ...
+pkg-load-lists: 9 file(s), 33 load(s) checked
+#+end_example
+
+Two findings fail, and both are silent at run time:
+
+- =load-list-missing-file= — the path does not exist, so the load does
+  nothing and nothing it should define is defined;
+- =load-list-out-of-order= — an earlier file requires a feature a later
+  one provides.
+
+Pairs are compared by *actual dependency*, not by position in a derived
+order, so two unrelated files in either order are not a finding — a
+check that invents findings gets switched off.  A computed path is
+counted and reported rather than skipped, so a partly unreadable list
+cannot look fully checked.
+
 * Dependencies
 
 - Host: =cl-lib=, =subr-x=.  No NeLisp packages.

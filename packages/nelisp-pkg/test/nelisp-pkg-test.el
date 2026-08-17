@@ -187,6 +187,69 @@ read; the sequence is doubtful, not shorter."
     (let ((sequence (nelisp-pkg-load-sequence "alpha" (nelisp-pkg-scan))))
       (should (= 2 (length sequence))))))
 
+(defmacro nelisp-pkg-test--with-files (files &rest body)
+  "Write FILES ((RELATIVE-PATH . CONTENT) ...) into a temp root, run BODY."
+  (declare (indent 1))
+  `(let ((root (make-temp-file "nelisp-pkg-list" t)))
+     (unwind-protect
+         (let ((default-directory (file-name-as-directory root)))
+           (dolist (file ,files)
+             (let ((path (expand-file-name (car file))))
+               (make-directory (file-name-directory path) t)
+               (with-temp-file path (insert (cdr file)))))
+           ,@body)
+       (delete-directory root t))))
+
+(ert-deftest nelisp-pkg-load-list-flags-a-path-that-does-not-exist ()
+  "The failure mode is silent at run time, so it must be loud here."
+  (nelisp-pkg-test--with-files
+      '(("smoke.el" . "(load \"src/gone.el\")\n"))
+    (let ((result (nelisp-pkg-check-load-list (expand-file-name "smoke.el"))))
+      (should (= 1 (length (plist-get result :findings))))
+      (should (eq 'load-list-missing-file
+                  (plist-get (car (plist-get result :findings)) :kind)))
+      (should (= 0 (plist-get result :checked))))))
+
+(ert-deftest nelisp-pkg-load-list-flags-a-file-loaded-too-early ()
+  (nelisp-pkg-test--with-files
+      '(("src/base.el" . "(provide 'base)\n")
+        ("src/top.el"  . "(require 'base)\n(provide 'top)\n")
+        ("smoke.el"    . "(load \"src/top.el\")\n(load \"src/base.el\")\n"))
+    (let* ((result (nelisp-pkg-check-load-list (expand-file-name "smoke.el")))
+           (finding (car (plist-get result :findings))))
+      (should (eq 'load-list-out-of-order (plist-get finding :kind)))
+      (should (eq 'base (plist-get finding :feature)))
+      (should (= 2 (plist-get result :checked))))))
+
+(ert-deftest nelisp-pkg-load-list-accepts-the-right-order ()
+  (nelisp-pkg-test--with-files
+      '(("src/base.el" . "(provide 'base)\n")
+        ("src/top.el"  . "(require 'base)\n(provide 'top)\n")
+        ("smoke.el"    . "(load \"src/base.el\")\n(load \"src/top.el\")\n"))
+    (should (null (plist-get (nelisp-pkg-check-load-list
+                              (expand-file-name "smoke.el"))
+                             :findings)))))
+
+(ert-deftest nelisp-pkg-load-list-ignores-unrelated-order ()
+  "Two files with no dependency between them may be loaded either way.
+Comparing against a derived global order instead would invent findings."
+  (nelisp-pkg-test--with-files
+      '(("src/one.el" . "(provide 'one)\n")
+        ("src/two.el" . "(provide 'two)\n")
+        ("smoke.el"   . "(load \"src/two.el\")\n(load \"src/one.el\")\n"))
+    (should (null (plist-get (nelisp-pkg-check-load-list
+                              (expand-file-name "smoke.el"))
+                             :findings)))))
+
+(ert-deftest nelisp-pkg-load-list-counts-a-computed-path ()
+  "A list that cannot be read fully must not look fully checked."
+  (nelisp-pkg-test--with-files
+      '(("smoke.el" . "(load (concat dir \"x.el\"))\n"))
+    (let ((result (nelisp-pkg-check-load-list (expand-file-name "smoke.el"))))
+      (should (eq 'load-list-computed-path
+                  (plist-get (car (plist-get result :findings)) :kind)))
+      (should (= 0 (plist-get result :checked))))))
+
 (ert-deftest nelisp-pkg-rejects-a-malformed-manifest ()
   (should (nelisp-pkg-validate-manifest '(:name "a")))
   (should (nelisp-pkg-validate-manifest '(:name a :version "1" :requires ())))

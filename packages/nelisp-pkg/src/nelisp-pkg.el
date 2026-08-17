@@ -326,6 +326,85 @@ be the failure this function exists to prevent."
                                        (list (plist-get file :file))))))))
         sequence))))
 
+;;;; Hand-written load lists ----------------------------------------------
+
+;; The standalone smokes load their dependencies by explicit path, in an
+;; order someone worked out once.  Those lists cannot be replaced by a
+;; generated one -- generating it inside the standalone runtime would
+;; mean bootstrapping this library there first -- but they can be
+;; checked, which is the part that matters: a stale list fails silently,
+;; because `(load "missing.el" nil t)' returns t in that runtime instead
+;; of signalling.
+
+(defun nelisp-pkg-load-list (file)
+  "Return the `load' calls in FILE as ((:path P :literal BOOL) ...).
+
+A computed path is recorded with `:literal' nil rather than dropped:
+knowing that a list is partly unreadable is different from believing it
+was fully checked."
+  (let ((calls nil))
+    (dolist (form (nelisp-pkg--read-forms file))
+      (nelisp-pkg--walk
+       form
+       (lambda (node)
+         (when (and (consp node) (eq (car node) 'load) (consp (cdr node)))
+           (let ((arg (nth 1 node)))
+             (push (list :path (and (stringp arg) arg)
+                         :literal (stringp arg))
+                   calls))))))
+    (nreverse calls)))
+
+(defun nelisp-pkg-check-load-list (file &optional root)
+  "Return findings for the hand-written load list in FILE.
+
+ROOT is the directory the paths are relative to, default
+`default-directory'.
+
+Two things are checked, and both are failures that produce no message
+at run time:
+
+  load-list-missing-file  the path does not exist, so the load is a
+                          silent no-op and nothing it should define is
+                          defined;
+  load-list-out-of-order  an earlier file requires a feature that a
+                          later one provides.
+
+Pairs are compared by actual dependency, not by position in a derived
+order, so two unrelated files in either order are not a finding."
+  (let* ((root (file-name-as-directory (or root default-directory)))
+         (calls (nelisp-pkg-load-list file))
+         (entries nil)
+         (findings nil))
+    (dolist (call calls)
+      (if (not (plist-get call :literal))
+          (push (list :kind 'load-list-computed-path :subject file) findings)
+        (let* ((path (plist-get call :path))
+               (full (expand-file-name path root)))
+          (if (not (file-readable-p full))
+              (push (list :kind 'load-list-missing-file
+                          :subject file :path path)
+                    findings)
+            (let ((features (nelisp-pkg-file-features full)))
+              (push (list :path path
+                          :provides (car features)
+                          :requires (cdr features))
+                    entries))))))
+    (setq entries (nreverse entries))
+    (let ((tail entries))
+      (while tail
+        (let ((earlier (car tail)))
+          (dolist (later (cdr tail))
+            (dolist (feature (plist-get earlier :requires))
+              (when (memq feature (plist-get later :provides))
+                (push (list :kind 'load-list-out-of-order
+                            :subject file
+                            :path (plist-get earlier :path)
+                            :after (plist-get later :path)
+                            :feature feature)
+                      findings)))))
+        (setq tail (cdr tail))))
+    (list :findings (nreverse findings) :checked (length entries))))
+
 ;;;; Checking ------------------------------------------------------------
 
 (defun nelisp-pkg-check (packages &optional core-features)
