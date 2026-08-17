@@ -337,23 +337,50 @@ Java・Go・Rust で境界検査が実質無料なのは、検査が安いから
 BCE、LLVM の最適化）。15% は「検査を軽くする」目標ではなく *AOT コンパ
 イラに検査除去パスを実装する* 目標として保持する。
 
-現状 =lisp/nelisp-aot-compiler.el= に検査除去パスは存在しない。よって
-未達は「目標が不適切」ではなく「まだ実装されていない」と読む。
+fresh/non-escaping cell 向けの限定検査除去 pass は
+=lisp/nelisp-aot-compiler.el= に実装済みである。aliasing しうる cell は
+保守的に対象外へ残すため、未達時は「目標が不適切」ではなく「解析範囲が
+まだ不足している」と読む。
 
-*** この予算は現時点で測定できない（2026-08-16 実測）
+*** ネイティブ予算の実測（2026-08-16）
 
-ネイティブ経路に予算を置いた以上、測れないことを明記しておく。測れない
-予算を黙って掲げるのは、本節が今日まで陥っていた「予算も測定コードも
-あるが誰も走らせていない」状態の再生産である。
+=make nl-safe-native-bench= は in-process loader 上で checked/plain の
+=.neln= を実行する。=N=2000、best of 7:
 
-借用を含むコードは =.neln= へ *コンパイルは通る*。マニフェストに
-=:native (:symbols ("...") :arch "x86_64")= が載る。しかし実行できない:
+| 対                       |  checked |   plain |  比 | 予算    |
+|--------------------------+----------+---------+-----+---------|
+| borrow read (shared)     | 9653.4ns | 1519.0ns | 6.36x | <=1.15x *FAIL* |
+| borrow, no type check    | 2281.5ns | 1592.0ns | 1.43x | (内訳)  |
+| borrow (fresh, elided)   | 1384.0ns | 1444.0ns | 0.96x | (除去)  |
 
-| 関数                                         | ネイティブ実行 |
-|----------------------------------------------+----------------|
-| =(defun f (n) (+ n 1))= — プリミティブのみ   | 成功           |
-| =(defun f (c) (nl-safe--cell-value c))= — Elisp ヘルパ 1 呼び出し | *link failed* |
-| 借用あり                                     | *link failed*  |
+*予算は未達である。* 予算行は 1 行目だけで、残りは内訳と除去 pass の
+成果であり合否ではない。
+
+内訳が主因を示す。state の read/increment/decrement だけなら 1.43x で、
+型検査を足すと 6.36x になる。=vectorp= / =length= / =eq= にネイティブ
+lowering が無く、1 反復あたり 3 回のディスパッチャ往復が入るためである
+(plain 側の extern 集合にはディスパッチャが 1 つも無い)。*従って梃子は
+借用の設計ではなく =nl-cell-p= のネイティブ化である。*
+
+2026-08-16 に一度 *0.99x で予算を満たす* と記録したが、これは誤りだった。
+当時の fixture は借用をループの外に出しており、さらに除去 pass がその形を
+丸ごと消していたため、checked と plain が同一バイト数・同一スロット数に
+コンパイルされていた。*同一プログラム同士を比較していた。* 現在のベンチは
+比を出す前に両側が別物であることを検査し、一致していれば拒否する。
+
+除去 pass 自体にも健全性の欠陥があった。適格条件が =(vector ...)= で
+あることしか見ておらず、cell でないベクタへの借用まで消していた。
+=nl-with-borrow= は借用前に =nl-cell-p= を検査して非 cell なら
+=nl-type-error= を送出するので、除去はその検査ごと消していたことになる。
+現在は =(nl-cell V)= か =(vector 'nl--cell V 0)= かつ state リテラルが 0 の
+場合のみ適格とする。*検出器を消す最適化は、最適化対象の機能を否定する。*
+
+解析は除去しない理由も保持する。cell escape、state 観測、複数経路、
+非局所制御、ネスト借用、排他借用を検出したときは checked path を残す。
+fat pointer も fresh allocation・literal length/generation・全 read が literal
+in-range であることを証明した場合だけ raw read へ下げる。fat pointer の 2 対は
+現在も checked/plain が同一にコンパイルされるため、予算行ではなく除去の
+実証として報告する。動的 offset、範囲外、alias、escape は checked path に残す。
 
 nl-safe 固有の問題ではない。そして *本節が当初書いた「in-process ローダ
 が無い」も、次に書いた「統合が残っている」も、どちらも誤りだった*
@@ -399,17 +426,15 @@ case is the remaining §6.4 work.
 したがって着手順序はこうなる:
 
 1. ~~Doc 142 §6.4 gate 6~~ — *統合済み*（=--neln-selftest= が通る）
-2. ネイティブ経路のベンチを、=native-exec= ではなく *リーダ内 in-process
-   ローダ* の上に載せ替える ← *ここが最初*。=bench/nl-safe-native-bench.el=
-   は整数 ABI 葉関数用の =native-exec= を使っており、ヘルパを呼ぶ関数を
-   測れない
-3. 検査除去パスを実装し 15% を目指す
+2. ~~ネイティブ経路のベンチをリーダ内 in-process ローダへ載せ替える~~ —
+   実装済み。=make nl-safe-native-bench= が checked/plain の .neln を測定する
+3. fresh/non-escaping cell の検査除去 pass は実装済み（現状 1.00x）。
+   次は通常の aliasing cell へ安全に拡張する
 4. nl-safe を実コードに導入する
 5. 違反データが集まり §8 のゲートが判定可能になる
 6. Stage 5 の可否を実データで決める
 
-=bench/nl-safe-native-bench.el= は 1 が済んだ時点で動く形で置いてある。
-現状では =native-exec= の整数 ABI 制約に当たって落ちる。
+=bench/nl-safe-native-bench.el= は現在 in-process loader を直接使う。
 
 ** 位置づけ
 
