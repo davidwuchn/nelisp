@@ -1,4 +1,4 @@
-.PHONY: unsafe-inventory nl-violation-corpus test-jit test-nojit jit-unverified nl-safe-bench nl-safe-native-bench neln-loader-test nl-dev-loop nl-check-gate ns-gate ns-inventory parens-check test test-fast test-parallel test-one wasm-smoke wasm-runtime-image-smoke wasm-dtw-skeleton-smoke wasm-dtw-transpile wasm-dtw-compile wasm-dtw-smoke wasm-dtw-site wasm-dtw-site-smoke compile clean all bench bench-aot-tco gc-bench actor-bench soak soak-1h soak-full soak-worker \
+.PHONY: unsafe-inventory nl-violation-corpus test-jit test-nojit jit-unverified nl-safe-bench nl-safe-native-bench neln-loader-test aot-differential nl-dev-loop nl-check-gate ns-gate ns-inventory parens-check test test-fast test-parallel test-one wasm-smoke wasm-runtime-image-smoke wasm-dtw-skeleton-smoke wasm-dtw-transpile wasm-dtw-compile wasm-dtw-smoke wasm-dtw-site wasm-dtw-site-smoke compile clean all bench bench-aot-tco gc-bench actor-bench soak soak-1h soak-full soak-worker \
         sqlite-module sqlite-module-clean \
         release-artifact release-checksum soak-blocker soak-post-ship \
         bench-actual bench-allocator bench-allocator-heavy \
@@ -1066,6 +1066,42 @@ neln-loader-test: standalone-reader
 	  echo '(load "$(CURDIR)/test/nelisp-native-load-driver.el")'; \
 	} > "$$prelude"; \
 	./target/nelisp --load "$$prelude"
+
+# The loader driver states each expected answer, so it only catches
+# shapes someone thought of first.  This one computes the answer: the
+# same source runs through the interpreter and as native code inside one
+# reader process, and the two are compared.
+aot-differential: standalone-reader
+	@mkdir -p target/aot-differential
+	NELISP_DIFF_DIR=$(CURDIR)/target/aot-differential \
+	  $(EMACS) --batch -Q -L lisp -L src -L scripts \
+	  --eval '(setq load-prefer-newer t)' \
+	  -l nelisp-aot-differential-cases \
+	  -f nelisp-aot-differential-main
+	@count=$$(cat target/aot-differential/count.txt); size=1; \
+	chunks=$$(( ($$count + $$size - 1) / $$size )); failed=0; \
+	echo "[diff] $$count cases in $$chunks chunks of $$size"; \
+	for chunk in $$(seq 0 $$(($$chunks - 1))); do \
+	  prelude=target/aot-differential/prelude-$$chunk.el; \
+	  { echo '(load "$(CURDIR)/lisp/nelisp-native-load.el")'; \
+	    echo '(load "$(CURDIR)/target/aot-differential/cases.el")'; \
+	    echo '(defvar nelisp-aot-differential-dir "$(CURDIR)/target/aot-differential")'; \
+	    echo "(defvar nelisp-aot-differential-chunk $$chunk)"; \
+	    echo "(defvar nelisp-aot-differential-chunk-size $$size)"; \
+	    echo '(load "$(CURDIR)/test/nelisp-aot-differential-driver.el")'; \
+	  } > "$$prelude"; \
+	  out=$$(./target/nelisp --load "$$prelude" 2>&1); \
+	  printf '%s\n' "$$out"; \
+	  summary=$$(printf '%s\n' "$$out" | grep "^differential chunk $$chunk:"); \
+	  if [ -z "$$summary" ]; then \
+	    died=$$(printf '%s\n' "$$out" | grep '^RUN ' | tail -1); \
+	    echo "[diff] CRASH $${died#RUN } -- the reader died running it"; \
+	    failed=1; \
+	  else \
+	    case "$$summary" in *", 0 wrong,"*) : ;; *) failed=1 ;; esac; \
+	  fi; \
+	done; \
+	test $$failed -eq 0
 
 # Fast focused loop for REPL work.  Builds/relinks target/nelisp with the
 # incremental unit cache, then runs only the REPL smoke used by the full reader

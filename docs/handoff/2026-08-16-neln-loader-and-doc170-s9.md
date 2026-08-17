@@ -1100,3 +1100,67 @@ standalone-reader`, which is the compiler's actual consumer. The next
 step is a differential harness -- the same source through the
 interpreter and through AOT, answers compared -- so the population is
 enumerated rather than guessed.
+
+## 19. The defect, measured rather than guessed (2026-08-18)
+
+`make aot-differential` crosses the value producers that differ in
+representation against the control shapes that have a path which does
+not run, compiles each program, and runs it twice inside the reader --
+interpreted and native -- comparing the answers. Nothing is written
+down as expected; the interpreter is the oracle.
+
+Baseline on this commit, 90 programs, full coverage:
+
+```
+75 summaries, 15 reader deaths, 35 wrong comparisons
+```
+
+### Wrong answers fall out exactly along representation classes
+
+Group the producers by the representation the compiler gives them:
+
+```
+A   0            (+ i 1)                 raw machine integer
+B   (aref v 0)   (aref (aref w 1) 0)     pointer to a Sexp
+C   (length v)                           neither -- `unknown'
+```
+
+Every two-armed program is wrong **iff its arms come from different
+classes**, and never otherwise. The 16 wrong `if2' programs are exactly
+the 16 ordered cross-class pairs; `cond2' repeats it. Same-class pairs
+(`zero'/`arith', `aref'/`deep') and the diagonal are all correct.
+
+`(length v)` forming a class of its own is the part hand analysis had
+wrong: the working model was two classes, raw against boxed. `unknown'
+is not an absence of information the compiler ignores, it is a third
+representation that disagrees with both of the other two. That is the
+measured argument for removing it from the vocabulary rather than
+teaching more sites to tolerate it.
+
+### Reader deaths are the same defect where one path is empty
+
+```
+if1 / cond1 (no t clause) / and   x  {aref, len, deep}     9
+while bound 0 / bound n           x  {aref, len, deep}     6
+```
+
+Bounds 1 and 3 -- loops that always run -- never die, and neither do the
+class A producers, which agree with the `(acc 0)` binding. The slot is
+bound raw, one path makes it boxed, and the path that does not run
+leaves the raw word to be dereferenced.
+
+### What this asks the fix to do
+
+Drive `35 wrong / 15 dead` to zero without refusing programs, and keep
+`make standalone-reader` building. The staging is:
+
+- **A.** Classify every IR kind so `--ir-repr` never answers `unknown';
+  add the per-symbol return representation `extern-call' needs. No
+  behaviour change intended, and verifiable as such by byte-identity of
+  the reader's emitted code.
+- **B.** Give branch nodes (`if', `cond', `and'/`or') a joined
+  representation and emit the coercion in the arm that needs it, so a
+  branch is a value join rather than a slot patched in evaluation order.
+- **C.** Derive each slot's representation, and its GC rooting, from the
+  analysis -- which is what the withdrawn promotion got wrong -- and
+  delete the mutable `:repr` overwriting in `setq'.
