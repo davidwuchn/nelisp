@@ -1,0 +1,65 @@
+#+TITLE: Recipe — stdio service
+
+* Shape
+
+A NeLisp process driven by a host program over a pipe: one
+s-expression request per line on stdin, one s-expression response per
+line on stdout.  The host owns the lifetime, the window, the tray icon,
+the socket — whatever it is that must be native — and NeLisp owns the
+logic.
+
+This is the shape with the most production evidence behind it in this
+codebase: a Windows IME service drives its NeLisp engine exactly this
+way, at a measured 15–38 ms per keystroke round trip including
+transport.
+
+* Run
+
+#+begin_src sh
+printf '(ping 1)\n(add 2 40)\n(quit)\n' | nelisp --load skeleton/service.el
+#+end_src
+
+#+begin_example
+(pong 1)
+(sum 42)
+(bye)
+service-eof
+#+end_example
+
+* Verify first
+
+#+begin_src sh
+recipes/stdio-service/verify.sh
+#+end_src
+
+Four checks, of which the fourth is the one that decides whether this
+shape works at all for an interactive host: responses must be flushed as
+they are produced, not buffered until exit.  The smoke holds the pipe
+open for four seconds and requires the first response to be on disk two
+seconds in.  It passes on this tree — 9 bytes at t=2s.
+
+* What it needs
+
+- =read-stdin-bytes=, =string-search=, =read-from-string=, =prin1=,
+  =terpri= — all present in the standalone runtime.
+- Nothing from =packages/=.
+
+* What it cannot do
+
+- *Long uptime is not free.*  The reader's arena does not reclaim
+  (~560 bytes per evaluated operation, =garbage-collect= frees nothing),
+  so a service that runs for days will grow.  Supervise it, restart it
+  on a memory threshold, or keep the process per session rather than
+  per machine.
+- *No JSON out of the box.*  Framing is s-expressions because
+  =read-from-string= is in the runtime and =json-encode= is not.  If the
+  host must speak JSON, load =packages/nelisp-json= and pay for it
+  deliberately.
+- *Lines, not arbitrary payloads.*  A request containing a newline needs
+  a length prefix instead.  Change =service-next-line=; nothing else in
+  the skeleton cares.
+
+* Where to cut
+
+=service-handle= is the only function you are meant to replace.
+Everything above it is transport and everything below it is the loop.

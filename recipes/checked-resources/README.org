@@ -1,0 +1,91 @@
+#+TITLE: Recipe — checked resources
+
+* Shape
+
+A shared mutable buffer that can only be reached through a borrow.
+=nl-defcell= wraps the value; =nl-with-borrow= takes a shared borrow
+(any number may coexist) and =nl-with-borrow-mut= an exclusive one.
+Taking an exclusive borrow while a shared one is live signals
+=nl-borrow-error= instead of quietly writing through an alias that
+someone else is reading.
+
+#+begin_src elisp
+(nl-defcell checked-buffer (make-vector 8 0))
+
+(nl-with-borrow-mut (b checked-buffer) (aset b 0 42))
+(nl-with-borrow     (b checked-buffer) (aref b 0))
+#+end_src
+
+This is the Rust-shaped half of NeLisp's memory-safety work (Doc 170
+Stage 1) reduced to the part you can use in an ordinary program today.
+
+* Verify first
+
+#+begin_src sh
+recipes/checked-resources/verify.sh
+#+end_src
+
+Four checks, and the second is the one that matters: it takes an
+exclusive borrow while a shared borrow is live and requires the checker
+to *signal*.  A smoke that only exercises the legal path proves the code
+runs, not that anything is being checked.
+
+* The cost is measured, not quoted
+
+=verify.sh= times the checked and unchecked arms on your machine and
+writes =target/ai/checked-resources-overhead.txt=.  It is *reported and
+never gated*, for a reason this repository has paid for twice: a "2.5x
+regression" that was background load, and a "1.00x parity" that was one
+program compared with itself.  So the plain arm is timed twice, the
+drift between those runs is printed beside the ratio, and past the
+drift limit the ratio is discarded rather than written down and quoted
+later.
+
+Timing happens outside the process because the standalone runtime has
+no clock — =(current-time)= answers =(0 0 0 0)= and =(float-time)=
+answers nil — so each arm is a whole process and an empty run of the
+same arm is subtracted to remove start-up.  That is the slope method
+already used for this repository's own benchmarks.
+
+One measurement, for calibration only (2026-08-17, main-built binary,
+drift 0.07): *1.45x* for 3000 interpreted borrow-checked sums against
+the same loop with no borrow.
+
+Do not carry that number anywhere.  In particular it is *not* the Doc
+170 section 9 budget: that one measures AOT-compiled borrows, where the
+cost is dominated by type checks in the emitted code and last measured
+4.99x against a ≤1.15x target.  Different path, different number.  This
+recipe measures what an ordinary interpreted program pays.
+
+* What it buys
+
+An aliasing bug becomes an error at the moment of the second borrow,
+naming the cell, instead of a wrong value somewhere later.  In a runtime
+whose failure mode is overwhelmingly *silent wrong values*, moving a
+class of bug from "silent and late" to "loud and immediate" is the whole
+argument — not the microseconds.
+
+* It also feeds the corpus
+
+=verify.sh= turns on =nl-safe-log-violations=, provokes a violation, and
+dumps it through =nl-safe-report=.  That log is the data source Doc 168's
+Phase 6 gate reads, and the reason Stage 5 has been waiting is that
+almost no real code adopts =nl-safe= yet.  Running this smoke is a small
+contribution to that population; writing your own resource on top of it
+is a larger one.
+
+* What it cannot do
+
+- *Make the ordinary Lisp layer unsafe-free.*  The checks apply to cells
+  you declare, not to everything.
+- *Replace static analysis.*  The borrow rules are enforced dynamically,
+  at the moment of the borrow.  =nl-check= / =nl-contract= are the
+  neighbouring packages for the static and boundary sides.
+- *Be free.*  See the measurement above, and take your own.
+
+* Where to cut
+
+=skeleton/checked.el= is the pattern: a cell, a mutating operation under
+an exclusive borrow, a reading operation under a shared one, and a
+deliberate conflict kept around as a live test of the checker.  Replace
+the buffer with your resource and keep the fourth function.

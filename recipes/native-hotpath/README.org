@@ -1,0 +1,79 @@
+#+TITLE: Recipe — native hot path
+
+* Shape
+
+Put the functions that need to be fast in their own file, compile that
+file to a =.neln= artifact, and let the manifest tell you — per
+function — whether they actually went native.
+
+#+begin_src sh
+nelisp compile-elisp-artifact --kind neln --input hot.el --output hot.neln
+nelisp inspect-elisp-artifact hot.neln
+#+end_src
+
+* Two claims, two gates
+
+These are true on different sets of machines, so =verify.sh= reports
+them separately.
+
+| gate                         | claim                          | where                                    |
+|------------------------------+--------------------------------+------------------------------------------|
+| =recipe-native-hotpath=      | it compiles, and the manifest says which functions are native | everywhere                |
+| =recipe-native-hotpath-exec= | the compiled code runs         | linux-x86_64 only today                  |
+
+The execution limit is not a guess: the repository's own tests gate on
+it (=skip-unless= a linux-x86_64 predicate throughout
+=test/nelisp-artifact-native-exec-test.el=), and on Windows
+=native-exec-elisp-artifact= exits 1.  The artifact's object format is
+=nelisp-aot-elf-v1= even when =:target= is =x86_64-w64-mingw32=.
+
+Keeping them apart matters: folded into one gate, the compile half —
+which works, and which is the half you can act on today — would be
+hidden behind a permanent red on every non-Linux machine, and a gate
+that always fails is a gate everyone learns to ignore.
+
+* What the compile half is actually good for
+
+A regression guard.  The manifest carries a per-function report:
+
+#+begin_example
+:compile-report ((:name "hot-sum-to" :native t) (:name "hot-checksum" :native t))
+#+end_example
+
+A change that quietly makes a function ineligible for native
+compilation does not fail any test — it just gets slower, somewhere,
+later.  Checking the manifest turns that into a build failure at the
+moment it happens.  That is worth wiring up even on a machine that
+cannot run the artifact.
+
+* Verify first
+
+#+begin_src sh
+recipes/native-hotpath/verify.sh
+#+end_src
+
+Four checks, the fourth of which asks the manifest about a symbol that
+does not exist and requires a negative answer.  Without that control,
+the other checks would keep passing if the pattern they grep for
+silently stopped matching.
+
+* What it cannot do
+
+- *Run anywhere but linux-x86_64* (see above).
+- *Be self-contained.*  An artifact that calls libc emits relocations a
+  linker must resolve; the =.el= alone does not run such code.
+- *Float freely.*  f64 arithmetic is x86_64 only, =extern-call= caps at
+  eight f64 arguments, and =va_arg= of a double is a loud error.
+- *Escape the boundary ABI.*  Multi-defun artifacts have known limits
+  around boundary slots; =docs/design/142-native-exec-findings.md= is
+  the reference, and that area is under active work.
+
+=docs/runtime-limitations.md= is the full list, grouped by how badly
+each item breaks C-equivalence.  Read it before assuming a compiled
+function behaves like its C original.
+
+* Where to cut
+
+Replace the two functions in =skeleton/hot.el=.  Keep the file small
+and keep the arithmetic integer; the point of the shape is that the
+hot path is separable, not that everything moves into it.

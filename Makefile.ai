@@ -1,0 +1,41 @@
+# Makefile.ai --- thin wrappers around tools/ai/nelisp-ai.sh
+#
+# Deliberately a separate file rather than four more targets in the root
+# Makefile: that file is ~1300 lines with ~90 targets, several branches
+# edit it at once, and its `.PHONY' list has already produced merge
+# conflicts twice during integration.  Nothing here is required — every
+# target is one line of shell you can also run directly.
+#
+#   make -f Makefile.ai help
+#   make -f Makefile.ai status
+#   make -f Makefile.ai verify
+#   make -f Makefile.ai test-one FILE=test/nelisp-artifact-test.el
+
+.PHONY: help status verify test test-one compile doctor gates-clean
+
+AI := tools/ai/nelisp-ai.sh
+
+help:
+	@$(AI) help
+
+status:
+	@$(AI) status
+
+verify:
+	@$(AI) verify
+
+test:
+	@$(AI) test
+
+test-one:
+	@test -n "$(FILE)" || { echo 'usage: make -f Makefile.ai test-one FILE=test/nelisp-FOO-test.el'; exit 2; }
+	@$(AI) test-one $(FILE)
+
+compile:
+	@$(AI) compile
+
+doctor:
+	@$(AI) doctor
+
+gates-clean:
+	@$(AI) gates-clean

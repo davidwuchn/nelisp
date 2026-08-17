@@ -1,0 +1,43 @@
+# Gates that must have produced a report before the tree can be called good.
+#
+# This file is the half of the mechanism that an exit code cannot supply.
+# A gate that never runs leaves no report; without a list of gates that
+# ought to exist, "no report" and "nothing to report" are the same thing.
+# A CI gate in this repository sat behind an already-red target for its
+# whole life and was counted as passing the entire time.
+#
+# One gate name per line.  A trailing `?' marks the gate optional: it is
+# shown when present, and its absence is not a failure.
+#
+# Add a line here the moment a gate becomes load-bearing.  Removing a
+# line is a decision to stop caring about that gate — make it explicitly,
+# not by letting the gate quietly stop emitting.
+
+compile
+ert-full
+
+# Developer-loop gates: useful, but not evidence about the whole tree.
+ert-focus?
+
+# Namespace boundaries for the recipe skeletons.  Whole-tree namespace
+# checking is `make ns-inventory', which ratchets against a baseline;
+# this one requires the skeletons to be simply clean, since they are
+# what people copy.
+ns-recipes?
+
+# Recipe smokes: run them when touching recipes/, or to find out whether
+# an application shape still works on this machine.
+recipe-stdio-service?
+recipe-batch-data?
+recipe-native-hotpath?
+recipe-native-hotpath-exec?
+recipe-checked-resources?
+
+# Not yet wired to this contract.  Each of these still reports through
+# its own Makefile target only; wrap them with tools/ai/gate-report.sh
+# and promote the line above the comment as they are converted.
+#
+# standalone-reader
+# standalone-selfhost
+# nelisp-performance-gate
+# nelisp-native-artifact-gate

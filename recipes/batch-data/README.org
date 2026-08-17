@@ -1,0 +1,64 @@
+#+TITLE: Recipe — batch data job
+
+* Shape
+
+Read a file, compute something, write a file, exit.  The shape the
+runtime is currently best at, for a structural reason: nothing reclaims
+memory in the standalone reader, so a program that exits is a program
+that cannot leak.  Short-lived is not a limitation here, it is the
+design.
+
+The skeleton aggregates a CSV by one column and writes a report.  The
+fixture is deliberately Japanese, because multibyte text is exactly
+where this runtime's file I/O differs from Emacs.
+
+* Run
+
+#+begin_src sh
+BATCH_INPUT=C:/data/in.csv BATCH_OUTPUT=C:/data/out.txt \
+  nelisp --load skeleton/batch.el
+#+end_src
+
+Paths come through the environment because =getenv= is in the runtime
+and command-line argument access is not.  Pass *drive-qualified* paths:
+=/tmp/x= inside the runtime resolves against the current drive, not to
+what =/tmp= means in your shell.
+
+Set =BATCH_COLUMN= to choose the field to group by (default 2).
+
+* Verify first
+
+#+begin_src sh
+recipes/batch-data/verify.sh
+#+end_src
+
+Four checks: the file lands, the row count is right, the aggregation
+keyed on a Japanese field is right, and the multibyte key survives the
+round trip byte for byte.  The last one matters because a mojibake round
+trip still produces a plausible-looking report.
+
+* What it needs
+
+- =insert-file-contents=, =buffer-string=, =write-region=,
+  =split-string=, =string-trim=, =assoc=, =format=, =getenv= — all
+  present in the standalone runtime.
+- Nothing from =packages/=.
+
+* What it cannot do
+
+- *No buffer navigation.*  =with-temp-buffer= and =insert-file-contents=
+  work, but =goto-char= and =re-search-forward= are void.  Read the file
+  in, then work on strings.
+- *No JSON, no SQLite* in the base runtime — those are
+  =packages/nelisp-json= and =packages/nelisp-sqlite=.
+- *No CSV quoting.*  =batch-rows= splits on commas.  A quoted field
+  containing a comma will split wrongly, silently.  Fix that before
+  pointing this at real accounting data.
+- *=file-exists-p= lies* — it returns nil for files that exist.  The
+  skeleton verifies writes by reading them back instead.
+
+* Where to cut
+
+=batch-count-by= and =batch-render= are the parts you replace.
+=batch-read-file= and =batch-write-file= are the parts that encode what
+this runtime actually does, and are worth keeping as they are.

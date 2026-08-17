@@ -1,5 +1,10 @@
 # Agent Instructions
 
+Read [`AI.md`](AI.md) first: it is the orientation page for this
+repository — how to see the current state, the inner loop, and the rules
+that exist because each one was broken here.  This file covers worklog
+policy only.
+
 Follow the parent `../AGENTS.md` worklog policy strictly.
 
 For this repository:

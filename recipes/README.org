@@ -1,0 +1,184 @@
+#+TITLE: NeLisp Recipes — building applications and services
+
+* What this is
+
+One directory per application shape, each with a skeleton you can copy
+and a smoke that proves the shape still works on your machine before you
+write anything of your own.
+
+Run the smoke first.  A recipe that cannot pass its own =verify.sh= here
+is telling you something about the runtime, the binary in =target/=, or
+the platform, and that is far cheaper to learn now than from a
+half-written service.
+
+* Which shapes are viable today
+
+Verdicts, with the evidence behind each.  Where the evidence is a
+measurement it was taken on this tree; where there is none, the verdict
+says so rather than guessing.
+
+| shape                          | verdict         | evidence                                                                                                   |
+|--------------------------------+-----------------+------------------------------------------------------------------------------------------------------------|
+| short-lived CLI / batch job    | ready           | =recipes/batch-data= passes here; =dist/= ships standalone tarballs for four platforms                      |
+| stdio worker under a host      | ready           | =recipes/stdio-service= passes, including the flush check: a response lands while the pipe is still open    |
+| long-lived resident service    | conditional     | the standalone reader's arena never reclaims — about 560 bytes per evaluated operation, and =garbage-collect= frees none of it (measured 2026-08-17).  Supervise and restart, or run one process per request |
+| native hot path (=.neln=)      | compile anywhere, run on linux-x86_64 | =recipes/native-hotpath= compiles and verifies the manifest here; execution is gated to linux-x86_64 by the repo's own tests, and exits 1 on Windows |
+| HTTP service                   | unverified here | =packages/nelisp-http= and =packages/nelisp-eventloop= exist; no recipe, and the arena caveat above applies |
+| GUI / TUI application          | experimental    | =examples/nelisp-x11-*=, =examples/nelisp-tty-editor=; no gate covers them                                  |
+| Emacs package via Layer 2      | conditional     | =dev/nelisp-emacs=; its suite reported 127 unexpected results the first time it could run at all            |
+| WASM / browser                 | experimental    | =make wasm-dtw-site=; no recipe                                                                             |
+
+The rule behind the first three rows: *process lifetime is the design
+variable*.  Nothing reclaims memory in the standalone reader, so a
+program that exits is a program that cannot leak.  Choose a shape where
+exiting is normal, and the constraint disappears.
+
+* Runtime surface, measured
+
+What the standalone runtime does and does not have.  Probed 2026-08-17
+against a binary built from =main= on 2026-08-16 12:53.  Four commits
+have landed on =main= since that build; none touch =src/= or =lisp/=,
+but =825d93af= changes =scripts/nelisp-standalone-build.el= so that deep
+recursion signals instead of dying silently — a binary built from
+current =main= differs in that respect.
+
+*This is a property of one binary, not of NeLisp.*  Re-probe after a
+rebuild rather than trusting the table; the surface has already moved
+once between builds (see =require= below).
+
+Present: =read-stdin-bytes=, =princ= / =prin1= / =terpri=,
+=read-from-string=, =string-search=, =string-match=, =substring=,
+=split-string=, =string-trim=, =string-join=, =format=, =concat=,
+=with-temp-buffer=, =insert-file-contents=, =buffer-string=,
+=write-region=, =getenv=, =directory-files=, =expand-file-name=,
+=make-process=, =call-process=, =sort=, =mapconcat=, =assoc=,
+=ignore-errors=.
+
+Absent or stubbed:
+
+- =read-string=, =read-from-minibuffer= — void.  =read-stdin-bytes= is
+  the only way in.
+- =read= — string streams only; it cannot read from stdin.
+- =goto-char=, =re-search-forward=, =mapatoms= — void.  Buffers exist,
+  but buffer *navigation* does not: read the file in, then work on
+  strings.
+- =file-exists-p=, =file-readable-p= — return nil for files that
+  demonstrably exist.  Never gate on them; read the file and check what
+  you got.
+- =json-encode=, =sqlite-open= — not in the base runtime; they live in
+  =packages/nelisp-json= and =packages/nelisp-sqlite=.
+
+Changed between builds, and worth knowing:
+
+- =(require 'missing-feature)= now signals =file-missing=.  An older
+  binary (2026-08-14) returned the feature name — success to every
+  caller — while =featurep= stayed nil, so a missing dependency was
+  undetectable.  Check this on your binary before relying on
+  =require= to report anything: it is the difference between a
+  dependency error and a =void-function= a thousand lines away.
+
+* Two traps that cost the most time
+
+** Multibyte writes signal after succeeding
+
+=write-region= verifies its own work by comparing a character count with
+the byte count the write returned.  Those differ for anything multibyte,
+so writing Japanese text raises
+
+: write-region stub: wrf returned 28 (expected 20)
+
+*after the file has been written correctly*.  Neither the error nor its
+absence tells you anything.  Read the file back and compare.
+
+** POSIX-looking absolute paths resolve against the current drive
+
+On Windows, =/tmp/out.txt= inside the runtime becomes =<current
+drive>:/tmp/out.txt=, while the same string in a shell means =%TEMP%=.
+Write and read agree with each other, so a round trip passes while the
+file sits somewhere you never look.  Confirmed on both drives: the same
+program run from a =D:= checkout wrote =D:\tmp=, and from a =C:=
+checkout wrote =C:\tmp=.  Pass drive-qualified paths, or paths relative
+to the working directory.
+
+(Both were found by running the recipes below, which is what the smokes
+are for.)
+
+* Naming: decide your namespace on line 1
+
+Elisp has one obarray.  =(defun foo ...)= is assignment to a global
+name and a second definition silently wins, so the first thing a new
+file does — before any of the design you care about — is claim a prefix.
+Changing that decision later is a rename of everything.
+
+=packages/nl-ns/= checks the claim without rewriting any code:
+
+- every definition carries its file's namespace prefix.  The prefix is
+  inferred from the dominant one in the file; =nl-ns-declare= overrides
+  the inference, and a file with no dominant prefix is treated as
+  deliberately global.
+- a =--= name is private to its file.  Referencing another file's is
+  =ns-private-escape=.
+- a cross-file reference wants an explicit =(require ...)=; without one
+  the dependency exists only in load order.
+- shadowing a host definition belongs behind =(unless (fboundp 'name)
+  ...)=.  A shim whose own docstring calls it partial while it replaces
+  a host function is reported as =ns-partial-override= — the highest
+  value finding in the set, because that shape has already produced a
+  silent nil deep in unrelated code.
+
+Check it:
+
+#+begin_src sh
+tools/ai/nelisp-ai.sh ns            # the recipe skeletons, must be clean
+tools/ai/nelisp-ai.sh ns FILE...    # anything else
+make ns-inventory                   # the whole tree, ratcheted to a baseline
+#+end_src
+
+=nl-ns-in= is the optional writing half: =nl-ns-define= declares a
+closed =:members= set and =nl-ns-in= rewrites the short names in a block
+into qualified globals.  It is a genuine convenience with a genuine
+cost — each member name is written twice, and quoted data is never
+rewritten (=ns-quoted-member= marks where that bites).  The recipes here
+stay with plain prefixes on purpose: in a runtime whose failures are
+already dominated by silent wrong values, what the backtrace prints
+should be what you typed.
+
+* Available recipes
+
+| directory           | shape                                                              |
+|---------------------+--------------------------------------------------------------------|
+| =stdio-service/=    | a worker driven by a host process over stdin/stdout, one s-expression per line |
+| =batch-data/=       | read a delimited file, aggregate it, write a report, exit          |
+| =native-hotpath/=   | compile the fast functions to a =.neln= and check the manifest says they went native |
+| =checked-resources/= | reach a shared mutable buffer only through borrows, so aliasing bugs signal instead of corrupting |
+
+* Memory safety, when you want it
+
+=packages/nl-safe/= brings Rust-shaped borrow rules to ordinary NeLisp
+code: a value in a cell, shared borrows that may coexist, exclusive
+borrows that may not, and =nl-borrow-error= at the moment the rule is
+broken rather than a wrong value later.  =recipes/checked-resources/= is
+the usable subset with a smoke that provokes a real violation — and that
+measures the cost on your machine instead of quoting a number.
+
+The neighbouring packages, for when this is not the right shape:
+=nl-check= (static findings), =nl-contract= (boundary contracts with
+blame), =nl-resource= (deterministic drop), =nl-parens= (structural
+repair).  They are libraries, not a mode you switch on.
+
+* Adding a recipe
+
+Four pieces, no exceptions:
+
+1. =README.org= — what it is, what it needs, and *what it cannot do*.
+2. =skeleton/= — the smallest thing that actually runs.
+3. =verify.sh= — a smoke that reports a real case count through
+   =tools/ai/gate-report.sh=.  Fake counts defeat the whole mechanism;
+   see =tools/ai/README.md=.  The skeleton must also pass
+   =tools/ai/nelisp-ai.sh ns=: it is what people copy, so its names are
+   the ones that spread.
+4. =PITFALLS.md= — what bit you while writing it, with the symptom as
+   it actually appeared.  The symptom is the searchable part.
+
+Then add the gate name to =tools/ai/gates.expected= with a trailing =?=
+so it is reported when run without being required of every tree.

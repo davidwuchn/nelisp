@@ -25,6 +25,14 @@ Rules:
 - Keep the library entry file name aligned with the provided feature.
   Example: =src/nelisp-json.el= must continue to =(provide 'nelisp-json)=.
 - Keep ERT coverage beside the package in =test/=.
+- Claim a namespace prefix and stay inside it.  Elisp has one obarray,
+  so a second definition of a name silently wins; =packages/nl-ns/=
+  reports definitions outside their file's prefix, references to another
+  file's =--= private names, cross-file references with no =require=,
+  and host definitions shadowed without an =fboundp= guard.  Check a
+  package with =tools/ai/nelisp-ai.sh ns packages/<name>/src/*.el=, and
+  the tree with =make ns-inventory= (ratcheted to a baseline, so the
+  count may not grow).
 - Do not rewrite callers when extracting a package.  Existing
   =(require 'feature)= forms should continue to resolve through the
   build's load-path.
