@@ -137,6 +137,22 @@ repository has published:
 | drift: run the base arm twice at `n=N` | a "2.5x regression" that was background load |
 | identity: commands, and optionally artifact digests, must differ | a "1.00x parity" between one program and itself |
 
+## One command before committing
+
+```sh
+tools/ai/nelisp-ai.sh check
+```
+
+Runs compile, parens-check, unsafe-inventory, ns-inventory and the
+recipe namespace check, then verifies — the same set the CI fast lane
+runs, so the answer arrives before the push instead of after it.
+
+That pairing is the point. `ns-inventory` existed for two days without
+being in CI and drifted 85 findings past its baseline in that time; the
+gate was fine, nothing ran it. A local command that mirrors CI, and a
+CI step that mirrors the local command, is what keeps a ratchet a
+ratchet.
+
 ## Bringing an existing gate under the contract
 
 1. Make the gate print or return a case count instead of only exiting.

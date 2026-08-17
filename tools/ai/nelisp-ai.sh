@@ -62,6 +62,7 @@ cmd_help() {
 usage: tools/ai/nelisp-ai.sh <command> [args]
 
   status              regenerate target/ai/STATUS.{json,md} — read this first
+  check               run the fast gates, then verify — the pre-commit command
   verify              aggregate gate reports and print one verdict
   test                run the full ERT suite as gate "ert-full"
   test-one FILE...    run selected test files as gate "ert-focus"
@@ -83,6 +84,26 @@ cmd_status() {
     "$EMACS" --batch -Q -l "$here/nelisp-status.el" -f nelisp-status-run
     printf '\n'
     cat target/ai/STATUS.md
+}
+
+cmd_check() {
+    # The same set the CI fast lane runs, in one command, so that
+    # "what will CI say" is answerable before pushing rather than after.
+    #
+    # The full ERT suite is deliberately NOT here: it takes minutes, and
+    # `verify' already holds you to the last ert-full report and prints
+    # its age.  Run `test' when the age column says the evidence is old.
+    failures=0
+    for step in compile parens-check unsafe-inventory ns-inventory ns; do
+        printf '\n=== %s ===\n' "$step"
+        case "$step" in
+            compile) ( cmd_compile ) || failures=$((failures + 1)) ;;
+            ns)      ( cmd_ns ) || failures=$((failures + 1)) ;;
+            *)       ( cmd_gate "$step" -- make "$step" ) || failures=$((failures + 1)) ;;
+        esac
+    done
+    printf '\n=== verify ===\n'
+    cmd_verify
 }
 
 cmd_verify() {
@@ -290,6 +311,7 @@ command=${1:-help}
 case "$command" in
     help|-h|--help) cmd_help ;;
     status)         cmd_status ;;
+    check)          cmd_check ;;
     verify)         cmd_verify ;;
     test)           cmd_test ;;
     test-one)       cmd_test_one "$@" ;;

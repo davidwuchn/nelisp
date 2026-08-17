@@ -23,6 +23,7 @@ run, reported 2859 tests and 127 unexpected results.
 ## Inner loop
 
 ```sh
+tools/ai/nelisp-ai.sh check                              # before every commit
 tools/ai/nelisp-ai.sh test-one test/nelisp-FOO-test.el   # seconds
 tools/ai/nelisp-ai.sh compile                            # byte-compile, error-on-warn
 tools/ai/nelisp-ai.sh ns FILE...                         # namespace boundaries (nl-ns)
@@ -30,6 +31,12 @@ tools/ai/nelisp-ai.sh gate NAME -- make TARGET            # wrap an existing che
 tools/ai/nelisp-ai.sh test                               # full ERT suite
 tools/ai/nelisp-ai.sh verify                             # the verdict
 ```
+
+`check` runs the same fast gates as the CI lane and then verifies, so
+"what will CI say" is answerable before pushing rather than after.  It
+deliberately does not run the full ERT suite; `verify` holds you to the
+last `ert-full` report and prints its age, so run `test` when that
+column says the evidence is stale.
 
 `verify` is the only command whose exit code answers "is the tree good".
 Every other command reports on itself; `verify` also knows which gates

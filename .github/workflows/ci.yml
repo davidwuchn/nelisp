@@ -39,6 +39,25 @@ jobs:
       - name: "Unsafe-surface inventory (Doc 170 sec 4.3 baseline gate)"
         shell: bash
         run: make unsafe-inventory
+      # Both scan tree text only -- no toolchain, no platform behaviour --
+      # so one lane answers for all three, and running them on every lane
+      # would just print the same number three times.
+      #
+      # ns-inventory was absent from CI until 2026-08-17 and drifted 85
+      # findings past its baseline in two days without anyone noticing,
+      # which is the whole argument for the step being here rather than
+      # in a habit.  parens-check reported nothing at all on a clean run
+      # until the same day; it now prints a GATE-COUNT line, so "417
+      # files, 0 findings" and "no files matched" can be told apart in
+      # the log.
+      - name: "Namespace-boundary inventory (nl-ns ratchet); Linux lane only"
+        if: runner.os == 'Linux'
+        shell: bash
+        run: make ns-inventory
+      - name: "Unbalanced-paren check (nl-parens); Linux lane only"
+        if: runner.os == 'Linux'
+        shell: bash
+        run: make parens-check
       # Reports the ratio on every run but does not fail the build: the
       # measurement is 0.885x-0.905x, below the 0.95 floor, and Doc 171
       # sec 11.1 blocks 5.3 (default-on) until that is closed.  Keeping
