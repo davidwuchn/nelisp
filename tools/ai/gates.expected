@@ -49,11 +49,45 @@ recipe-checked-resources?
 # arms are the same program.  It never fails on the number itself.
 bench-borrow-check?
 
-# Not yet wired to this contract, and not wired blind: every one of
-# these needs a standalone binary built from the tree, and most are
-# Linux- or macOS-only, so nothing here can be exercised on a Windows
-# host.  Adding a wrapper whose success path has never run would be the
-# same unverified-gate problem in a new place.
+# Standalone gates.  These build a binary from the tree and run it, so
+# they need a Linux host; on Windows they now report a reasoned skip
+# (GATE-SKIP) rather than exiting 0, which used to read as a pass.
+#
+# standalone-reader-test is OPTIONAL because it is currently red on
+# Linux, and was before this contract reached it.  Verified 2026-08-18 in
+# WSL Debian on both this branch and plain main, failing identically at
+# the fifth of its eight checks:
+#
+#   GATE-COUNT checked=5 findings=1
+#   FAIL: command smoke: eval-elisp-artifact exit=1
+#         "nelisp: uncaught error: file-missing: url-parse"
+#
+# Cause: `require' now signals `file-missing' instead of silently
+# succeeding (a good change), and the standalone path carries requires
+# that only ever worked because it did not.  src/nelisp-eval.el:101
+# requires the host library `url-parse', which the standalone runtime
+# does not have; `make pkg-graph' independently lists url-parse among
+# the requires nothing in the tree provides.
+#
+# It is a chain, not a line.  Guarding the url-* requires with
+# `ignore-errors' (measured in a throwaway WSL clone) moves the failure
+# on to `file-missing: nelisp-core-fileio', which is a tree file, so the
+# remaining question is how the standalone resolves its own requires --
+# a policy decision for whoever owns that path, not a patch to guess at
+# from here.  `locate-library' is void in the standalone, so that guard
+# is not available either.
+#
+# nelisp-native-artifact-gate fails at `load_source_uses_neln' with the
+# same error and is left unwired for the same reason.
+#
+# Required-vs-optional here is a judgement, not an oversight: making it
+# required would paint every Linux verify red for a defect this harness
+# only reports.  Promote the line once the require chain is resolved.
+standalone-reader-test?
+#
+# Not yet wired, and not wired blind: adding a wrapper whose success
+# path has never run would be the same unverified-gate problem in a new
+# place.
 #
 # To adopt one, on a machine that can run it: give the script a
 # GATE-COUNT line where it already knows its case count, make the
