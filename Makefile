@@ -342,6 +342,15 @@ pkg-graph:
 # that does not exist, or a file loaded before something it requires.
 # Both are silent at run time -- `load' on a missing file returns t in
 # the standalone runtime instead of signalling.
+# Writes each package's manifest.el from the dependencies its code
+# actually has.  This is the one-command fix for a drift finding from
+# `make pkg-graph'; keys other than :name / :requires are preserved.
+#   make pkg-manifest-update [PKG=<name>]
+.PHONY: pkg-manifest-update
+pkg-manifest-update:
+	@$(EMACS) --batch -Q -L packages/nelisp-pkg/src \
+	  -l tools/nelisp-pkg-manifest.el
+
 .PHONY: pkg-load-lists
 pkg-load-lists:
 	$(EMACS) --batch -Q -L packages/nelisp-pkg/src \

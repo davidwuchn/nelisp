@@ -36,13 +36,35 @@ is where the two disagree.
 
 #+begin_src elisp
 (:name "nelisp-http"
- :version "1.0"
  :requires ("nelisp-process" "nelisp-state" "nelisp-sys"))
 #+end_src
 
 =:requires= names *packages*, not features.  Host libraries (=cl-lib=,
 =dom=, =url=) are not listed: they are not in the tree, so the checker
 classifies them separately rather than pretending they are edges.
+
+=:name= and =:requires= are required.  *=:version= is not* — nothing
+consumes a version yet (no resolver constraint, no distribution, no
+compatibility rule), so requiring one would mean stamping 34 invented
+numbers into the tree and calling it metadata.  A =:version= is
+validated as a string when a package chooses to carry one, and is
+preserved across regeneration, along with any other key an author adds.
+
+** Writing them
+
+#+begin_src sh
+make pkg-manifest-update            # every package
+make pkg-manifest-update PKG=nl-safe
+#+end_src
+
+Writes each manifest from the dependencies the code actually has.  This
+is the one-command fix for a drift finding, which is what makes the
+gate affordable: a declaration people must maintain by hand goes stale,
+and a gate that then blocks them is friction they route around.
+
+Regeneration is idempotent and preserves every key except =:requires=.
+It does not preserve comments — the file is generated, so put the
+reasoning in the package README rather than in the manifest.
 
 * Findings
 
@@ -62,20 +84,31 @@ make pkg-graph
 tools/ai/nelisp-ai.sh gate pkg-graph -- make pkg-graph
 #+end_src
 
-Two findings fail the build and both are structural: =pkg-cycle=,
-because a ring of requires has no load order at all and no care at the
-call site can work around it; and =pkg-invalid-manifest=, because a
-manifest that cannot be read is worse than one that is absent.
+Four findings fail the build:
 
-Everything else is reported.  =pkg-missing-manifest= fires for every
-package that has not adopted one yet, and =pkg-unresolved-require= is
-mostly host libraries; gating on either would make the check red from
-birth, which is how a gate becomes decoration.
+- =pkg-cycle= — a ring of requires has no load order at all, and no care
+  at the call site can work around it;
+- =pkg-invalid-manifest= — a manifest that cannot be read is worse than
+  one that is absent, because it is believed;
+- =pkg-undeclared-dependency= — the code depends on a package the
+  manifest does not name;
+- =pkg-stale-dependency= — the manifest names one the code no longer
+  uses.
+
+The last two became gateable on 2026-08-18, when every package got a
+manifest.  They are the point of having manifests at all: unchecked, a
+declaration is decoration.  Both are fixed by =make pkg-manifest-update=,
+so the gate costs a keystroke.
+
+=pkg-missing-manifest= and =pkg-unresolved-require= are reported and not
+gated: the first cannot fire today, and the second is mostly host
+libraries, which would make the check red from birth.
 
 * What the tree looks like today (2026-08-17)
 
 #+begin_example
 34 packages, 20 cross-package edges, no cycles
+34 manifests, all matching the code
 13 requires provided nowhere in the tree:
   compile dom flymake generator subr-x url url-http url-parse
 #+end_example

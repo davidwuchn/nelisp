@@ -257,6 +257,38 @@ Comparing against a derived global order instead would invent findings."
   (should (null (nelisp-pkg-validate-manifest
                  '(:name "a" :version "1" :requires ("b"))))))
 
+(ert-deftest nelisp-pkg-version-is-optional-but-typed ()
+  "Nothing consumes a version yet, so requiring one would mean inventing
+34 numbers.  A version that is present still has to be a string."
+  (should (null (nelisp-pkg-validate-manifest '(:name "a" :requires ()))))
+  (should (nelisp-pkg-validate-manifest '(:name "a" :version 1 :requires ()))))
+
+(ert-deftest nelisp-pkg-render-preserves-other-keys ()
+  "Regenerating dependencies must not drop what an author put there."
+  (let ((text (nelisp-pkg-manifest-render
+               "alpha" '("beta")
+               '(:name "alpha" :version "2.1" :maintainer "someone"
+                       :requires ("stale")))))
+    (should (string-match-p ":version \"2.1\"" text))
+    (should (string-match-p ":maintainer \"someone\"" text))
+    (should (string-match-p ":requires (\"beta\")" text))
+    (should-not (string-match-p "stale" text))
+    ;; And it must read back as a valid manifest.
+    (let ((manifest (car (read-from-string text))))
+      (should (null (nelisp-pkg-validate-manifest manifest)))
+      (should (equal (plist-get manifest :requires) '("beta"))))))
+
+(ert-deftest nelisp-pkg-actual-requires-is-sorted-and-self-free ()
+  (nelisp-pkg-test--with-tree
+      '(("alpha" ("alpha.el" . "(require 'zeta)\n(require 'beta)\n(require 'alpha)\n(provide 'alpha)\n"))
+        ("beta"  ("beta.el"  . "(provide 'beta)\n"))
+        ("zeta"  ("zeta.el"  . "(provide 'zeta)\n")))
+    (let* ((packages (nelisp-pkg-scan))
+           (alpha (cl-find-if (lambda (p) (equal (plist-get p :name) "alpha"))
+                              packages)))
+      (should (equal (nelisp-pkg-actual-requires alpha packages)
+                     '("beta" "zeta"))))))
+
 (ert-deftest nelisp-pkg-treats-host-libraries-as-unresolved-not-missing ()
   "A require nothing in the tree provides is reported, not fatal."
   (nelisp-pkg-test--with-tree

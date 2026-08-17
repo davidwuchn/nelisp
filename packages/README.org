@@ -25,18 +25,23 @@ Rules:
 - Keep the library entry file name aligned with the provided feature.
   Example: =src/nelisp-json.el= must continue to =(provide 'nelisp-json)=.
 - Keep ERT coverage beside the package in =test/=.
-- Declare dependencies in =packages/<name>/manifest.el=:
+- Keep =packages/<name>/manifest.el= in step with the code:
 
   #+begin_src elisp
-  (:name "nelisp-http" :version "1.0"
+  (:name "nelisp-http"
    :requires ("nelisp-process" "nelisp-state" "nelisp-sys"))
   #+end_src
 
   =:requires= names packages, not features; host libraries such as
-  =cl-lib= are not listed.  =make pkg-graph= derives the real graph from
-  =provide= / =require= and reports where a declaration disagrees with
-  it, so the manifest is checked rather than trusted.  The gate fails
-  only on a dependency cycle or an unreadable manifest — see
+  =cl-lib= are not listed.  Every package has one, and =make pkg-graph=
+  fails when a manifest and the code disagree — so adding a cross-package
+  =require= means updating the manifest, which is one command:
+
+  #+begin_src sh
+  make pkg-manifest-update PKG=<name>
+  #+end_src
+
+  =:version= is optional; nothing consumes one yet.  See
   =packages/nelisp-pkg/README.org=.
 - Claim a namespace prefix and stay inside it.  Elisp has one obarray,
   so a second definition of a name silently wins; =packages/nl-ns/=

@@ -111,8 +111,14 @@ would put a guess into the graph."
 
 ;;;; Manifests -----------------------------------------------------------
 
-(defconst nelisp-pkg-manifest-keys '(:name :version :requires)
-  "Keys a manifest must carry.")
+(defconst nelisp-pkg-manifest-keys '(:name :requires)
+  "Keys a manifest must carry.
+
+`:version' is deliberately not among them.  Nothing consumes a version
+yet -- there is no resolver constraint, no distribution, no
+compatibility rule -- so requiring one would mean stamping 34 invented
+numbers into the tree and calling it metadata.  Require what is
+checked; add `:version' to a package when it starts to mean something.")
 
 (defun nelisp-pkg-validate-manifest (manifest)
   "Return a list of problem strings for MANIFEST, empty when it is valid."
@@ -126,7 +132,8 @@ would put a guess into the graph."
             (version (plist-get manifest :version))
             (requires (plist-get manifest :requires)))
         (unless (stringp name) (push ":name must be a string" problems))
-        (unless (stringp version) (push ":version must be a string" problems))
+        (when (and (plist-member manifest :version) (not (stringp version)))
+          (push ":version must be a string when present" problems))
         (unless (listp requires) (push ":requires must be a list" problems))
         (dolist (r (and (listp requires) requires))
           (unless (stringp r)
@@ -142,6 +149,46 @@ would put a guess into the graph."
             (cons nil (list "manifest.el could not be read"))
           (let ((manifest (car forms)))
             (cons manifest (nelisp-pkg-validate-manifest manifest))))))))
+
+(defun nelisp-pkg-manifest-render (name requires &optional existing)
+  "Return the text of a manifest for NAME requiring REQUIRES.
+
+EXISTING, when given, is the manifest already on disk; every key in it
+other than `:name' and `:requires' is carried over, so regenerating a
+package's dependencies never silently drops a `:version' or anything
+else its author put there."
+  (let ((extra nil)
+        (tail existing))
+    (while (and tail (cdr tail))
+      (let ((key (car tail))
+            (value (cadr tail)))
+        (unless (memq key '(:name :requires))
+          (setq extra (append extra (list key value)))))
+      (setq tail (cddr tail)))
+    (concat
+     "(:name " (prin1-to-string name) "\n"
+     (let ((rendered ""))
+       (while (and extra (cdr extra))
+         (setq rendered (concat rendered " " (symbol-name (car extra))
+                                " " (prin1-to-string (cadr extra)) "\n"))
+         (setq extra (cddr extra)))
+       rendered)
+     " :requires "
+     (if requires
+         (concat "(" (mapconcat #'prin1-to-string requires " ") ")")
+       "()")
+     ")\n")))
+
+(defun nelisp-pkg-actual-requires (package packages)
+  "Return the package names PACKAGE actually depends on, sorted."
+  (let ((providers (nelisp-pkg-provider-table packages))
+        (name (plist-get package :name))
+        (deps nil))
+    (dolist (feature (plist-get package :requires))
+      (let ((owner (gethash feature providers)))
+        (when (and owner (not (equal owner name)))
+          (cl-pushnew owner deps :test #'equal))))
+    (sort deps #'string<)))
 
 ;;;; Scanning ------------------------------------------------------------
 

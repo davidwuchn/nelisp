@@ -1,0 +1,2 @@
+(:name "nelisp-actor"
+ :requires ())
