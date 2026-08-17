@@ -71,6 +71,12 @@ these; prefer the dispatch-armed equivalents (e.g.
                    (length nelisp-reader-surface-audit--combiner-deferred)))
     (dolist (name nelisp-reader-surface-audit--combiner-deferred)
       (princ (format "    %s\n" name)))
+    ;; Machine-readable tail, before the verdict so it survives both
+    ;; exit paths.  `claimed' is the population this audit is about: if
+    ;; `nelisp-standalone--reader-builtins' were ever empty the audit
+    ;; would print PASS having compared nothing.  See tools/ai/README.md.
+    (princ (format "GATE-COUNT checked=%d findings=%d\n"
+                   (length claimed) (length liars)))
     (if (null liars)
         (princ "  PASS: every claimed builtin has a dispatch arm\n")
       (princ (format "  FAIL: %d fboundp-liar builtin(s) — fboundp t, call aborts:\n"

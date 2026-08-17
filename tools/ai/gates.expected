@@ -22,6 +22,7 @@ ert-full
 parens-check
 unsafe-inventory
 ns-inventory
+reader-surface-audit
 
 # Developer-loop gates: useful, but not evidence about the whole tree.
 ert-focus?
@@ -45,11 +46,22 @@ recipe-checked-resources?
 # arms are the same program.  It never fails on the number itself.
 bench-borrow-check?
 
-# Not yet wired to this contract.  Each of these still reports through
-# its own Makefile target only; give it a GATE-COUNT line, wrap it with
-# `nelisp-ai.sh gate', and promote it above this comment.
+# Not yet wired to this contract, and not wired blind: every one of
+# these needs a standalone binary built from the tree, and most are
+# Linux- or macOS-only, so nothing here can be exercised on a Windows
+# host.  Adding a wrapper whose success path has never run would be the
+# same unverified-gate problem in a new place.
 #
-# standalone-reader
-# standalone-selfhost
+# To adopt one, on a machine that can run it: give the script a
+# GATE-COUNT line where it already knows its case count, make the
+# can't-run path print a reason instead of failing, wrap it with
+# `nelisp-ai.sh gate', and move the name above this comment.
+#
+# standalone-reader-test
+# standalone-selfhost-test
 # nelisp-performance-gate
 # nelisp-native-artifact-gate
+#
+# `make audit' is deliberately absent: it exits 1 on 26 PENDING
+# sub-phases, which is a roadmap state rather than a defect, and a gate
+# that is red by design trains people to ignore the column.

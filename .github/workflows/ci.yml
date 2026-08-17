@@ -58,6 +58,14 @@ jobs:
         if: runner.os == 'Linux'
         shell: bash
         run: make parens-check
+      # Catches a builtin that answers fboundp and then aborts the caller
+      # -- the reader's own list against the build script's dispatch
+      # arms.  176 names today; the GATE-COUNT line is what stops an
+      # empty list from reading as "every builtin has an arm".
+      - name: "Reader surface audit (fboundp-liar builtins); Linux lane only"
+        if: runner.os == 'Linux'
+        shell: bash
+        run: make reader-surface-audit
       # Reports the ratio on every run but does not fail the build: the
       # measurement is 0.885x-0.905x, below the 0.95 floor, and Doc 171
       # sec 11.1 blocks 5.3 (default-on) until that is closed.  Keeping
