@@ -308,3 +308,156 @@ had ever run anything else natively in-process.
 
 That is worth keeping in mind while working through the list above: a
 fault in this area is more likely to be a first visit than a regression.
+
+---
+
+## 9. 2026-08-16 completion record
+
+The AOT value-representation boundary is now explicit:
+
+- `:repr` flows through local `setq`, runtime `let`, arithmetic and
+  comparisons; Sexp dispatcher results unbox at raw arithmetic consumers.
+- `calln` boxes raw integer expressions (not only raw frame references).
+- Local `setq` clones Sexp dispatcher results into a private slot, so a
+  subsequent delegated call cannot overwrite a prior value through shared
+  `out`.
+- Native artifact defun metadata now records `:return-repr`; the loader
+  decodes rax as raw or boxed accordingly instead of guessing from externs.
+
+Regression coverage in `neln-loader-test` includes `rawloop`,
+`dispatchint` (dispatcher result -> `setq` -> arithmetic), `vsetget`, and
+`cell-acquire` (state read/update plus nested vector read).  The loader run
+completed with 17 cases and zero failures.
+
+Doc 170 §9 now runs on the in-process native loader with the fast-path
+fixture and fixed integer cell tag.  The former `N=20`, one-run result was
+dominated by setup and is not a valid budget measurement.  With `N=2000`,
+best of seven runs, the result is checked `1625.1 ns`, plain `1621.6 ns`,
+ratio `1.00x`: the `<= 1.15x` gate **PASSES**.
+
+The fixture enables the vector-only AOT path, so `aref`/`aset` lower to
+refcount-safe native vector IR rather than the dynamic dispatcher.  Its
+checked side uses ordinary `nl-with-borrow`; the opt-in preprocessor recognizes
+only a syntactic fresh `(vector ...)` binding whose cell name never occurs in
+the body, then lowers it to internal `aot-with-fresh-shared-borrow`.  It
+therefore eliminates state read/increment/decrement/write while retaining the
+value-slot read.  The checked and plain artifacts consequently have the same
+text size (1254 bytes), runtime-slot count (26), and extern set.
+
+The source-form analysis now reports a reason rather than silently declining:
+`:cell-escape`, `:state-observed`, `:multiple-path`, `:exceptional-control`,
+`:nested-borrow`, and `:exclusive-borrow` all retain checking.  Fat-pointer
+elision now recognizes a fresh `nl-ptr-make (alloc-bytes ...)` with literal
+length, generation and in-range `nl-ptr-ref-u8` offset, and lowers that narrow
+case to native `ptr-read-u8`.  Dynamic offsets, out-of-bounds offsets and
+pointer escape retain checks.
+
+### Follow-up: fat-pointer loop analysis and native gate
+
+The fat-pointer analysis now accepts a body containing any number of literal,
+in-range `nl-ptr-ref-u8` reads, including reads inside a loop.  It rejects an
+alias, escape, rebinding, dynamic offset, or out-of-range offset; eligible
+reads alone are rewritten to `ptr-read-u8`.  The compiler regression covers
+both the loop rewrite and an alias rejection.
+
+The raw byte address now has a distinct `raw-ptr` representation.  It keeps
+the GP-register calling convention but is not implicitly boxed for the Sexp
+dispatcher.  The actual loader fault was an independent representation gap:
+`let-rt-n` did not forward the representation of its final body, so a raw
+integer return was recorded as `unknown` and unboxed as if it were a Sexp
+address.  Propagating its `:repr` fixes the loader boundary without changing
+vector Sexp-slot handling.
+
+The native pair is now part of `make nl-safe-native-bench`: both sides run
+the same 2000-read loop, validate equal output, and enforce the Doc 170 fat
+pointer budget of `<= 1.20x`.  Latest run: checked `1437.5 ns`, plain
+`1405.0 ns`, ratio `1.02x` — **PASS**.  The borrow gate in the same run is
+`0.99x <= 1.15x`.
+
+### Follow-up: derived-slice provenance and narrowed loop bounds
+
+`s = nl-ptr-slice(p, off, len)` is now tracked as a non-escaping narrowed
+range of `p`, rather than as an alias.  A nested `q = nl-ptr-slice(s, ...)`
+composes the parent offset and length; eligible u8 reads/writes are rewritten
+against `p` only after the composed range and literal byte value are proven.
+For a canonical monotone loop, an index is accepted only when its literal
+upper bound fits the *derived* slice, then rewritten as the corresponding
+root offset expression.  Returning, storing, rebinding, passing to an
+unknown operation, an out-of-range slice/index, or a non-byte write value
+retains checked semantics.  Any unknown `if` branch in a candidate body also
+retains checked semantics rather than joining provenance across paths.
+
+The analysis canonicalizes both the public pointer primitives and nl-safe's
+compiler-macro-expanded `nl-safe--ptr-{ref,set}-u8` spellings.  This avoids a
+load-order-dependent escape classification when nl-safe has already loaded.
+The compiler regression now has 211 passing tests, including nested-slice
+read/write, escape, derived-loop proof, and derived-loop overrun rejection.
+
+`make neln-loader-test` now executes 20 fixtures with zero failures; the new
+`fat-derived` and `fat-derived-loop` cases cover nested derived read/write and
+the raw loop-index path.  `make nl-safe-native-bench` adds the derived-slice
+checked/plain pair.  On the final run (N=2000, best of seven): borrow
+`1479.0/1516.0 ns = 0.98x <= 1.15x`, direct fat pointer
+`1318.1/1353.5 ns = 0.97x <= 1.20x`, and derived fat-pointer loop
+`1357.0/1329.1 ns = 1.02x <= 1.20x`; all gates passed.
+
+---
+
+## 9. Intra-unit calls do not establish the callee's boundary (2026-08-17)
+
+A `.neln` with more than one defun runs until the callee touches a
+boundary slot, then faults. Reduced:
+
+```elisp
+(defun bp-probe (n) (aref (vector 41 42 43) n))
+(defun bp-outer (n) (bp-probe n))
+```
+
+`bp-probe` loaded and called directly answers 42. `bp-outer`, which calls
+it, faults. `pair` (a callee that touches no boundary slot) runs fine, so
+intra-unit calls themselves are not the problem.
+
+The caller passes one argument and nothing else:
+
+```asm
+bp-outer:
+   4: push rdi                ; spill n
+   c: sub  rsp,0x90
+  21: mov  rdi,[rbp-0x8]      ; rdi = n
+  25: call -637               ; -> bp-probe + 0  (its prologue)
+```
+
+and the callee reads a boundary slot nobody filled:
+
+```asm
+bp-probe:
+   4: push rdi                ; spills n only
+  2c: mov  rax,[rbp-0x30]     ; slot 5 = name_slot -- never initialised
+  4c: call nl_alloc_symbol    ; writes through it
+```
+
+So the boundary is established **only by the loader's trampoline**, which
+fills slots `arity..arity+16` and enters at `body-offset`. A normal call
+enters at offset 0 and gets uninitialised stack in those slots. Nothing
+in the unit establishes them.
+
+Three ways out, in decreasing order of preference:
+
+- **(a) each defun's prologue establishes its own boundary.** Self
+  contained, the caller needs no change, and the AOT already emits
+  `(alloc-bytes 32 8)` for Sexp slots. Costs an allocation per call.
+- **(b) a second entry point** that establishes the boundary and falls
+  into the body; normal calls enter there, the trampoline keeps entering
+  at `body-offset`. Same work as (a), emitted elsewhere.
+- **(c) pass the boundary as real hidden parameters.** Touches every
+  defun's signature.
+
+Note for whoever picks this up: two earlier readings of this same fault
+were wrong, both from disassembling without pinning down which function
+the bytes belonged to. Slice by the manifest's `:offset` / `:size`, and
+check a call's displacement arithmetic against the manifest rather than
+eyeballing it. `§4.4` has the recipe.
+
+Until this is fixed, a benchmark or fixture that needs helper functions
+has to inline them into one defun -- which is what
+`scripts/nl-safe-native-bench-fixtures.el` does, and says so.
