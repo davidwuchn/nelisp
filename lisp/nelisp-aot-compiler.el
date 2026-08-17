@@ -291,6 +291,25 @@ through it therefore resolves ordinary Elisp functions and leaves the
 unit's extern set closed over the C runtime symbols, which is what a
 dynamic loader can bridge.")
 
+(defvar nelisp-aot-compiler--native-vector-primitives nil
+  "Non-nil lowers proven vector-only `aref' and `aset' calls natively.
+
+This is deliberately opt-in while source type facts are not yet carried
+through the general object compiler: `aref' also accepts strings and other
+arrays, whereas the native IR is specifically a NeLisp vector operation.
+The nl-safe AOT fixture binds it after establishing vector-only inputs.")
+
+(defvar nelisp-aot-compiler--aot-borrow-check-elision nil
+  "Non-nil recognizes a provably fresh `nl-with-borrow' source form.
+
+The current proof is intentionally narrow: one lexical binding initialized
+by a syntactic `vector', used only as the borrow operand and never mentioned
+by the borrow body.  It lowers to `aot-with-fresh-shared-borrow'; all other
+borrows retain their ordinary checked semantics.")
+
+(defvar nelisp-aot-compiler--aot-fat-pointer-check-elision nil
+  "Non-nil lowers statically safe fresh `nl-ptr-ref-u8' forms to raw IR.")
+
 (defconst nelisp-aot-compiler--dynamic-calln-max-args 8
   "User arguments a calln call may carry when lowering for dynamic load.
 The standalone reader's `nelisp_aot_builtin_calln' provider reads the
@@ -308,6 +327,7 @@ build time.")
     if while cond and or let let*
     catch condition-case unwind-protect
     throw signal error setq setq-default
+    aot-with-fresh-shared-borrow
     defun write static-imm32-table-define exit data-blob)
   "Form heads that must not be treated as object-mode external calls.")
 
@@ -759,6 +779,52 @@ at its kind-fixed offset since per-kind layout is constant."
       (setq i (+ i 2)))
     result))
 
+(defsubst nelisp-aot-compiler--ir-repr (node)
+  "Return NODE's runtime value representation.
+
+`raw-i64' denotes machine integers used by arithmetic and loop control;
+`raw-ptr' denotes an unboxed byte address, which must never be offered to
+the Sexp dispatcher; `sexp-ptr' denotes an address of a 32-byte Sexp slot
+accepted by the runtime dispatcher.  New lowering must set this explicitly at every
+representation boundary; the temporary fallback documents legacy IR
+nodes while their constructors are migrated."
+  (or (nelisp-aot-compiler--ir-get node :repr)
+      (let ((kind (nelisp-aot-compiler--ir-kind node)))
+        (cond
+         ((memq kind '(imm arith cmp sexp-int-unwrap
+                           ptr-read-u8 ptr-read-u16 ptr-read-u32 ptr-read-u64
+                           ptr-write-u8 ptr-write-u16 ptr-write-u32 ptr-write-u64))
+          'raw-i64)
+         ;; A byte pointer shares GP registers with an integer but has a
+         ;; different consumer contract: dispatcher arguments must not box it
+         ;; as a tagged integer.  `alloc-bytes' is also used for Sexp storage,
+         ;; but that storage is passed directly to native helpers, never as a
+         ;; dispatcher value, so the pointer representation is still correct.
+         ((memq kind '(alloc-bytes addr-of data-addr)) 'raw-ptr)
+         ((memq kind '(sexp-int-make)) 'sexp-ptr)
+         ((memq kind '(let-rt let-rt-n let))
+          (nelisp-aot-compiler--ir-repr
+           (nelisp-aot-compiler--ir-get node :body)))
+         ((eq kind 'value-seq)
+          (let ((forms (nelisp-aot-compiler--ir-get node :forms)))
+            (if forms (nelisp-aot-compiler--ir-repr (car (last forms))) 'unknown)))
+         ((eq kind 'setq-local)
+          (nelisp-aot-compiler--ir-repr
+           (nelisp-aot-compiler--ir-get node :value-ir)))
+         (t 'unknown)))))
+
+(defun nelisp-aot-compiler--ir-as-raw-i64 (node)
+  "Return NODE in the raw-i64 representation required by native math.
+
+Dispatcher calls return a pointer to a boxed Sexp result slot.  Native
+arithmetic and comparisons, however, operate on raw machine integers.
+Keep that conversion at the consumer boundary so a local `setq' can
+faithfully retain either representation in its frame slot."
+  (if (eq (nelisp-aot-compiler--ir-repr node) 'sexp-ptr)
+      (nelisp-aot-compiler--make-ir 'sexp-int-unwrap
+            :ptr node :repr 'raw-i64)
+    node))
+
 (defconst nelisp-aot-compiler--ir-kind-tags
   '((alloc-bytes . 0)
     (addr-of . 97)
@@ -1011,7 +1077,17 @@ START-SLOT is the first reserved frame slot after source parameters."
           (extra nil))
       (dolist (sym nelisp-aot-compiler--object-hidden-boundary-symbols)
         (unless (assq sym fenv)
-          (push (cons sym (list :slot slot :class 'gp :root-p t)) extra)
+          (push (cons sym (list :slot slot :class 'gp :root-p t
+                                :repr (if (memq sym '(out scratch name_slot
+                                                        callback-slot-0 callback-slot-1
+                                                        callback-slot-2 callback-slot-3
+                                                        callback-slot-4 callback-slot-5
+                                                        callback-slot-6 callback-slot-7
+                                                        callback-slot-8 callback-slot-9
+                                                        callback-slot-10 callback-slot-11))
+                                          'sexp-ptr
+                                        'raw-i64)))
+                extra)
           (setq slot (1+ slot))))
       (let ((count (length extra)))
         (list :fenv (append (nreverse extra) fenv)
@@ -1277,7 +1353,8 @@ extend FENV only for BODY.  PARSE-BODY-FN is either
                        (val-ir (nelisp-aot-compiler--parse-value
                                 val-sexp env fenv defuns)))
                   (push (list var slot val-ir root-p) rt-bindings)
-                  (push (cons var (list :slot slot :class 'gp :root-p root-p))
+                  (push (cons var (list :slot slot :class 'gp :root-p root-p
+                                        :repr (nelisp-aot-compiler--ir-repr val-ir)))
                         new-fenv)))))
           (let ((body-ir (funcall parse-body-fn body-sexp new-env new-fenv defuns)))
             (if rt-bindings
@@ -1523,11 +1600,20 @@ boxed into caller-owned Sexp slots when a boxed AOT boundary exists."
                   (list :aot-literal-boundary-missing
                         '(out scratch)
                         :form form)))
-        (let ((write-forms
-               (nelisp-aot-compiler--top-level-literal-write-forms
-                out (cdr literal) scratch 0)))
-          (when write-forms
-            `(seq ,@write-forms ,out)))))))
+        ;; Do not materialize a value literal in OUT.  A runtime `let'
+        ;; stores the returned pointer verbatim in its frame slot; OUT is
+        ;; the shared boundary result slot and the next delegated builtin
+        ;; call overwrites it.  A vector bound as `(let ((v (vector ...)))
+        ;; ...)` would consequently stop being a vector after an `aset',
+        ;; `aref', or any other calln call.  Give each literal its own
+        ;; 32-byte arena slot so the binding remains a stable Sexp view.
+        (let ((slot (nelisp-aot-compiler--gensym "aot-literal-slot")))
+          (let ((write-forms
+                 (nelisp-aot-compiler--top-level-literal-write-forms
+                  slot (cdr literal) scratch 0)))
+            (when write-forms
+              `(let ((,slot (alloc-bytes 32 8)))
+                 (seq ,@write-forms ,slot)))))))))
 
 (defun nelisp-aot-compiler--runtime-boxed-sexp-form (form fenv)
   "Return FORM rewritten to produce a boxed Sexp pointer when needed.
@@ -3788,6 +3874,450 @@ OUT."
                        ,mirror ,frames ,name-slot ,arg ,out ,scratch)
           ,out)))))
 
+(defun nelisp-aot-compiler--form-mentions-symbol-p (form symbol)
+  "Return non-nil when executable FORM mentions SYMBOL.
+
+Quoted data is not executable and does not make a fresh borrow cell escape.
+This deliberately errs on the conservative side for every other form."
+  (cond
+   ((eq form symbol) t)
+   ((atom form) nil)
+   ((eq (car form) 'quote) nil)
+   (t (or (nelisp-aot-compiler--form-mentions-symbol-p (car form) symbol)
+          (nelisp-aot-compiler--form-mentions-symbol-p (cdr form) symbol)))))
+
+(defun nelisp-aot-compiler--form-has-head-p (form heads)
+  "Return non-nil when executable FORM contains a head in HEADS."
+  (cond
+   ((atom form) nil)
+   ((eq (car form) 'quote) nil)
+   ((memq (car form) heads) t)
+   (t (or (nelisp-aot-compiler--form-has-head-p (car form) heads)
+          (nelisp-aot-compiler--form-has-head-p (cdr form) heads)))))
+
+(defun nelisp-aot-compiler--borrow-state-observed-p (body cell)
+  "Return non-nil when BODY reads or writes CELL's borrow-state slot."
+  (cond
+   ((atom body) nil)
+   ((eq (car body) 'quote) nil)
+   ((and (memq (car body) '(aref aset))
+         (eq (nth 1 body) cell) (equal (nth 2 body) 2)) t)
+   ((and (memq (car body)
+               '(nl-safe--borrow-shared nl-safe--borrow-mut
+                 nl-safe--release-shared nl-safe--release-mut
+                 nl-safe--borrow-state-kind nl-cell-set))
+         (memq cell (cdr body))) t)
+   (t (or (nelisp-aot-compiler--borrow-state-observed-p (car body) cell)
+          (nelisp-aot-compiler--borrow-state-observed-p (cdr body) cell)))))
+
+(defun nelisp-aot-compiler--fresh-cell-init-p (init)
+  "Return non-nil when INIT constructs a borrow cell, not merely a vector.
+
+`nl-with-borrow' type-checks before it borrows -- `nl-safe--borrow-shared'
+calls `nl-safe--cell-check', which signals `nl-type-error' unless
+`nl-cell-p' holds.  Eliding the borrow elides that check with it, so
+accepting any `(vector ...)' here turns a program that must signal into one
+that silently succeeds:
+
+  (let ((c (vector 1 (vector 7 8 9) 0))) (nl-with-borrow (v c) (aref v 0)))
+
+signals `nl-type-error' when run, because element 0 is not `nl--cell'.
+Only a shape that `nl-cell-p' would accept is eligible, and the state slot
+has to be a literal 0 -- an unborrowed cell is what makes the state check
+provable, and a non-literal is not provable at all."
+  (and (consp init)
+       (or
+        ;; (nl-cell VALUE)
+        (and (eq (car init) 'nl-cell) (= (length init) 2))
+        ;; (vector 'nl--cell VALUE 0)
+        (and (eq (car init) 'vector)
+             (= (length init) 4)
+             (equal (nth 1 init) '(quote nl--cell))
+             (equal (nth 3 init) 0)))))
+
+(defun nelisp-aot-compiler--fresh-shared-borrow-analysis (sexp)
+  "Classify whether SEXP may elide a fresh shared borrow.
+
+The result is a plist with `:eligible' and a diagnostic `:reason'.  This is
+intentionally conservative: the first implementation accepts exactly one
+fresh vector binding and one direct `nl-with-borrow'.  Any reference to the
+cell in the body is an escape unless it is a detected state observation;
+branches, cleanup, and nested borrows are separately reported and retained."
+  (let ((base (list :eligible nil :reason :not-candidate)))
+    (if (not (and (consp sexp) (eq (car sexp) 'let)
+                  (= (length sexp) 3)
+                  (consp (nth 1 sexp)) (= (length (nth 1 sexp)) 1)))
+        base
+      (let* ((binding (car (nth 1 sexp)))
+             (borrow (nth 2 sexp)))
+        (if (not (and (consp binding) (= (length binding) 2)
+                      (symbolp (car binding))))
+            base
+          (let ((cell (car binding)) (init (cadr binding)))
+            (cond
+             ((not (nelisp-aot-compiler--fresh-cell-init-p init))
+              (list :eligible nil :reason :nonfresh-init :cell cell))
+             ((and (consp borrow) (eq (car borrow) 'nl-with-borrow-mut))
+              (list :eligible nil :reason :exclusive-borrow :cell cell))
+             ((not (and (consp borrow) (eq (car borrow) 'nl-with-borrow)
+                        (>= (length borrow) 3)))
+              (list :eligible nil :reason :multiple-path :cell cell))
+             (t
+              (let ((spec (nth 1 borrow)) (body (cddr borrow)))
+                (cond
+                 ((not (and (consp spec) (= (length spec) 2)
+                            (symbolp (car spec)) (eq (cadr spec) cell)))
+                  (list :eligible nil :reason :borrow-target :cell cell))
+                 ((nelisp-aot-compiler--borrow-state-observed-p body cell)
+                  (list :eligible nil :reason :state-observed :cell cell))
+                 ((nelisp-aot-compiler--form-has-head-p
+                   body '(unwind-protect condition-case catch throw signal))
+                  (list :eligible nil :reason :exceptional-control :cell cell))
+                 ((nelisp-aot-compiler--form-has-head-p
+                   body '(nl-with-borrow nl-with-borrow-mut))
+                  (list :eligible nil :reason :nested-borrow :cell cell))
+                 ((nelisp-aot-compiler--form-mentions-symbol-p body cell)
+                  (list :eligible nil :reason :cell-escape :cell cell))
+                 (t (list :eligible t :reason :fresh-nonescaping
+                          :cell cell :init init :var (car spec) :body body))))))))))))
+
+(defun nelisp-aot-compiler--fresh-shared-borrow-source-form (sexp)
+  "Return a checked-borrow-elided form for eligible SEXP, or nil."
+  (when nelisp-aot-compiler--aot-borrow-check-elision
+    (let ((analysis (nelisp-aot-compiler--fresh-shared-borrow-analysis sexp)))
+      (when (plist-get analysis :eligible)
+        `(aot-with-fresh-shared-borrow
+          ,(plist-get analysis :init) ,(plist-get analysis :var)
+          ,(nelisp-aot-compiler--body->form (plist-get analysis :body)))))))
+
+(defun nelisp-aot-compiler--fat-pointer-loop-step-p (form var)
+  "Return non-nil when FORM is the sole canonical increment of VAR."
+  (equal form `(setq ,var (+ ,var 1))))
+
+(defun nelisp-aot-compiler--fat-pointer-sets-var-p (form var)
+  "Return non-nil when FORM assigns VAR outside a recognized loop step."
+  (cond
+   ((atom form) nil)
+   ((eq (car form) 'quote) nil)
+   ((and (eq (car form) 'setq) (eq (nth 1 form) var)) t)
+   (t (or (nelisp-aot-compiler--fat-pointer-sets-var-p (car form) var)
+          (nelisp-aot-compiler--fat-pointer-sets-var-p (cdr form) var)))))
+
+(defun nelisp-aot-compiler--fresh-fat-pointer-direct-slice-offset (form ptr size)
+  "Return FORM's literal slice base offset into PTR, or nil.
+
+Only a direct, literal, in-parent-range slice is eligible.  Binding the slice
+to another variable is deliberately left to the alias analysis rather than
+being mistaken for this non-escaping form."
+  (when (and (consp form) (eq (car form) 'nl-ptr-slice)
+             (= (length form) 4) (eq (nth 1 form) ptr)
+             (integerp (nth 2 form)) (integerp (nth 3 form))
+             (<= 0 (nth 2 form)) (<= 0 (nth 3 form))
+             (<= (+ (nth 2 form) (nth 3 form)) size))
+    (cons (nth 2 form) (nth 3 form))))
+
+(defvar nelisp-aot-compiler--fat-pointer-normalize-loop-bounds nil
+  "Dynamically scoped induction-variable maxima during slice normalization.")
+
+(defun nelisp-aot-compiler--fat-pointer-normalize-derived-slices (form root ranges size)
+  "Inline non-escaping derived pointer bindings in FORM.
+
+RANGES maps a pointer symbol to (BASE . LENGTH), relative to ROOT.  A slice
+binding is removed only when every use is another slice or an u8 read/write;
+all other uses return nil, making the caller retain checked semantics."
+  (cond
+   ;; RANGES deliberately excludes ROOT.  ROOT remains a normal pointer in
+   ;; the surrounding form; only a derived binding is forbidden to escape.
+   ((atom form) (if (assq form ranges) nil form))
+   ((eq (car form) 'quote) form)
+   ;; A pointer use under an unknown branch is deliberately not path-proven.
+   ;; Keep the checked implementation rather than trying to join provenance.
+   ((eq (car form) 'if) nil)
+   ((memq (car form) '(nl-ptr-ref-u8 nl-ptr-set-u8
+                       nl-safe--ptr-ref-u8 nl-safe--ptr-set-u8))
+    ;; nl-safe exposes these as compiler macros.  Analyze their expanded
+    ;; spelling exactly like the public operations, then emit the canonical
+    ;; primitive so the raw rewrite remains independent of macro load order.
+    (let* ((op (pcase (car form)
+                 ('nl-safe--ptr-ref-u8 'nl-ptr-ref-u8)
+                 ('nl-safe--ptr-set-u8 'nl-ptr-set-u8)
+                 (other other)))
+           (p (nth 1 form)) (range (assq p ranges)))
+      (if (not range)
+          (let ((a (nelisp-aot-compiler--fat-pointer-normalize-derived-slices
+                    p root ranges size))
+                (b (nelisp-aot-compiler--fat-pointer-normalize-derived-slices
+                    (nth 2 form) root ranges size)))
+            (and a b (append (list op a b) (nthcdr 3 form))))
+        (let* ((desc (cdr range)) (base (car desc)) (len (cdr desc))
+               (offset (nth 2 form)))
+          (when (and (or (eq op 'nl-ptr-ref-u8)
+                         (and (integerp (nth 3 form))
+                              (<= 0 (nth 3 form) 255)))
+                     (or (and (integerp offset) (<= 0 offset) (< offset len))
+                         (and (symbolp offset)
+                              (let ((bound (assq offset nelisp-aot-compiler--fat-pointer-normalize-loop-bounds)))
+                                (and bound (<= (cdr bound) (1- len)))))))
+            (append (list op root
+                          (if (integerp offset) (+ base offset) `(+ ,base ,offset)))
+                    (nthcdr 3 form)))))))
+   ((eq (car form) 'while)
+    ;; A derived pointer indexed by I is safe only if this loop's literal
+    ;; upper bound is within the derived slice.  The body analysis below also
+    ;; proves I's initializer and monotone step before accepting the rewrite.
+    (let ((condition (nth 1 form)))
+      (if (and (consp condition) (eq (car condition) '<)
+               (symbolp (nth 1 condition)) (integerp (nth 2 condition))
+               (<= 0 (nth 2 condition)))
+          (let ((nelisp-aot-compiler--fat-pointer-normalize-loop-bounds
+                 (cons (cons (nth 1 condition) (1- (nth 2 condition)))
+                       nelisp-aot-compiler--fat-pointer-normalize-loop-bounds)))
+            (let ((items (mapcar (lambda (x)
+                                   (nelisp-aot-compiler--fat-pointer-normalize-derived-slices
+                                    x root ranges size))
+                                 form)))
+              (and (not (memq nil items)) items)))
+        nil)))
+   ((eq (car form) 'let)
+    (let ((bindings (nth 1 form)))
+      (if (= (length bindings) 1)
+          (let* ((binding (car bindings)) (var (car binding)) (init (cadr binding))
+               (parent (and (consp init) (eq (car init) 'nl-ptr-slice)
+                            (or (assq (nth 1 init) ranges)
+                                (and (eq (nth 1 init) root)
+                                     (cons root (cons 0 size)))))))
+          (if parent
+              (let* ((start (nth 2 init)) (len (nth 3 init))
+                     (desc (cdr parent)))
+                (if (not (and (symbolp var) (integerp start) (integerp len)
+                              (<= 0 start) (<= 0 len) (<= (+ start len) (cdr desc))))
+                    nil
+                  (let ((body (mapcar (lambda (x)
+                                        (nelisp-aot-compiler--fat-pointer-normalize-derived-slices
+                                         x root (cons (cons var
+                                                             (cons (+ (car desc) start) len))
+                                                       ranges)
+                                         size))
+                                      (nthcdr 2 form))))
+                    (and (not (memq nil body))
+                         (nelisp-aot-compiler--body->form body)))))
+            ;; Non-derived bindings may not capture a known pointer.
+            (let ((init* (nelisp-aot-compiler--fat-pointer-normalize-derived-slices
+                          init root ranges size))
+                  (body (mapcar (lambda (x)
+                                  (nelisp-aot-compiler--fat-pointer-normalize-derived-slices
+                                   x root ranges size))
+                                (nthcdr 2 form))))
+              (and init* (not (memq nil body))
+                   `(let ((,var ,init*)) ,@body)))))
+        ;; Ordinary LETs are preserved.  They may contain loop counters and
+        ;; accumulators, but cannot introduce a derived pointer binding here.
+        (let ((bindings* (mapcar
+                          (lambda (binding)
+                            (let ((init* (nelisp-aot-compiler--fat-pointer-normalize-derived-slices
+                                          (cadr binding) root ranges size)))
+                              (and init* (list (car binding) init*))))
+                          bindings))
+              (body (mapcar (lambda (x)
+                              (nelisp-aot-compiler--fat-pointer-normalize-derived-slices
+                               x root ranges size))
+                            (nthcdr 2 form))))
+          (and (not (memq nil bindings*)) (not (memq nil body))
+               `(let ,bindings* ,@body))))))
+   (t
+    ;; A proper form list ends in nil, which is also the failure sentinel.
+    ;; Normalize its elements instead of recursively normalizing the cdr.
+    (let ((items (mapcar (lambda (x)
+                           (nelisp-aot-compiler--fat-pointer-normalize-derived-slices
+                            x root ranges size))
+                         form)))
+      (and (not (memq nil items)) items)))))
+
+(defun nelisp-aot-compiler--fresh-fat-pointer-body-analysis (body ptr size)
+  "Classify PTR uses in BODY under a fresh static allocation of SIZE bytes.
+
+Every executable PTR occurrence must be a literal in-range access, or an
+access indexed by the canonical monotone loop proof `(while (< I LIMIT) ...
+(setq I (+ I 1)))', where I has a non-negative literal initializer and
+LIMIT is within SIZE.  Passing, storing, rebinding, or otherwise escaping PTR
+remains ineligible.  Returning the count avoids changing a dead allocation."
+  (let ((reads 0)
+        (reason nil))
+    (cl-labels
+        ((walk
+          (form bounds initializers)
+          (cond
+           ((eq form ptr) (setq reason :pointer-escape))
+           ((atom form) nil)
+           ((eq (car form) 'quote) nil)
+           ((memq (car form) '(nl-safe--ptr-ref-u8 nl-safe--ptr-set-u8))
+            (walk (cons (if (eq (car form) 'nl-safe--ptr-ref-u8)
+                            'nl-ptr-ref-u8
+                          'nl-ptr-set-u8)
+                        (cdr form))
+                  bounds initializers))
+           ((memq (car form) '(nl-ptr-ref-u8 nl-ptr-set-u8))
+            (cond
+             ((not (= (length form)
+                      (if (eq (car form) 'nl-ptr-ref-u8) 3 4)))
+              (setq reason :pointer-escape))
+             ((let ((slice (nelisp-aot-compiler--fresh-fat-pointer-direct-slice-offset
+                            (nth 1 form) ptr size)))
+                (when slice
+                  (if (and (or (eq (car form) 'nl-ptr-ref-u8)
+                               (and (integerp (nth 3 form))
+                                    (<= 0 (nth 3 form) 255)))
+                           (integerp (nth 2 form))
+                           (<= 0 (nth 2 form) (1- (cdr slice))))
+                      (setq reads (1+ reads))
+                    (setq reason (if (and (eq (car form) 'nl-ptr-set-u8)
+                                          (not (integerp (nth 3 form))))
+                                     :dynamic-write-value
+                                   :out-of-bounds)))
+                  t)))
+             ((not (eq (nth 1 form) ptr))
+              (walk (nth 1 form) bounds initializers)
+              (walk (nth 2 form) bounds initializers))
+             ((and (eq (car form) 'nl-ptr-set-u8)
+                   (not (and (integerp (nth 3 form))
+                             (<= 0 (nth 3 form) 255))))
+              (setq reason :dynamic-write-value))
+             ((and (integerp (nth 2 form))
+                   (not (<= 0 (nth 2 form) (1- size))))
+              (setq reason :out-of-bounds))
+             ((and (symbolp (nth 2 form))
+                   (assq (nth 2 form) bounds))
+              (setq reads (1+ reads)))
+             ((let ((offset (nth 2 form)))
+                (and (consp offset) (eq (car offset) '+)
+                     (= (length offset) 3)
+                     (integerp (nth 1 offset))
+                     (symbolp (nth 2 offset))
+                     (let ((bound (assq (nth 2 offset) bounds)))
+                       (and bound (<= 0 (nth 1 offset))
+                            (<= (+ (nth 1 offset) (cdr bound)) (1- size))))))
+              (setq reads (1+ reads)))
+             ((not (integerp (nth 2 form))) (setq reason :dynamic-offset))
+             (t (setq reads (1+ reads)))))
+           ((eq (car form) 'let)
+            (let ((next initializers))
+              (dolist (binding (nth 1 form))
+                (when (and (consp binding) (symbolp (car binding))
+                           (integerp (cadr binding)))
+                  (push (cons (car binding) (cadr binding)) next)))
+              (dolist (sub (nthcdr 2 form)) (walk sub bounds next))))
+           ((eq (car form) 'while)
+            (let* ((condition (nth 1 form))
+                   (var (nth 1 condition))
+                   (limit (nth 2 condition))
+                   (loop-body (nthcdr 2 form))
+                   (step (car (last loop-body)))
+                   (prefix (butlast loop-body)))
+              (if (and (consp condition) (eq (car condition) '<) (symbolp var)
+                       (integerp limit) (<= limit size)
+                       (let ((init (assq var initializers)))
+                         (and init (>= (cdr init) 0)))
+                       (nelisp-aot-compiler--fat-pointer-loop-step-p step var)
+                       (not (nelisp-aot-compiler--fat-pointer-sets-var-p
+                             prefix var)))
+                  (dolist (sub prefix)
+                    (walk sub (cons (cons var (1- limit)) bounds) initializers))
+                ;; A loop whose induction range is not a pointer range can
+                ;; still contain literal accesses.  Walk it normally; a
+                ;; dynamic access will then set :dynamic-offset itself.
+                (dolist (sub loop-body) (walk sub bounds initializers)))))
+           (t (walk (car form) bounds initializers)
+              (walk (cdr form) bounds initializers)))))
+      (walk body nil nil))
+    (cond
+     (reason (list :eligible nil :reason reason :reads reads))
+     ((zerop reads) (list :eligible nil :reason :pointer-escape :reads 0))
+     (t (list :eligible t :reason :fresh-static-bounds :reads reads)))))
+
+(defun nelisp-aot-compiler--fresh-fat-pointer-rewrite (form ptr)
+  "Replace proven checked PTR reads and writes in FORM with raw operations."
+  (cond
+   ((atom form) form)
+   ((eq (car form) 'quote) form)
+   ((memq (car form) '(nl-safe--ptr-ref-u8 nl-safe--ptr-set-u8))
+    (nelisp-aot-compiler--fresh-fat-pointer-rewrite
+     (cons (if (eq (car form) 'nl-safe--ptr-ref-u8)
+               'nl-ptr-ref-u8
+             'nl-ptr-set-u8)
+           (cdr form))
+     ptr))
+   ((and (eq (car form) 'nl-ptr-ref-u8) (eq (nth 1 form) ptr))
+    `(ptr-read-u8 ,ptr ,(nth 2 form)))
+   ((and (eq (car form) 'nl-ptr-set-u8) (eq (nth 1 form) ptr))
+    `(ptr-write-u8 ,ptr ,(nth 2 form) ,(nth 3 form)))
+   ((and (memq (car form) '(nl-ptr-ref-u8 nl-ptr-set-u8))
+         (let ((slice (nelisp-aot-compiler--fresh-fat-pointer-direct-slice-offset
+                       (nth 1 form) ptr most-positive-fixnum)))
+           (when slice
+             (if (eq (car form) 'nl-ptr-ref-u8)
+                 `(ptr-read-u8 ,ptr ,(+ (car slice) (nth 2 form)))
+               `(ptr-write-u8 ,ptr ,(+ (car slice) (nth 2 form)) ,(nth 3 form)))))))
+   (t (cons (nelisp-aot-compiler--fresh-fat-pointer-rewrite (car form) ptr)
+            (nelisp-aot-compiler--fresh-fat-pointer-rewrite (cdr form) ptr)))))
+
+(defun nelisp-aot-compiler--fresh-fat-pointer-analysis (sexp)
+  "Classify a fresh, statically bounded `nl-ptr-ref-u8' source form.
+
+This is the eligibility half of the Doc 170 20%% AOT path.  Native lowering
+may remove type/bounds/generation checks only when the pointer is minted from
+one `alloc-bytes' or a static `data-addr', has a literal length and
+generation, and every executable use is a literal in-range read.  This
+permits a loop containing such reads while retaining checks for pointer
+escape, aliasing, and dynamic bounds."
+  (let ((base (list :eligible nil :reason :not-candidate)))
+    (if (not (and (consp sexp) (eq (car sexp) 'let) (>= (length sexp) 3)
+                  (consp (nth 1 sexp)) (= (length (nth 1 sexp)) 1)))
+        base
+      (let ((binding (car (nth 1 sexp))))
+        (if (not (and (consp binding) (= (length binding) 2)
+                      (symbolp (car binding))))
+            base
+          (let* ((ptr (car binding)) (init (cadr binding)))
+            (cond
+             ((not (and (consp init) (eq (car init) 'nl-ptr-make)
+                        (= (length init) 4)))
+              (list :eligible nil :reason :nonfresh-pointer :ptr ptr))
+             ((not (and (or (and (consp (nth 1 init))
+                                  (eq (car (nth 1 init)) 'alloc-bytes)
+                                  (= (length (nth 1 init)) 3))
+                             (and (consp (nth 1 init))
+                                  (eq (car (nth 1 init)) 'data-addr)
+                                  (= (length (nth 1 init)) 2)
+                                  (symbolp (nth 1 (nth 1 init)))))
+                        (integerp (nth 2 init)) (>= (nth 2 init) 0)
+                        (equal (nth 3 init) 0)))
+              (list :eligible nil :reason :dynamic-pointer-metadata :ptr ptr))
+             (t
+              (let ((body (let ((nelisp-aot-compiler--fat-pointer-normalize-loop-bounds nil))
+                            (mapcar
+                           (lambda (form)
+                             (nelisp-aot-compiler--fat-pointer-normalize-derived-slices
+                             form ptr nil (nth 2 init)))
+                           (cdr (cdr sexp))))))
+                (if (memq nil body)
+                    (list :eligible nil :reason :pointer-escape :ptr ptr)
+                  (let ((uses (nelisp-aot-compiler--fresh-fat-pointer-body-analysis
+                               body ptr (nth 2 init))))
+                    (append uses (list :ptr ptr :base (nth 1 init)
+                                      :body body)))))))))))))
+
+(defun nelisp-aot-compiler--fresh-fat-pointer-source-form (sexp)
+  "Return raw-pointer IR source for an eligible checked fat-pointer read."
+  (when nelisp-aot-compiler--aot-fat-pointer-check-elision
+    (let ((analysis (nelisp-aot-compiler--fresh-fat-pointer-analysis sexp)))
+      (when (plist-get analysis :eligible)
+        `(let ((,(plist-get analysis :ptr) ,(plist-get analysis :base)))
+           ,@(mapcar
+              (lambda (form)
+                (nelisp-aot-compiler--fresh-fat-pointer-rewrite
+                 form (plist-get analysis :ptr)))
+              (plist-get analysis :body)))))))
+
 (defun nelisp-aot-compiler--preprocess-source (sexp)
   "Macroexpand and normalize SEXP before AOT parsing.
 This is Doc 129.1's host-frontend step.  It deliberately preserves
@@ -3800,6 +4330,12 @@ the whole program."
    ((null sexp) 0)
    ((atom sexp) sexp)
    ((eq (car sexp) 'quote) sexp)
+   ((nelisp-aot-compiler--fresh-fat-pointer-source-form sexp)
+    (nelisp-aot-compiler--preprocess-source
+     (nelisp-aot-compiler--fresh-fat-pointer-source-form sexp)))
+   ((nelisp-aot-compiler--fresh-shared-borrow-source-form sexp)
+    (nelisp-aot-compiler--preprocess-source
+     (nelisp-aot-compiler--fresh-shared-borrow-source-form sexp)))
    ((and (eq (car sexp) 'defvar) (= (length sexp) 2))
     'nelisp-aot--top-level-noop)
    ((nelisp-aot-compiler--lambda-literal-form sexp)
@@ -4574,6 +5110,28 @@ caller-owned boundary params in the current defun:
            ,out))
        env fenv defuns))))
 
+(defun nelisp-aot-compiler--aot-dispatcher-arg-form (form fenv)
+  "Return FORM in the Sexp-pointer representation required by calln.
+
+Only a known raw frame reference is converted here.  Unknown values keep
+the legacy path until their producer has been migrated to `:repr'; this
+avoids treating arbitrary native pointers as tagged integers."
+  (let ((info (and (symbolp form) (cdr (assq form fenv)))))
+    (if (or (eq (plist-get info :repr) 'raw-i64)
+            ;; The source-level arithmetic and comparison forms always
+            ;; yield raw i64 values.  They are not frame references, so
+            ;; FENV alone cannot describe their representation; box them
+            ;; before a calln dispatcher consumes the argument.
+            (and (consp form)
+                 (memq (car form)
+                       '(+ - * / mod logior logand logxor shl sar shr
+                         < > <= >= = /=)))
+            (integerp form))
+        (let ((slot (nelisp-aot-compiler--gensym "aot-dispatch-box")))
+          `(let ((,slot (alloc-bytes 32 8)))
+             (seq (sexp-int-make ,slot ,form) ,slot)))
+      form)))
+
 (defun nelisp-aot-compiler--parse-aot-builtinn-call
     (sexp env fenv defuns)
   "Lower a direct vararg builtin call SEXP through the AOT dispatcher."
@@ -4766,10 +5324,30 @@ caller-owned boundary params in the current defun:
            (call-args
             (mapcar
              (lambda (form)
+               (setq form (nelisp-aot-compiler--aot-dispatcher-arg-form
+                           form fenv))
                (if (memq form prewritten)
                    form
                  (let ((slot (nelisp-aot-compiler--gensym "aot-calln-arg")))
-                   (push (list (list slot :type 'sexp) form) bindings)
+                   ;; A nested delegated call returns the shared boundary
+                   ;; OUT pointer.  A later argument evaluation can overwrite
+                   ;; it before this call consumes it, so snapshot call forms
+                   ;; into an arena slot.  Bare references may still be raw
+                   ;; i64 locals (loop counters, for example), and must not
+                   ;; be handed to `nl_sexp_clone_into' as an address.
+                   (push
+                    (list (list slot :type 'sexp)
+                          (cond
+                           ((consp form)
+                              (let ((raw (nelisp-aot-compiler--gensym
+                                          "aot-calln-raw")))
+                                `(let ((,raw ,form)
+                                       (,slot (alloc-bytes 32 8)))
+                                   (seq (extern-call nl_sexp_clone_into
+                                                     ,raw ,slot)
+                                        ,slot))))
+                           (t form)))
+                    bindings)
                    slot)))
              lowered-args))
            (body `(seq
@@ -8168,6 +8746,7 @@ functions `((NAME . ARITY) ...)'."
                   :reg (plist-get info :reg)
                   :slot (plist-get info :slot)
                   :class (or (plist-get info :class) 'gp)
+                  :repr (or (plist-get info :repr) 'unknown)
                   :root-p (plist-get info :root-p)))
         (if (and nelisp-aot-compiler--allow-external-user-calls
                  (nelisp-aot-compiler--fenv-has-symbol-p fenv 'out)
@@ -8218,9 +8797,34 @@ functions `((NAME . ARITY) ...)'."
                (slot (plist-get (cdr pcell) :slot))
                (value-ir (nelisp-aot-compiler--parse-value
                           (cadr pairs) env fenv defuns)))
+          ;; A dispatcher result normally aliases the shared boundary OUT
+          ;; slot.  Storing that pointer in a local makes a later delegated
+          ;; call silently change the earlier `setq' value.  Give local Sexp
+          ;; assignments their own slot before the next call can reuse OUT.
+          (when (eq (nelisp-aot-compiler--ir-repr value-ir) 'sexp-ptr)
+            (let ((stable (nelisp-aot-compiler--gensym "aot-setq-stable")))
+              (setq value-ir
+                    (nelisp-aot-compiler--make-ir
+                     'value-seq :repr 'sexp-ptr
+                     :forms
+                     (list
+                      (nelisp-aot-compiler--parse-value
+                       `(let ((,stable (alloc-bytes 32 8)))
+                          (seq (extern-call nl_sexp_clone_into
+                                            ,(cadr pairs) ,stable)
+                               ,stable))
+                       env fenv defuns))))))
+          ;; FENV is parsed in evaluation order.  Keep the representation
+          ;; attached to the frame slot in sync so a later form in the same
+          ;; `seq' / loop body cannot treat a dispatcher result as the raw
+          ;; integer representation that occupied the slot initially.
+          (setcdr pcell
+                  (plist-put (cdr pcell) :repr
+                             (nelisp-aot-compiler--ir-repr value-ir)))
           (push (nelisp-aot-compiler--make-ir 'setq-local
                        :var var
                        :slot slot
+                       :repr (nelisp-aot-compiler--ir-repr value-ir)
                        :value-ir value-ir)
                 forms))
         (setq pairs (cddr pairs)))
@@ -8335,12 +8939,15 @@ functions `((NAME . ARITY) ...)'."
     (unless (= (length sexp) 3)
       (signal 'nelisp-aot-compiler-error
               (list :arith-arity (car sexp) sexp)))
-    (nelisp-aot-compiler--make-ir 'arith
-          :op (car sexp)
-          :a (nelisp-aot-compiler--parse-value
-              (nth 1 sexp) env fenv defuns)
-          :b (nelisp-aot-compiler--parse-value
+    (let ((a (nelisp-aot-compiler--parse-value
+              (nth 1 sexp) env fenv defuns))
+          (b (nelisp-aot-compiler--parse-value
               (nth 2 sexp) env fenv defuns)))
+      (nelisp-aot-compiler--make-ir 'arith
+            :op (car sexp)
+            :repr 'raw-i64
+            :a (nelisp-aot-compiler--ir-as-raw-i64 a)
+            :b (nelisp-aot-compiler--ir-as-raw-i64 b))))
    ;; Doc 110 §110.E.1 f64 arithmetic — flat binop form only
    ;; (`f64-add' / `f64-sub' / `f64-mul' / `f64-div').  Each arm
    ;; is `(f64-OP A B)' where A, B are themselves value-producing
@@ -8411,12 +9018,15 @@ functions `((NAME . ARITY) ...)'."
 	    (unless (= (length sexp) 3)
 	      (signal 'nelisp-aot-compiler-error
 	              (list :cmp-arity (car sexp) sexp)))
-    (nelisp-aot-compiler--make-ir 'cmp
-          :op (car sexp)
-          :a (nelisp-aot-compiler--parse-value
-              (nth 1 sexp) env fenv defuns)
-          :b (nelisp-aot-compiler--parse-value
+    (let ((a (nelisp-aot-compiler--parse-value
+              (nth 1 sexp) env fenv defuns))
+          (b (nelisp-aot-compiler--parse-value
               (nth 2 sexp) env fenv defuns)))
+      (nelisp-aot-compiler--make-ir 'cmp
+            :op (car sexp)
+            :repr 'raw-i64
+            :a (nelisp-aot-compiler--ir-as-raw-i64 a)
+            :b (nelisp-aot-compiler--ir-as-raw-i64 b))))
    ;; (if TEST THEN ELSE) — control-flow value form.
    ((and (consp sexp) (eq (car sexp) 'if))
     (unless (= (length sexp) 4)
@@ -8967,7 +9577,8 @@ functions `((NAME . ARITY) ...)'."
               (list :sexp-int-unwrap-arity sexp)))
     (nelisp-aot-compiler--make-ir 'sexp-int-unwrap
           :ptr (nelisp-aot-compiler--parse-value
-                (nth 1 sexp) env fenv defuns)))
+                (nth 1 sexp) env fenv defuns)
+          :repr 'raw-i64))
    ((and (consp sexp) (eq (car sexp) 'sexp-int-make))
     (unless (= (length sexp) 3)
       (signal 'nelisp-aot-compiler-error
@@ -8976,7 +9587,8 @@ functions `((NAME . ARITY) ...)'."
           :slot (nelisp-aot-compiler--parse-value
                  (nth 1 sexp) env fenv defuns)
           :val (nelisp-aot-compiler--parse-value
-                (nth 2 sexp) env fenv defuns)))
+                (nth 2 sexp) env fenv defuns)
+          :repr 'sexp-ptr))
    ;; ---- Doc 101 §101.B Cons read ops ----
    ((and (consp sexp) (eq (car sexp) 'cons-null-p))
     (unless (= (length sexp) 2)
@@ -9086,6 +9698,7 @@ functions `((NAME . ARITY) ...)'."
       (signal 'nelisp-aot-compiler-error
               (list :vector-ref-arity sexp)))
     (nelisp-aot-compiler--make-ir 'vector-ref
+          :repr 'sexp-ptr
           :ptr (nelisp-aot-compiler--parse-value
                 (nth 1 sexp) env fenv defuns)
           :idx (nelisp-aot-compiler--parse-value
@@ -10171,6 +10784,49 @@ functions `((NAME . ARITY) ...)'."
    ;; slots; without them the direct relocation is still emitted, so a
    ;; unit compiled in this mode is only self-contained when every such
    ;; call site had the boundary available.
+   ;; Doc 170 §9 — vector-only AOT fast path.  Keep this behind the
+   ;; explicit proof-mode flag: source `aref' has broader Elisp array
+   ;; semantics, but the native `vector-ref' IR is refcount-safe and
+   ;; avoids the calln dispatcher for a known NeLisp vector.
+   ((and nelisp-aot-compiler--native-vector-primitives
+         (consp sexp) (eq (car sexp) 'aref) (= (length sexp) 3))
+    (let ((slot (nelisp-aot-compiler--gensym "aot-aref-slot")))
+      (nelisp-aot-compiler--parse-value
+       `(let ((,slot (alloc-bytes 32 8)))
+          (vector-ref ,(nth 1 sexp) ,(nth 2 sexp) ,slot))
+       env fenv defuns)))
+   ((and nelisp-aot-compiler--native-vector-primitives
+         (consp sexp) (eq (car sexp) 'aset) (= (length sexp) 4))
+    (let ((value (nelisp-aot-compiler--aot-dispatcher-arg-form
+                  (nth 3 sexp) fenv)))
+      ;; `vector-slot-set' has a truthy sequencing result; Elisp `aset'
+      ;; returns the assigned value, so retain VALUE as the value result.
+      (nelisp-aot-compiler--parse-value
+       `(seq (vector-slot-set ,(nth 1 sexp) ,(nth 2 sexp) ,value) ,value)
+       env fenv defuns)))
+   ;; A fresh cell has no aliases and its borrow state is necessarily zero.
+   ;; This is an internal post-analysis form: INIT is deliberately limited
+   ;; to a literal vector construction, and CELL never appears in BODY.
+   ;; Therefore acquiring/releasing a shared borrow has no observable effect;
+   ;; retain only the value-slot read that binds VAR.
+   ((and (consp sexp) (eq (car sexp) 'aot-with-fresh-shared-borrow))
+    (unless (= (length sexp) 4)
+      (signal 'nelisp-aot-compiler-error
+              (list :aot-fresh-shared-borrow-arity sexp)))
+    (let ((init (nth 1 sexp))
+          (var (nth 2 sexp))
+          (body (nth 3 sexp)))
+      (unless (and (consp init) (eq (car init) 'vector))
+        (signal 'nelisp-aot-compiler-error
+                (list :aot-fresh-shared-borrow-not-fresh init)))
+      (unless (symbolp var)
+        (signal 'nelisp-aot-compiler-error
+                (list :aot-fresh-shared-borrow-var var)))
+      (let ((cell (nelisp-aot-compiler--gensym "aot-fresh-cell")))
+        (nelisp-aot-compiler--parse-value
+         `(let ((,cell ,init))
+            (let ((,var (aref ,cell 1))) ,body))
+         env fenv defuns))))
    ((and nelisp-aot-compiler--allow-external-user-calls
          (consp sexp)
          (symbolp (car sexp))
@@ -10236,7 +10892,8 @@ functions `((NAME . ARITY) ...)'."
                    ;; Extend FENV: var → slot (gp class, no reg = not
                    ;; a param but loads via the same `ref' mechanism).
                    (new-fenv (cons (cons var (list :slot slot :class 'gp
-                                                   :root-p root-p))
+                                                   :root-p root-p
+                                                   :repr (nelisp-aot-compiler--ir-repr val-ir)))
                                    fenv))
                    (body-ir (nelisp-aot-compiler--parse-value
                              body-sexp env new-fenv defuns)))
@@ -19087,6 +19744,10 @@ register budgeting while ELF/Mach-O keep SysV."
                                                  (nelisp-aot-compiler--ir-get
                                                   ir-node :rt-slot-count))
                                             0)
+                         :return-repr (and ir-node
+                                           (nelisp-aot-compiler--ir-repr
+                                            (nelisp-aot-compiler--ir-get
+                                             ir-node :body)))
                          :body-offset (and ir-node
                                            (nelisp-aot-compiler--object-defun-body-offset
                                             ir-node)))))

@@ -11812,10 +11812,19 @@ mirroring the plt32 entries x86_64 records directly."
     (dolist (sym (plist-get unit :symbols))
       (when (eq (plist-get sym :section) 'undef)
         (push (plist-get sym :name) undef)))
-    (should (equal undef '("nl_alloc_str")))
-    (should (= (length relocs) 1))
-    (should (eq (plist-get (car relocs) :type) 'b26-pc))
-    (should (equal (plist-get (car relocs) :symbol) "nl_alloc_str"))))
+    ;; Materialising the literal now allocates its bytes through
+    ;; `nl_alloc_bytes' rather than inline, so a string literal surfaces two
+    ;; helpers, not one.  Sorted because the point is which helpers become
+    ;; extern relocs, not the order the emitter happens to record them in.
+    (should (equal (sort (copy-sequence undef) #'string<)
+                   '("nl_alloc_bytes" "nl_alloc_str")))
+    (should (= (length relocs) 2))
+    (should (equal (sort (mapcar (lambda (r) (plist-get r :type)) relocs)
+                         (lambda (a b) (string< (symbol-name a) (symbol-name b))))
+                   '(b26-pc b26-pc)))
+    (should (equal (sort (mapcar (lambda (r) (plist-get r :symbol)) relocs)
+                         #'string<)
+                   '("nl_alloc_bytes" "nl_alloc_str")))))
 
 (ert-deftest nelisp-aot-doc129/mach-o-defvar-module-embeds-metadata ()
   "Mach-O link units embed the same module-init rodata as ELF (v3)."

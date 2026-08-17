@@ -989,6 +989,7 @@ becomes (:eval FORM) replayed through `nelisp-eval' at load."
         :arity (plist-get entry :arity)
         :param-class (plist-get entry :param-class)
         :rt-slot-count (plist-get entry :rt-slot-count)
+        :return-repr (plist-get entry :return-repr)
         :body-offset (plist-get entry :body-offset)))
 
 (defun nelisp-artifact--native-defun-metadata (native symbol)
@@ -3252,6 +3253,11 @@ implementation."
                         "nl_alloc_mut_str"
                         "nl_mut_str_push_byte"
                         "nl_mut_str_finalize"
+                        ;; Materialising a string literal allocates its bytes
+                        ;; through this rather than inline, so any unit with a
+                        ;; string in it now carries the symbol.  The harness
+                        ;; provides it the same way it provides the others.
+                        "nl_alloc_bytes"
                         "nelisp_aot_builtin_call1"
                         "nelisp_aot_builtin_calln")))
        externs))))
@@ -3431,6 +3437,18 @@ implementation."
      "  neln_slot_registry[neln_slot_registry_len++] = ptr;\n"
      "}\n"
      "\n"
+     ;; Same, but for slots the compiled code allocates itself rather than
+     ;; the boundary slots this driver pre-registers.  A result Sexp built
+     ;; in one of those is a real Sexp the driver must decode; unregistered
+     ;; it was printed as the raw pointer instead.  Silent when the registry
+     ;; is full: losing the ability to decode a later result is a wrong
+     ;; answer in one case, while failing is a dead harness in every case.
+     "static void neln_register_slot_soft(const void *ptr) {\n"
+     "  if (neln_slot_registry_len < (sizeof(neln_slot_registry) / sizeof(neln_slot_registry[0]))) {\n"
+     "    neln_slot_registry[neln_slot_registry_len++] = ptr;\n"
+     "  }\n"
+     "}\n"
+     "\n"
      "static int neln_is_registered_slot(const void *ptr) {\n"
      "  size_t i;\n"
      "  for (i = 0; i < neln_slot_registry_len; i++) {\n"
@@ -3530,6 +3548,30 @@ implementation."
      "  result_slot->b = (uint64_t)(uintptr_t)buf;\n"
      "  result_slot->c = (uint64_t)n;\n"
      "  return result_slot;\n"
+     "}\n"
+     "\n"
+     ;; Materialising a string literal allocates its bytes through this
+     ;; before handing them to `nl_alloc_str', so any unit with a string in
+     ;; it references the symbol and the link fails without a definition.
+     ;; Zeroed because a caller may write only part of what it asked for.
+     "void *nl_alloc_bytes(int64_t size, int64_t align) {\n"
+     "  size_t n = (size <= 0) ? 1u : (size_t)size;\n"
+     "  size_t a = (align <= 0) ? 1u : (size_t)align;\n"
+     "  void *p = NULL;\n"
+     "  if (a < sizeof(void *)) {\n"
+     "    a = sizeof(void *);\n"
+     "  }\n"
+     "  if (n % a != 0u) {\n"
+     "    n += a - (n % a);\n"
+     "  }\n"
+     "  if (posix_memalign(&p, a, n) != 0 || !p) {\n"
+     "    neln_fail(\"posix_memalign failed in nl_alloc_bytes\");\n"
+     "  }\n"
+     "  memset(p, 0, n);\n"
+     "  if ((size_t)size == sizeof(NelnSexp)) {\n"
+     "    neln_register_slot_soft(p);\n"
+     "  }\n"
+     "  return p;\n"
      "}\n"
      "\n"
      "NelnSexp *nl_alloc_str(const unsigned char *bytes_ptr, int64_t len, NelnSexp *result_slot) {\n"

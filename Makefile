@@ -1,4 +1,4 @@
-.PHONY: unsafe-inventory nl-violation-corpus test-jit test-nojit jit-unverified nl-safe-bench nl-safe-native-bench neln-loader-test nl-check-gate ns-gate ns-inventory parens-check test test-fast test-parallel test-one wasm-smoke wasm-runtime-image-smoke wasm-dtw-skeleton-smoke wasm-dtw-transpile wasm-dtw-compile wasm-dtw-smoke wasm-dtw-site wasm-dtw-site-smoke compile clean all bench bench-aot-tco gc-bench actor-bench soak soak-1h soak-full soak-worker \
+.PHONY: unsafe-inventory nl-violation-corpus test-jit test-nojit jit-unverified nl-safe-bench nl-safe-native-bench neln-loader-test nl-dev-loop nl-check-gate ns-gate ns-inventory parens-check test test-fast test-parallel test-one wasm-smoke wasm-runtime-image-smoke wasm-dtw-skeleton-smoke wasm-dtw-transpile wasm-dtw-compile wasm-dtw-smoke wasm-dtw-site wasm-dtw-site-smoke compile clean all bench bench-aot-tco gc-bench actor-bench soak soak-1h soak-full soak-worker \
         sqlite-module sqlite-module-clean \
         release-artifact release-checksum soak-blocker soak-post-ship \
         bench-actual bench-allocator bench-allocator-heavy \
@@ -96,6 +96,13 @@ test-one:
 	  -l ert \
 	  $(addprefix -l ,$(FILE)) \
 	  -f ert-run-tests-batch-and-exit
+
+# Automated development loop.  Detects touched AOT/loader files (or accepts
+# FILES explicitly), selects the focused gates, records output, and writes a
+# diagnostic handoff on either success or failure.
+#   make nl-dev-loop FILES="lisp/nelisp-aot-compiler.el lisp/nelisp-native-load.el"
+nl-dev-loop:
+	@./tools/nl-dev-loop.sh $(if $(FILES),--files "$(FILES)")
 
 wasm-smoke:
 	mkdir -p target/wasm-smoke

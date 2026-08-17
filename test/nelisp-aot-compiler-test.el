@@ -116,6 +116,273 @@ Caller is responsible for `delete-file' on cleanup."
       (should (eq (nelisp-aot-compiler--ir-kind vnode) 'imm))
       (should (= (nelisp-aot-compiler--ir-get vnode :value) 7)))))
 
+(ert-deftest nelisp-aot-compiler/fresh-shared-borrow-elision-is-non-escaping-only ()
+  "Only a lexical fresh vector whose cell name cannot escape is elided."
+  (let ((nelisp-aot-compiler--aot-borrow-check-elision t))
+    (should
+     (equal
+      (nelisp-aot-compiler--fresh-shared-borrow-source-form
+       '(let ((c (vector 'nl--cell (vector 7) 0)))
+          (nl-with-borrow (v c) (aref v 0))))
+      '(aot-with-fresh-shared-borrow (vector 'nl--cell (vector 7) 0) v
+        (aref v 0))))
+    ;; Passing the cell into the body would permit aliasing, so retain the
+    ;; ordinary checked path even though the initializer is fresh.
+    (should-not
+     (nelisp-aot-compiler--fresh-shared-borrow-source-form
+      '(let ((c (vector 'nl--cell (vector 7) 0)))
+         (nl-with-borrow (v c) (ignore c) (aref v 0)))))
+    (dolist (case
+             '((:state-observed
+                (let ((c (vector 'nl--cell (vector 7) 0)))
+                  (nl-with-borrow (v c) (aref c 2))))
+               (:cell-escape
+                (let ((c (vector 'nl--cell (vector 7) 0)))
+                  (nl-with-borrow (v c) (list c))))
+               (:multiple-path
+                (let ((c (vector 'nl--cell (vector 7) 0)))
+                  (if t (nl-with-borrow (v c) (aref v 0)) 0)))
+               (:exceptional-control
+                (let ((c (vector 'nl--cell (vector 7) 0)))
+                  (nl-with-borrow (v c)
+                    (unwind-protect (aref v 0) (ignore 0)))))
+               (:nested-borrow
+                (let ((c (vector 'nl--cell (vector 7) 0)))
+                  (nl-with-borrow (v c)
+                    (nl-with-borrow (w c) (aref w 0)))))
+               (:exclusive-borrow
+                (let ((c (vector 'nl--cell (vector 7) 0)))
+                  (nl-with-borrow-mut (v c) (aref v 0))))
+               ;; A vector is not automatically a cell.  `nl-with-borrow'
+               ;; type-checks before borrowing and signals `nl-type-error'
+               ;; on a non-cell, so eliding the borrow here would turn a
+               ;; program that must signal into one that quietly succeeds.
+               (:nonfresh-init
+                (let ((c (vector 1 (vector 7) 0)))
+                  (nl-with-borrow (v c) (aref v 0))))
+               ;; Nor is a cell whose state is not provably zero.
+               (:nonfresh-init
+                (let ((c (vector 'nl--cell (vector 7) 1)))
+                  (nl-with-borrow (v c) (aref v 0))))))
+      (should (eq (plist-get
+                   (nelisp-aot-compiler--fresh-shared-borrow-analysis
+                    (nth 1 case))
+                   :reason)
+                   (car case))))))
+
+(ert-deftest nelisp-aot-compiler/fresh-fat-pointer-analysis-is-static-only ()
+  "Fat-pointer check elision requires fresh storage and literal bounds."
+  (should (plist-get
+           (nelisp-aot-compiler--fresh-fat-pointer-analysis
+            '(let ((p (nl-ptr-make (alloc-bytes 64 8) 64 0)))
+               (nl-ptr-ref-u8 p 7)))
+           :eligible))
+  (should (plist-get
+           (nelisp-aot-compiler--fresh-fat-pointer-analysis
+            '(let ((p (nl-ptr-make (data-addr private-byte) 1 0)))
+               (nl-ptr-ref-u8 p 0)))
+           :eligible))
+  (dolist (case
+           '((:dynamic-offset
+              (let ((p (nl-ptr-make (alloc-bytes 64 8) 64 0)))
+                (nl-ptr-ref-u8 p i)))
+             (:out-of-bounds
+             (let ((p (nl-ptr-make (alloc-bytes 64 8) 64 0)))
+                (nl-ptr-ref-u8 p 64)))
+             (:pointer-escape
+              (let ((p (nl-ptr-make (alloc-bytes 64 8) 64 0)))
+                (let ((q p)) (nl-ptr-ref-u8 q 0))))
+             (:pointer-escape
+              (let ((p (nl-ptr-make (alloc-bytes 64 8) 64 0)))
+                (list p)))))
+    (should (eq (plist-get
+                 (nelisp-aot-compiler--fresh-fat-pointer-analysis
+                  (nth 1 case)) :reason)
+                (car case)))))
+
+(ert-deftest nelisp-aot-compiler/fresh-fat-pointer-elision-lowers-to-raw-read ()
+  "Eligible `nl-ptr-ref-u8' uses the existing raw pointer primitive."
+  (let ((nelisp-aot-compiler--aot-fat-pointer-check-elision t))
+    (should (equal
+             (nelisp-aot-compiler--fresh-fat-pointer-source-form
+             '(let ((p (nl-ptr-make (alloc-bytes 64 8) 64 0)))
+                (nl-ptr-ref-u8 p 7)))
+             '(let ((p (alloc-bytes 64 8))) (ptr-read-u8 p 7))))))
+
+(ert-deftest nelisp-aot-compiler/fresh-fat-pointer-elision-covers-static-loop-reads ()
+  "A fresh pointer may be read repeatedly without reintroducing a check."
+  (let ((nelisp-aot-compiler--aot-fat-pointer-check-elision t))
+    (should (equal
+             (nelisp-aot-compiler--fresh-fat-pointer-source-form
+              '(let ((p (nl-ptr-make (alloc-bytes 64 8) 64 0)))
+                 (let ((i 0) (acc 0))
+                   (while (< i 3)
+                     (setq acc (+ acc (nl-ptr-ref-u8 p 0)))
+                     (setq i (+ i 1)))
+                   acc)))
+             '(let ((p (alloc-bytes 64 8)))
+                (let ((i 0) (acc 0))
+                  (while (< i 3)
+                    (setq acc (+ acc (ptr-read-u8 p 0)))
+                    (setq i (+ i 1)))
+                  acc))))))
+
+(ert-deftest nelisp-aot-compiler/fresh-fat-pointer-elision-proves-monotone-loop-index ()
+  "A bounded canonical loop may use its index as a raw byte offset."
+  (let ((nelisp-aot-compiler--aot-fat-pointer-check-elision t))
+    (should (equal
+             (nelisp-aot-compiler--fresh-fat-pointer-source-form
+              '(let ((p (nl-ptr-make (alloc-bytes 8 8) 8 0)))
+                 (let ((i 0) (acc 0))
+                   (while (< i 8)
+                     (setq acc (+ acc (nl-ptr-ref-u8 p i)))
+                     (setq i (+ i 1)))
+                   acc)))
+             '(let ((p (alloc-bytes 8 8)))
+                (let ((i 0) (acc 0))
+                  (while (< i 8)
+                    (setq acc (+ acc (ptr-read-u8 p i)))
+                    (setq i (+ i 1)))
+                  acc))))))
+
+(ert-deftest nelisp-aot-compiler/fresh-fat-pointer-elision-rejects-unproven-loop-index ()
+  "A non-monotone loop index must retain checked access."
+  (should (eq
+           (plist-get
+            (nelisp-aot-compiler--fresh-fat-pointer-analysis
+             '(let ((p (nl-ptr-make (alloc-bytes 8 8) 8 0)))
+                (let ((i 0))
+                  (while (< i 8)
+                    (setq i 0)
+                    (nl-ptr-ref-u8 p i)
+                    (setq i (+ i 1))))))
+            :reason)
+           :dynamic-offset)))
+
+(ert-deftest nelisp-aot-compiler/fresh-fat-pointer-elision-lowers-literal-write ()
+  "A static u8 write is lowered only with a byte-range literal value."
+  (let ((nelisp-aot-compiler--aot-fat-pointer-check-elision t))
+    (should (equal
+             (nelisp-aot-compiler--fresh-fat-pointer-source-form
+              '(let ((p (nl-ptr-make (alloc-bytes 8 8) 8 0)))
+                 (nl-ptr-set-u8 p 2 255)))
+             '(let ((p (alloc-bytes 8 8))) (ptr-write-u8 p 2 255))))
+  (should (eq
+           (plist-get
+            (nelisp-aot-compiler--fresh-fat-pointer-analysis
+             '(let ((p (nl-ptr-make (alloc-bytes 8 8) 8 0)))
+                (nl-ptr-set-u8 p 2 value)))
+            :reason)
+           :dynamic-write-value))))
+
+(ert-deftest nelisp-aot-compiler/fresh-fat-pointer-elision-lowers-direct-static-slice ()
+  "A direct in-range slice access folds to its parent raw offset."
+  (let ((nelisp-aot-compiler--aot-fat-pointer-check-elision t))
+    (should (equal
+             (nelisp-aot-compiler--fresh-fat-pointer-source-form
+              '(let ((p (nl-ptr-make (alloc-bytes 8 8) 8 0)))
+                 (nl-ptr-ref-u8 (nl-ptr-slice p 2 3) 1)))
+             '(let ((p (alloc-bytes 8 8))) (ptr-read-u8 p 3)))))
+  (should (eq
+           (plist-get
+            (nelisp-aot-compiler--fresh-fat-pointer-analysis
+             '(let ((p (nl-ptr-make (alloc-bytes 8 8) 8 0)))
+                (nl-ptr-ref-u8 (nl-ptr-slice p 2 1) 1)))
+            :reason)
+           :out-of-bounds)))
+
+(ert-deftest nelisp-aot-compiler/fresh-fat-pointer-elision-tracks-nested-derived-slices ()
+  "Nested non-escaping slices compose parent offsets and retain their range."
+  (let ((nelisp-aot-compiler--aot-fat-pointer-check-elision t))
+    (should (equal
+             (nelisp-aot-compiler--fresh-fat-pointer-source-form
+              '(let ((p (nl-ptr-make (alloc-bytes 16 8) 16 0)))
+                 (let ((s (nl-ptr-slice p 2 8)))
+                   (let ((q (nl-ptr-slice s 3 4)))
+                     (nl-ptr-set-u8 q 1 42)
+                     (nl-ptr-ref-u8 q 1)))))
+             '(let ((p (alloc-bytes 16 8)))
+                (seq (ptr-write-u8 p 6 42)
+                     (ptr-read-u8 p 6)))))))
+
+(ert-deftest nelisp-aot-compiler/fresh-fat-pointer-elision-proves-derived-slice-loop-index ()
+  "A monotone index is proved against the narrowed derived-slice range."
+  (should (plist-get
+           (nelisp-aot-compiler--fresh-fat-pointer-analysis
+            '(let ((p (nl-ptr-make (alloc-bytes 16 8) 16 0)))
+               (let ((s (nl-ptr-slice p 2 4)))
+                 (let ((i 0) (acc 0))
+                   (while (< i 4)
+                     (setq acc (+ acc (nl-ptr-ref-u8 s i)))
+                     (setq i (+ i 1)))
+                   acc))))
+           :eligible)))
+
+(ert-deftest nelisp-aot-compiler/fresh-fat-pointer-elision-rejects-derived-slice-loop-overrun ()
+  "A root-valid loop cannot bypass the narrower derived-slice bound."
+  (should (eq
+           (plist-get
+            (nelisp-aot-compiler--fresh-fat-pointer-analysis
+             '(let ((p (nl-ptr-make (alloc-bytes 16 8) 16 0)))
+                (let ((s (nl-ptr-slice p 2 4)))
+                  (let ((i 0))
+                    (while (< i 5)
+                      (nl-ptr-ref-u8 s i)
+                      (setq i (+ i 1)))))))
+            :reason)
+           :pointer-escape)))
+
+(ert-deftest nelisp-aot-compiler/fresh-fat-pointer-elision-rejects-derived-slice-escape ()
+  "Returning or passing a derived pointer keeps all its checks."
+  (should (eq
+           (plist-get
+            (nelisp-aot-compiler--fresh-fat-pointer-analysis
+             '(let ((p (nl-ptr-make (alloc-bytes 16 8) 16 0)))
+                (let ((s (nl-ptr-slice p 2 8))) (list s))))
+           :reason)
+           :pointer-escape)))
+
+(ert-deftest nelisp-aot-compiler/fresh-fat-pointer-elision-rejects-derived-slice-unknown-branch ()
+  "An unknown control branch is not a provenance-preserving path."
+  (should (eq
+           (plist-get
+            (nelisp-aot-compiler--fresh-fat-pointer-analysis
+             '(let ((p (nl-ptr-make (alloc-bytes 16 8) 16 0)))
+                (let ((s (nl-ptr-slice p 2 4)))
+                  (if condition
+                      (nl-ptr-ref-u8 s 0)
+                    0))))
+            :reason)
+           :pointer-escape)))
+
+(ert-deftest nelisp-aot-compiler/raw-pointer-binding-is-not-a-dispatcher-integer ()
+  "A raw byte pointer keeps its distinct representation through `let'."
+  (let* ((ir (nelisp-aot-compiler--parse
+              '(defun probe ()
+                 (let ((p (alloc-bytes 64 8))) (ptr-read-u8 p 0)))))
+         (body (nelisp-aot-compiler--ir-get ir :body))
+         (ptr (nelisp-aot-compiler--ir-get body :value-ir)))
+    (should (eq (nelisp-aot-compiler--ir-repr ptr) 'raw-ptr))
+    (should (eq (nelisp-aot-compiler--ir-repr
+                 (nelisp-aot-compiler--ir-get
+                  (nelisp-aot-compiler--ir-get body :body) :ptr))
+                'raw-ptr))))
+
+(ert-deftest nelisp-aot-compiler/multi-let-return-repr-reaches-native-loader ()
+  "`let-rt-n' retains the final raw result representation for loader rax."
+  (let* ((ir (nelisp-aot-compiler--parse
+              '(defun probe ()
+                 (let ((p (alloc-bytes 64 8)))
+                   (let ((i 0) (acc 0))
+                     (while (< i 2)
+                       (setq acc (+ acc (ptr-read-u8 p 0)))
+                       (setq i (+ i 1)))
+                     acc)))))
+         (outer (nelisp-aot-compiler--ir-get ir :body))
+         (inner (nelisp-aot-compiler--ir-get outer :body)))
+    (should (eq (nelisp-aot-compiler--ir-kind inner) 'let-rt-n))
+    (should (eq (nelisp-aot-compiler--ir-repr inner) 'raw-i64))))
+
 (ert-deftest nelisp-aot-compiler/parse-nested-let-arith ()
   "Nested let + chained arithmetic resolves to a single integer."
   (let ((ir (nelisp-aot-compiler--parse
@@ -738,6 +1005,8 @@ sq(9) = 81 -> exit 81."
          (nelisp-aot-compiler-test--native-mov-rbp-disp-reg-bytes
           (nth i arg-regs)
           (nelisp-aot-compiler-test--native-trampoline-slot-disp i))))
+      ;; The host-proof trampoline supplies the fixed boundary ABI slots.
+      ;; Artifact-local frame slots are allocated by the compiled callee.
       (dotimes (i (+ 5 12))
         (emit-imm64-placeholder)
         (emit
@@ -800,7 +1069,11 @@ integration step."
                                 (plist-get defun0 :body-offset))))
             (should (equal (plist-get defun0 :name) "inc1"))
             (should (= (plist-get defun0 :arity) 1))
-            (should (= (plist-get defun0 :rt-slot-count) 17))
+            ;; `call1' evaluates its argument into a dedicated frame slot
+            ;; before writing the shared dispatcher name slot.  Keep the
+            ;; trampoline assertion tied to the artifact metadata: nested
+            ;; delegated calls may legitimately require further slots.
+            (should (>= (plist-get defun0 :rt-slot-count) 17))
             (should (= (plist-get defun0 :body-offset) 19))
             (should (equal (sort (copy-sequence externs) #'string<)
                            '("nelisp_aot_builtin_call1" "nl_alloc_symbol")))

@@ -13234,9 +13234,16 @@ never recurse through one enormous `seq' cdr chain."
     "nl_alloc_mut_str"
     "nl_mut_str_push_byte"
     "nl_mut_str_finalize"
+    "nl_alloc_bytes"
+    "nl_sexp_clone_into"
     "nl_alloc_vector"
     "nl_vector_slot_ptr"
-    "nl_vector_set_slot")
+    "nl_vector_set_slot"
+    ;; A borrow that survives to run reads `nl-safe--enabled' through the
+    ;; environment, so the unit carries this.  Appended, not inserted: the
+    ;; index is the contract and inserting would repoint every stub after
+    ;; the insertion point at a different function.
+    "nelisp_env_lookup_value")
   "Runtime symbols the in-process loader can point a stub at.
 
 A stub is `movabs rax, ADDR; jmp rax', and ADDR comes from `data-addr',

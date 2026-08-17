@@ -48,9 +48,12 @@
     "nl_alloc_mut_str"
     "nl_mut_str_push_byte"
     "nl_mut_str_finalize"
+    "nl_alloc_bytes"
+    "nl_sexp_clone_into"
     "nl_alloc_vector"
     "nl_vector_slot_ptr"
-    "nl_vector_set_slot")
+    "nl_vector_set_slot"
+    "nelisp_env_lookup_value")
   "Runtime symbols a stub can be pointed at, in `nelisp--native-symbol-addr' order.
 
 The index is the contract: the builtin selects from a chain of
@@ -582,6 +585,7 @@ what a cache wants and what the demo did."
             :out slots
             :arity arity
             :abi (nelisp-native-load-abi native)
+            :return-repr (or (plist-get meta :return-repr) 'unknown)
             :arg-slots (+ slots arg-slot-base)
             :name name
             :path path))))
@@ -629,7 +633,8 @@ answer 406962619651776 and leave `out' untouched."
       ;; looked right until a body ended in something else.  `(let ((v
       ;; (vector 7 8 9))) n)' leaves the vector in `out' and returns the
       ;; boxed `n' in rax, so reading `out' answered with the vector.
-      (if boxed
+      (if (or (eq (plist-get handle :return-repr) 'sexp-ptr)
+              (and boxed (eq (plist-get handle :return-repr) 'unknown)))
           (nelisp-native-load-unbox raw)
         raw))))
 

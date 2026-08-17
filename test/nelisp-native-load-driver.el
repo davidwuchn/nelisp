@@ -53,6 +53,26 @@
 (nelisp-native-load-driver--case "symname" '(0) "abc")
 (nelisp-native-load-driver--case "istrue" '(1) t)
 (nelisp-native-load-driver--case "isfalse" '(1) nil)
+;; Both zero and non-zero literal vector indices must be passed to the
+;; native helper as raw indices, not boxed Sexp payloads.
+(nelisp-native-load-driver--case "vget" '(0) 7)
+(nelisp-native-load-driver--case "plainref" '(0) 8)
+(nelisp-native-load-driver--case "nestvec" '(0) 7)
+(nelisp-native-load-driver--case "vsetget" '(42) 42)
+;; Raw loop state crosses `setq', arithmetic, comparison and `while'.
+(nelisp-native-load-driver--case "rawloop" '(10) 10)
+;; A dispatcher-produced Sexp integer must unbox before native arithmetic.
+(nelisp-native-load-driver--case "dispatchint" '("abc") 13)
+;; One shared-borrow acquisition: vector state read, raw arithmetic, write,
+;; and boxed vector return, without the loop or cleanup path.
+(nelisp-native-load-driver--case "cell-acquire" '(0) 7)
+;; A fresh fat pointer crosses allocation, checked u8 write/read lowering,
+;; and the raw-integer return boundary without relying on the benchmark.
+(nelisp-native-load-driver--case "fat-roundtrip" '() 42)
+;; Derived and nested slices must retain their narrowed provenance through
+;; binding; the latter also proves a raw monotone loop index against it.
+(nelisp-native-load-driver--case "fat-derived" '() 42)
+(nelisp-native-load-driver--case "fat-derived-loop" '() 10)
 
 (princ (format "\nfailures: %d\n" nelisp-native-load-driver--failures))
 (if (> nelisp-native-load-driver--failures 0) (exit 1) (exit 0))
