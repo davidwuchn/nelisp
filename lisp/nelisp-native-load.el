@@ -773,6 +773,14 @@ answer 406962619651776 and leave `out' untouched."
       (while (< (length passed) (length nelisp-native-load--arg-regs))
         (setq passed (append passed (list 0))))
       (setq raw (apply (function ptr-call) (plist-get handle :entry) passed))
+      ;; A defun can carry a dispatcher extern and still answer in a raw
+      ;; register -- `(let ((m 3) (i 0)) (integerp n) (if (< i m) 111 222))'
+      ;; delegates once and returns 111.  Its `:return-repr' is `unknown',
+      ;; so neither the externs nor the metadata settle it, and unboxing
+      ;; 111 dereferences address 111.  Nothing below the first page is a
+      ;; Sexp, so treat such a result as the raw value it is.
+      (when (and boxed (integerp raw) (< raw nelisp-native-load-page-bytes))
+        (setq boxed nil))
       ;; The result is what rax holds, not what `out' holds.  For a body
       ;; that ends in a delegated call the two are the same pointer --
       ;; the dispatcher returns `out' -- which is why reading `out'

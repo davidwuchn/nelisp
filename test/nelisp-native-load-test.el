@@ -256,6 +256,25 @@ rather than anywhere near the cause.  `(c1 0)' now answers 222."
                  (plist-get (nelisp-native-load-manifest path) :native))
                 'boxed))))
 
+(ert-deftest nelisp-native-load/a-result-below-a-page-is-not-a-pointer ()
+  "A raw result is not dereferenced just because the defun could delegate.
+
+Neither signal settles this on its own.  A defun can carry a dispatcher
+extern and still answer in a register:
+
+  (defun u3 (n) (let ((m 3) (i 0)) (integerp n) (if (< i m) 111 222)))
+
+delegates once, so the extern set says boxed, and its `:return-repr' is
+`unknown', so the metadata declines to say.  Unboxing then dereferenced
+address 111 -- a fault raised inside the caller's own `ptr-read-u64',
+which is nowhere near the defun that produced it.
+
+Nothing below the first page is a Sexp, so a result under that is the
+value itself.  Pinned as a constant because the guard is a claim about
+the address space, not a tuning knob."
+  (should (= nelisp-native-load-page-bytes 4096))
+  (should (> nelisp-native-load-page-bytes 222)))
+
 ;;;; Boxing -----------------------------------------------------------
 
 (ert-deftest nelisp-native-load/string-bytes-refuses-past-one-byte ()
