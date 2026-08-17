@@ -51,13 +51,14 @@ answers nil — so each arm is a whole process and an empty run of the
 same arm is subtracted to remove start-up.  That is the slope method
 already used for this repository's own benchmarks.
 
-For calibration only: three runs on one machine on 2026-08-17, all with
-drift under 0.07, gave *1.45x, 1.58x and 1.50x* for 3000 interpreted
-borrow-checked sums against the same loop with no borrow.
+For calibration only: four runs on one machine on 2026-08-17, all
+within the drift limit, gave *1.45x, 1.50x, 1.58x and 1.64x* for 3000
+interpreted borrow-checked sums against the same loop with no borrow.
 
-That spread — 9% between the extremes of three consecutive valid runs —
-is the reason to take your own measurement rather than quote one.  Do
-not carry these numbers anywhere.  In particular it is *not* the Doc
+That spread — 13% between the extremes of four valid runs, the widest
+one taken while other work was running — is the reason to take your own
+measurement rather than quote one.  Do not carry these numbers
+anywhere.  In particular it is *not* the Doc
 170 section 9 budget: that one measures AOT-compiled borrows, where the
 cost is dominated by type checks in the emitted code and last measured
 4.99x against a ≤1.15x target.  Different path, different number.  This

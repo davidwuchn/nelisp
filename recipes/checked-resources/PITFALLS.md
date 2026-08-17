@@ -53,9 +53,10 @@ differently.
 
 ## Do not carry the ratio anywhere
 
-Three consecutive valid runs on one machine gave 1.45x, 1.58x and
-1.50x — a 9% spread with drift under 0.07 each time. One binary, one
-loop shape, in the interpreter.
+Four valid runs on one machine gave 1.45x, 1.50x, 1.58x and 1.64x — a
+13% spread, the widest taken while other work was running (drift 0.15,
+still inside the limit). One binary, one loop shape, in the
+interpreter.
 
 The Doc 170 §9 figure (4.99x against a ≤1.15x budget) measures
 AOT-compiled borrows where type checks dominate. Quoting either number

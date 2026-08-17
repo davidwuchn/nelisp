@@ -104,3 +104,10 @@ are known to work today and the ones that are not viable yet, with the
 measurement behind each verdict.  Copy a recipe's `skeleton/`, then run
 its `verify.sh` before writing anything of your own — a recipe that
 cannot pass its own smoke on your machine is telling you something.
+
+```sh
+tools/ai/nelisp-ai.sh recipes    # every recipe smoke, against target/nelisp
+```
+
+Each smoke skips with a reason when the binary is absent, so this is
+also the quickest way to find out which shapes your build supports.

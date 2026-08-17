@@ -68,6 +68,7 @@ usage: tools/ai/nelisp-ai.sh <command> [args]
   test-one FILE...    run selected test files as gate "ert-focus"
   compile             byte-compile with error-on-warn as gate "compile"
   ns [FILE...]        namespace check (defaults to the recipe skeletons)
+  recipes             run every recipe smoke against the standalone binary
   gate NAME -- CMD    run CMD and report it, reading its GATE-COUNT line
   probe EXPR          evaluate EXPR in the standalone runtime, output to files
   doctor              print the toolchain and binary identity of this checkout
@@ -185,6 +186,30 @@ cmd_compile() {
         --failed "$([ $code -eq 0 ] && echo 0 || echo 1)" \
         --duration-ms "$(( ($(date +%s) - started) * 1000 ))" \
         --command "nelisp-ai.sh compile"
+}
+
+cmd_recipes() {
+    # The recipes are the answer to "can I build something on this?", so
+    # they are the surface most expensive to let rot: nobody notices a
+    # stale recipe until they follow it.  One command runs them all.
+    #
+    # Each smoke reports its own gate and skips with a reason when the
+    # binary is missing, so this loop does not need to know which shapes
+    # are viable on this host.
+    found=0
+    failures=0
+    for script in recipes/*/verify.sh; do
+        [ -f "$script" ] || continue
+        found=$((found + 1))
+        printf '\n=== %s ===\n' "$(dirname "$script" | sed 's|recipes/||')"
+        ( sh "$script" ) || failures=$((failures + 1))
+    done
+    if [ "$found" -eq 0 ]; then
+        printf 'no recipe smoke found under recipes/*/verify.sh\n' >&2
+        exit 1
+    fi
+    printf '\n%d recipe(s), %d failing\n' "$found" "$failures"
+    [ "$failures" -eq 0 ]
 }
 
 cmd_gate() {
@@ -319,6 +344,7 @@ case "$command" in
     compile)        cmd_compile ;;
     gate)           cmd_gate "$@" ;;
     ns)             cmd_ns "$@" ;;
+    recipes)        cmd_recipes ;;
     probe)          cmd_probe "$@" ;;
     doctor)         cmd_doctor ;;
     gates-clean)    cmd_gates_clean ;;
