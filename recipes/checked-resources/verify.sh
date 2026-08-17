@@ -7,22 +7,14 @@
 #   1. a shared borrow reads the right value
 #   2. an exclusive borrow taken while a shared one is live SIGNALS
 #   3. the violation lands in the corpus the Phase 6 gate reads
-#   4. the timed arm actually did work (a loop that ran zero times must
-#      not look like a fast one)
 #
-# The overhead ratio is reported, never gated.  A ratio measured on a
-# loaded machine is not a fact about the code: in this repository a
-# "2.5x regression" turned out to be background load and a "1.00x
-# parity" turned out to be one program compared with itself.  So the
-# plain arm is timed twice and the drift between those runs is printed
-# beside the ratio; when the drift is large the ratio is discarded here
-# rather than written down and quoted later.
-#
-# Timing happens out here because the standalone runtime has no clock:
-# `(current-time)' answers `(0 0 0 0)' and `(float-time)' answers nil.
-# Each arm is therefore a whole process, and an empty run of the same
-# arm is subtracted to remove start-up — the slope method already used
-# for this repository's own benchmarks.
+# The overhead is measured by tools/ai/bench-compare.sh, which reports
+# it under its own gate (bench-borrow-check) so that a number the
+# machine invalidated cannot quietly become part of this recipe's
+# verdict.  That harness runs each arm at n=0 and n=N and subtracts
+# (the standalone runtime has no clock: `(current-time)' answers
+# `(0 0 0 0)' and `(float-time)' answers nil), times the base arm twice
+# to measure drift, and discards the ratio when the machine moved.
 
 set -eu
 
@@ -71,14 +63,6 @@ check() {
 
 probe() { PROBE_ARM=$1 PROBE_ITERATIONS=$2 "$NELISP" --load recipes/checked-resources/probe.el 2>&1; }
 
-# Milliseconds for one whole arm, start-up included.
-timed() {
-    start=$(date +%s%N)
-    probe "$1" "$2" > /dev/null 2>&1 || true
-    end=$(date +%s%N)
-    echo $(( (end - start) / 1000000 ))
-}
-
 printf 'checked-resources: %s\n' "$NELISP"
 
 probe behaviour 0 > "$work/behaviour.txt" || true
@@ -96,40 +80,17 @@ violations=$(sed -n 's/^RESULT violations=//p' "$work/behaviour.txt" | head -1)
     && check ok "violation recorded in the corpus ($violations)" \
     || check no "no violation reached nl-safe-report's log"
 
-# Slope method: (arm at N) - (arm at 0) removes process start-up.
-plain0=$(timed plain 0)
-plainM=$(timed plain "$ITERATIONS")
-checked0=$(timed checked 0)
-checkedM=$(timed checked "$ITERATIONS")
-plainM2=$(timed plain "$ITERATIONS")
-
-[ "$plainM" -gt "$plain0" ] \
-    && check ok "the timed arm did measurable work (${plain0}ms -> ${plainM}ms)" \
-    || check no "the timed loop cost nothing; it did not run"
-
-measurement=target/ai/checked-resources-overhead.txt
-awk -v p0="$plain0" -v pm="$plainM" -v c0="$checked0" -v cm="$checkedM" \
-    -v pm2="$plainM2" -v n="$ITERATIONS" -v limit="$DRIFT_LIMIT" \
-    -v bin="$NELISP" '
-BEGIN {
-  pc = pm - p0; cc = cm - c0;
-  drift = (pm > 0) ? ((pm > pm2 ? pm - pm2 : pm2 - pm) / pm) : 1;
-  printf "checked-resources overhead\n";
-  printf "binary:      %s\n", bin;
-  printf "iterations:  %d\n", n;
-  printf "plain:       %d ms (%d at n=0, %d at n=N)\n", pc, p0, pm;
-  printf "checked:     %d ms (%d at n=0, %d at n=N)\n", cc, c0, cm;
-  printf "plain again: %d ms\n", pm2 - p0;
-  printf "drift:       %.2f (limit %.2f)\n", drift, limit;
-  if (pc <= 0)          printf "ratio:       DISCARDED (plain arm cost nothing measurable)\n";
-  else if (drift>limit) printf "ratio:       DISCARDED (machine moved under the measurement)\n";
-  else                  printf "ratio:       %.2fx\n", cc / pc;
-}' > "$measurement"
-
-cat "$measurement"
-printf 'measurement written to %s (reported, not gated)\n' "$measurement"
-
 gate --name recipe-checked-resources --kind smoke \
      --ran "$ran" --passed "$((ran - failed))" --failed "$failed" \
      --reason "$(printf '%s' "$note" | sed 's/^; //')" \
      --command "recipes/checked-resources/verify.sh"
+
+# The cost, under its own gate.  Reported, never folded into the
+# behaviour verdict above.
+"$root/tools/ai/bench-compare.sh" \
+    --name bench-borrow-check \
+    --iterations "$ITERATIONS" \
+    --drift-limit "$DRIFT_LIMIT" \
+    --out target/ai/checked-resources-overhead.txt \
+    --base "PROBE_ARM=plain PROBE_ITERATIONS=%N% $NELISP --load recipes/checked-resources/probe.el" \
+    --candidate "PROBE_ARM=checked PROBE_ITERATIONS=%N% $NELISP --load recipes/checked-resources/probe.el"

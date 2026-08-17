@@ -89,6 +89,54 @@ tools/ai/gate-report.sh --name standalone-reader --reason \
 Pass a real count.  A hard-coded `--ran 1` reintroduces precisely the
 blindness this exists to remove.
 
+## Wrapping a command: the GATE-COUNT line
+
+Most existing checks already know what they examined; they just do not
+say so. `make parens-check` scans 417 files and, on a clean tree,
+prints nothing at all — indistinguishable from a run whose file list
+came back empty.
+
+The cheap fix is one line at the end of the tool:
+
+```elisp
+(princ (format "GATE-COUNT checked=%d findings=%d\n"
+               (length paths) (length findings)))
+```
+
+and then:
+
+```sh
+tools/ai/nelisp-ai.sh gate parens-check -- make parens-check
+```
+
+The wrapper runs the command, reads the last `GATE-COUNT` line, and
+reports `ran = checked`. **A missing GATE-COUNT line is a failure** —
+rather than assuming the command checked something, the wrapper says it
+refused to answer. `checked` counts files or cases; `findings` is
+informational, because a ratchet gate legitimately passes with findings
+below its baseline.
+
+## Measurements: bench-compare.sh
+
+A benchmark has a third outcome too: it can produce a number that the
+machine invalidated. `tools/ai/bench-compare.sh` reports that as a
+`skip` with the reason, never as a pass.
+
+```sh
+tools/ai/bench-compare.sh --name bench-borrow-check \
+    --base      'PROBE_ARM=plain   PROBE_ITERATIONS=%N% nelisp --load probe.el' \
+    --candidate 'PROBE_ARM=checked PROBE_ITERATIONS=%N% nelisp --load probe.el'
+```
+
+Three guards, each of which corresponds to a real wrong answer this
+repository has published:
+
+| guard | what it caught |
+|---|---|
+| slope: run each arm at `n=0` and `n=N`, subtract | start-up counted as work |
+| drift: run the base arm twice at `n=N` | a "2.5x regression" that was background load |
+| identity: commands, and optionally artifact digests, must differ | a "1.00x parity" between one program and itself |
+
 ## Bringing an existing gate under the contract
 
 1. Make the gate print or return a case count instead of only exiting.
@@ -101,6 +149,7 @@ blindness this exists to remove.
 | file | role |
 |---|---|
 | `nelisp-ai.sh` | the entry point; `help` lists commands |
+| `bench-compare.sh` | two-arm measurement with slope, drift and identity guards |
 | `nelisp-gate-lib.el` | report writer for Elisp gates |
 | `nelisp-ert-gate.el` | ERT batch runner that reports executed counts |
 | `gate-report.sh` | report writer for shell gates |

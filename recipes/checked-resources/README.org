@@ -25,21 +25,25 @@ Stage 1) reduced to the part you can use in an ordinary program today.
 recipes/checked-resources/verify.sh
 #+end_src
 
-Four checks, and the second is the one that matters: it takes an
-exclusive borrow while a shared borrow is live and requires the checker
-to *signal*.  A smoke that only exercises the legal path proves the code
-runs, not that anything is being checked.
+Three behaviour checks, of which the second is the one that matters: it
+takes an exclusive borrow while a shared borrow is live and requires the
+checker to *signal*.  A smoke that only exercises the legal path proves
+the code runs, not that anything is being checked.
+
+The cost is then measured by =tools/ai/bench-compare.sh= under its own
+gate (=bench-borrow-check=), so a number the machine invalidated cannot
+become part of this recipe's verdict.
 
 * The cost is measured, not quoted
 
-=verify.sh= times the checked and unchecked arms on your machine and
-writes =target/ai/checked-resources-overhead.txt=.  It is *reported and
-never gated*, for a reason this repository has paid for twice: a "2.5x
-regression" that was background load, and a "1.00x parity" that was one
-program compared with itself.  So the plain arm is timed twice, the
-drift between those runs is printed beside the ratio, and past the
-drift limit the ratio is discarded rather than written down and quoted
-later.
+=verify.sh= hands the two arms to =tools/ai/bench-compare.sh=, which
+writes =target/ai/checked-resources-overhead.txt=.  The ratio is
+*reported and never gated*, for a reason this repository has paid for
+twice: a "2.5x regression" that was background load, and a "1.00x
+parity" that was one program compared with itself.  The base arm is run
+twice, the drift is printed beside the ratio, and past the drift limit
+the ratio is discarded — reported as a =skip= with its reason rather
+than written down and quoted later.
 
 Timing happens outside the process because the standalone runtime has
 no clock — =(current-time)= answers =(0 0 0 0)= and =(float-time)=
@@ -47,11 +51,13 @@ answers nil — so each arm is a whole process and an empty run of the
 same arm is subtracted to remove start-up.  That is the slope method
 already used for this repository's own benchmarks.
 
-One measurement, for calibration only (2026-08-17, main-built binary,
-drift 0.07): *1.45x* for 3000 interpreted borrow-checked sums against
-the same loop with no borrow.
+For calibration only: three runs on one machine on 2026-08-17, all with
+drift under 0.07, gave *1.45x, 1.58x and 1.50x* for 3000 interpreted
+borrow-checked sums against the same loop with no borrow.
 
-Do not carry that number anywhere.  In particular it is *not* the Doc
+That spread — 9% between the extremes of three consecutive valid runs —
+is the reason to take your own measurement rather than quote one.  Do
+not carry these numbers anywhere.  In particular it is *not* the Doc
 170 section 9 budget: that one measures AOT-compiled borrows, where the
 cost is dominated by type checks in the emitted code and last measured
 4.99x against a ≤1.15x target.  Different path, different number.  This

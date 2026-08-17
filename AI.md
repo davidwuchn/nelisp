@@ -26,6 +26,7 @@ run, reported 2859 tests and 127 unexpected results.
 tools/ai/nelisp-ai.sh test-one test/nelisp-FOO-test.el   # seconds
 tools/ai/nelisp-ai.sh compile                            # byte-compile, error-on-warn
 tools/ai/nelisp-ai.sh ns FILE...                         # namespace boundaries (nl-ns)
+tools/ai/nelisp-ai.sh gate NAME -- make TARGET            # wrap an existing check
 tools/ai/nelisp-ai.sh test                               # full ERT suite
 tools/ai/nelisp-ai.sh verify                             # the verdict
 ```
@@ -33,7 +34,10 @@ tools/ai/nelisp-ai.sh verify                             # the verdict
 `verify` is the only command whose exit code answers "is the tree good".
 Every other command reports on itself; `verify` also knows which gates
 produced no report at all.  See `tools/ai/README.md` for the report
-contract and how to bring an existing Makefile gate under it.
+contract, the `GATE-COUNT` line that brings an existing Makefile target
+under it, and `bench-compare.sh` for measurements — which have a third
+outcome of their own, since a ratio the machine invalidated is neither
+a pass nor a failure.
 
 The root `Makefile` still holds the real build, the standalone smokes and
 the release targets.  Use it directly for those; `nelisp-ai.sh` does not

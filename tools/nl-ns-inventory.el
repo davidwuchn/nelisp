@@ -82,6 +82,10 @@
          ((< n limit)
           (princ (format "        ratchet available: %s is %d below baseline\n"
                          kind (- limit n)))))))
+    ;; Machine-readable tail, printed before the verdict so it survives
+    ;; every exit path (contract: tools/ai/README.md).
+    (princ (format "GATE-COUNT checked=%d findings=%d\n"
+                   (length files) (length findings)))
     (cond
      ((null baseline)
       (princ (format "ns-inventory: FAIL (no baseline file %s)\n"

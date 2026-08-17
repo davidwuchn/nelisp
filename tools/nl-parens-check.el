@@ -20,6 +20,13 @@
                          (expand-file-name "test" package)))))
   (let ((findings (nl-parens-check-files paths)))
     (princ (nl-parens-report findings))
+    ;; Machine-readable tail.  A clean run of this gate prints nothing
+    ;; at all, which is indistinguishable from a run that scanned no
+    ;; files — if `paths' were ever empty (wrong working directory, a
+    ;; renamed package layout) the gate would pass in silence.  The
+    ;; contract is in tools/ai/README.md.
+    (princ (format "GATE-COUNT checked=%d findings=%d\n"
+                   (length paths) (length findings)))
     (when findings (kill-emacs 1))))
 
 ;;; nl-parens-check.el ends here

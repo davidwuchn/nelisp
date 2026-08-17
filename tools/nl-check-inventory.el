@@ -38,9 +38,11 @@
 (defun nl-check-inventory-run ()
   "Scan lisp/ and scripts/, print the inventory, enforce the baseline."
   (let ((total 0)
+        (scanned 0)
         (failed nil))
     (dolist (dir '("lisp" "scripts"))
       (dolist (f (directory-files dir t "\\.el\\'"))
+        (setq scanned (+ scanned 1))
         (condition-case err
             (let ((n (length (nl-check-findings-of-kind
                               (nl-check-file f) 'unsafe-call))))
@@ -53,6 +55,11 @@
     (let ((baseline (nl-check-inventory--baseline)))
       (princ (format "unsafe-inventory: total=%d baseline=%s\n"
                      total (or baseline "ABSENT")))
+      ;; Machine-readable tail, before the verdict so it survives every
+      ;; exit path.  `total' counts findings; `checked' counts files,
+      ;; and only the second one can show that the scan happened at all
+      ;; (contract: tools/ai/README.md).
+      (princ (format "GATE-COUNT checked=%d findings=%d\n" scanned total))
       (cond
        (failed
         (princ "unsafe-inventory: FAIL (unreadable file)\n")

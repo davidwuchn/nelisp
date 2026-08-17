@@ -20,10 +20,11 @@ Two failures in this repository's history, both from real sessions:
 - a 1.00x "parity" between two fixtures that had compiled to byte-identical
   programs, so the benchmark was comparing one program with itself.
 
-`verify.sh` times the plain arm twice and prints the drift. Past the
-limit it discards the ratio instead of printing it. Keep that when you
-adapt this — a number you cannot trust is worse than no number, because
-it gets quoted.
+`tools/ai/bench-compare.sh` runs the base arm twice and prints the
+drift. Past the limit it discards the ratio and reports a `skip` with
+the reason instead of a number. Use that harness rather than writing
+your own timing loop — a number you cannot trust is worse than no
+number, because it gets quoted.
 
 ## The checker can be present and doing nothing
 
@@ -50,9 +51,13 @@ least one. If you want the corpus to accumulate across runs — which is
 the point of it for the Phase 6 gate — do not delete it, and count
 differently.
 
-## Do not carry the 1.45x anywhere
+## Do not carry the ratio anywhere
 
-It is one machine, one binary, one loop shape, in the interpreter. The
-Doc 170 §9 figure (4.99x against a ≤1.15x budget) measures AOT-compiled
-borrows where type checks dominate. Quoting either number in place of
-the other is how a design decision gets made on the wrong data.
+Three consecutive valid runs on one machine gave 1.45x, 1.58x and
+1.50x — a 9% spread with drift under 0.07 each time. One binary, one
+loop shape, in the interpreter.
+
+The Doc 170 §9 figure (4.99x against a ≤1.15x budget) measures
+AOT-compiled borrows where type checks dominate. Quoting either number
+in place of the other is how a design decision gets made on the wrong
+data.

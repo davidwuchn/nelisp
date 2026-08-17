@@ -16,6 +16,13 @@
 compile
 ert-full
 
+# Tree-wide checks that already ratchet against a baseline.  Each now
+# prints a GATE-COUNT line so "clean" and "scanned nothing" can be told
+# apart; run them through `nelisp-ai.sh gate NAME -- make TARGET'.
+parens-check
+unsafe-inventory
+ns-inventory
+
 # Developer-loop gates: useful, but not evidence about the whole tree.
 ert-focus?
 
@@ -33,9 +40,14 @@ recipe-native-hotpath?
 recipe-native-hotpath-exec?
 recipe-checked-resources?
 
+# Measurements.  A bench gate passes when the ratio is valid, skips with
+# a reason when the machine invalidated it, and fails only when the two
+# arms are the same program.  It never fails on the number itself.
+bench-borrow-check?
+
 # Not yet wired to this contract.  Each of these still reports through
-# its own Makefile target only; wrap them with tools/ai/gate-report.sh
-# and promote the line above the comment as they are converted.
+# its own Makefile target only; give it a GATE-COUNT line, wrap it with
+# `nelisp-ai.sh gate', and promote it above this comment.
 #
 # standalone-reader
 # standalone-selfhost

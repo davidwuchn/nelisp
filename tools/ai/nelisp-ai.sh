@@ -67,6 +67,7 @@ usage: tools/ai/nelisp-ai.sh <command> [args]
   test-one FILE...    run selected test files as gate "ert-focus"
   compile             byte-compile with error-on-warn as gate "compile"
   ns [FILE...]        namespace check (defaults to the recipe skeletons)
+  gate NAME -- CMD    run CMD and report it, reading its GATE-COUNT line
   probe EXPR          evaluate EXPR in the standalone runtime, output to files
   doctor              print the toolchain and binary identity of this checkout
   gates-clean         delete every gate report (they are per-machine)
@@ -164,6 +165,57 @@ cmd_compile() {
         --command "nelisp-ai.sh compile"
 }
 
+cmd_gate() {
+    # Wrap a command that already knows what it checked.  The command
+    # must print a line of the form
+    #
+    #   GATE-COUNT checked=<files> findings=<n>
+    #
+    # and its absence is itself a failure: a gate that will not say what
+    # it examined cannot be believed when it says nothing is wrong.
+    # `make parens-check' prints nothing at all on a clean run, so an
+    # empty file list and a clean tree looked identical from outside.
+    [ $# -ge 3 ] || { echo 'usage: nelisp-ai.sh gate NAME -- COMMAND...' >&2; exit 2; }
+    gate_name=$1
+    shift
+    [ "$1" = "--" ] || { echo 'nelisp-ai.sh gate: expected -- after NAME' >&2; exit 2; }
+    shift
+    log=$(mktemp)
+    started=$(date +%s)
+    set +e
+    "$@" > "$log" 2>&1
+    code=$?
+    set -e
+    cat "$log"
+    line=$(grep -E '^GATE-COUNT ' "$log" | tail -1 || true)
+    checked=$(printf '%s' "$line" | sed -n 's/.*checked=\([0-9][0-9]*\).*/\1/p')
+    findings=$(printf '%s' "$line" | sed -n 's/.*findings=\([0-9][0-9]*\).*/\1/p')
+    # The command's own verdict line, when it has one.  A wrapped gate
+    # that reports only a count says "1704 findings" where the tool
+    # itself said which kind went over its baseline -- keep that half.
+    detail=$(grep -E 'FAIL' "$log" | tail -1 | cut -c1-200 || true)
+    duration=$(( ($(date +%s) - started) * 1000 ))
+    rm -f "$log"
+    if [ -z "$checked" ]; then
+        "$here/gate-report.sh" --name "$gate_name" --kind wrapped --ran 0 \
+            --failed 1 --duration-ms "$duration" \
+            --reason "no GATE-COUNT line; the command did not report what it checked (exit $code)" \
+            --command "$*"
+        exit 1
+    fi
+    if [ "$code" -eq 0 ]; then
+        "$here/gate-report.sh" --name "$gate_name" --kind wrapped \
+            --ran "$checked" --passed "$checked" --failed 0 \
+            --duration-ms "$duration" --command "$*"
+    else
+        "$here/gate-report.sh" --name "$gate_name" --kind wrapped \
+            --ran "$checked" --passed 0 --failed 1 \
+            --duration-ms "$duration" \
+            --reason "${detail:-exit $code with ${findings:-?} finding(s)}" \
+            --command "$*"
+    fi
+}
+
 cmd_ns() {
     # Elisp has one obarray, so a second definition of a name silently
     # wins.  `nl-ns' reports the boundaries the language cannot enforce.
@@ -242,6 +294,7 @@ case "$command" in
     test)           cmd_test ;;
     test-one)       cmd_test_one "$@" ;;
     compile)        cmd_compile ;;
+    gate)           cmd_gate "$@" ;;
     ns)             cmd_ns "$@" ;;
     probe)          cmd_probe "$@" ;;
     doctor)         cmd_doctor ;;
