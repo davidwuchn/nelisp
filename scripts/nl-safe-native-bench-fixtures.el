@@ -88,6 +88,33 @@
       (setq acc (aref (aref c 1) 0))
       (setq i (+ i 1)))
     acc))")
+   ;; Attribution ladder: the type check is three predicates, and they do
+   ;; not cost the same.  Each rung adds one, so the deltas say which to
+   ;; lower natively next rather than guessing.
+   (list "nl-safe-native-bench-chk1"
+         "(defun nl-safe-native-bench-chk1 ()
+  (let ((c (vector 'nl--cell (vector 7 8 9) 0)) (i 0) (acc 0))
+    (while (< i 2000)
+      (if (vectorp c)
+          (let ((state (aref c 2)))
+            (aset c 2 (+ state 1))
+            (setq acc (aref (aref c 1) 0))
+            (aset c 2 (- (aref c 2) 1)))
+        (setq acc (aref (aref c 1) 0)))
+      (setq i (+ i 1)))
+    acc))")
+   (list "nl-safe-native-bench-chk2"
+         "(defun nl-safe-native-bench-chk2 ()
+  (let ((c (vector 'nl--cell (vector 7 8 9) 0)) (i 0) (acc 0))
+    (while (< i 2000)
+      (if (and (vectorp c) (= (length c) 3))
+          (let ((state (aref c 2)))
+            (aset c 2 (+ state 1))
+            (setq acc (aref (aref c 1) 0))
+            (aset c 2 (- (aref c 2) 1)))
+        (setq acc (aref (aref c 1) 0)))
+      (setq i (+ i 1)))
+    acc))")
    ;; The same per-iteration borrow with the TYPE CHECK removed, keeping
    ;; only the state bookkeeping.  Splits the budget miss into its two
    ;; parts: `vectorp' / `length' / `eq' have no native lowering and each

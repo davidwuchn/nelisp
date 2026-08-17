@@ -4631,12 +4631,31 @@ the whole program."
 These names are direct-call candidates only when no same-named AOT
 defun is visible in the current compile unit.")
 
+(defvar nelisp-aot-compiler--aot-test-position nil
+  "Non-nil while parsing a form whose value is consumed only as a truth test.
+
+A tag predicate lowers two ways.  Without the dispatcher boundary it
+becomes a `sexp-tag' comparison producing a raw i64; with the boundary
+it delegates to builtin1 and produces a boxed Sexp.  The boxed form is
+required wherever the value flows on as a value -- but in an `if' or
+`while' test nothing observes it except the branch, and the branch
+already accepts a raw i64 (that is how `cmp' results are consumed).
+
+Measured on the Doc 170 section 9 bench: `nl-cell-p' is
+`(and (vectorp c) (= (length c) 3) (eq (aref c 0) 'nl--cell))', all of
+it in test position, and routing its predicates through the dispatcher
+took the checked borrow from 1.43x to 6.36x.
+
+Bound to nil again around anything that is not itself a test, so a
+predicate appearing as an argument keeps the boxed path.")
+
 (defconst nelisp-aot-compiler--aot-direct-tag-predicate-symbols
   '(not null atom consp listp symbolp numberp integerp float stringp vectorp)
   "One-argument predicates that can lower without the AOT builtin boundary.
-These produce raw i64 booleans through `sexp-tag' comparisons and are
-used only when the current defun does not expose the dispatcher
-boundary slots.")
+These produce raw i64 booleans through `sexp-tag' comparisons.  They are
+used when the current defun does not expose the dispatcher boundary
+slots, and -- see `nelisp-aot-compiler--aot-test-position' -- when the
+value is consumed only as a truth test.")
 
 (defun nelisp-aot-compiler--aot-builtin-boundary-available-p (fenv)
   "Return non-nil when FENV has the standard AOT builtin boundary slots."
@@ -9034,12 +9053,16 @@ functions `((NAME . ARITY) ...)'."
               (list :if-arity sexp)))
     (nelisp-aot-compiler--make-ir 'if
           :id (nelisp-aot-compiler--gensym "if")
-          :test (nelisp-aot-compiler--parse-value
-                 (nth 1 sexp) env fenv defuns)
-          :then (nelisp-aot-compiler--parse-value
-                 (nth 2 sexp) env fenv defuns)
-          :else (nelisp-aot-compiler--parse-value
-                 (nth 3 sexp) env fenv defuns)))
+          :test (let ((nelisp-aot-compiler--aot-test-position t))
+                  (nelisp-aot-compiler--parse-value
+                   (nth 1 sexp) env fenv defuns))
+          ;; The arms produce the `if''s value, so they are not tests.
+          :then (let ((nelisp-aot-compiler--aot-test-position nil))
+                  (nelisp-aot-compiler--parse-value
+                   (nth 2 sexp) env fenv defuns))
+          :else (let ((nelisp-aot-compiler--aot-test-position nil))
+                  (nelisp-aot-compiler--parse-value
+                   (nth 3 sexp) env fenv defuns))))
    ;; (while TEST BODY...) — returns 0 after loop exit.
    ((and (consp sexp) (eq (car sexp) 'while))
     (unless (>= (length sexp) 2)
@@ -9196,14 +9219,21 @@ functions `((NAME . ARITY) ...)'."
          (memq (car sexp)
                nelisp-aot-compiler--aot-direct-tag-predicate-symbols)
          (not (assq (car sexp) defuns))
-         (not (nelisp-aot-compiler--aot-builtin-boundary-available-p
-               fenv)))
+         (or (not (nelisp-aot-compiler--aot-builtin-boundary-available-p
+                   fenv))
+             ;; With the boundary available the boxed builtin1 result is
+             ;; normally required, but in a test position nothing observes
+             ;; it except the branch, which takes a raw i64 already.
+             nelisp-aot-compiler--aot-test-position))
     (let ((lowered
            (nelisp-aot-compiler--aot-direct-tag-predicate-form sexp)))
       (unless lowered
         (signal 'nelisp-aot-compiler-error
                 (list :aot-direct-predicate-shape sexp)))
-      (nelisp-aot-compiler--parse-value lowered env fenv defuns)))
+      ;; The lowered form's operands are values, not tests: a predicate
+      ;; nested inside one still needs its boxed result.
+      (let ((nelisp-aot-compiler--aot-test-position nil))
+        (nelisp-aot-compiler--parse-value lowered env fenv defuns))))
    ;; Doc 129.6D — first direct user-call lowering for one-argument
    ;; builtins.  The surrounding defun must expose the boxed-boundary
    ;; slots used by the 129.6B helper, so ordinary `(symbol-name arg)'
