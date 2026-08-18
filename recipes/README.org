@@ -91,6 +91,17 @@ Changed between builds, and worth knowing:
   =require= to report anything: it is the difference between a
   dependency error and a =void-function= a thousand lines away.
 
+- *But do not write =(require 'x)= in standalone code.*  The runtime
+  resolves FEATURE as a literal path: no =load-path=, no =.el=
+  completion.  Measured 2026-08-18 — setting =load-path= changes
+  nothing, and =(require 'nelisp-core-fileio)= fails while
+  =(require 'nelisp-core-fileio "src/nelisp-core-fileio.el")= and
+  =(load "src/nelisp-core-fileio.el")= both work.  So a file that
+  exists and provides its feature is still unreachable by name.  Load
+  by path, or pass the filename.  For a host-only library use the
+  three-argument form =(require 'url-parse nil t)= — note that
+  =(require 'url-parse t)= means FILENAME = t, not NOERROR.
+
 * Two traps that cost the most time
 
 ** Multibyte writes signal after succeeding
