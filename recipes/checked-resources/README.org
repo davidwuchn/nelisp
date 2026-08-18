@@ -45,11 +45,15 @@ twice, the drift is printed beside the ratio, and past the drift limit
 the ratio is discarded — reported as a =skip= with its reason rather
 than written down and quoted later.
 
-Timing happens outside the process because the standalone runtime has
-no clock — =(current-time)= answers =(0 0 0 0)= and =(float-time)=
-answers nil — so each arm is a whole process and an empty run of the
-same arm is subtracted to remove start-up.  That is the slope method
-already used for this repository's own benchmarks.
+Timing happens outside the process, which is forced on Windows and
+prudent everywhere: =(current-time)= answers =(0 0 0 0)= there, while
+the Linux build has a real clock (=tools/ai/nelisp-ai.sh runtime-probe=
+will tell you which you have).  =(float-time)= answers nil on both, and
+its value cannot be carried through a =let*=, a =condition-case= or a
+function call without ending the process.  So each arm is a whole
+process and an empty run of the same arm is subtracted to remove
+start-up — the slope method already used for this repository's own
+benchmarks, and the one that does not care which host you are on.
 
 For calibration only, 3000 interpreted borrow-checked sums against the
 same loop with no borrow:

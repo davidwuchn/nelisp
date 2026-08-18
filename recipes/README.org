@@ -35,72 +35,45 @@ exiting is normal, and the constraint disappears.
 
 * Runtime surface, measured
 
-What the standalone runtime does and does not have.  Probed 2026-08-17
-against a binary built from =main= on 2026-08-16 12:53.  Four commits
-have landed on =main= since that build; none touch =src/= or =lisp/=,
-but =825d93af= changes =scripts/nelisp-standalone-build.el= so that deep
-recursion signals instead of dying silently — a binary built from
-current =main= differs in that respect.
+Do not read this section for your answer — run the probe:
 
-*This is a property of one binary, not of NeLisp.*  Re-probe after a
-rebuild rather than trusting the table; the surface has already moved
-once between builds (see =require= below).
+#+begin_src sh
+tools/ai/nelisp-ai.sh runtime-probe
+#+end_src
 
-Present: =read-stdin-bytes=, =princ= / =prin1= / =terpri=,
-=read-from-string=, =string-search=, =string-match=, =substring=,
-=split-string=, =string-trim=, =string-join=, =format=, =concat=,
-=with-temp-buffer=, =insert-file-contents=, =buffer-string=,
-=write-region=, =getenv=, =directory-files=, =expand-file-name=,
-=make-process=, =call-process=, =sort=, =mapconcat=, =assoc=,
-=ignore-errors=.
+Nine capabilities, one line each, from the binary in front of you.  The
+answers differ per binary *and per platform*, and this section used to
+state them as facts; two were wrong within a day of being written.
 
-Absent or stubbed:
+What two hosts answered on 2026-08-18, same commit:
+
+| capability            | Windows x86_64        | WSL Debian x86_64 |
+|-----------------------+-----------------------+-------------------|
+| =getenv=              | works                 | *nil, always*     |
+| =file-exists-p=       | *nil for a file that exists* | works      |
+| =current-time=        | *(0 0 0 0)* stub      | real clock        |
+| =require= tree feature | file-missing         | file-missing      |
+| =load= missing file   | returns t, silent     | returns t, silent |
+| =write-region= multibyte | signals after writing | signals after writing |
+
+The three in bold are single-platform defects, which is exactly why a
+recipe written on one host cannot be trusted on the other until it has
+run there.
+
+Beyond the probe, still true of both:
 
 - =read-string=, =read-from-minibuffer= — void.  =read-stdin-bytes= is
   the only way in.
 - =read= — string streams only; it cannot read from stdin.
 - =goto-char=, =re-search-forward=, =mapatoms= — void.  Buffers exist,
-  but buffer *navigation* does not: read the file in, then work on
-  strings.
-- =file-exists-p=, =file-readable-p= — return nil for files that
-  demonstrably exist.  Never gate on them; read the file and check what
-  you got.
+  but buffer *navigation* does not.
 - =json-encode=, =sqlite-open= — not in the base runtime; they live in
   =packages/nelisp-json= and =packages/nelisp-sqlite=.
-
-Two more, both measured on 2026-08-17 and both silent:
-
-- =(load "missing.el" nil t)= *returns t*.  NOERROR is nil in that call,
-  so Emacs would signal; this runtime does not.  A wrong path in a
-  hand-written load list therefore produces no error and no output —
-  just a program in which nothing is defined, failing later as
-  =void-function= somewhere unrelated.  After loading by path, assert
-  =featurep=.
-- Emacs batch on Windows prints *CRLF*, so a shell loop over a
-  generated file list (=for f in $(make -s pkg-load-order ...)=) keeps
-  the carriage return in each path.  Combined with the point above, the
-  whole sequence loads nothing and says nothing.  Tools that emit paths
-  should call =(set-binary-mode 'stdout t)=.
-
-Changed between builds, and worth knowing:
-
-- =(require 'missing-feature)= now signals =file-missing=.  An older
-  binary (2026-08-14) returned the feature name — success to every
-  caller — while =featurep= stayed nil, so a missing dependency was
-  undetectable.  Check this on your binary before relying on
-  =require= to report anything: it is the difference between a
-  dependency error and a =void-function= a thousand lines away.
-
-- *But do not write =(require 'x)= in standalone code.*  The runtime
-  resolves FEATURE as a literal path: no =load-path=, no =.el=
-  completion.  Measured 2026-08-18 — setting =load-path= changes
-  nothing, and =(require 'nelisp-core-fileio)= fails while
-  =(require 'nelisp-core-fileio "src/nelisp-core-fileio.el")= and
-  =(load "src/nelisp-core-fileio.el")= both work.  So a file that
-  exists and provides its feature is still unreachable by name.  Load
-  by path, or pass the filename.  For a host-only library use the
-  three-argument form =(require 'url-parse nil t)= — note that
-  =(require 'url-parse t)= means FILENAME = t, not NOERROR.
+- =(require 'x)= resolves FEATURE as a literal path: no =load-path=, no
+  =.el= completion, so a file that exists and provides its feature is
+  still unreachable by name.  Load by path, or pass the filename; for a
+  host-only library use =(require 'url-parse nil t)= — the third
+  argument is NOERROR, not the second.
 
 * Two traps that cost the most time
 
