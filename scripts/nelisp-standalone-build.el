@@ -7104,6 +7104,123 @@ unresolved at link time."
       (if (= (bf_require_arg_present_p args 2) 1)
           (if (= (ptr-read-u64 (wf_arg_ptr args 2) 0) 0) 0 1)
         0))
+    ;; Observability for the native subset.
+    ;;
+    ;; Nothing in here could report anything, so a change to it was visible
+    ;; only through its effect on the outside world, and each attempt cost a
+    ;; full reader rebuild.  Measured 2026-08-19: a load-path search for
+    ;; `require' was written, compiled, and landed in the binary -- `strings
+    ;; target/nelisp' finds every helper -- and did not resolve.  Whether the
+    ;; search arm was even entered could not be established, so the work
+    ;; stopped on a tooling gap rather than on a hard question.
+    ;;
+    ;; Every piece this needs was already here; it had just never been put in
+    ;; one callable place.  `nl_eval_source_print_error' does the same three
+    ;; steps -- mut-str, m5_prin1, nl_os_write_stderr -- to report an uncaught
+    ;; error.
+    ;;
+    ;; MARKER is a raw integer so a call site costs nothing to write:
+    ;; (nl_dbg_note 1 dirs) prints
+    ;;
+    ;;   nelisp-dbg: 1 ("/tmp/x" "/tmp/y")
+    ;;
+    ;; There is no enable flag, deliberately.  A flag has to be turned off by
+    ;; whoever turned it on, and forgetting is silent; a call left behind is
+    ;; loud on stderr, and `make dbg-note-inventory' fails on one that reaches
+    ;; a commit.  Reader-only: the baked eval link set has no
+    ;; `nl_os_write_stderr', which is why this lives with the bf helpers and
+    ;; not in the core group.
+    (defun nl_dbg_note (marker val)
+      (let* ((pre (alloc-bytes 16 1))
+             (sp (alloc-bytes 1 1))
+             (eol (alloc-bytes 1 1))
+             (mslot (alloc-bytes 32 8))
+             (mms (alloc-bytes 32 8))
+             (mrep (alloc-bytes 32 8))
+             (vms (alloc-bytes 32 8))
+             (vrep (alloc-bytes 32 8)))
+        (seq
+         (ptr-write-u64 pre 0 7218549418737034606) ; "nelisp-d"
+         (ptr-write-u32 (+ pre 8) 0 540698466)     ; "bg: "
+         (nl_os_write_stderr pre 12)
+         (wf_write_int mslot marker)
+         (mut-str-make-empty mms 32)
+         (m5_prin1 mms mslot)
+         (mut-str-finalize mms mrep)
+         (nl_os_write_stderr (nl_bi_strptr mrep) (nl_bi_strlen mrep))
+         (ptr-write-u8 sp 0 32)
+         (nl_os_write_stderr sp 1)
+         (mut-str-make-empty vms 32)
+         (m5_prin1 vms val)
+         (mut-str-finalize vms vrep)
+         (nl_os_write_stderr (nl_bi_strptr vrep) (nl_bi_strlen vrep))
+         (ptr-write-u8 eol 0 10)
+         (nl_os_write_stderr eol 1)
+         0)))
+    ;; `load-path' resolution for `require'.  A feature name was used as a
+    ;; literal path and nothing read `load-path', so no feature resolved --
+    ;; not even a file sitting in this tree.  Measured before writing this:
+    ;; (require 'f "dir/f.el") loads and its defun is callable, and
+    ;; (load "dir/f.el" nil t) works, so only the name-to-path step was
+    ;; missing.  Each piece below has a working model in this same file:
+    ;; bf_features_symbol / bf_features_get for reading a global, and
+    ;; bf_feature_member_p for walking a list.
+    (defun bf_load_path_symbol (out)
+      (let* ((buf (alloc-bytes 16 1)))
+        (seq (ptr-write-u64 buf 0 8386107321400520556) ; "load-pat"
+             (ptr-write-u8 (+ buf 8) 0 104)            ; "h"
+             (nl_alloc_symbol buf 9 out)
+             0)))
+    ;; Not `bf_features_get''s mirror-only read.  `features' lands in the
+    ;; mirror because `provide' writes it there natively; `load-path' arrives
+    ;; by `setq' and can sit on the frame stack at env+32, where a mirror
+    ;; lookup cannot see it.  `bf_symbol_value' carries the same correction,
+    ;; with a comment about (let ((x 9)) (symbol-value 'x)) reading the global.
+    (defun bf_load_path_get (env out)
+      (let* ((sym (alloc-bytes 32 8)))
+        (seq
+         (bf_load_path_symbol sym)
+         (if (= (nelisp_env_lookup_value (+ env 0) (+ env 32) sym out) 0)
+             0
+           (seq (wf_write_nil out) 0)))))
+    ;; Copy N bytes of SRC into DST at DSTI.  `nl_bi_cpath_loop' is the same
+    ;; shape but always writes from 0 and NUL-terminates, so it cannot append.
+    (defun bf_rq_copy (src dst dsti i n)
+      (if (= i n)
+          (+ dsti n)
+        (nl_seq2 (ptr-write-u8 dst (+ dsti i) (ptr-read-u8 src i))
+                 (bf_rq_copy src dst dsti (+ i 1) n))))
+    ;; DIR + "/" + FEATURE + ".el" as a Str.  A Symbol (tag 4) carries the
+    ;; same ptr@16/len@24 layout a Str does, which is what `symbol-name'
+    ;; relies on, so the accessors read a feature directly.  The separator is
+    ;; unconditional: "a//b" and "a/b" name the same file here.
+    (defun bf_require_candidate (feature dir out)
+      (let* ((dptr (nl_bi_strptr dir))
+             (dlen (nl_bi_strlen dir))
+             (nptr (nl_bi_strptr feature))
+             (nlen (nl_bi_strlen feature))
+             (total (+ (+ dlen 1) (+ nlen 3)))
+             (buf (alloc-bytes total 1)))
+        (seq
+         (bf_rq_copy dptr buf 0 0 dlen)
+         (ptr-write-u8 buf dlen 47)                    ; "/"
+         (bf_rq_copy nptr buf (+ dlen 1) 0 nlen)
+         (ptr-write-u8 buf (+ (+ dlen 1) nlen) 46)     ; "."
+         (ptr-write-u8 buf (+ (+ dlen 2) nlen) 101)    ; "e"
+         (ptr-write-u8 buf (+ (+ dlen 3) nlen) 108)    ; "l"
+         (nl_alloc_str buf total out)
+         0)))
+    ;; Walk `load-path' and leave the first readable candidate in OUT.
+    ;; Returns 1 when one was found, 0 otherwise.
+    (defun bf_require_search (feature dirs out)
+      (if (= (ptr-read-u64 dirs 0) 7)
+          (let* ((cand (alloc-bytes 32 8)))
+            (seq
+             (bf_require_candidate feature (nl_cons_car_ptr dirs) cand)
+             (if (= (bf_require_file_readable_p cand) 1)
+                 (seq (wf_copy32 out cand) 1)
+               (bf_require_search feature (nl_cons_cdr_ptr dirs) out))))
+        0))
     (defun bf_require_file_missing (feature)
       (let* ((buf (alloc-bytes 16 1)))
         (seq
@@ -7159,9 +7276,27 @@ unresolved at link time."
            ;; require from converting a missing dependency into false success.
            (if (= (bf_require_file_readable_p file) 1)
                (bf_require_after_load (bf_require_load_file file env out) feature noerror env out)
-             (if (= noerror 1)
-                 (seq (wf_write_nil out) 0)
-               (bf_require_file_missing feature)))))))
+             ;; The literal name did not name a readable file.  Search
+             ;; `load-path' before giving up -- but only when the caller named
+             ;; no FILENAME, since the candidates are built from the FEATURE
+             ;; and would silently answer a different question than the one an
+             ;; explicit path asked.  Anything that resolved before still
+             ;; resolves the same way: this runs only where the old code was
+             ;; already on its way to `file-missing'.
+             (let* ((dirs (alloc-bytes 32 8))
+                    (found (alloc-bytes 32 8)))
+               (seq
+                (bf_load_path_get env dirs)
+                (if (= (bf_require_arg_present_p args 1) 1)
+                    (if (= noerror 1)
+                        (seq (wf_write_nil out) 0)
+                      (bf_require_file_missing feature))
+                  (if (= (bf_require_search feature dirs found) 1)
+                      (bf_require_after_load
+                       (bf_require_load_file found env out) feature noerror env out)
+                    (if (= noerror 1)
+                        (seq (wf_write_nil out) 0)
+                      (bf_require_file_missing feature)))))))))))
     (defun bf_set (args env out)
       (let* ((sym (wf_arg_ptr args 0))
              (val (wf_arg_ptr args 1)))
@@ -11293,6 +11428,20 @@ dispatch arm in `nelisp-standalone--applyfn-dispatch-table'.")
   "Return PE imports for the current Windows-native standalone reader."
   nelisp-standalone--windows-reader-imports)
 
+(defun nelisp-standalone--reader-tree-load-path ()
+  "Return the tree directories `require' should search, newest build wins.
+Only directories that exist are listed: a path that cannot be read is
+indistinguishable from one that is simply empty once the search runs, and
+listing it would make the load-path lie about what is reachable."
+  (let ((dirs (append
+               (list (expand-file-name "lisp" nelisp-standalone--repo-root)
+                     (expand-file-name "src" nelisp-standalone--repo-root))
+               (sort (file-expand-wildcards
+                      (expand-file-name "packages/*/src"
+                                        nelisp-standalone--repo-root))
+                     #'string<))))
+    (seq-filter #'file-directory-p dirs)))
+
 (defun nelisp-standalone--reader-repl-prelude-source ()
   "Return source evaluated once before the standalone reader REPL loop.
 Concatenates the stdlib prelude with the pure-elisp regexp matcher (Doc 143)
@@ -11302,6 +11451,27 @@ and the `string-match' family aliases over it."
      (expand-file-name "scripts/nelisp-stdlib-prelude.el"
                        nelisp-standalone--repo-root))
     (goto-char (point-max))
+    ;; `load-path' shipped empty and nothing filled it, so `require' could
+    ;; not resolve a feature even when the file was in this tree -- measured
+    ;; 2026-08-19, the search reads load-path correctly and finds nothing
+    ;; because there is nothing in it.
+    ;;
+    ;; Baked at build time rather than discovered at run time.  Every way of
+    ;; discovering it is a guess: argv[0] is whatever the caller typed,
+    ;; `/proc/self/exe' is Linux-only and unreadable from here without
+    ;; readlink, and `getenv' answers nil in this runtime.  A guess that
+    ;; picks the wrong root would resolve a feature to the wrong file, which
+    ;; is worse than not resolving it.  The build knows the answer exactly.
+    ;;
+    ;; A relocated binary keeps paths that no longer exist; the search then
+    ;; finds nothing, which is exactly today's behaviour -- no answer rather
+    ;; than a wrong one.
+    (insert "\n;; --- build-time load-path (see nelisp-standalone--reader-repl-prelude-source) ---\n")
+    (insert (format "(setq load-path (list %s))\n"
+                    (mapconcat
+                     (lambda (d) (format "%S" d))
+                     (nelisp-standalone--reader-tree-load-path)
+                     " ")))
     (insert "\n;; --- Doc 143: regexp matcher + string-match family ---\n")
     (insert-file-contents
      (expand-file-name "lisp/nelisp-stdlib-regexp.el"
