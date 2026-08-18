@@ -1207,3 +1207,52 @@ deaths in `if1' / `cond1' / `and' are branch shapes. The remaining 6 are
 `while' with a bound that can be zero, where the disagreement is between
 the loop's entry state and its body -- that needs **C**, because coercing
 the entry value is exactly the promotion that failed for want of rooting.
+
+## 21. Branch joins, and what they are waiting on (2026-08-18)
+
+A frame slot holds one machine word and the compiler tracks, per slot,
+whether that word is a raw integer or a Sexp pointer.  Branches now agree
+with themselves about that: where two paths leave a slot differently, the
+raw one is boxed, and the slot becomes a GC root at the same moment --
+the pairing the withdrawn promotion missed.
+
+Two shapes, because the placement differs:
+
+- **Selection** (`if`, `cond`): the conversion goes in the arm.  A path
+  that assigned the slot converts after; a path that did not converts
+  before, or the conversion becomes that path's value and
+  `(if c (setq acc BOXED) nil)' stops answering nil.
+- **Skip** (`and`, `or`, `while`): the skipped path is the absence of
+  code, so the conversion goes before the whole form and the skip
+  inherits it.  Appending to an `and' arm would corrupt the test it is.
+  Arms are then parsed once more, since they were parsed against the old
+  representation; once, not to a fixed point, because a slot only moves
+  raw -> boxed and it has already moved.
+
+Measured on `make aot-differential`, 90 programs:
+
+```
+baseline                     35 wrong, 15 deaths
+joins alone                  44 wrong,  3 deaths
+joins + parameter convention  0 wrong,  0 deaths
+```
+
+The middle row is the honest one. Alone, the joins remove the deaths --
+a raw word is no longer dereferenced -- but the answers stay wrong,
+because the branch is still choosing the wrong arm for an unrelated
+reason. Trading a crash for a silent wrong answer is the wrong
+direction, and the joins only pay once section 20's parameter question
+is settled. They are landed rather than held because that fix needs
+them: an entry wrapper makes the arm choice right, and the joins make
+what the arms leave behind readable.
+
+Also landed here, from the suite: `nl_sexp_clone_into` now has a
+definition in the `native-exec-general` C harness (a unit that assigns a
+delegated call to a local references it, and the link failed without
+one), and the compiler test's list of bridgeable runtime symbols is
+taken from the loader's constant instead of copied -- the copy had gone
+stale by two symbols and failed on units the loader loads and runs.
+
+State: reader builds and runs, `make neln-loader-test` 20/20, `make
+compile' clean, suite at one known load-dependent failure
+(`nelisp-aot-tco-bench-tco-keeps-up-with-nl-loop').

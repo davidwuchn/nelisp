@@ -3278,6 +3278,11 @@ implementation."
                         ;; string in it now carries the symbol.  The harness
                         ;; provides it the same way it provides the others.
                         "nl_alloc_bytes"
+                        ;; A dispatcher result aliases the shared OUT
+                        ;; slot, so storing one in a local copies it into
+                        ;; a slot of its own first.  Any unit that assigns
+                        ;; a delegated call to a variable carries this.
+                        "nl_sexp_clone_into"
                         "nelisp_aot_builtin_call1"
                         "nelisp_aot_builtin_calln")))
        externs))))
@@ -3592,6 +3597,17 @@ implementation."
      "    neln_register_slot_soft(p);\n"
      "  }\n"
      "  return p;\n"
+     "}\n"
+     "\n"
+     ;; A dispatcher writes its result into the shared OUT slot, so a
+     ;; local that keeps one has to own a copy before the next call
+     ;; reuses OUT.  The compiler emits this for every such assignment.
+     "void nl_sexp_clone_into(NelnSexp *src, NelnSexp *dst) {\n"
+     "  if (!src || !dst) {\n"
+     "    return;\n"
+     "  }\n"
+     "  *dst = *src;\n"
+     "  neln_register_slot_soft(dst);\n"
      "}\n"
      "\n"
      "NelnSexp *nl_alloc_str(const unsigned char *bytes_ptr, int64_t len, NelnSexp *result_slot) {\n"

@@ -4273,14 +4273,22 @@ extern (Doc 06 C-3 function-pointer tables), resolved by the linker."
 ;; instruction is emitted but whether the unit's extern set is CLOSED --
 ;; every name in it a C runtime symbol the loader can bridge.
 
+(load (expand-file-name
+       "lisp/nelisp-native-load.el"
+       (locate-dominating-file (or load-file-name buffer-file-name)
+                               "lisp"))
+      nil t)
+
 (defconst nelisp-aot-compiler-test--runtime-extern-symbols
-  '("nelisp_aot_builtin_call1" "nelisp_aot_builtin_calln"
-    "nl_alloc_symbol" "nl_alloc_str" "nl_alloc_mut_str"
-    "nl_mut_str_push_byte" "nl_mut_str_finalize"
-    "nl_alloc_vector" "nl_vector_slot_ptr" "nl_vector_set_slot")
+  nelisp-native-load-bridgeable-symbols
   "C runtime symbols an in-process loader can resolve to a bridge.
 Anything else in an artifact's extern set is an Elisp name, which no
-stub can point at once the unit is loaded rather than linked.")
+stub can point at once the unit is loaded rather than linked.
+
+Taken from the loader rather than copied.  The copy went stale the
+moment the compiler emitted a boxing conversion: `nl_alloc_bytes' and
+`nl_sexp_clone_into' are both bridgeable and both were missing here, so
+this failed on units the loader loads and runs perfectly well.")
 
 (defun nelisp-aot-compiler-test--artifact-externs (dir name source)
   "Compile SOURCE as NAME under DIR and return its native extern symbols."
