@@ -46,11 +46,31 @@ seconds in.  It passes on this tree — 9 bytes at t=2s.
 
 * What it cannot do
 
-- *Long uptime is not free.*  The reader's arena does not reclaim
-  (~560 bytes per evaluated operation, =garbage-collect= frees nothing),
-  so a service that runs for days will grow.  Supervise it, restart it
-  on a memory threshold, or keep the process per session rather than
-  per machine.
+- *Long uptime is not free, and the budget is measurable.*  The arena
+  does not reclaim, so the question is how many requests fit before the
+  process has to be restarted.  Ask this service:
+
+  #+begin_src sh
+  recipes/stdio-service/measure.sh
+  #+end_src
+
+  Measured 2026-08-18 on the same commit, sending `(ping N)':
+
+  | host              | 10 req  | 110 req | 210 req | shape                        |
+  |-------------------+---------+---------+---------+------------------------------|
+  | WSL Debian x86_64 | 12.3 MB | 132 MB  | 243 MB  | linear, ~1.15 MB per request |
+  | Windows x86_64    | 12.3 MB | 42.1 MB | 42.0 MB | plateaus near 42 MB          |
+
+  On Linux that is roughly *900 requests per gigabyte*, so supervision
+  and a restart threshold are not optional.  On Windows the growth
+  stopped inside the measured range, which is a different operating
+  posture entirely — and the difference is the reason the recipe ships a
+  measurement rather than a rule of thumb.
+
+  The script takes three counts rather than two: the Windows slope
+  between 10 and 110 requests reads 297 KB per request and between 110
+  and 210 reads *below zero*, so a two-point measurement would have
+  published a rate that does not exist.
 - *No JSON out of the box.*  Framing is s-expressions because
   =read-from-string= is in the runtime and =json-encode= is not.  If the
   host must speak JSON, load =packages/nelisp-json= and pay for it

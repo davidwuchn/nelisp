@@ -60,9 +60,11 @@ out=target/ai/stdio-service-arena.txt
     printf '%-6s requests: %s bytes\n' "$large" "$d_large"
     printf 'slope %s..%s:  %s bytes/request\n' "$small" "$middle" "$slope_low"
     printf 'slope %s..%s: %s bytes/request\n' "$middle" "$large" "$slope_high"
-    if [ "$slope_low" -gt 0 ] && [ "$slope_high" -gt 0 ] \
-       && [ $(( slope_low * 4 )) -gt $(( slope_high * 5 )) ]; then
-        printf 'shape:         CHUNKED -- the slopes disagree, so neither is a rate\n'
+    # A high slope at or below zero is the clearest chunking signal of
+    # all: the arena stopped growing between the two counts, so the
+    # earlier figure was never a rate.
+    if [ "$slope_high" -le 0 ] \
+       || [ $(( slope_low * 4 )) -gt $(( slope_high * 5 )) ]; then
         printf '               use the largest total as an upper bound\n'
     else
         printf 'shape:         linear within these counts\n'
