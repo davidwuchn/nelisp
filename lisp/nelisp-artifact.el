@@ -2907,6 +2907,24 @@ on the hot path, so use a small deterministic rolling hash there."
              args
              ""))
 
+(defun nelisp-artifact--native-driver-fingerprint (variant argc)
+  "Return a hash of the driver C that VARIANT and ARGC will compile.
+The calling convention lives in that generated source, so hashing it is
+what keeps a cached executable from outliving a change to it.  A written
+-down version token was tried first and is precisely the kind of thing
+that gets forgotten: it has to be bumped by whoever edits the driver, and
+nothing fails when they do not -- the failure lands later, on a machine
+with a warm cache, as a wrong answer rather than as a miss.  Deriving it
+cannot be forgotten, because the thing being hashed is the thing being
+compiled.
+
+The symbol name is a fixed placeholder: it varies per call and is already
+part of the key, so letting it in would only defeat sharing."
+  (nelisp-artifact--small-string-hash
+   (if (equal variant "general")
+       (nelisp-artifact--native-driver-c "nelisp_fp" (list :arity argc))
+     (nelisp-artifact--native-fast-driver-c "nelisp_fp" argc))))
+
 (defun nelisp-artifact--native-exec-cache-key
     (artifact-path symbol argc &optional variant arg-signature)
   "Return a stable cache key for ARTIFACT-PATH, SYMBOL, and ARGC."
@@ -2917,15 +2935,16 @@ on the hot path, so use a small deterministic rolling hash there."
     ;; sufficient to invalidate the private dev-loop executable cache; the
     ;; validating native paths still parse the manifest on fallback/error.
     ;;
-    ;; The ABI token is the half the artifact cannot supply.  The cache root
-    ;; is $XDG_CACHE_HOME, shared by every worktree on the machine, and the
-    ;; key describes the artifact rather than the driver -- so a change to
-    ;; how the driver hands arguments over leaves every warm entry both stale
-    ;; and indistinguishable from a fresh one.  Bump this whenever the fast
-    ;; driver's calling convention changes.
+    ;; The driver is the half the artifact cannot supply.  The cache root is
+    ;; $XDG_CACHE_HOME, shared by every worktree on the machine, and the rest
+    ;; of this key describes the artifact -- so a change to how the driver
+    ;; hands arguments over would leave every warm entry both stale and
+    ;; indistinguishable from a fresh one.  The fingerprint below closes that
+    ;; by hashing the C this key will actually compile.
     (let* ((seed (concat
                   "neln-cache|"
-                  "abi=valueword|"
+                  (nelisp-artifact--native-driver-fingerprint variant argc)
+                  "|"
                   (or variant "fast")
                   "|"
                   artifact
