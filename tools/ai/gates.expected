@@ -77,8 +77,18 @@ bench-borrow-check?
 # from here.  `locate-library' is void in the standalone, so that guard
 # is not available either.
 #
-# nelisp-native-artifact-gate fails at `load_source_uses_neln' with the
-# same error and is left unwired for the same reason.
+# One defect, every Linux standalone gate.  Measured 2026-08-18 in WSL:
+#
+#   standalone-reader-test        file-missing: url-parse   (5 of 8 checks in)
+#   nelisp-native-artifact-gate   file-missing: url-parse   (load_source_uses_neln)
+#   nelisp-performance-gate       file-missing: url-parse   (cache_default_load)
+#   standalone-selfhost-test      file-missing: macroexp    (fact driver)
+#
+# The last one names a different library, which makes the shape clear:
+# it is not one bad require, it is every require the standalone path
+# makes to something it cannot resolve.  Resolving that unblocks four
+# gates at once, which is why it is worth doing before wiring any of
+# the other three.
 #
 # Required-vs-optional here is a judgement, not an oversight: making it
 # required would paint every Linux verify red for a defect this harness

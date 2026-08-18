@@ -92,6 +92,15 @@ run_timed() {
   end="$(date +%s%3N)"
   printf 'gate_result label=%s rc=%s ms=%s out=%s\n' \
     "$label" "$rc" "$((end - start))" "$(tr '\n' ' ' <"$out_file" | sed 's/[[:space:]]*$//')"
+  # On failure, say why.  stderr was captured into a temp file that the
+  # EXIT trap deletes, so a failing step printed `rc=1 ms=74 out=' and
+  # nothing else; finding that the cause was `file-missing: url-parse'
+  # took a patched copy of this script.  A gate that discards its own
+  # diagnostic makes every reader repeat that.
+  if [ "$rc" -ne 0 ] && [ -s "$err_file" ]; then
+    printf 'gate_stderr label=%s %s\n' \
+      "$label" "$(tr '\n' ' ' <"$err_file" | sed 's/[[:space:]]*$//')" >&2
+  fi
   return "$rc"
 }
 
