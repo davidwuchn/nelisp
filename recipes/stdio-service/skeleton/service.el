@@ -85,6 +85,12 @@ Replace this function; everything above and below it is transport."
     (cons 'echo (cdr request)))
    ((eq (car request) 'add)
     (list 'sum (+ (car (cdr request)) (car (cdr (cdr request))))))
+   ;; How much arena the process has used so far.  Worth keeping in any
+   ;; service you build: the arena does not reclaim, so "how long can
+   ;; this run" is a question with a numeric answer, and the answer is
+   ;; per-request growth measured through this handler.
+   ((eq (car request) 'stats)
+    (list 'used (car (cdr (cdr (nelisp--arena-stats))))))
    (t
     (list 'error (format "unknown request: %s" (car request))))))
 
