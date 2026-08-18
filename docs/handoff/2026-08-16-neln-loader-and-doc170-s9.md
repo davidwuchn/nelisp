@@ -1154,13 +1154,56 @@ leaves the raw word to be dereferenced.
 Drive `35 wrong / 15 dead` to zero without refusing programs, and keep
 `make standalone-reader` building. The staging is:
 
-- **A.** Classify every IR kind so `--ir-repr` never answers `unknown';
-  add the per-symbol return representation `extern-call' needs. No
-  behaviour change intended, and verifiable as such by byte-identity of
-  the reader's emitted code.
 - **B.** Give branch nodes (`if', `cond', `and'/`or') a joined
   representation and emit the coercion in the arm that needs it, so a
   branch is a value join rather than a slot patched in evaluation order.
+- **A.** Classify the roots -- defun parameters and `extern-call' return
+  values -- so the rest resolves through them.
 - **C.** Derive each slot's representation, and its GC rooting, from the
   analysis -- which is what the withdrawn promotion got wrong -- and
   delete the mutable `:repr` overwriting in `setq'.
+
+## 20. Where `unknown' actually comes from (2026-08-18)
+
+`nelisp-aot-compiler--repr-audit' walks each parsed defun and reports
+every node whose representation is `unknown'.  It changes no decision,
+and the reader it builds is byte-identical to the one built without it.
+
+Over the reader corpus, 73644 such nodes:
+
+```
+71204  ref                                 96.7%
+  684  if
+  495  call
+  371  let-rt
+  311  extern-call
+  283  value-seq
+  142  setq-local
+   28  syscall-direct
+   21  logic
+  <20  vector-ref-ptr, sexp-write-str-lit, record-*, sexp-tag,
+       str-byte-at, atomic-fetch-add, shift, vector-make
+```
+
+`let-rt', `value-seq' and `setq-local' are already classified -- they
+delegate, and report `unknown' only because what they delegate to does.
+They are not separate work.
+
+The finding is that this is not a long tail of exotic IR kinds. It is
+variable references, by two orders of magnitude. A `ref' copies `:repr'
+from its FENV cell, a `let' copies it from its initialiser, and an
+initialiser is usually another `ref' -- so the `unknown' is circular and
+has to be broken at the roots, which are defun parameters and the
+values externs return.
+
+That reorders the staging above. Parameters were changed once already,
+in isolation, and broke the build; the reason is now visible rather than
+inferred. Precision at a root flows into joins, and the joins cannot yet
+represent two arms disagreeing. Joins first, roots second.
+
+Expected effect, stated before the work so it can be wrong: **B** should
+take the 35 wrong comparisons to zero and 15 deaths to 6, since the 9
+deaths in `if1' / `cond1' / `and' are branch shapes. The remaining 6 are
+`while' with a bound that can be zero, where the disagreement is between
+the loop's entry state and its body -- that needs **C**, because coercing
+the entry value is exactly the promotion that failed for want of rooting.

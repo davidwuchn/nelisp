@@ -1017,6 +1017,30 @@ these slots is a later 129.5 step."
            (push (nelisp-aot-compiler--ir-get node :slot) slots))))
       (sort (delete-dups slots) #'<))))
 
+(defvar nelisp-aot-compiler--repr-audit nil
+  "When non-nil, report IR kinds whose representation is `unknown'.
+
+`unknown' is the default arm of `--ir-repr', meaning nobody classified
+that kind yet.  It is not an absence of information the rest of the
+compiler ignores: measured over the generated differential corpus, a
+value classified `unknown' disagrees with a raw integer and with a Sexp
+pointer alike, so it behaves as a third representation and produces
+wrong answers against both.
+
+Removing it means classifying every kind, and classifying a kind IS a
+behaviour change -- `--ir-as-raw-i64' unwraps on `sexp-ptr',
+`--aot-dispatcher-arg-form' boxes on `raw-i64'.  So count first: this
+reports which kinds actually reach `unknown' in the reader corpus, and
+how often, without changing any decision.")
+
+(defun nelisp-aot-compiler--repr-audit-walk (ir)
+  "Report each node in IR whose representation is `unknown'."
+  (nelisp-aot-compiler--walk-ir
+   ir
+   (lambda (node)
+     (when (eq (nelisp-aot-compiler--ir-repr node) 'unknown)
+       (message "[repr-audit] %s" (nelisp-aot-compiler--ir-kind node))))))
+
 (defun nelisp-aot-compiler--gc-root-descriptor-for-defun (defun-ir)
   "Return the call-boundary GC root descriptor for DEFUN-IR, or nil.
 The descriptor is the compiler-side handoff for Doc 99 / 129.5C:
@@ -11313,6 +11337,8 @@ Returns one of:
                              rt-slot-cell))
                         (nelisp-aot-compiler--parse-value
                          body env parse-fenv defuns)))
+             (_ (when nelisp-aot-compiler--repr-audit
+                  (nelisp-aot-compiler--repr-audit-walk body-ir)))
              (rt-slot-count (- (car rt-slot-cell) arity))
              (gc-root-slots
               (nelisp-aot-compiler--gc-root-slots-for-defun body-ir))
