@@ -83,3 +83,56 @@ seconds in.  It passes on this tree — 9 bytes at t=2s.
 
 =service-handle= is the only function you are meant to replace.
 Everything above it is transport and everything below it is the loop.
+
+* Adopting nl-safe: the request buffer under a borrow
+
+=skeleton/service-checked.el= is the same service with one change: the
+bytes read but not yet parsed live in a borrow cell instead of a plain
+variable.  That buffer is the aliasing shape in miniature — one function
+appends to it, another consumes from it, and nothing in the plain
+version says which owns it at any moment.
+
+#+begin_src elisp
+(nl-defcell service-checked-pending (vector ""))
+
+(nl-with-borrow-mut (slot service-checked-pending)   ; fill and split together
+  ...)
+(nl-with-borrow (slot service-checked-pending)       ; read the length
+  (length (aref slot 0)))
+#+end_src
+
+It ships as a second file so the recipe can be measured both ways.
+
+** Granularity is the whole finding
+
+One borrow is taken per *line read*, covering fill-and-scan together —
+not one per =read-stdin-bytes= call and not one per access.  That choice
+is what the cost turns on:
+
+| measurement                                   | ratio    |
+|-----------------------------------------------+----------|
+| =make nl-safe-bench=: one borrow vs one unchecked read | *46.60x* |
+| this service, 200 requests, Windows x86_64    | *1.04x*  |
+| this service, 200 requests, WSL Debian        | *0.98x*  |
+
+Both service figures come from =tools/ai/bench-compare.sh= with
+noise/signal at 0.01 and 0.08.  Arena use did not rise either; on
+Windows the checked variant used *less* (13.6 MB against 42.1 MB at 110
+requests, both plateaued).
+
+So the question "can we afford nl-safe" is really "where are the
+boundaries of a unit of work".  Per access it is unaffordable; per
+request it is inside the noise.
+
+** Proving the checks are live
+
+A service whose borrows are all legal looks exactly like a service with
+no checks in it.  =(conflict)= is a request that deliberately takes an
+exclusive borrow while a shared one is held; =verify.sh= requires the
+answer =(conflict signalled)=.  Keep an equivalent in anything you
+adapt.
+
+#+begin_src sh
+recipes/stdio-service/measure.sh 10 110 210 service-checked
+sh recipes/stdio-service/arm.sh service-checked 200
+#+end_src

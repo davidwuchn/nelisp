@@ -89,6 +89,18 @@ wait "$writer" || true
     && check ok "response flushed while the pipe was still open ($early bytes at t=2s)" \
     || check no "nothing written at t=2s: output is buffered until exit, so this shape cannot drive an interactive host"
 
+# The borrow-checked variant: same protocol, request buffer in a cell.
+printf '(ping 7)\n(conflict)\n(quit)\n' \
+    | "$NELISP" --load "$here/skeleton/service-checked.el" > "$work/checked.txt" 2>&1 || true
+
+grep -q '^(pong 7)$' "$work/checked.txt" \
+    && check ok "borrow-checked variant answers the same protocol" \
+    || check no "the checked variant did not answer (pong 7)"
+
+grep -q '^(conflict signalled)$' "$work/checked.txt" \
+    && check ok "its borrow checker is live (a nested exclusive borrow signals)" \
+    || check no "the conflicting borrow was not caught -- the checks are decorative"
+
 gate --name recipe-stdio-service --kind smoke \
      --ran "$ran" --passed "$((ran - failed))" --failed "$failed" \
      --reason "$(printf '%s' "$note" | sed 's/^; //')" \
