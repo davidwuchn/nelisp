@@ -994,6 +994,10 @@ becomes (:eval FORM) replayed through `nelisp-eval' at load."
         :size (plist-get entry :size)
         :arity (plist-get entry :arity)
         :param-class (plist-get entry :param-class)
+        ;; The register class is not the representation.  Recorded so a
+        ;; caller reads how to hand the arguments over instead of
+        ;; inferring it from the extern set, a different question.
+        :param-repr (plist-get entry :param-repr)
         :rt-slot-count (plist-get entry :rt-slot-count)
         :return-repr (plist-get entry :return-repr)
         :body-offset (plist-get entry :body-offset)))
@@ -1337,9 +1341,15 @@ standalone build pipeline."
               (let (unit native-section)
                 (setq stage-start (nelisp-artifact--profile-time))
                 (setq unit
-                      (nelisp-aot-compile-to-link-unit
-                       (cons 'seq eligible)
-                       :arch arch :format 'elf))
+                      ;; Entered from the runtime, which hands over Sexps.
+                      ;; The compiler cannot tell that from the source --
+                      ;; the hand-written reader sources reach the same
+                      ;; entry point and are entered natively -- so the
+                      ;; caller says which lane this is.
+                      (let ((nelisp-aot-compiler--runtime-entry-params t))
+                        (nelisp-aot-compile-to-link-unit
+                         (cons 'seq eligible)
+                         :arch arch :format 'elf)))
                 (nelisp-artifact--profile-log
                  "native-required-compile"
                  stage-start
@@ -1391,9 +1401,10 @@ is already native-compatible."
            (native nil))
       (unwind-protect
           (condition-case nil
-              (let ((unit (nelisp-aot-compile-to-link-unit
-                           (cons 'seq defuns)
-                           :arch arch :format 'elf)))
+              (let ((unit (let ((nelisp-aot-compiler--runtime-entry-params t))
+                            (nelisp-aot-compile-to-link-unit
+                             (cons 'seq defuns)
+                             :arch arch :format 'elf))))
                 (nelisp-artifact--write-elf-rel-object obj unit)
                 (setq nelisp-artifact--last-native-compile-report
                       compile-report)
@@ -1472,9 +1483,10 @@ module."
                   (let ((obj (nelisp-artifact--make-temp-path "neln-obj" "o")))
                     (unwind-protect
                         (let* ((unit
-                                (nelisp-aot-compile-to-link-unit
-                                 (cons 'seq (nreverse eligible))
-                                 :arch arch :format 'elf)))
+                                (let ((nelisp-aot-compiler--runtime-entry-params t))
+                                  (nelisp-aot-compile-to-link-unit
+                                   (cons 'seq (nreverse eligible))
+                                   :arch arch :format 'elf))))
                           (nelisp-artifact--write-elf-rel-object obj unit)
                           (nelisp-artifact--native-section-plist
                            obj unit arch (nreverse symbols)
@@ -3806,8 +3818,13 @@ implementation."
         (let ((kind (nth i arg-kinds)))
           (pcase kind
             ('int
-             (format "    case %d: argv_vals[%d] = strtol(argv[i], NULL, 10); break;\n"
-                     i i))
+             ;; A Sexp, like the string case below.  Parameters arrive
+             ;; boxed now, uniformly, so handing over a bare `long' left
+             ;; the compiled body unwrapping an integer as an address:
+             ;; `(defun nat-nx-sq (n) (* n n))' answered 4 for 9.
+             (format "    case %d: neln_write_int(&argv_string_slots[%d], strtol(argv[i], NULL, 10)); neln_register_slot(&argv_string_slots[%d]); argv_vals[%d] = (long)(intptr_t)&argv_string_slots[%d]; break;
+"
+                     i i i i i))
             ('str
              (format "    case %d: neln_write_str(&argv_string_slots[%d], argv[i]); neln_register_slot(&argv_string_slots[%d]); argv_vals[%d] = (long)(intptr_t)&argv_string_slots[%d]; break;\n"
                      i i

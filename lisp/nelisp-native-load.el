@@ -731,6 +731,11 @@ what a cache wants and what the demo did."
             :out slots
             :arity arity
             :abi (nelisp-native-load-abi native)
+            ;; How to hand the arguments over is recorded per defun, so it
+            ;; no longer has to be inferred from the extern set -- a
+            ;; different question, and one that got `(if (< n 1) 5 (aref v
+            ;; 1))' answering 8 for every n.
+            :param-repr (or (plist-get meta :param-repr) 'unknown)
             :return-repr (or (plist-get meta :return-repr) 'unknown)
             :arg-slots (+ slots arg-slot-base)
             :name name
@@ -745,9 +750,16 @@ do arithmetic on the values, and calling an integer defun with slot
 addresses makes it do arithmetic on the pointers.  Measured on `add3',
 an extern-less `(+ a (+ b c))': raw arguments answer 6, boxed arguments
 answer 406962619651776 and leave `out' untouched."
-  (let ((arity (plist-get handle :arity))
-        (arg-slots (plist-get handle :arg-slots))
-        (boxed (eq (plist-get handle :abi) 'boxed)))
+  (let* ((arity (plist-get handle :arity))
+         (arg-slots (plist-get handle :arg-slots))
+         (boxed (eq (plist-get handle :abi) 'boxed))
+         ;; Arguments and the result are separate questions.  Prefer what
+         ;; the artifact records; the inference stays for artifacts written
+         ;; before it did.
+         (param-boxed (let ((repr (plist-get handle :param-repr)))
+                        (cond ((eq repr 'sexp-ptr) t)
+                              ((eq repr 'raw-i64) nil)
+                              (t boxed)))))
     (unless (= (length args) arity)
       (error "nelisp-native-load: %s takes %d argument(s), got %d"
              (plist-get handle :name) arity (length args)))
@@ -756,7 +768,7 @@ answer 406962619651776 and leave `out' untouched."
           (passed nil)
           (raw nil))
       (while rest
-        (if boxed
+        (if param-boxed
             (setq passed (cons (nelisp-native-load-box
                                 (+ arg-slots (* 32 i)) (car rest))
                                passed))

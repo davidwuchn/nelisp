@@ -273,6 +273,29 @@ The standalone interpreter still mis-handles `(apply #'unibyte-string
         (push (apply #'unibyte-string (nreverse bytes)) chunks)))
     (apply #'concat (nreverse chunks))))
 
+(defvar nelisp-aot-compiler--runtime-entry-params nil
+  "Non-nil when this unit's defuns are entered from the NeLisp runtime.
+
+Then every parameter arrives as a Sexp pointer, uniformly.  That is
+not a preference: with the cells carrying no representation at all,
+arithmetic wants the raw word, a dispatcher wants the Sexp, and a
+string argument is already a Sexp that must not be boxed again -- no
+static rule satisfies all three, because the type is not known.  Making
+every parameter a Sexp removes the question; `--ir-as-raw-i64' unwraps
+one for arithmetic and `--aot-dispatcher-arg-form' passes it straight
+through.
+
+Nil for the hand-written reader sources, whose defuns are entered by
+other native code with raw machine words: `nl_os_stat_path' takes a
+path pointer and a stat buffer, and unwrapping those as Sexps builds a
+reader that dumps core on startup.
+
+Nothing in the source distinguishes the two lanes.  Both reach
+`nelisp-aot-compile-to-link-unit', which binds
+`--allow-external-user-calls' unconditionally, so 1539 of the reader's
+1541 defuns look like object mode and that flag cannot answer this.
+The caller knows and the compiler does not, so the caller says.")
+
 (defvar nelisp-aot-compiler--dynamic-user-calls nil
   "Non-nil lowers otherwise-unresolvable user calls through the
 `nelisp_aot_builtin_calln' dispatcher instead of emitting a plt32
@@ -11647,6 +11670,17 @@ Returns one of:
                new-fenv arity))
              (parse-fenv (plist-get hidden-boundary :fenv))
              (hidden-boundary-count (plist-get hidden-boundary :count))
+             ;; Entered from the runtime means the arguments are Sexps.
+             ;; Scoped by the caller, not by the synthesized boundary: that
+             ;; boundary says this defun MAKES delegated calls, not that it
+             ;; RECEIVES boxed arguments, and nearly every reader defun has
+             ;; one.  Scoping by it declared `nl_os_stat_path' boxed and the
+             ;; reader dumped core.
+             (param-repr (and nelisp-aot-compiler--runtime-entry-params
+                              'sexp-ptr))
+             (_ (when param-repr
+                  (dolist (cell new-fenv)
+                    (setcdr cell (plist-put (cdr cell) :repr param-repr)))))
              ;; Body is a value-producing expression (= implicit return).
              ;; Bind `--next-rt-let-slot' starting at arity so runtime
              ;; `let-rt' bindings occupy slots arity, arity+1, ...
@@ -11671,6 +11705,10 @@ Returns one of:
               :param-regs param-regs
               :param-class param-class
               :param-classes classes
+              ;; The register class is not the representation.  Recorded so
+              ;; a caller reads how to hand the arguments over instead of
+              ;; inferring it from the extern set, a different question.
+              :param-repr param-repr
               :rest-p (plist-get param-info :rest-p)
               :variadic (plist-get param-info :c-variadic)
               :fixed-param-count (plist-get param-info :fixed-count)
@@ -20241,6 +20279,9 @@ register budgeting while ELF/Mach-O keep SysV."
                                                (nelisp-aot-compiler--ir-get
                                                 ir-node :param-class))
                                           'gp)
+                         :param-repr (and ir-node
+                                          (nelisp-aot-compiler--ir-get
+                                           ir-node :param-repr))
                          :rt-slot-count (or (and ir-node
                                                  (nelisp-aot-compiler--ir-get
                                                   ir-node :rt-slot-count))
