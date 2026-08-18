@@ -11327,28 +11327,6 @@ Returns one of:
                new-fenv arity))
              (parse-fenv (plist-get hidden-boundary :fenv))
              (hidden-boundary-count (plist-get hidden-boundary :count))
-             ;; A synthesized boundary means an ordinary user defun in
-             ;; object mode.  Its parameters arrive as raw machine words
-             ;; -- that is what the emitted code already assumes, since
-             ;; `--ir-as-raw-i64' unwraps only on `sexp-ptr' and these
-             ;; cells carried no representation at all.  Saying so is not
-             ;; a change of convention, it is writing the existing one
-             ;; down, and it buys the one thing the silence cost:
-             ;; `--aot-dispatcher-arg-form' boxes a `raw-i64' frame
-             ;; reference, so a parameter handed to a dispatcher is now
-             ;; boxed at the call instead of arriving there as a bare
-             ;; integer.
-             ;;
-             ;; Declaring them `sexp-ptr' instead was tried and produced
-             ;; a reader binary that dumped core on `--eval "(princ 42)"'.
-             ;; Defuns carrying the boundary explicitly -- the
-             ;; hand-written reader helpers -- keep their parameters
-             ;; unclassified: those already hold Sexp addresses as raw
-             ;; words and must not be boxed again.
-             (param-repr (and (> hidden-boundary-count 0) 'raw-i64))
-             (_ (when param-repr
-                  (dolist (cell new-fenv)
-                    (setcdr cell (plist-put (cdr cell) :repr param-repr)))))
              ;; Body is a value-producing expression (= implicit return).
              ;; Bind `--next-rt-let-slot' starting at arity so runtime
              ;; `let-rt' bindings occupy slots arity, arity+1, ...
@@ -11373,13 +11351,6 @@ Returns one of:
               :param-regs param-regs
               :param-class param-class
               :param-classes classes
-              ;; How the caller must hand the parameters over.  Recorded
-              ;; so a loader does not have to infer it from the extern
-              ;; set, which answers a different question: measured, a
-              ;; defun with a dispatcher extern was called with boxed
-              ;; arguments while its own comparison read them raw, so
-              ;; `(if (< n 1) 5 (aref v 1))' answered 8 for every n.
-              :param-repr param-repr
               :rest-p (plist-get param-info :rest-p)
               :variadic (plist-get param-info :c-variadic)
               :fixed-param-count (plist-get param-info :fixed-count)
@@ -19950,12 +19921,6 @@ register budgeting while ELF/Mach-O keep SysV."
                                                (nelisp-aot-compiler--ir-get
                                                 ir-node :param-class))
                                           'gp)
-                         ;; `:param-class' is the register class; this is
-                         ;; the representation, a different question that
-                         ;; was previously not recorded at all.
-                         :param-repr (and ir-node
-                                          (nelisp-aot-compiler--ir-get
-                                           ir-node :param-repr))
                          :rt-slot-count (or (and ir-node
                                                  (nelisp-aot-compiler--ir-get
                                                   ir-node :rt-slot-count))

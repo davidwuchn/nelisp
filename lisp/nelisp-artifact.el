@@ -994,10 +994,6 @@ becomes (:eval FORM) replayed through `nelisp-eval' at load."
         :size (plist-get entry :size)
         :arity (plist-get entry :arity)
         :param-class (plist-get entry :param-class)
-        ;; The register class is not the representation.  Without this the
-        ;; loader had to infer how to pass arguments from the extern set,
-        ;; which answers a different question.
-        :param-repr (plist-get entry :param-repr)
         :rt-slot-count (plist-get entry :rt-slot-count)
         :return-repr (plist-get entry :return-repr)
         :body-offset (plist-get entry :body-offset)))
