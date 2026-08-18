@@ -53,6 +53,10 @@ bench-borrow-check?
 # binary, and on a machine without one it reports a reasoned skip.
 runtime-probe?
 
+# Elisp to wasm32, validated and executed under node.  Optional only
+# because it needs node; it passes on both hosts measured so far.
+wasm-smoke?
+
 # Standalone gates.  These build a binary from the tree and run it, so
 # they need a Linux host; on Windows they now report a reasoned skip
 # (GATE-SKIP) rather than exiting 0, which used to read as a pass.

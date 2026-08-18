@@ -26,7 +26,7 @@ says so rather than guessing.
 | HTTP service                   | not viable today | the 20-file =nelisp-http= stack loads and reports its features, but only because =load= continues past a signalled error: its =(require 'url)= / =url-parse= / =url-http= / =dom= all fail, and the first real call dies with =void-function url-generic-parse-url= (measured 2026-08-18, WSL) |
 | GUI / TUI application          | experimental    | =examples/nelisp-x11-*=, =examples/nelisp-tty-editor=; no gate covers them                                  |
 | Emacs package via Layer 2      | conditional     | =dev/nelisp-emacs=; its suite reported 127 unexpected results the first time it could run at all            |
-| WASM / browser                 | experimental    | =make wasm-dtw-site=; no recipe                                                                             |
+| WASM / browser                 | compiles and runs | =make wasm-smoke= compiles two Elisp functions to wasm32, validates both modules and executes them under node, on Windows and Linux alike (2026-08-18).  =wasm-runtime-image-smoke= is stale: it asks for =--kind neln= with a =.wasm= output and the compiler rejects the pair |
 
 The rule behind the first three rows: *process lifetime is the design
 variable*.  Nothing reclaims memory in the standalone reader, so a
