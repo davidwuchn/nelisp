@@ -27,12 +27,25 @@
 (load "packages/nl-safe/src/nl-safe-report.el" nil t)
 (load "recipes/checked-resources/skeleton/checked.el" nil t)
 
+(defvar probe-arm nil
+  "Arm to run.  Falls back to the PROBE_ARM environment variable.")
+
+(defvar probe-iteration-count nil
+  "Iterations per timed arm.  Falls back to PROBE_ITERATIONS.")
+
 (defun probe-iterations ()
-  "Return the iteration count requested through the environment."
-  (let ((raw (getenv "PROBE_ITERATIONS")))
-    (if (and raw (> (length raw) 0))
-        (string-to-number raw)
-      0)))
+  "Return the iteration count, from the variable or the environment.
+
+The variable comes first because `getenv' answers nil for everything on
+the Linux build.  Reading only the environment there meant every arm
+ran zero iterations, both arms measured process start-up, and the
+harness dutifully reported a ratio of 0.89x -- the checked loop faster
+than the unchecked one."
+  (or probe-iteration-count
+      (let ((raw (getenv "PROBE_ITERATIONS")))
+        (if (and raw (> (length raw) 0))
+            (string-to-number raw)
+          0))))
 
 (defun probe-report (key value)
   (princ (format "RESULT %s=%s" key value))
@@ -76,7 +89,7 @@ did not run cannot look like one that did."
   (setq nl-safe-log-violations nil))
 
 (defun probe-run ()
-  (let ((arm (or (getenv "PROBE_ARM") "behaviour")))
+  (let ((arm (or probe-arm (getenv "PROBE_ARM") "behaviour")))
     (cond
      ((equal arm "plain")
       (checked-fill 3)

@@ -61,7 +61,9 @@ check() {
     fi
 }
 
-probe() { PROBE_ARM=$1 PROBE_ITERATIONS=$2 "$NELISP" --load recipes/checked-resources/probe.el 2>&1; }
+# Parameters go in as variables, not environment: `getenv' answers nil
+# for everything on the Linux build.  See arm.sh.
+probe() { NELISP_BIN="$NELISP" sh recipes/checked-resources/arm.sh "$1" "$2" 2>&1; }
 
 printf 'checked-resources: %s\n' "$NELISP"
 
@@ -96,5 +98,5 @@ gate --name recipe-checked-resources --kind smoke \
     --iterations "$ITERATIONS" \
     --drift-limit "$DRIFT_LIMIT" \
     --out target/ai/checked-resources-overhead.txt \
-    --base "PROBE_ARM=plain PROBE_ITERATIONS=%N% $NELISP --load recipes/checked-resources/probe.el" \
-    --candidate "PROBE_ARM=checked PROBE_ITERATIONS=%N% $NELISP --load recipes/checked-resources/probe.el"
+    --base "NELISP_BIN=$NELISP sh recipes/checked-resources/arm.sh plain %N%" \
+    --candidate "NELISP_BIN=$NELISP sh recipes/checked-resources/arm.sh checked %N%"
