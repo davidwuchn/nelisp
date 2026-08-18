@@ -49,6 +49,10 @@ recipe-checked-resources?
 # arms are the same program.  It never fails on the number itself.
 bench-borrow-check?
 
+# The price of adopting nl-safe in the stdio service, measured the same
+# way.  See recipes/stdio-service/README.org.
+bench-service-borrow?
+
 # What the binary in front of you can actually do.  Optional: it needs a
 # binary, and on a machine without one it reports a reasoned skip.
 runtime-probe?
