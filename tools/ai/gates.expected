@@ -49,6 +49,10 @@ recipe-checked-resources?
 # arms are the same program.  It never fails on the number itself.
 bench-borrow-check?
 
+# What the binary in front of you can actually do.  Optional: it needs a
+# binary, and on a machine without one it reports a reasoned skip.
+runtime-probe?
+
 # Standalone gates.  These build a binary from the tree and run it, so
 # they need a Linux host; on Windows they now report a reasoned skip
 # (GATE-SKIP) rather than exiting 0, which used to read as a pass.

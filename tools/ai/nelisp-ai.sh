@@ -69,6 +69,7 @@ usage: tools/ai/nelisp-ai.sh <command> [args]
   compile             byte-compile with error-on-warn as gate "compile"
   ns [FILE...]        namespace check (defaults to the recipe skeletons)
   recipes             run every recipe smoke against the standalone binary
+  runtime-probe       report what the standalone binary can actually do
   gate NAME -- CMD    run CMD and report it, reading its GATE-COUNT line
   probe EXPR          evaluate EXPR in the standalone runtime, output to files
   doctor              print the toolchain and binary identity of this checkout
@@ -210,6 +211,31 @@ cmd_recipes() {
     fi
     printf '\n%d recipe(s), %d failing\n' "$found" "$failures"
     [ "$failures" -eq 0 ]
+}
+
+cmd_runtime_probe() {
+    # Asks the binary what it can do, instead of consulting a table
+    # somebody wrote down once.  The recipes used to carry these facts by
+    # hand and two of them were already wrong.
+    gate_name=${NELISP_GATE_NAME:-runtime-probe}
+    if ! bin=$(nelisp_binary); then
+        "$here/gate-report.sh" --name "$gate_name" --kind probe             --reason "no nelisp binary in target/; build one or set NELISP_BIN"             --command "nelisp-ai.sh runtime-probe"
+        return 0
+    fi
+    mkdir -p target/ai
+    log=$(mktemp)
+    set +e
+    "$bin" --load tools/ai/runtime-probe.el > "$log" 2>&1
+    code=$?
+    set -e
+    grep -E '^PROBE ' "$log" || true
+    checked=$(grep -cE '^PROBE ' "$log" || true)
+    rm -f "$log"
+    if [ "$code" -ne 0 ] || [ "${checked:-0}" -eq 0 ]; then
+        "$here/gate-report.sh" --name "$gate_name" --kind probe             --ran "${checked:-0}" --failed 1             --reason "the probe did not finish (exit $code)"             --command "nelisp-ai.sh runtime-probe"
+        exit 1
+    fi
+    "$here/gate-report.sh" --name "$gate_name" --kind probe         --ran "$checked" --passed "$checked" --failed 0         --command "nelisp-ai.sh runtime-probe ($(binary_identity "$bin"))"
 }
 
 cmd_gate() {
@@ -360,6 +386,7 @@ case "$command" in
     gate)           cmd_gate "$@" ;;
     ns)             cmd_ns "$@" ;;
     recipes)        cmd_recipes ;;
+    runtime-probe)  cmd_runtime_probe ;;
     probe)          cmd_probe "$@" ;;
     doctor)         cmd_doctor ;;
     gates-clean)    cmd_gates_clean ;;
