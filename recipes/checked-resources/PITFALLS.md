@@ -69,12 +69,23 @@ least one. If you want the corpus to accumulate across runs — which is
 the point of it for the Phase 6 gate — do not delete it, and count
 differently.
 
+## `getenv` answers nil on Linux, so parameters go in as variables
+
+The timed arms originally read `PROBE_ITERATIONS` from the environment.
+On the Linux build `getenv` returns nil for everything — including
+`HOME` — so every arm ran zero iterations and both arms measured
+process start-up. The tell was that raising the count from 3000 to
+120000 changed the wall time by nothing.
+
+`arm.sh` now writes a driver that sets the parameters as variables and
+loads the probe. Do the same in anything you adapt: the environment is
+not a portable channel into this runtime.
+
 ## Do not carry the ratio anywhere
 
-Five valid runs on one machine gave 1.40x, 1.45x, 1.50x, 1.58x and
-1.64x — a 17% spread, the widest taken while other work was running
-(drift 0.15 and 0.22, both inside the limit). One binary, one loop
-shape, in the interpreter.
+Six valid runs on Windows gave 1.40x to 1.64x — a 17% spread, the
+widest taken while other work was running. Linux gave 1.86x. One loop
+shape, in the interpreter, on two hosts.
 
 The Doc 170 §9 figure (4.99x against a ≤1.15x budget) measures
 AOT-compiled borrows where type checks dominate. Quoting either number

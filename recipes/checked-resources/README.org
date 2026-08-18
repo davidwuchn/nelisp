@@ -51,15 +51,26 @@ answers nil — so each arm is a whole process and an empty run of the
 same arm is subtracted to remove start-up.  That is the slope method
 already used for this repository's own benchmarks.
 
-For calibration only: five runs on one machine on 2026-08-17, all
-within the drift limit, gave *1.40x, 1.45x, 1.50x, 1.58x and 1.64x* for
-3000 interpreted borrow-checked sums against the same loop with no
-borrow.
+For calibration only, 3000 interpreted borrow-checked sums against the
+same loop with no borrow:
 
-That spread — 17% between the extremes of five valid runs, the widest
-ones taken while other work was running (drift 0.15 and 0.22, both
-inside the limit) — is the reason to take your own measurement rather
-than quote one.  Do not carry these numbers anywhere.  In particular it is *not* the Doc
+| host                | measured                                |
+|---------------------+-----------------------------------------|
+| Windows x86_64      | 1.40x 1.45x 1.50x 1.52x 1.58x 1.64x      |
+| WSL Debian x86_64   | 1.86x                                   |
+
+A 17% spread on one host across six valid runs, and a different number
+again on another — which is the argument for measuring rather than
+quoting, made better than any single figure could.  Do not carry these
+anywhere.
+
+The Linux figure took two corrections to become real.  The arms had
+read their iteration count from the environment, and =getenv= answers
+nil for everything on that build, so both arms ran zero iterations and
+measured process start-up; raising the count from 3000 to 120000
+changed the wall time by nothing, which is what gave it away.  The
+harness had already refused to report a ratio from those runs — see the
+noise guard below — so it was right while the recipe was wrong.  In particular it is *not* the Doc
 170 section 9 budget: that one measures AOT-compiled borrows, where the
 cost is dominated by type checks in the emitted code and last measured
 4.99x against a ≤1.15x target.  Different path, different number.  This
