@@ -229,6 +229,17 @@ cmd_runtime_probe() {
     "$bin" --load tools/ai/runtime-probe.el > "$log" 2>&1
     code=$?
     set -e
+    # The identity goes into the OUTPUT, not only into the report.  A probe
+    # table is read as a transcript -- pasted into a message, scrolled back
+    # to, compared against an earlier run -- and on its own it cannot say
+    # which binary produced it.  Measured 2026-08-19: a build failed, the
+    # next command probed the binary that was already in target/, and the
+    # table it printed was indistinguishable from a passing run.  That
+    # happened three times in one day, once immediately after building the
+    # command meant to prevent it, because `build-probe' can only guard
+    # measurements it starts.  A line that travels with the output guards
+    # every reader of it.
+    printf 'PROBE-BINARY %s\n' "$(binary_identity "$bin")"
     grep -E '^PROBE ' "$log" || true
     checked=$(grep -cE '^PROBE ' "$log" || true)
     rm -f "$log"

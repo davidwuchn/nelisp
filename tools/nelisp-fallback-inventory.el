@@ -27,6 +27,12 @@
 ;;   bare-handler      `condition-case' with the variable set to nil, so the
 ;;                     error object is discarded before anyone could record
 ;;                     it even if they wanted to.
+;;   dbg-note          a live `nl_dbg_note' call.  The native subset has no
+;;                     other way to report anything, so the primitive has no
+;;                     enable flag to forget -- which is only safe while a
+;;                     call left behind cannot reach a commit.  Baseline 0;
+;;                     this is the half that makes "no flag" a design rather
+;;                     than an oversight.
 ;;
 ;; A handler counts as recording when it mentions any name in
 ;; `nelisp-fallback-inventory--recording-functions', and as re-raising when it
@@ -72,7 +78,7 @@ can check.")
   "Names whose presence in a handler counts as not swallowing the error.")
 
 (defconst nelisp-fallback-inventory--kinds
-  '(silent-fallback ignore-errors bare-handler))
+  '(silent-fallback ignore-errors bare-handler dbg-note))
 
 (defun nelisp-fallback-inventory--baseline ()
   "Read the baseline as an alist of (KIND . COUNT), or nil when absent."
@@ -117,6 +123,11 @@ can check.")
        ((memq head '(ignore-errors with-demoted-errors))
         (unless (nelisp-fallback-inventory--traced-p form)
           (puthash 'ignore-errors (1+ (gethash 'ignore-errors counts 0)) counts)))
+       ;; Only a CALL counts.  In `(defun nl_dbg_note ...)' the name is the
+       ;; second element, not the head, so the definition is not its own
+       ;; finding.
+       ((eq head 'nl_dbg_note)
+        (puthash 'dbg-note (1+ (gethash 'dbg-note counts 0)) counts))
        ((eq head 'condition-case)
         (let ((var (nth 1 form))
               (handlers (nthcdr 3 form)))
@@ -138,6 +149,23 @@ can check.")
         (nelisp-fallback-inventory--walk (car rest) counts)
         (setq rest (cdr rest))))))
 
+(defun nelisp-fallback-inventory--only-blanks-p (start)
+  "Return non-nil when only whitespace and comments lie between START and eob.
+That is what tells a file that ended from a form that did not: `read'
+signals `end-of-file' for both, and by then point has been dragged to
+the end of the buffer either way -- so the question has to be asked from
+where the read BEGAN, not from where it stopped."
+  (save-excursion
+    (goto-char start)
+    (let ((clean t))
+      (while (and clean (not (eobp)))
+        (skip-chars-forward " \t\n\f\r")
+        (cond
+         ((eobp))
+         ((eq (char-after) ?\;) (forward-line 1))
+         (t (setq clean nil))))
+      clean)))
+
 (defun nelisp-fallback-inventory--scan-file (file counts)
   "Read FILE and classify every handler in it into COUNTS."
   (with-temp-buffer
@@ -145,13 +173,22 @@ can check.")
     (goto-char (point-min))
     (let ((done nil))
       (while (not done)
-        (let ((form (condition-case nil
+        (let* ((start (point))
+               (form (condition-case nil
                         (read (current-buffer))
-                      ;; Reading stops at the first form this Emacs cannot
-                      ;; read; the file still contributes what came before it.
-                      ;; Reported by the caller, never swallowed here -- which
-                      ;; is the whole point of this gate.
-                      (end-of-file (setq done 'eof) nil)
+                      ;; `end-of-file' means two different things and they
+                      ;; must not be conflated: the file ended, or a form did
+                      ;; not.  Treating both as a clean finish made an
+                      ;; unbalanced file contribute zero findings and the gate
+                      ;; still pass -- this gate's own defect, of exactly the
+                      ;; kind it exists to count.  Caught 2026-08-19 when a
+                      ;; deliberately planted call went unreported because the
+                      ;; edit that planted it left a paren open.
+                      (end-of-file
+                       (setq done (if (nelisp-fallback-inventory--only-blanks-p start)
+                                      'eof
+                                    'unreadable))
+                       nil)
                       (error (setq done 'unreadable) nil))))
           (when form
             (nelisp-fallback-inventory--walk form counts))))

@@ -24,3 +24,8 @@
 silent-fallback 91
 ignore-errors   32
 bare-handler    34
+
+# 0, and it should stay 0.  `nl_dbg_note' has no enable flag on purpose --
+# a flag has to be turned off by whoever turned it on, and forgetting is
+# silent.  A leftover call is loud on stderr and fails here instead.
+dbg-note        0
