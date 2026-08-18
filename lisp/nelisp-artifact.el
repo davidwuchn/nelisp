@@ -2916,8 +2916,16 @@ on the hot path, so use a small deterministic rolling hash there."
     ;; the benefit of a cached native driver.  Size + mtime + artifact path are
     ;; sufficient to invalidate the private dev-loop executable cache; the
     ;; validating native paths still parse the manifest on fallback/error.
+    ;;
+    ;; The ABI token is the half the artifact cannot supply.  The cache root
+    ;; is $XDG_CACHE_HOME, shared by every worktree on the machine, and the
+    ;; key describes the artifact rather than the driver -- so a change to
+    ;; how the driver hands arguments over leaves every warm entry both stale
+    ;; and indistinguishable from a fresh one.  Bump this whenever the fast
+    ;; driver's calling convention changes.
     (let* ((seed (concat
                   "neln-cache|"
+                  "abi=valueword|"
                   (or variant "fast")
                   "|"
                   artifact
@@ -2942,7 +2950,16 @@ on the hot path, so use a small deterministic rolling hash there."
     (nelisp-artifact--native-exec-cache-root))))
 
 (defun nelisp-artifact--native-fast-driver-c (csym argc)
-  "Return the integer ABI fast driver C source for CSYM with ARGC."
+  "Return the integer ABI fast driver C source for CSYM with ARGC.
+Arguments go over as canonical value words, not as bare `long's.  A
+parameter of a runtime-entered defun is a value word -- low bit 1 is the
+immediate integer N encoded as 4N+1, low bit 0 is a Sexp slot address --
+so the compiled body decodes what it is handed.  Passing N raw made it
+read (N-1)/4 instead: `(defun f (x) (+ x 1))' answered 11 for 41, and
+`(defun sq (n) (* n n))' answered 4 for 9.  The general harness reaches
+the same convention from the other side, by boxing into a slot and
+passing its address; an immediate needs no slot and no GC root, which is
+why this path stays a two-line driver."
   (concat
    "#include <stdlib.h>\n#include <stdio.h>\n"
    (format "extern long %s(%s);\n" csym
@@ -2955,7 +2972,10 @@ on the hot path, so use a small deterministic rolling hash there."
              (mapconcat
               (lambda (_)
                 (setq i (1+ i))
-                (format "atol(v[%d])" i))
+                ;; 4N+1, written as multiplication: a left shift of a
+                ;; negative long is not defined by every C standard this
+                ;; driver may be compiled under.
+                (format "(atol(v[%d])*4+1)" i))
               (make-list argc nil)
               ",")))))
 
@@ -3062,18 +3082,11 @@ for diagnostics, symbol checks, and non-simple artifacts."
                                                 symbol csym)
                                         obj obj2)))
               (error "objcopy symbol rename failed for %s" symbol))
+            ;; One driver, one owner.  This used to carry its own copy of
+            ;; the C source, so the argument convention had two places to
+            ;; be right in and only the cached one was updated.
             (with-temp-file csrc
-              (insert "#include <stdlib.h>\n#include <stdio.h>\n")
-              (insert (format "extern long %s(%s);\n" csym
-                              (if (= argc 0) "void"
-                                (mapconcat (lambda (_) "long") args ","))))
-              (insert "int main(int c,char**v){(void)c;")
-              (insert (format "printf(\"%%ld\\n\",%s(%s));return 0;}\n"
-                              csym
-                              (mapconcat (lambda (i)
-                                           (format "atol(v[%d])" i))
-                                         (number-sequence 1 argc)
-                                         ","))))
+              (insert (nelisp-artifact--native-fast-driver-c csym argc)))
             (unless (eq 0
                         (if sh
                             (call-process
