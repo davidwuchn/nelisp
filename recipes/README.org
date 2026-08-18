@@ -23,7 +23,7 @@ says so rather than guessing.
 | stdio worker under a host      | ready           | =recipes/stdio-service= passes, including the flush check: a response lands while the pipe is still open    |
 | long-lived resident service    | conditional     | the standalone reader's arena never reclaims — about 560 bytes per evaluated operation, and =garbage-collect= frees none of it (measured 2026-08-17).  Supervise and restart, or run one process per request |
 | native hot path (=.neln=)      | not yet usable end to end | compiles with =:native t= on Windows, which cannot execute the result; on Linux, which can, both functions fall back because the compiler's own object write trips =write-region='s character-vs-byte check (measured 2026-08-18) |
-| HTTP service                   | unverified here | =packages/nelisp-http= and =packages/nelisp-eventloop= exist; no recipe, and the arena caveat above applies |
+| HTTP service                   | not viable today | the 20-file =nelisp-http= stack loads and reports its features, but only because =load= continues past a signalled error: its =(require 'url)= / =url-parse= / =url-http= / =dom= all fail, and the first real call dies with =void-function url-generic-parse-url= (measured 2026-08-18, WSL) |
 | GUI / TUI application          | experimental    | =examples/nelisp-x11-*=, =examples/nelisp-tty-editor=; no gate covers them                                  |
 | Emacs package via Layer 2      | conditional     | =dev/nelisp-emacs=; its suite reported 127 unexpected results the first time it could run at all            |
 | WASM / browser                 | experimental    | =make wasm-dtw-site=; no recipe                                                                             |
@@ -69,6 +69,11 @@ Beyond the probe, still true of both:
   but buffer *navigation* does not.
 - =json-encode=, =sqlite-open= — not in the base runtime; they live in
   =packages/nelisp-json= and =packages/nelisp-sqlite=.
+- =load= does not stop at an error.  A form that signals inside a loaded
+  file is skipped and the rest of the file runs, so a package whose
+  host-library requires all fail still ends up =featurep= t with half
+  its functions undefined.  That is how the HTTP stack above looks
+  healthy until the first call.
 - =(require 'x)= resolves FEATURE as a literal path: no =load-path=, no
   =.el= completion, so a file that exists and provides its feature is
   still unreachable by name.  Load by path, or pass the filename; for a

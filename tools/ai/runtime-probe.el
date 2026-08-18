@@ -71,6 +71,22 @@ probe in a lambda would have made the wrapper the thing measured."
                     "a wrong path is loud"
                   "SILENT: assert featurep after loading by path")))
 
+;; Does a signalled error inside a loaded file stop the load?  This is
+;; the probe that changes how the rest are read: if the answer is no,
+;; then "it loaded fine" means nothing anywhere in this tree, including
+;; in the smokes' hand-written load lists.
+(ignore-errors
+  (write-region
+   "(require 'no-such-lib-xyz)\n(defun probe-marker-after-error () 42)\n"
+   nil "target/ai/probe-error-file.el"))
+(probe-report "load past an error"
+              (if (progn (ignore-errors
+                           (load "target/ai/probe-error-file.el" nil t))
+                         (fboundp 'probe-marker-after-error))
+                  "continues"
+                "stops")
+              "a failed require inside a file does not stop the file")
+
 ;;;; Files ---------------------------------------------------------------
 
 (let* ((result (probe-safe (write-region "abc\n" nil "target/ai/probe-ascii.txt"))))
