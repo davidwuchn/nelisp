@@ -18,9 +18,13 @@
 #
 #   1. slope method -- each arm is run at n=0 and n=N and the difference
 #      taken, so process start-up is not counted as work;
-#   2. drift guard -- the base arm is run twice at n=N, and if those two
-#      runs disagree by more than the limit the ratio is DISCARDED
-#      rather than printed;
+#   2. noise guard -- the base arm is run twice at n=N, and their
+#      disagreement is compared against the measured work rather than
+#      against the wall time.  On a fast host 3000 iterations added 9 ms
+#      to a 150 ms process while two runs of the same arm differed by
+#      20 ms, and the ratio came out 0.89x -- the checked loop "faster"
+#      than the unchecked one.  Judged against the total that looks like
+#      13% drift and passes; judged against the signal it is nonsense;
 #   3. identity guard -- optional artifact digests must differ, because
 #      two arms that are the same program produce a beautiful 1.00x.
 #
@@ -119,15 +123,19 @@ verdict=$(awk -v b0="$base0" -v bn="$baseN" -v c0="$cand0" -v cn="$candN" \
               -v bn2="$baseN2" -v limit="$drift_limit" '
 BEGIN {
   bc = bn - b0; cc = cn - c0;
-  drift = (bn > 0) ? ((bn > bn2 ? bn - bn2 : bn2 - bn) / bn) : 1;
-  # Either arm costing nothing measurable invalidates the ratio, and so
-  # does a negative one: on a fast host the n=0 run can come out slower
-  # than the n=N run through start-up noise alone, which produced a
-  # cheerful "-2.00x" here before this line existed.  A ratio whose sign
-  # is wrong is not a small error, it is a different quantity.
-  if (bc <= 0 || cc <= 0) printf "discard cost %.2f", drift;
-  else if (drift > limit) printf "discard drift %.2f", drift;
-  else                    printf "valid %.2f %.2f", cc / bc, drift;
+  noise = (bn > bn2) ? bn - bn2 : bn2 - bn;
+  # The signal is the measured work, not the wall time, so the noise is
+  # judged against it.  A run whose loop adds 9 ms to a 150 ms process,
+  # with 20 ms between two runs of the same arm, has no ratio to report
+  # however small that 20 ms looks next to 150.
+  snr = (bc > 0) ? noise / bc : 999;
+  # A non-positive cost on either arm is the same failure in its extreme
+  # form -- the n=0 run finishing slower than the n=N run -- and it
+  # produced a cheerful "-2.00x" before this existed.  A ratio whose
+  # sign is wrong is not a small error, it is a different quantity.
+  if (bc <= 0 || cc <= 0) printf "discard no-measurable-work %.2f", snr;
+  else if (snr > limit)   printf "discard noise-exceeds-signal %.2f", snr;
+  else                    printf "valid %.2f %.2f", cc / bc, snr;
 }')
 
 set -- $verdict
@@ -141,9 +149,10 @@ state=$1
     printf 'base cmd:    %s\n' "$base"
     printf 'cand cmd:    %s\n' "$candidate"
     if [ "$state" = "valid" ]; then
-        printf 'ratio:       %sx (drift %s, limit %s)\n' "$2" "$3" "$drift_limit"
+        printf 'ratio:       %sx (noise/signal %s, limit %s)\n' "$2" "$3" "$drift_limit"
     else
-        printf 'ratio:       DISCARDED (%s %s, limit %s)\n' "$2" "$3" "$drift_limit"
+        printf 'ratio:       DISCARDED (%s, noise/signal %s, limit %s)\n' "$2" "$3" "$drift_limit"
+        printf 'hint:        raise PROBE_ITERATIONS until the loop dominates start-up\n'
     fi
 } > "$out"
 
@@ -156,6 +165,6 @@ else
     # Nothing was learned.  That is a third outcome, and it gets said out
     # loud rather than rounded to either of the other two.
     gate --name "$name" --kind bench \
-         --reason "measurement discarded: $2 $3 (limit $drift_limit); see $out" \
+         --reason "measurement discarded: $2 (noise/signal $3, limit $drift_limit); raise PROBE_ITERATIONS; see $out" \
          --command "bench-compare.sh --name $name"
 fi
