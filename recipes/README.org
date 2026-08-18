@@ -22,7 +22,7 @@ says so rather than guessing.
 | short-lived CLI / batch job    | ready           | =recipes/batch-data= passes here; =dist/= ships standalone tarballs for four platforms                      |
 | stdio worker under a host      | ready           | =recipes/stdio-service= passes, including the flush check: a response lands while the pipe is still open    |
 | long-lived resident service    | conditional     | the standalone reader's arena never reclaims — about 560 bytes per evaluated operation, and =garbage-collect= frees none of it (measured 2026-08-17).  Supervise and restart, or run one process per request |
-| native hot path (=.neln=)      | compile anywhere, run on linux-x86_64 | =recipes/native-hotpath= compiles and verifies the manifest here; execution is gated to linux-x86_64 by the repo's own tests, and exits 1 on Windows |
+| native hot path (=.neln=)      | not yet usable end to end | compiles with =:native t= on Windows, which cannot execute the result; on Linux, which can, both functions fall back because the compiler's own object write trips =write-region='s character-vs-byte check (measured 2026-08-18) |
 | HTTP service                   | unverified here | =packages/nelisp-http= and =packages/nelisp-eventloop= exist; no recipe, and the arena caveat above applies |
 | GUI / TUI application          | experimental    | =examples/nelisp-x11-*=, =examples/nelisp-tty-editor=; no gate covers them                                  |
 | Emacs package via Layer 2      | conditional     | =dev/nelisp-emacs=; its suite reported 127 unexpected results the first time it could run at all            |

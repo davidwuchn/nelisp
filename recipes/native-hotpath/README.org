@@ -18,7 +18,7 @@ them separately.
 
 | gate                         | claim                          | where                                    |
 |------------------------------+--------------------------------+------------------------------------------|
-| =recipe-native-hotpath=      | it compiles, and the manifest says which functions are native | everywhere                |
+| =recipe-native-hotpath=      | it compiles, and the manifest says which functions are native | *Windows only today* |
 | =recipe-native-hotpath-exec= | the compiled code runs         | linux-x86_64 only today                  |
 
 The execution limit is not a guess: the repository's own tests gate on
@@ -26,6 +26,30 @@ it (=skip-unless= a linux-x86_64 predicate throughout
 =test/nelisp-artifact-native-exec-test.el=), and on Windows
 =native-exec-elisp-artifact= exits 1.  The artifact's object format is
 =nelisp-aot-elf-v1= even when =:target= is =x86_64-w64-mingw32=.
+
+** And the compile half does not hold on Linux either (2026-08-18)
+
+Running this recipe in WSL Debian for the first time, both functions
+fell back:
+
+#+begin_example
+:native-report ((:name "hot-sum-to"  :native nil
+                 :reason "write-region stub: wrf returned 628 (expected 623)
+                          path=.neln-probe.o.0.972598")
+                (:name "hot-checksum" :native nil ...))
+#+end_example
+
+The source is pure ASCII.  What fails is the compiler writing its own
+*object file*: =write-region= checks its work by comparing a character
+count against the byte count written, and an object file is full of
+bytes above 127, so the write succeeds and then signals.  The compiler
+reads that as "cannot go native" and falls back.
+
+So the defect the =batch-data= recipe records as an annoyance for
+Japanese text silently disables native compilation here — on the one
+platform that can execute the result.  The recipe's checks caught it,
+which is what they are for; the claim in the table above was corrected
+rather than the check relaxed.
 
 Keeping them apart matters: folded into one gate, the compile half —
 which works, and which is the half you can act on today — would be

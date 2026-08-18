@@ -120,7 +120,12 @@ verdict=$(awk -v b0="$base0" -v bn="$baseN" -v c0="$cand0" -v cn="$candN" \
 BEGIN {
   bc = bn - b0; cc = cn - c0;
   drift = (bn > 0) ? ((bn > bn2 ? bn - bn2 : bn2 - bn) / bn) : 1;
-  if (bc <= 0)           printf "discard cost %.2f", drift;
+  # Either arm costing nothing measurable invalidates the ratio, and so
+  # does a negative one: on a fast host the n=0 run can come out slower
+  # than the n=N run through start-up noise alone, which produced a
+  # cheerful "-2.00x" here before this line existed.  A ratio whose sign
+  # is wrong is not a small error, it is a different quantity.
+  if (bc <= 0 || cc <= 0) printf "discard cost %.2f", drift;
   else if (drift > limit) printf "discard drift %.2f", drift;
   else                    printf "valid %.2f %.2f", cc / bc, drift;
 }')

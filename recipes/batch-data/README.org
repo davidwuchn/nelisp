@@ -14,17 +14,30 @@ where this runtime's file I/O differs from Emacs.
 
 * Run
 
-#+begin_src sh
-BATCH_INPUT=C:/data/in.csv BATCH_OUTPUT=C:/data/out.txt \
-  nelisp --load skeleton/batch.el
+Write a two-line driver and load it:
+
+#+begin_src elisp
+(setq batch-input "data/in.csv")
+(setq batch-output "data/out.txt")
+(load "recipes/batch-data/skeleton/batch.el" nil t)
 #+end_src
 
-Paths come through the environment because =getenv= is in the runtime
-and command-line argument access is not.  Pass *drive-qualified* paths:
-=/tmp/x= inside the runtime resolves against the current drive, not to
-what =/tmp= means in your shell.
+#+begin_src sh
+nelisp --load run.el
+#+end_src
 
-Set =BATCH_COLUMN= to choose the field to group by (default 2).
+*Not the environment.*  =getenv= answers nil for everything on the Linux
+build — including =HOME= — while it works on Windows (measured
+2026-08-18).  The skeleton still falls back to =BATCH_INPUT= /
+=BATCH_OUTPUT= when the variables are unset, but a recipe that only runs
+on the platform it was written on is not a recipe.
+
+Use paths *relative to the working directory*, or drive-qualified ones.
+An absolute POSIX path is resolved against the current drive by the
+runtime: =/tmp/x= means =%TEMP%= to your shell and =<drive>:\tmp= to the
+program.
+
+Set =batch-column= to choose the field to group by (default 2).
 
 * Verify first
 

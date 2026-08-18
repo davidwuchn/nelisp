@@ -7,10 +7,17 @@
 ;; is also the shape the runtime is currently best at — nothing here is
 ;; long-lived, so the arena's lack of reclamation never comes up.
 ;;
-;;     BATCH_INPUT=in.csv BATCH_OUTPUT=out.txt nelisp --load batch.el
+;; Paths arrive through variables set before this file is loaded:
 ;;
-;; Paths arrive through the environment because `getenv' is in the
-;; standalone runtime and command-line argument access is not.
+;;     (setq batch-input "C:/data/in.csv")
+;;     (setq batch-output "C:/data/out.txt")
+;;     (load "batch.el" nil t)
+;;
+;; and fall back to the environment when those are unset.  The
+;; environment alone is not enough: `getenv' answers nil for everything
+;; on the Linux build -- even HOME -- while it works on Windows
+;; (measured 2026-08-18).  Setting a variable before loading works on
+;; both, and matches how this runtime loads anything else: by path.
 ;;
 ;; Text processing here is string-based on purpose.  `with-temp-buffer',
 ;; `insert-file-contents' and `buffer-string' all work, but `goto-char'
@@ -19,6 +26,15 @@
 ;; `split-string' / `string-match' / `substring'.
 
 ;;; Code:
+
+(defvar batch-input nil
+  "Input path.  Falls back to the BATCH_INPUT environment variable.")
+
+(defvar batch-output nil
+  "Output path.  Falls back to the BATCH_OUTPUT environment variable.")
+
+(defvar batch-column nil
+  "Zero-based field to group by.  Falls back to BATCH_COLUMN, then 2.")
 
 (defun batch-read-file (path)
   "Return the contents of PATH as a string."
@@ -82,12 +98,13 @@ The first line is treated as a header and dropped."
 
 (defun batch-main ()
   "Read `BATCH_INPUT', aggregate it, write `BATCH_OUTPUT'."
-  (let ((input (getenv "BATCH_INPUT"))
-        (output (getenv "BATCH_OUTPUT"))
-        (column (string-to-number (or (getenv "BATCH_COLUMN") "2"))))
+  (let* ((input (or batch-input (getenv "BATCH_INPUT")))
+         (output (or batch-output (getenv "BATCH_OUTPUT")))
+         (column (or batch-column
+                     (string-to-number (or (getenv "BATCH_COLUMN") "2")))))
     (if (not (and input output))
         (progn
-          (princ "batch.el: set BATCH_INPUT and BATCH_OUTPUT")
+          (princ "batch.el: set batch-input and batch-output before loading")
           (terpri))
       (let* ((text (batch-read-file input))
              (rows (batch-rows text))

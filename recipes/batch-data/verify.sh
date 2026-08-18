@@ -37,8 +37,15 @@ if [ -z "$NELISP" ]; then
     exit 0
 fi
 
-work=$(mktemp -d)
-trap 'rm -rf "$work"' EXIT
+# Work inside the repository, in paths relative to it, because the
+# runtime resolves an absolute POSIX path against the current drive:
+# a `/tmp/...' path from mktemp means %TEMP% to the shell and
+# <drive>:\tmp to the runtime.  Combined with `load' returning t for a
+# file it did not find, that produced a smoke which ran nothing and
+# reported four failures with no explanation.
+work=target/ai/batch-smoke
+rm -rf "$work"
+mkdir -p "$work"
 
 ran=0
 failed=0
@@ -64,8 +71,16 @@ cat > "$work/in.csv" <<'EOF'
 じゃんじゃか,2026-08-03,良
 EOF
 
-BATCH_INPUT="$work/in.csv" BATCH_OUTPUT="$work/out.txt" \
-    "$NELISP" --load "$here/skeleton/batch.el" > "$work/log.txt" 2>&1 || true
+# Paths go in as variables, not environment: `getenv' answers nil for
+# everything on the Linux build, including HOME, while it works on
+# Windows.  A recipe that only ran on the platform it was written on is
+# the reason this smoke now runs on both.
+cat > "$work/run.el" <<EOF
+(setq batch-input "$work/in.csv")
+(setq batch-output "$work/out.txt")
+(load "recipes/batch-data/skeleton/batch.el" nil t)
+EOF
+"$NELISP" --load "$work/run.el" > "$work/log.txt" 2>&1 || true
 
 [ -s "$work/out.txt" ] \
     && check ok "output file written" \
