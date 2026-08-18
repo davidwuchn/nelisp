@@ -28,6 +28,13 @@ LOADS="(load \"scripts/nelisp-stdlib-prelude.el\") \
 (load \"packages/nelisp-eventloop/src/nelisp-eventloop.el\") \
 (load \"packages/nelisp-eventloop/src/nelisp-async.el\")"
 
+# `set -o pipefail' plus `set -e' means this capture aborts the whole
+# script when the runtime exits non-zero -- before either of the echoes
+# below can report anything.  The failure that mattered here,
+# `void-variable: (declarations)' from the host generator.el, had to be
+# recovered with `bash -x'.  Keep the output and let the comparison
+# below say what happened.
+set +e
 OUT="$(printf 'abc' | "$NELISP" --eval "(progn $LOADS
   (nelisp-actor--reset) (nelisp-async-reset-timers)
   (setq nelisp-eventloop--bindings (make-hash-table :test (quote equal)))
@@ -38,6 +45,7 @@ OUT="$(printf 'abc' | "$NELISP" --eval "(progn $LOADS
     (let* ((main (nelisp-eventloop-spawn-main-actor))
            (res (nelisp-async-run-tty main)))
       (format \"RESULT[%s %s]\" res (reverse seen)))))" 2>&1 | tail -1)"
+set -e
 
 echo "[async-tty-smoke] $OUT"
 case "$OUT" in

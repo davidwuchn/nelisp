@@ -135,6 +135,12 @@ wasm-runtime-image-smoke:
 	       \"--target\" \"wasm32-wasi\" \
 	       \"--input\" \"tools/wasm-runtime-image-p3c.nlri\" \
 	       \"--output\" \"target/wasm-runtime-image/runtime-image.wasm\")))"
+	@test -s target/wasm-runtime-image/runtime-image.wasm || { \
+	  echo "wasm-runtime-image-smoke: the compile step wrote no .wasm."; \
+	  echo "  Its message is above; it exits 0 either way, so without this"; \
+	  echo "  check the failure arrives as an ENOENT from node opening a"; \
+	  echo "  file nobody wrote."; \
+	  exit 1; }
 	node tools/wasm-driver.mjs target/wasm-runtime-image/runtime-image.wasm _start 3
 
 wasm-dtw-skeleton-smoke:
