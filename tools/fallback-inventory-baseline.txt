@@ -1,0 +1,26 @@
+# Silent-degradation baseline (tools/nelisp-fallback-inventory.el).
+# One "KIND COUNT" line per tracked kind.  Raise a number only in the
+# commit that introduces the handler, and say there why the fall does
+# not need recording.  Lower it whenever the ratchet notice says you can.
+#
+# Captured 2026-08-19 from lisp/ scripts/ tools/ (263 files).  These are
+# starting values, not a target: nothing here has been reviewed, and the
+# gate's job today is to stop the numbers growing while they are worked
+# down.
+#
+# Why this gate exists, measured the same day: `compile-elisp-artifact'
+# produced a 1391-byte .neln with an empty native section and printed no
+# error at all, because the native compile falls back to bytecode inside
+# a `condition-case'.  A green compile said nothing about whether
+# anything was compiled natively.  The underlying bug -- write-region
+# comparing bytes against characters -- was one symbol; finding it was
+# not, because nothing recorded the fall.
+#
+# silent-fallback is the actionable kind: an error becomes a quieter,
+# wrong answer.  ignore-errors is usually a deliberate probe and is
+# counted apart for that reason.  bare-handler means `condition-case'
+# discarded the error object before anyone could record it.
+
+silent-fallback 91
+ignore-errors   32
+bare-handler    34

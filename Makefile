@@ -321,6 +321,19 @@ nl-violation-corpus:
 	  --eval '(setq load-prefer-newer t)' \
 	  -l tools/nl-violation-corpus.el
 
+# Silent-degradation inventory.  Counts error handlers that neither
+# record nor re-raise, and fails when a kind exceeds
+# tools/fallback-inventory-baseline.txt.  Same ratchet rule as above.
+#
+# Measured 2026-08-19: a native compile fell back to bytecode inside a
+# `condition-case' and printed nothing, so a green compile said nothing
+# about whether anything had been compiled natively.  This gate does not
+# judge whether a fall is acceptable -- that is not mechanical -- it
+# keeps the count from growing quietly.
+.PHONY: fallback-inventory
+fallback-inventory:
+	$(EMACS) --batch -Q -l tools/nelisp-fallback-inventory.el
+
 # Doc 169 defect #6: namespace boundaries, checked instead of enforced
 # by a reader extension.  Counts nl-ns cross-file collisions, stray
 # definitions, and references through another file's `--' private
