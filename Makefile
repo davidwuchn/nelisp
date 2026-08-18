@@ -1078,6 +1078,12 @@ aot-differential: standalone-reader
 	  --eval '(setq load-prefer-newer t)' \
 	  -l nelisp-aot-differential-cases \
 	  -f nelisp-aot-differential-main
+	@echo '(princ "reader-ok\n")' > target/aot-differential/smoke.el; \
+	if ! ./target/nelisp --load target/aot-differential/smoke.el 2>&1 | grep -q reader-ok; then \
+	  echo "[diff] the reader does not run -- every case would 'crash' and say nothing about the cases"; \
+	  echo "[diff] a compiler change can build a binary that dies on startup; check that first"; \
+	  exit 1; \
+	fi
 	@count=$$(cat target/aot-differential/count.txt); size=1; \
 	chunks=$$(( ($$count + $$size - 1) / $$size )); failed=0; \
 	echo "[diff] $$count cases in $$chunks chunks of $$size"; \
