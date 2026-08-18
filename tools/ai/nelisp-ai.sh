@@ -72,6 +72,7 @@ usage: tools/ai/nelisp-ai.sh <command> [args]
   runtime-probe       report what the standalone binary can actually do
   gate NAME -- CMD    run CMD and report it, reading its GATE-COUNT line
   probe EXPR          evaluate EXPR in the standalone runtime, output to files
+  build-probe [-- CMD] build, then probe -- and refuse to probe if the build failed
   doctor              print the toolchain and binary identity of this checkout
   gates-clean         delete every gate report (they are per-machine)
 
@@ -351,6 +352,58 @@ cmd_probe() {
     printf '%s\n' "$dir"
 }
 
+cmd_build_probe() {
+    # Build, then measure -- and refuse to measure when the build failed.
+    #
+    # The event this prevents, measured 2026-08-19: a reader build exited
+    # 255 and the next steps in the same shell command ran the binary that
+    # was already there, printing a clean `42' and a full probe table.
+    # Read without the exit code, that is indistinguishable from "built
+    # fine, nothing changed" -- a failure wearing a pass, which is the
+    # same shape as a gate that exits 0 without running.
+    #
+    # Noticing it took a habit (print BUILD_EXIT first), and a habit is a
+    # memory dependency.  This is the same rule as an exit code, moved
+    # somewhere it cannot be skipped.
+    #
+    # Everything after `--' replaces the default build command.
+    if [ "${1:-}" = "--" ]; then shift; fi
+    [ $# -gt 0 ] || set -- make standalone-reader
+    printf '=== build: %s ===\n' "$*"
+    set +e
+    "$@"
+    code=$?
+    set -e
+    if [ "$code" -ne 0 ]; then
+        printf '\n=== NOT MEASURING ===\n'
+        printf 'build failed (exit %s).  Any measurement now would run the\n' "$code"
+        printf 'binary that was already in target/, and report it as this\n'
+        printf "build's result.\n"
+        # `|| true': a failing gate report must not become the exit
+        # status.  Without it `set -e' ends the script here and the
+        # build's own code never propagates -- a build that died 255
+        # reported 1, which is the report's status wearing the build's
+        # name.
+        "$here/gate-report.sh" --name build-probe --kind smoke \
+            --ran 1 --passed 0 --failed 1 \
+            --reason "build failed (exit $code); no measurement taken" \
+            --command "nelisp-ai.sh build-probe -- $*" || true
+        exit "$code"
+    fi
+    if ! bin=$(nelisp_binary); then
+        printf '\n=== NOT MEASURING ===\n'
+        printf 'build reported success but left no binary in target/.\n'
+        "$here/gate-report.sh" --name build-probe --kind smoke \
+            --ran 1 --passed 0 --failed 1 \
+            --reason "build exited 0 but produced no binary" \
+            --command "nelisp-ai.sh build-probe -- $*" || true
+        exit 1
+    fi
+    # Which binary produced the numbers is part of the numbers.
+    printf '\n=== measuring: %s ===\n' "$(binary_identity "$bin")"
+    NELISP_GATE_NAME=build-probe cmd_runtime_probe
+}
+
 cmd_doctor() {
     printf 'repo:        %s\n' "$root"
     printf 'branch:      %s\n' "$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo '?')"
@@ -388,6 +441,7 @@ case "$command" in
     recipes)        cmd_recipes ;;
     runtime-probe)  cmd_runtime_probe ;;
     probe)          cmd_probe "$@" ;;
+    build-probe)    cmd_build_probe "$@" ;;
     doctor)         cmd_doctor ;;
     gates-clean)    cmd_gates_clean ;;
     *)              printf 'unknown command: %s\n\n' "$command" >&2; cmd_help >&2; exit 2 ;;
