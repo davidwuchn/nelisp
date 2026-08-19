@@ -3687,6 +3687,14 @@ argument (reachability + in-arena bounds checks).")
     ;; representation.  `make-hash-table' itself is the prelude's defun.
     ((:lit "make-hash-table")  . (nl_ht_make out))
     ((:lit "nelisp--hash-table-make-raw") . (nl_ht_make out))
+    ;; A closure's captured value is a lexical CELL (tag 11), and the printer
+    ;; had no way to look inside one -- so every captured variable printed as
+    ;; `#<unprintable>' where Emacs shows the value.  This is the read side of
+    ;; `nl_cell_get_value', exposed under a private name; anything that is not
+    ;; a cell comes back unchanged, so the caller does not have to ask first.
+    ((:lit "nelisp--cell-value") . (if (= (ptr-read-u64 (wf_arg_ptr args 0) 0) 11)
+                                       (nl_cell_get_value (wf_arg_ptr args 0) out)
+                                     (seq (wf_copy32 out (wf_arg_ptr args 0)) 0)))
     ((:lit "puthash")          . (seq (wf_dirty) (nl_ht_put args out)))
     ((:lit "gethash")          . (if (= (bf_hash_table_p_raw (wf_arg_ptr args 1)) 1)
                             (nl_ht_get args out)
@@ -3762,10 +3770,13 @@ argument (reachability + in-arena bounds checks).")
                                    (if (= bad 0)
                                        (let* ((bt (m5_concat_bad_tail args)))
                                          (if (= bt 0)
-                                             (let* ((ms (alloc-bytes 32 8)))
-                                               (seq (mut-str-make-empty ms 16)
-                                                    (m5_concat_walk ms args)
-                                                    (mut-str-finalize ms out) 0))
+                                             (let* ((bc (m5_concat_bad_char args)))
+                                               (if (= bc 0)
+                                                   (let* ((ms (alloc-bytes 32 8)))
+                                                     (seq (mut-str-make-empty ms 16)
+                                                          (m5_concat_walk ms args)
+                                                          (mut-str-finalize ms out) 0))
+                                                 (bf_wrong_type_characterp bc)))
                                            (bf_wrong_type_listp bt)))
                                      (bf_wrong_type_sequencep bad))))
     ;; An out-of-range FROM/TO was clamped by the byte walk and came back as a
@@ -5478,12 +5489,20 @@ unresolved at link time."
     ;; arithmetic-heavy benchmark, measured, and this costs nothing on the
     ;; path that succeeds -- `wf_first_non_number' is called only to name the
     ;; offender once the answer is already known to be 2.
-    (defun wf_any_float (list_ptr)
+    (defun wf_has_float (list_ptr)
       (if (= (ptr-read-u64 list_ptr 0) 7)
-          (let* ((tg (ptr-read-u64 (nl_cons_car_ptr list_ptr) 0)))
-            (if (= tg 3) 1
-              (if (= tg 2) (wf_any_float (nl_cons_cdr_ptr list_ptr)) 2)))
+          (if (= (ptr-read-u64 (nl_cons_car_ptr list_ptr) 0) 3)
+              1
+            (wf_has_float (nl_cons_cdr_ptr list_ptr)))
         0))
+    ;; The WHOLE list is scanned for a non-number before any float is
+    ;; reported: stopping at the first float let (/ 1.5 nil) reach the float
+    ;; path, where nil's payload word became a divisor and the answer came
+    ;; back 1.0e+INF instead of the type error Emacs raises.
+    (defun wf_any_float (list_ptr)
+      (if (= (wf_first_non_number list_ptr) 0)
+          (wf_has_float list_ptr)
+        2))
     (defun wf_elem_fbits (car_ptr scratch)
       (if (= (ptr-read-u64 car_ptr 0) 3)
           (ptr-read-u64 car_ptr 8)
@@ -5778,17 +5797,21 @@ unresolved at link time."
     (defun nl_ht_meta_slot (table_ptr) (nl_cons_car_ptr table_ptr))
     (defun nl_ht_meta_count (table_ptr)
       (let* ((meta_ptr (nl_ht_meta_slot table_ptr)))
-        (if (= (ptr-read-u64 meta_ptr 0) 2)
-            (ptr-read-u64 meta_ptr 8)
+        (if (= (ptr-read-u64 meta_ptr 0) 8)
+            (let* ((c (vector-ref-ptr meta_ptr 1)))
+              (if (= (ptr-read-u64 c 0) 2) (ptr-read-u64 c 8) 0))
           0)))
     (defun nl_ht_meta_set_count (table_ptr n)
       (let* ((meta_ptr (nl_ht_meta_slot table_ptr)))
-        (seq
-         (ptr-write-u64 meta_ptr 0 2)
-         (ptr-write-u64 meta_ptr 8 n)
-         (ptr-write-u64 meta_ptr 16 0)
-         (ptr-write-u64 meta_ptr 24 0)
-         0)))
+        (if (= (ptr-read-u64 meta_ptr 0) 8)
+            (let* ((c (vector-ref-ptr meta_ptr 1)))
+              (seq
+               (ptr-write-u64 c 0 2)
+               (ptr-write-u64 c 8 n)
+               (ptr-write-u64 c 16 0)
+               (ptr-write-u64 c 24 0)
+               0))
+          0)))
     (defun nl_ht_str_hash_loop (str_ptr i n h)
       (if (>= i n)
           h
@@ -5945,11 +5968,34 @@ unresolved at link time."
                      0))
                 0))
           0)))
+    ;; The marker used to be a bare Int holding the count, which made
+    ;; `hash-table-p' "a cons whose car is an integer" -- so '(1) was a hash
+    ;; table, (gethash K '(1 2 3)) answered nil instead of signalling, and
+    ;; nothing could print one as `#s(hash-table)' because nothing could tell
+    ;; one from an ordinary pair.  It is a two-slot vector now: slot 0 names
+    ;; the type, slot 1 is the count.
+    (defun nl_ht_write_marker_sym (out)
+      (let* ((buf (alloc-bytes 16 1)))
+        (seq (ptr-write-u64 buf 0 7089075026832613736)
+             (ptr-write-u64 (+ buf 8) 0 25964)
+             (nl_alloc_symbol buf 10 out))))
+    (defun nl_ht_write_eql_sym (out)
+      (let* ((buf (alloc-bytes 8 1)))
+        (seq (ptr-write-u64 buf 0 7106917) (nl_alloc_symbol buf 3 out))))
     (defun nl_ht_make (out)
-      (let* ((marker (alloc-bytes 32 8)) (buckets (alloc-bytes 32 8)))
+      (let* ((marker (alloc-bytes 32 8)) (buckets (alloc-bytes 32 8))
+             (sym (alloc-bytes 32 8)) (cnt (alloc-bytes 32 8)))
         (seq
-         (ptr-write-u64 marker 0 2) (ptr-write-u64 marker 8 0)
-         (ptr-write-u64 marker 16 0) (ptr-write-u64 marker 24 0)
+         (vector-make 3 marker)
+         (nl_ht_write_marker_sym sym)
+         (vector-slot-set marker 0 sym)
+         (ptr-write-u64 cnt 0 2) (ptr-write-u64 cnt 8 0)
+         (ptr-write-u64 cnt 16 0) (ptr-write-u64 cnt 24 0)
+         (vector-slot-set marker 1 cnt)
+         ;; Slot 2 records the requested :test.  `make-hash-table' in the
+         ;; prelude writes it; the default is `eql', as in Emacs.
+         (nl_ht_write_eql_sym sym)
+         (vector-slot-set marker 2 sym)
          (vector-make 2048 buckets)
          (nelisp_cons_construct marker buckets out)
          0)))
@@ -6881,6 +6927,96 @@ unresolved at link time."
          (if (= i 0) 0 (mut-str-push-byte ms 32))
          (m5_prin1 ms (vector-ref-ptr vec i))
          (m5_prin1_vector_loop ms vec (+ i 1) n))))
+    ;; Tagged objects print as themselves.  Without these a buffer came out
+    ;; as [buffer "x" "" t], a hash table as its bucket vector -- 2048 nils --
+    ;; and a closure as the (closure ENV ARGS . BODY) list it is made of.
+    ;; Every one of those is readable Lisp that means something else.
+    (defun m5_sym_is (p w0 w1 len)
+      (let* ((buf (alloc-bytes 16 1)))
+        (seq (ptr-write-u64 buf 0 w0) (ptr-write-u64 (+ buf 8) 0 w1)
+             (wf_sym_eq p buf len))))
+    (defun m5_prin1_buffer (ms vptr)
+      (seq (mut-str-push-byte ms 35) (mut-str-push-byte ms 60)
+           (mut-str-push-byte ms 98) (mut-str-push-byte ms 117)
+           (mut-str-push-byte ms 102) (mut-str-push-byte ms 102)
+           (mut-str-push-byte ms 101) (mut-str-push-byte ms 114)
+           (mut-str-push-byte ms 32)
+           (m5_push_str ms (vector-ref-ptr vptr 1))
+           (mut-str-push-byte ms 62) 1))
+    (defun m5_prin1_subr (ms vptr)
+      (seq (mut-str-push-byte ms 35) (mut-str-push-byte ms 60)
+           (mut-str-push-byte ms 115) (mut-str-push-byte ms 117)
+           (mut-str-push-byte ms 98) (mut-str-push-byte ms 114)
+           (mut-str-push-byte ms 32)
+           (m5_push_str ms (nl_cons_car_ptr (nl_cons_cdr_ptr vptr)))
+           (mut-str-push-byte ms 62) 1))
+    (defun m5_prin1_closure (ms vptr)
+      (let* ((d1 (nl_cons_cdr_ptr vptr))
+             (env (nl_cons_car_ptr d1))
+             (d2 (nl_cons_cdr_ptr d1))
+             (argl (nl_cons_car_ptr d2))
+             (body (nl_cons_cdr_ptr d2)))
+        (seq (mut-str-push-byte ms 35) (mut-str-push-byte ms 91)
+             (m5_prin1 ms argl) (mut-str-push-byte ms 32)
+             (m5_prin1 ms body) (mut-str-push-byte ms 32)
+             (m5_prin1 ms env) (mut-str-push-byte ms 93) 1)))
+    (defun m5_prin1_ht_chain (ms node first)
+      (if (= (ptr-read-u64 node 0) 7)
+          (let* ((pair (nl_cons_car_ptr node)))
+            (if (= (ptr-read-u64 pair 0) 7)
+                (seq (if (= first 1) 0 (mut-str-push-byte ms 32))
+                     (m5_prin1 ms (nl_cons_car_ptr pair))
+                     (mut-str-push-byte ms 32)
+                     (m5_prin1 ms (nl_cons_cdr_ptr pair))
+                     (m5_prin1_ht_chain ms (nl_cons_cdr_ptr node) 0))
+              (m5_prin1_ht_chain ms (nl_cons_cdr_ptr node) first)))
+        first))
+    (defun m5_prin1_ht_buckets (ms vec i n first)
+      (if (< i n)
+          (m5_prin1_ht_buckets ms vec (+ i 1) n
+                               (m5_prin1_ht_chain ms (vector-ref-ptr vec i) first))
+        first))
+    (defun m5_prin1_ht_data (ms d first)
+      (if (= (ptr-read-u64 d 0) 8)
+          (m5_prin1_ht_buckets ms d 0 (vector-len d) first)
+        (m5_prin1_ht_chain ms d first)))
+    (defun m5_prin1_hashtable (ms vptr)
+      (let* ((cnt (nl_ht_meta_count vptr)))
+        (seq
+         (mut-str-push-byte ms 35) (mut-str-push-byte ms 115)
+         (mut-str-push-byte ms 40)
+         (mut-str-push-byte ms 104) (mut-str-push-byte ms 97)
+         (mut-str-push-byte ms 115) (mut-str-push-byte ms 104)
+         (mut-str-push-byte ms 45) (mut-str-push-byte ms 116)
+         (mut-str-push-byte ms 97) (mut-str-push-byte ms 98)
+         (mut-str-push-byte ms 108) (mut-str-push-byte ms 101)
+         (if (= cnt 0)
+             0
+           (seq (mut-str-push-byte ms 32)
+                (mut-str-push-byte ms 100) (mut-str-push-byte ms 97)
+                (mut-str-push-byte ms 116) (mut-str-push-byte ms 97)
+                (mut-str-push-byte ms 32) (mut-str-push-byte ms 40)
+                (m5_prin1_ht_data ms (nl_ht_data_slot vptr) 1)
+                (mut-str-push-byte ms 41)))
+         (mut-str-push-byte ms 41) 1)))
+    (defun m5_prin1_plain_cons (ms vptr)
+      (seq (mut-str-push-byte ms 40) (m5_prin1_list_tail ms vptr 1)))
+    (defun m5_prin1_cons (ms vptr)
+      (let* ((h (nl_cons_car_ptr vptr)))
+        (if (= (bf_marker_vec_is h 7089075026832613736 25964 10) 1)
+            (m5_prin1_hashtable ms vptr)
+          (if (= (ptr-read-u64 h 0) 4)
+              (let* ((d1 (nl_cons_cdr_ptr vptr)))
+                (if (= (ptr-read-u64 d1 0) 7)
+                    (if (= (m5_sym_is h 31078196194145634 0 7) 1)
+                        (m5_prin1_subr ms vptr)
+                      (if (= (m5_sym_is h 28554821421198435 0 7) 1)
+                          (if (= (ptr-read-u64 (nl_cons_cdr_ptr d1) 0) 7)
+                              (m5_prin1_closure ms vptr)
+                            (m5_prin1_plain_cons ms vptr))
+                        (m5_prin1_plain_cons ms vptr)))
+                  (m5_prin1_plain_cons ms vptr)))
+            (m5_prin1_plain_cons ms vptr)))))
     (defun m5_prin1 (ms vptr)
       (let* ((tag (ptr-read-u64 vptr 0)))
         (cond
@@ -6891,10 +7027,11 @@ unresolved at link time."
          ((= tag 4) (m5_push_str ms vptr))
          ((= tag 5) (m5_prin1_string ms vptr))
          ((= tag 6) (m5_prin1_string ms vptr))
-         ((= tag 7) (seq (mut-str-push-byte ms 40)
-                         (m5_prin1_list_tail ms vptr 1)))
-         ((= tag 8) (seq (mut-str-push-byte ms 91)
-                         (m5_prin1_vector_loop ms vptr 0 (vector-len vptr))))
+         ((= tag 7) (m5_prin1_cons ms vptr))
+         ((= tag 8) (if (= (bf_marker_vec_is vptr 125779835254114 0 6) 1)
+                        (m5_prin1_buffer ms vptr)
+                      (seq (mut-str-push-byte ms 91)
+                           (m5_prin1_vector_loop ms vptr 0 (vector-len vptr)))))
          (t (m5_push_lit_object ms)))))
     (defun m5_emit_value (ms vptr)
       (let* ((tag (ptr-read-u64 vptr 0)))
@@ -7043,6 +7180,41 @@ unresolved at link time."
       (if (= (ptr-read-u64 p 0) 7)
           (m5_improper_tail (nl_cons_cdr_ptr p))
         (if (= (ptr-read-u64 p 0) 0) 0 p)))
+    (defun m5_elem_bad_char (node)
+      (if (= (ptr-read-u64 node 0) 7)
+          (let* ((a (nl_cons_car_ptr node)))
+            (if (= (ptr-read-u64 a 0) 2)
+                (let* ((v (ptr-read-u64 a 8)))
+                  (if (< v 0)
+                      a
+                    (if (> v 4194303)
+                        a
+                      (m5_elem_bad_char (nl_cons_cdr_ptr node)))))
+              a))
+        0))
+    (defun m5_vec_bad_char (vec i n)
+      (if (< i n)
+          (let* ((a (vector-ref-ptr vec i)))
+            (if (= (ptr-read-u64 a 0) 2)
+                (let* ((v (ptr-read-u64 a 8)))
+                  (if (< v 0)
+                      a
+                    (if (> v 4194303)
+                        a
+                      (m5_vec_bad_char vec (+ i 1) n))))
+              a))
+        0))
+    (defun m5_concat_bad_char (cur)
+      (if (= (ptr-read-u64 cur 0) 7)
+          (let* ((a (nl_cons_car_ptr cur)) (tg (ptr-read-u64 a 0)))
+            (if (= tg 7)
+                (let* ((b (m5_elem_bad_char a)))
+                  (if (= b 0) (m5_concat_bad_char (nl_cons_cdr_ptr cur)) b))
+              (if (= tg 8)
+                  (let* ((b (m5_vec_bad_char a 0 (vector-len a))))
+                    (if (= b 0) (m5_concat_bad_char (nl_cons_cdr_ptr cur)) b))
+                (m5_concat_bad_char (nl_cons_cdr_ptr cur)))))
+        0))
     (defun m5_concat_bad_tail (cur)
       (if (= (ptr-read-u64 cur 0) 7)
           (let* ((a (nl_cons_car_ptr cur)))
@@ -7281,7 +7453,15 @@ unresolved at link time."
     ;; that genuinely holds nil -- so reading past the end of a vector was a
     ;; silent wrong answer, and a handler written for `args-out-of-range'
     ;; never fired.  A negative index is the same error there.
+    ;; The INDEX has to be an integer before anything is read with it: this
+    ;; took offset 8 of whatever Sexp it was handed, so (aref "\u3042\u3044" t)
+    ;; answered 12354 -- t's payload word read as a character index -- and a
+    ;; string index came back as `args-out-of-range' rather than a type error.
     (defun bf_aref (args out)
+      (if (= (ptr-read-u64 (wf_arg_ptr args 1) 0) 2)
+          (bf_aref_checked args out)
+        (bf_wrong_type_fixnump (wf_arg_ptr args 1))))
+    (defun bf_aref_checked (args out)
       (let* ((arr (wf_arg_ptr args 0))
              (idx (ptr-read-u64 (wf_arg_ptr args 1) 8))
              (tg (ptr-read-u64 arr 0)))
@@ -7713,6 +7893,43 @@ unresolved at link time."
       (bf_wrong_type_named offender 3274791373809938025 7308060583107850863 7351666 19))
     (defun bf_wrong_type_characterp (offender)
       (bf_wrong_type_named offender 7310577365311121507 28786 0 10))
+    ;; ONE walk, in argument order: each byte is type-checked and then
+    ;; range-checked before the next is looked at, because Emacs reports
+    ;; whichever fails FIRST -- (unibyte-string -1 'sym) names -1, not the
+    ;; symbol a separate type pass would have found first.
+    (defun bf_first_bad_byte (args)
+      (if (= (sexp-tag args) 7)
+          (let* ((a (nl_cons_car_ptr args)))
+            (if (= (ptr-read-u64 a 0) 2)
+                (let* ((v (ptr-read-u64 a 8)))
+                  (if (< v 0)
+                      a
+                    (if (> v 255)
+                        a
+                      (bf_first_bad_byte (nl_cons_cdr_ptr args)))))
+              a))
+        0))
+    (defun bf_args_out_of_range_byte (offender)
+      (let* ((sbuf (alloc-bytes 24 1))
+             (lo (alloc-bytes 32 8))
+             (hi (alloc-bytes 32 8))
+             (nil-slot (alloc-bytes 32 8))
+             (t2 (alloc-bytes 32 8))
+             (t1 (alloc-bytes 32 8)))
+        (seq
+         (ptr-write-u64 sbuf 0 8391735721675158113)
+         (ptr-write-u64 (+ sbuf 8) 0 7453001576360603437)
+         (ptr-write-u64 (+ sbuf 16) 0 101)
+         (nl_alloc_symbol sbuf 17 268435480)
+         (wf_write_int lo 0)
+         (wf_write_int hi 255)
+         (wf_write_nil nil-slot)
+         (nelisp_cons_construct hi nil-slot t2)
+         (nelisp_cons_construct lo t2 t1)
+         (nelisp_cons_construct offender t1 268435512)
+         (ptr-write-u64 268435472 0 1)
+         (atomic-fetch-add 268435544 1)
+         1)))
     (defun bf_first_non_integer (args)
       (if (= (sexp-tag args) 7)
           (let* ((a (nl_cons_car_ptr args)))
@@ -7790,9 +8007,24 @@ unresolved at link time."
     ;; A hash table is a cons whose car is an Int in this runtime -- the same
     ;; test the prelude's `hash-table-p' uses, so the guard and the predicate
     ;; cannot disagree about what a table is.
+    ;; A vector whose slot 0 is the symbol named by W0/W1: the shape every
+    ;; tagged object in this runtime uses, and the only thing that tells a
+    ;; hash table or a buffer from an ordinary cons or vector.
+    (defun bf_marker_vec_is (p w0 w1 len)
+      (if (= (ptr-read-u64 p 0) 8)
+          (if (< (vector-len p) 2)
+              0
+            (let* ((sy (vector-ref-ptr p 0)))
+              (if (= (ptr-read-u64 sy 0) 4)
+                  (let* ((buf (alloc-bytes 16 1)))
+                    (seq (ptr-write-u64 buf 0 w0)
+                         (ptr-write-u64 (+ buf 8) 0 w1)
+                         (wf_sym_eq sy buf len)))
+                0)))
+        0))
     (defun bf_hash_table_p_raw (h)
       (if (= (ptr-read-u64 h 0) 7)
-          (if (= (ptr-read-u64 (nl_cons_car_ptr h) 0) 2) 1 0)
+          (bf_marker_vec_is (nl_cons_car_ptr h) 7089075026832613736 25964 10)
         0))
     ;; `string<' accepts a string OR a symbol (nil and t included, they carry
     ;; their own tags).  A vector is neither, and comparing one read whatever
@@ -8725,9 +8957,16 @@ Wave-2 (C) appends bf_ash (shl/sar compose) + bf_str_lt (byte-lexicographic).")
     ;; needed here (unlike `intern', whose `bf_intern' returns a non-zero
     ;; slot pointer).  Backs the elisp `intern-soft' (lisp/nelisp-stdlib-misc.el).
     ((:lit "nelisp--intern-lookup") . (bf_intern_soft (wf_arg_ptr args 0) out))
-    ((:lit "unibyte-string") . (if (= (bf_first_non_integer args) 0)
-                            (bf_unibyte_string args out)
-                          (bf_wrong_type_integerp (bf_first_non_integer args))))
+    ;; A BYTE is 0..255.  Anything else was taken modulo 256 and became a
+    ;; different character: (unibyte-string 300) answered "," rather than
+    ;; signalling, so a caller building a byte string from computed values
+    ;; got quietly wrong bytes.
+    ((:lit "unibyte-string") . (let* ((bad (bf_first_bad_byte args)))
+                            (if (= bad 0)
+                                (bf_unibyte_string args out)
+                              (if (= (ptr-read-u64 bad 0) 2)
+                                  (bf_args_out_of_range_byte bad)
+                                (bf_wrong_type_integerp bad)))))
     ;; --- vector ops ---
     ((:lit "make-vector") . (bf_make_vector args out))
     ((:lit "vector")      . (bf_vector args out))
@@ -12408,7 +12647,7 @@ value (matches the binary's M8 read+eval-loop driver)."
     "nelisp--env-globals-op"
     ;; M4 hash tables
     "make-hash-table" "puthash" "gethash" "remhash" "hash-table-count" "maphash"
-    "nelisp--hash-table-make-raw"
+    "nelisp--hash-table-make-raw" "nelisp--cell-value"
     ;; List search hot paths
     "memq" "member" "assq" "assoc" "rassoc"
     ;; M5 strings + format
@@ -12545,17 +12784,23 @@ and the `string-match' family aliases over it."
                        nelisp-standalone--repo-root))
     (goto-char (point-max))
     (insert "\n(defun string-match (re s &optional start)\n"
-            "  (when start (unless (integerp start)\n"
-            "    (signal 'wrong-type-argument (list 'fixnump start))))\n"
-            "  (if (and (stringp re) (stringp s))\n"
-            "      (nlre-string-match re s start)\n"
-            "    (signal 'wrong-type-argument (list 'stringp (if (stringp re) s re)))))\n"
+            "  (unless (stringp re) (signal 'wrong-type-argument (list 'stringp re)))\n"
+            "  (unless (stringp s) (signal 'wrong-type-argument (list 'stringp s)))\n"
+            "  (when start\n"
+            "    (unless (integerp start)\n"
+            "      (signal 'wrong-type-argument (list 'fixnump start)))\n"
+            "    (when (or (< start 0) (> start (length s)))\n"
+            "      (signal 'args-out-of-range (list s start))))\n"
+            "  (nlre-string-match re s start))\n"
             "(defun string-match-p (re s &optional start)\n"
-            "  (when start (unless (integerp start)\n"
-            "    (signal 'wrong-type-argument (list 'fixnump start))))\n"
-            "  (if (and (stringp re) (stringp s))\n"
-            "      (nlre-string-match re s start)\n"
-            "    (signal 'wrong-type-argument (list 'stringp (if (stringp re) s re)))))\n"
+            "  (unless (stringp re) (signal 'wrong-type-argument (list 'stringp re)))\n"
+            "  (unless (stringp s) (signal 'wrong-type-argument (list 'stringp s)))\n"
+            "  (when start\n"
+            "    (unless (integerp start)\n"
+            "      (signal 'wrong-type-argument (list 'fixnump start)))\n"
+            "    (when (or (< start 0) (> start (length s)))\n"
+            "      (signal 'args-out-of-range (list s start))))\n"
+            "  (nlre-string-match re s start))\n"
             "(defun match-beginning (n) (nlre-match-beginning n))\n"
             "(defun match-end (n) (nlre-match-end n))\n"
             "(defun match-string (n &optional str)\n"
@@ -13281,18 +13526,24 @@ runtime cache does not replay source file loads on every command invocation."
     "lisp/nelisp-stdlib-regexp.el" inline)
    "(unless (fboundp 'string-match)\n"
    "  (defun string-match (re s &optional start)\n"
-   "    (when start (unless (integerp start)\n"
-   "      (signal 'wrong-type-argument (list 'fixnump start))))\n"
-   "    (if (and (stringp re) (stringp s))\n"
-   "        (nlre-string-match re s start)\n"
-   "      (signal 'wrong-type-argument (list 'stringp (if (stringp re) s re))))))\n"
+   "    (unless (stringp re) (signal 'wrong-type-argument (list 'stringp re)))\n"
+   "    (unless (stringp s) (signal 'wrong-type-argument (list 'stringp s)))\n"
+   "    (when start\n"
+   "      (unless (integerp start)\n"
+   "        (signal 'wrong-type-argument (list 'fixnump start)))\n"
+   "      (when (or (< start 0) (> start (length s)))\n"
+   "        (signal 'args-out-of-range (list s start))))\n"
+   "    (nlre-string-match re s start))\n"
    "(unless (fboundp 'string-match-p)\n"
    "  (defun string-match-p (re s &optional start)\n"
-   "    (when start (unless (integerp start)\n"
-   "      (signal 'wrong-type-argument (list 'fixnump start))))\n"
-   "    (if (and (stringp re) (stringp s))\n"
-   "        (nlre-string-match re s start)\n"
-   "      (signal 'wrong-type-argument (list 'stringp (if (stringp re) s re))))))\n"
+   "    (unless (stringp re) (signal 'wrong-type-argument (list 'stringp re)))\n"
+   "    (unless (stringp s) (signal 'wrong-type-argument (list 'stringp s)))\n"
+   "    (when start\n"
+   "      (unless (integerp start)\n"
+   "        (signal 'wrong-type-argument (list 'fixnump start)))\n"
+   "      (when (or (< start 0) (> start (length s)))\n"
+   "        (signal 'args-out-of-range (list s start))))\n"
+   "    (nlre-string-match re s start))\n"
    "(unless (fboundp 'match-beginning)\n"
    "  (defun match-beginning (n) (nlre-match-beginning n)))\n"
    "(unless (fboundp 'match-end)\n"
@@ -13882,18 +14133,24 @@ artifact before wiring that artifact into the marker command path."
       "lisp/nelisp-stdlib-regexp.el" t)
      "(unless (fboundp 'string-match)\n"
      "  (defun string-match (re s &optional start)\n"
-     "    (when start (unless (integerp start)\n"
-     "      (signal 'wrong-type-argument (list 'fixnump start))))\n"
-     "    (if (and (stringp re) (stringp s))\n"
-     "        (nlre-string-match re s start)\n"
-     "      (signal 'wrong-type-argument (list 'stringp (if (stringp re) s re))))))\n"
+     "    (unless (stringp re) (signal 'wrong-type-argument (list 'stringp re)))\n"
+     "    (unless (stringp s) (signal 'wrong-type-argument (list 'stringp s)))\n"
+     "    (when start\n"
+     "      (unless (integerp start)\n"
+     "        (signal 'wrong-type-argument (list 'fixnump start)))\n"
+     "      (when (or (< start 0) (> start (length s)))\n"
+     "        (signal 'args-out-of-range (list s start))))\n"
+     "    (nlre-string-match re s start))\n"
      "(unless (fboundp 'string-match-p)\n"
      "  (defun string-match-p (re s &optional start)\n"
-     "    (when start (unless (integerp start)\n"
-     "      (signal 'wrong-type-argument (list 'fixnump start))))\n"
-     "    (if (and (stringp re) (stringp s))\n"
-     "        (nlre-string-match re s start)\n"
-     "      (signal 'wrong-type-argument (list 'stringp (if (stringp re) s re))))))\n"
+     "    (unless (stringp re) (signal 'wrong-type-argument (list 'stringp re)))\n"
+     "    (unless (stringp s) (signal 'wrong-type-argument (list 'stringp s)))\n"
+     "    (when start\n"
+     "      (unless (integerp start)\n"
+     "        (signal 'wrong-type-argument (list 'fixnump start)))\n"
+     "      (when (or (< start 0) (> start (length s)))\n"
+     "        (signal 'args-out-of-range (list s start))))\n"
+     "    (nlre-string-match re s start))\n"
      "(unless (fboundp 'match-beginning)\n"
      "  (defun match-beginning (n) (nlre-match-beginning n)))\n"
      "(unless (fboundp 'match-end)\n"

@@ -53,15 +53,13 @@ string-trim-right|lisp/nelisp-stdlib-plist-str.el|_regexp|not yet reviewed
 string-trim|lisp/nelisp-stdlib-plist-str.el|_trim-left _trim-right|not yet reviewed
 write-region|lisp/nelisp-stdlib-misc.el|_lockname _mustbenew _visit|not yet reviewed
 write-region|scripts/nelisp-stdlib-prelude.el|_lockname _mustbenew _visit|not yet reviewed
-base64-decode-string|scripts/nelisp-stdlib-prelude.el|_base64url _ignore-invalid|accepted so a 3-argument call raises the type error Emacs raises rather than an arity error; the URL alphabet and invalid-char tolerance are not implemented
 locate-file|scripts/nelisp-stdlib-prelude.el|_predicate|PREDICATE ignored: the search is file-exists-p only, so a caller asking for executable-only or readable-only gets any existing file
 terpri|scripts/nelisp-stdlib-prelude.el|_ensure|ENSURE ignored: output always goes to stdout and a newline is always written, so "only if not at column 0" cannot be honoured without a column to read
-prin1-to-string|scripts/nelisp-stdlib-prelude.el|_overrides|OVERRIDES ignored: per-call print settings (print-length, print-level, ...) are read from the dynamic variables, not from this alist
 prin1-to-string|lisp/nelisp-stdlib-prn.el|_overrides|OVERRIDES ignored; byte-identical to the prelude copy
 locate-library|scripts/nelisp-stdlib-prelude.el|_interactive-call _nosuffix _path|NOSUFFIX/PATH/INTERACTIVE-CALL ignored: the search is always load-path with .el and no suffix
 bool-vector-p|scripts/nelisp-stdlib-prelude.el|_x|always nil: bool vectors are plain vectors here, so nothing can be one
 bool-vector-p|lisp/nelisp-stdlib-plist-str.el|_x|always nil; byte-identical to the prelude copy
 generate-new-buffer|scripts/nelisp-stdlib-prelude.el|_inhibit-buffer-hooks|there are no buffer hooks here, so nothing can be inhibited
-file-truename|scripts/nelisp-stdlib-prelude.el|_prev-dirs|PREV-DIRS ignored: symlink-loop detection is not implemented, so a cycle is neither followed nor reported
+file-truename|scripts/nelisp-stdlib-prelude.el|_prev-dirs|PREV-DIRS ignored: no symlink is resolved AT ALL -- this is `expand-file-name' with the two argument checks Emacs performs, so a path through a symlink comes back unresolved and a cycle is neither followed nor reported.  Resolving them needs a readlink primitive the standalone does not have
 file-truename|lisp/nelisp-stdlib-misc.el|_prev-dirs|the same; byte-identical to the prelude copy
 run-at-time|scripts/nelisp-stdlib-prelude.el|_repeat|REPEAT ignored: the function runs once, immediately, so a repeating timer never repeats

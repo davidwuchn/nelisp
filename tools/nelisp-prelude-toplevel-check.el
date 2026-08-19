@@ -66,6 +66,17 @@ during boot.  The top-level-only version of this check passed that file."
   "Record that a file ended at a form boundary."
   (setq nelisp-prelude-toplevel--eofs (1+ nelisp-prelude-toplevel--eofs)))
 
+(defun nelisp-prelude-toplevel--clean-eof-p (start)
+  "Return non-nil when only whitespace and comments follow START.
+`end-of-file' means two different things and this is the difference: the
+reader raises it BOTH when a file ends after its last form and when a form
+is missing a closing paren.  Treating the second as the first is how a
+prelude with one paren short passed this check, built, and was caught two
+gates later by `make emacs-compat' instead."
+  (save-excursion
+    (goto-char start)
+    (looking-at "\\(?:[ \t\n]\\|;[^\n]*\\)*\\'")))
+
 (defun nelisp-prelude-toplevel--note-unreadable (file start err cell)
   "Record that FILE stopped parsing at START with ERR, into CELL."
   (setcar cell (cons (list file (line-number-at-pos start) err) (car cell))))
@@ -87,7 +98,13 @@ during boot.  The top-level-only version of this check passed that file."
                 ;; `end-of-file' is how the reader says "that was the last
                 ;; form"; it is the loop's exit, not a fallback.  Named so
                 ;; `make fallback-inventory' can tell the two apart.
-                (end-of-file (nelisp-prelude-toplevel--note-eof) (setq done t))
+                (end-of-file
+                 (if (nelisp-prelude-toplevel--clean-eof-p start)
+                     (nelisp-prelude-toplevel--note-eof)
+                   (nelisp-prelude-toplevel--note-unreadable
+                    file start '(end-of-file "form is never closed") bad-cell)
+                   (setq bad (car bad-cell)))
+                 (setq done t))
                 (error
                  (nelisp-prelude-toplevel--note-unreadable file start err bad-cell)
                  (setq bad (car bad-cell))

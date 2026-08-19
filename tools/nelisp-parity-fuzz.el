@@ -52,6 +52,37 @@
 (defvar nelisp-parity-fuzz--table
   (expand-file-name "docs/emacs-compat-table.txt" nelisp-parity-fuzz--root))
 
+;; Generated calls RUN.  `make-symbolic-link', `rename-file' and friends were
+;; doing so with the repository as their working directory, and two of their
+;; symlinks -- `abc' and `[a-z]+' -- got committed by a later `git add -A'.
+;; Worse than the mess: the corpus then measured THEM.  (file-truename "abc")
+;; disagreed because a stray symlink existed, not because the runtimes did,
+;; and the finding would have vanished the moment somebody cleaned up.  Both
+;; sides get a scratch directory instead, so a filesystem call lands
+;; somewhere disposable and both runtimes see the same empty world.
+(defvar nelisp-parity-fuzz--scratch nil
+  "Working directory both runtimes are launched in.")
+
+(defun nelisp-parity-fuzz--scratch-dir ()
+  "Return the scratch directory, creating it and fixing its mode.
+Called before EVERY capture, not once: a generated `set-file-modes' call
+took the scratch directory's own permissions away mid-run, and every
+process launched after that died with \"Setting current directory:
+Permission denied\" -- reported as a hundred missing results rather than as
+the one call that caused them."
+  (let ((d (or nelisp-parity-fuzz--scratch
+               (setq nelisp-parity-fuzz--scratch
+                     (expand-file-name "target/parity-fuzz-scratch/"
+                                       nelisp-parity-fuzz--root)))))
+    (unless (file-directory-p d) (make-directory d t))
+    (condition-case err
+        (set-file-modes d #o755)
+      ;; Said out loud rather than swallowed: if the scratch directory cannot
+      ;; be made usable again, every capture after this point fails to start
+      ;; and the run reports missing results instead of the reason.
+      (error (message "parity-fuzz: cannot reset %s: %S" d err)))
+    d))
+
 ;; ---------------------------------------------------------------------------
 ;; Deterministic RNG.  `random' with a seed string is reproducible within one
 ;; Emacs version but not across them, and a fuzz report nobody can replay is
@@ -107,6 +138,26 @@
   '(;; time, environment, randomness
     current-time float-time current-time-string format-time-string random
     getenv setenv emacs-version emacs-pid system-name user-login-name
+    ;; `make-temp-name' is randomness by definition, and `make-temp-file'
+    ;; is that plus a file.  Neither can agree across two processes.
+    make-temp-name make-temp-file
+    ;; A timer records the CURRENT TIME in its own slots.
+    run-at-time run-with-timer run-with-idle-timer timer-create
+    ;; `lwarn'/`display-warning' accumulate `warning-suppress-log-types' as
+    ;; they go, so the SAME call answers differently the second time -- a
+    ;; measurement here disagreed with a clean host on the same input.
+    lwarn display-warning warn
+    ;; these read whichever buffer the host happens to have current, and
+    ;; batch Emacs moves between *scratch* and *Messages* on its own
+    buffer-substring-no-properties insert-file-contents-literally
+    buffer-name buffer-size
+    ;; THIS TOOL'S OWN PROTOCOL is stdout -- one "##KEY\tRESULT\n" line per
+    ;; case -- and a call that writes to stdout writes INTO that line.  The
+    ;; result field then holds whatever survived the split, which is how
+    ;; (terpri 1.5 "x") was reported as answering nil here while a direct
+    ;; measurement of the same call signals `invalid-function' every time.
+    ;; Not a runtime difference; a measurement the harness cannot make.
+    princ prin1 print terpri print-char write-char
     ;; process / file / world
     load require provide kill-emacs delete-file write-region make-directory
     insert-file-contents find-file expand-file-name file-exists-p
@@ -130,6 +181,30 @@
     ;; mutation's result is the least interesting half of what it did
     setcar setcdr aset puthash remhash clrhash sort nreverse nconc
     delete-dups nbutlast ntake))
+
+(defun nelisp-parity-fuzz--gap (name emacs nelisp)
+  "Return the missing TYPE that explains EMACS vs NELISP, or nil.
+
+Four Emacs types this runtime does not have, and a differential over them
+compares a value against a shape that cannot exist here.  They are matched
+on the ANSWER rather than on the name, so a call that diverges for some
+OTHER reason still counts as a disagreement -- skip-listing the names would
+have thrown away every type check those functions do.
+
+They are reported, every run, in their own section.  A gap that stops being
+printed is a gap somebody has to rediscover."
+  (cond
+   ((and (stringp emacs) (string-prefix-p "#&" emacs))
+    "bool-vector: Emacs has a packed bit type; this runtime uses a plain vector of t/nil")
+   ((and (stringp emacs) (string-prefix-p "#[" emacs)
+         (stringp nelisp) (string-prefix-p "#[" nelisp))
+    "byte-code function: Emacs's stdlib is compiled, so the value it hands back prints as byte code; this one is an interpreted closure")
+   ((and (stringp emacs) (string-match-p "\\`-?[0-9]\\{19,\\}\\'" emacs))
+    "bignum: the answer needs more than 64 bits and this runtime has fixnums only")
+   ((memq name '(string-as-unibyte string-make-unibyte string-to-unibyte
+                 string-as-multibyte string-to-multibyte multibyte-string-p))
+    "unibyte string: Emacs tracks a per-string multibyte flag; every string here is UTF-8 bytes")
+   (t nil)))
 
 (defun nelisp-parity-fuzz--names ()
   "Shared names from the compat table, minus the ones a differential cannot judge."
@@ -293,7 +368,7 @@ in the results as `:missing\=', which is what the abort report keys on."
 (defun nelisp-parity-fuzz--capture (argv)
   "Run ARGV, return an alist of CASE-TEXT -> RESULT-TEXT from its ## lines."
   (with-temp-buffer
-    (let ((default-directory nelisp-parity-fuzz--root))
+    (let ((default-directory (nelisp-parity-fuzz--scratch-dir)))
       (apply #'call-process (car argv) nil t nil (cdr argv)))
     (goto-char (point-min))
     (let ((rows nil))
@@ -427,14 +502,35 @@ ended up slower than the search that produced the case."
                        (length aborts)))
         (dolist (a aborts)
           (princ (format "    %S\n      emacs %s\n" (car a) (cdr a)))))
-      (let* ((bad (cl-remove-if (lambda (r)
-                                  (or (equal (nth 1 r) (nth 2 r))
-                                      (eq (nth 2 r) :missing)
-                                      (and (stringp (nth 2 r))
-                                           (string-match-p "aborted without signal"
-                                                           (nth 2 r)))))
-                                rows))
+      (let* ((differing (cl-remove-if (lambda (r)
+                                        (or (equal (nth 1 r) (nth 2 r))
+                                            (eq (nth 2 r) :missing)
+                                            (and (stringp (nth 2 r))
+                                                 (string-match-p "aborted without signal"
+                                                                 (nth 2 r)))))
+                                      rows))
+             (gaps (cl-remove-if-not
+                    (lambda (r) (nelisp-parity-fuzz--gap
+                                 (car (nth 0 r)) (nth 1 r) (nth 2 r)))
+                    differing))
+             (bad (cl-remove-if
+                   (lambda (r) (nelisp-parity-fuzz--gap
+                                (car (nth 0 r)) (nth 1 r) (nth 2 r)))
+                   differing))
              (families (delete-dups (mapcar (lambda (r) (car (nth 0 r))) bad))))
+        (when gaps
+          (princ (format "\nparity-fuzz: %d case(s) need an Emacs TYPE this runtime does not have.\nThese are NOT counted below -- they are not wrong answers, they are absent types:\n"
+                         (length gaps)))
+          (dolist (reason (sort (delete-dups
+                                 (mapcar (lambda (r)
+                                           (nelisp-parity-fuzz--gap
+                                            (car (nth 0 r)) (nth 1 r) (nth 2 r)))
+                                         gaps))
+                                #'string<))
+            (princ (format "    %s\n" reason)))
+          (dolist (r gaps)
+            (princ (format "      %S\n        emacs %s\n        nelisp %s\n"
+                           (nth 0 r) (nth 1 r) (nth 2 r)))))
         (princ (format "GATE-COUNT checked=%d findings=%d\n" (length rows) (length bad)))
         (let ((skipped (delete-dups (mapcar #'car nelisp-parity-fuzz--no-arity))))
           (unless (null skipped)

@@ -949,6 +949,89 @@
        (replace-regexp-in-string "b" "\\&\\&" "abc")
        (replace-regexp-in-string "b" "z" "abc" nil t)
        (condition-case e (replace-regexp-in-string 0 t "ab") (error e)))
+
+ ;; Objects that print as themselves.  A buffer came out as its backing
+ ;; vector, a hash table as 2048 nils, and a closure as the list it is made
+ ;; of -- each of them readable Lisp that means something else.  The last one
+ ;; could not be printed at all: the printer's fallback formatted the object
+ ;; with %S, which re-entered the printer on the same object.
+ (list (make-hash-table) (make-hash-table :test 'equal)
+       (hash-table-p '(1)) (hash-table-p (make-hash-table))
+       (condition-case e (gethash 1 '(1 2 3)) (error e))
+       (condition-case e (hash-table-test '(1)) (error e))
+       (let ((h (make-hash-table))) (puthash 1 2 h) (list (gethash 1 h) (hash-table-count h)))
+       (generate-new-buffer "x") (generate-new-buffer " a b ")
+       ;; Forced lexical: this file is loaded with the default binding mode,
+       ;; and a DYNAMIC closure captures nothing -- so the env would be nil
+       ;; on the host and the case would say nothing about printing one.
+       (eval '(let ((a 1)) (lambda () a)) t)
+       (eval '(let ((a (list 1))) (lambda () a)) t))
+
+ ;; Numerics that were close but not equal.  A float literal with more than
+ ;; eighteen digits OVERFLOWED the reader's mantissa and came back about ten
+ ;; times too small; sqrt and exp were each one ULP out.
+ (list 1.44269504088896338700e+00 6.93147180369123816490e-01
+       1.90821492927058770002e-10 1.66666666666666019037e-01
+       (sqrt 2) (sqrt 32) (sqrt 4) (sqrt 123456.789) (sqrt 1e10)
+       (exp -1.5) (exp 0) (exp -0.1)
+       (condition-case e (sqrt t) (error e))
+       (condition-case e (unibyte-string 300) (error e))
+       (condition-case e (ash 97 0.0) (error e)))
+
+ ;; One more afternoon of measurements, each one its own rule.
+ (list (condition-case e (seq-partition '(1 2 3) 0) (error e))
+       (seq-partition '(1 2 3) 2)
+       (condition-case e (string-chop-newline -7) (error e))
+       (condition-case e (string-chop-newline ["a" "b"]) (error e))
+       (macroexpand-all '(1 2 . 3))
+       (condition-case e (macroexpand-all '(1 2 . 3) 32) (error e))
+       (macroexpand "aXbXc" "x") (macroexpand-1 0.0 -1)
+       (condition-case e (number-sequence nil [1 2 3] "") (error e))
+       (condition-case e (seq-mapn 1.5 '(1 . 2)) (error e))
+       (condition-case e (string-match-p "ABC" "ab" 7) (error e))
+       (condition-case e (string-match-p nil "ab" 0.0) (error e))
+       (condition-case e (decode-char 'foo -7) (error e))
+       (condition-case e (prin1-to-string "x" nil 3) (error e))
+       (condition-case e (prin1-to-string "x" nil '(quote sym)) (error e))
+       (condition-case e (prin1-to-string "x" nil '((a . 1))) (error e))
+       (condition-case e (string-to-number "a" "b") (error e))
+       (condition-case e (string-to-number "ABC" 97) (error e))
+       (condition-case e (string-trim 65 nil '("a" "b")) (error e))
+       (condition-case e (copy-sequence '(1 . 2)) (error e))
+       (condition-case e (delete 1 '(1 . 2)) (error e))
+       (condition-case e (plist-put '(1 . 2) 1 2) (error e))
+       (condition-case e (alist-get 1 '(1 . 2)) (error e))
+       (condition-case e (concat "x" '("a")) (error e))
+       (condition-case e (string-to-list 5) (error e))
+       (string-to-list '(1)) (string-to-list [1 2]) (string-to-list "ab")
+       (condition-case e (string-suffix-p 1.5 0.0) (error e))
+       (help-add-fundoc-usage 0 '("a" "b")) (help-add-fundoc-usage t t)
+       (help-add-fundoc-usage "d" '(a &optional b))
+       (json-serialize nil) (json-serialize '((a . 1) (b . "x")))
+       (json-serialize '(:a 1 :b 2)) (json-serialize [1 "a" t])
+       (condition-case e (json-serialize '(1 2 . 3)) (error e))
+       (condition-case e (seq-empty-p "x" 0) (error e))
+       (seq-sort #'< '(3 1 2)) (seq-sort #'< [3 1 2]) (seq-sort #'< "cab")
+       (condition-case e (base64-decode-string "ABC") (error e))
+       (condition-case e (base64-decode-string "A!BC") (error e))
+       (base64-decode-string "AB==")
+       (condition-case e (seq-concatenate '(1 2 3) 'foo) (error e))
+       (condition-case e (mapc t '(1 2 . 3)) (error e))
+       (condition-case e (mapcar 7 '(1 . 2)) (error e))
+       (condition-case e (assoc-string "" '(1) '(1)) (error e))
+       (condition-case e (error-message-string nil) (error e))
+       (condition-case e (error-message-string "") (error e))
+       (error-message-string '(error "x"))
+       (error-message-string '(wrong-type-argument stringp 1))
+       (condition-case e (string-search "a" "bab" 1.5) (error e))
+       (condition-case e (string-search "a" "bab" 9) (error e))
+       (condition-case e (aref [1] "x") (error e))
+       (condition-case e (seq-min []) (error e))
+       (condition-case e (seq-max "") (error e))
+       (condition-case e (min) (error e))
+       (substring "abcd") (substring [1 2])
+       (condition-case e (substring -7) (error e))
+       (condition-case e (substring "abc" 1 "z") (error e)))
 )
 
 ;;; nelisp-shadow-differential-cases.el ends here

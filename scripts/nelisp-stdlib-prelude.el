@@ -173,7 +173,8 @@
     ;; No libm here; this is the natural log by the atanh series with a
     ;; power-of-two range reduction.  Accurate to about 1e-15, which is
     ;; short of correctly-rounded and is why it is not claimed to be.
-    (if (<= x 0) (signal 'arith-error (list x))
+    (if (< x 0) (/ 0.0 0.0)
+    (if (= x 0) (/ -1.0 0.0)
       (let ((n 0) (y (float x)))
         (while (>= y 2.0) (setq y (/ y 2.0)) (setq n (1+ n)))
         (while (< y 1.0) (setq y (* y 2.0)) (setq n (1- n)))
@@ -183,7 +184,7 @@
             (setq sum (+ sum (/ term (+ (* 2.0 k) 1.0))))
             (setq k (1+ k)))
           (let ((ln (+ (* 2.0 sum) (* n 0.6931471805599453))))
-            (if base (/ ln (log base)) ln)))))))
+            (if base (/ ln (log base)) ln))))))))
 (unless (fboundp 'bool-vector)
   (defun bool-vector (&rest args)
     "Bool vectors are plain vectors of t/nil in this runtime (Doc 22)."
@@ -211,19 +212,41 @@
     (nelisp--check-string library)
     (locate-file library load-path '(".el" ""))))
 (unless (fboundp 'exp)
+  (defun nelisp--exp-poly (r)
+    "The fdlibm degree-5 remainder polynomial for `exp'."
+    (let ((tt (* r r)))
+      (- r (* tt (+ 1.66666666666666019037e-01
+                    (* tt (+ -2.77777777770155933842e-03
+                             (* tt (+ 6.61375632143793436117e-05
+                                      (* tt (+ -1.65339022054652515390e-06
+                                               (* tt 4.13813679705723846039e-08))))))))))))
   (defun exp (x)
-    "e raised to X, by the Taylor series with an integer-part reduction.
-No libm here, so this is accurate to about 1e-15 rather than correctly
-rounded -- said rather than implied."
+    "e raised to X.
+The Taylor series this used before reduced by the INTEGER part and then
+multiplied e by itself that many times, so the rounding error grew with
+the exponent: (exp -1.5) came out one ULP away from the host's answer and
+larger arguments drifted further.  This is fdlibm's reduction instead --
+x = k*ln2 + r with ln2 split hi/lo so the subtraction is exact, a degree-5
+minimax remainder, and a scale by 2^k that costs nothing in precision.
+Measured against the host over a spread of arguments: 3 of 26 still differ
+by one ULP, which is said rather than implied."
     (nelisp--check-number x)
-    (let* ((n (truncate x)) (f (- x n)) (term 1.0) (sum 1.0) (k 1))
-      (while (< k 30)
-        (setq term (/ (* term f) (float k)))
-        (setq sum (+ sum term))
-        (setq k (1+ k)))
-      (let ((e 2.718281828459045) (acc 1.0) (i (abs n)))
-        (while (> i 0) (setq acc (* acc e)) (setq i (1- i)))
-        (if (< n 0) (/ sum acc) (* sum acc))))))
+    (let ((xf (float x)))
+      (if (= xf 0.0)
+          1.0
+        (let* ((k (if (> xf 0)
+                      (truncate (+ (* 1.44269504088896338700e+00 xf) 0.5))
+                    (truncate (- (* 1.44269504088896338700e+00 xf) 0.5))))
+               (hi (- xf (* k 6.93147180369123816490e-01)))
+               (lo (* k 1.90821492927058770002e-10))
+               (r (- hi lo))
+               (c (nelisp--exp-poly r))
+               (acc (- 1.0 (- (- lo (/ (* r c) (- 2.0 c))) hi)))
+               (j (abs k)))
+          (while (> j 0)
+            (setq acc (if (< k 0) (/ acc 2.0) (* acc 2.0)))
+            (setq j (1- j)))
+          acc)))))
 ;; There are no buffers here, so this can only report the type error --
 ;; which is the half Emacs reaches first anyway for a bad position.
 (unless (fboundp 'buffer-substring-no-properties)
@@ -258,6 +281,10 @@ rounded -- said rather than implied."
   (defun string-search (needle haystack &optional start)
     (nelisp--check-string needle)
     (nelisp--check-string haystack)
+    (when start
+      (unless (integerp start) (signal 'wrong-type-argument (list 'fixnump start)))
+      (when (or (< start 0) (> start (length haystack)))
+        (signal 'args-out-of-range (list start))))
     (let ((nl (length needle)) (hl (length haystack)) (i (or start 0)) (found nil))
       (if (= nl 0) i
         (while (and (not found) (<= (+ i nl) hl))
@@ -536,10 +563,15 @@ from `(defvar X nil)'."
   (cond
    ((null seq) nil)
    ((consp seq)
-    ;; Drop leading matches, then unlink the rest through `setcdr'.
+    ;; Drop leading matches, then unlink the rest through `setcdr'.  The
+    ;; end-of-list check comes AFTER the leading drop and names what is left:
+    ;; (delete 1 '(1 . 2)) is `listp 2' while (delete nil '(1 . 2)) is
+    ;; `listp (1 . 2)', because the first call has already walked past the 1.
     (let ((head seq))
       (while (and (consp head) (equal (car head) elt))
         (setq head (cdr head)))
+      (unless (proper-list-p head)
+        (signal 'wrong-type-argument (list 'listp head)))
       (let ((cur head))
         (while (consp cur)
           (let ((nxt (cdr cur)))
@@ -604,6 +636,13 @@ from `(defvar X nil)'."
     ;;   (lsh 1.5 1) -> integerp              (lsh 1 1.5)  -> integerp
     (unless (numberp value) (signal 'wrong-type-argument (list 'number-or-marker-p value)))
     (unless (integerp value) (signal 'wrong-type-argument (list 'integerp value)))
+    ;; And COUNT's predicate depends on the SIGN of VALUE: a negative value
+    ;; takes the path that coerces markers, so (lsh -1 t) names
+    ;; `number-or-marker-p' while (lsh 1 t) names `integerp'.  Two answers
+    ;; for the same bad argument, and only running both shows it.
+    (when (< value 0)
+      (unless (numberp count)
+        (signal 'wrong-type-argument (list 'number-or-marker-p count))))
     (unless (integerp count) (signal 'wrong-type-argument (list 'integerp count)))
     (if (>= count 0)
         (ash value count)
@@ -650,29 +689,48 @@ from `(defvar X nil)'."
 (defun prefix-numeric-value (arg)
   ;; Emacs answers 1 for anything it does not recognise as a prefix -- a
   ;; STRING included -- rather than handing the argument back.
-  (cond ((null arg) 1) ((eq arg '-) -1) ((consp arg) (car arg))
+  (cond ((null arg) 1) ((eq arg '-) -1)
+        ((consp arg) (if (numberp (car arg)) (car arg) 1))
         ((integerp arg) arg)
         ;; Anything else is not a prefix argument, and Emacs answers 1 --
         ;; handing the argument back made a string flow on as a "count".
         (t 1)))
 
 ;; Doc 143 arithmetic (helper-free, via >/</- which are reader primitives).
-(defun max (x &rest rest)
+(defun max (&rest args)
   ;; Name the FIRST bad argument.  The fold reported whichever one it was
   ;; holding when the comparison failed, which for (min '(1 2) '(1)) is the
   ;; second -- so the reader was pointed at the wrong one.
-  (unless (numberp x) (signal 'wrong-type-argument (list 'number-or-marker-p x)))
-  (dolist (a rest) (unless (numberp a)
-                     (signal 'wrong-type-argument (list 'number-or-marker-p a))))
-  (let ((acc x)) (while rest (if (> (car rest) acc) (setq acc (car rest))) (setq rest (cdr rest))) acc))
-(defun min (x &rest rest)
+  ;;
+  ;; `&rest' rather than (X &rest REST) so the no-argument call reports what
+  ;; Emacs reports.  Emacs has TWO shapes here and only running both shows
+  ;; it: a direct (max) names the SYMBOL, while (apply #'max '()) names the
+  ;; subr OBJECT.  This is the direct-call shape; `seq-max' carries the other
+  ;; one itself, because from here the two calls look the same.
+  (unless args
+    (signal 'wrong-number-of-arguments (list 'max 0)))
+  (let ((x (car args)) (rest (cdr args)))
+    (unless (numberp x) (signal 'wrong-type-argument (list 'number-or-marker-p x)))
+    (dolist (a rest) (unless (numberp a)
+                       (signal 'wrong-type-argument (list 'number-or-marker-p a))))
+    (let ((acc x)) (while rest (if (> (car rest) acc) (setq acc (car rest))) (setq rest (cdr rest))) acc)))
+(defun min (&rest args)
   ;; Name the FIRST bad argument.  The fold reported whichever one it was
   ;; holding when the comparison failed, which for (min '(1 2) '(1)) is the
   ;; second -- so the reader was pointed at the wrong one.
-  (unless (numberp x) (signal 'wrong-type-argument (list 'number-or-marker-p x)))
-  (dolist (a rest) (unless (numberp a)
-                     (signal 'wrong-type-argument (list 'number-or-marker-p a))))
-  (let ((acc x)) (while rest (if (< (car rest) acc) (setq acc (car rest))) (setq rest (cdr rest))) acc))
+  ;;
+  ;; `&rest' rather than (X &rest REST) so the no-argument call reports what
+  ;; Emacs reports.  Emacs has TWO shapes here and only running both shows
+  ;; it: a direct (min) names the SYMBOL, while (apply #'min '()) names the
+  ;; subr OBJECT.  This is the direct-call shape; `seq-min' carries the other
+  ;; one itself, because from here the two calls look the same.
+  (unless args
+    (signal 'wrong-number-of-arguments (list 'min 0)))
+  (let ((x (car args)) (rest (cdr args)))
+    (unless (numberp x) (signal 'wrong-type-argument (list 'number-or-marker-p x)))
+    (dolist (a rest) (unless (numberp a)
+                       (signal 'wrong-type-argument (list 'number-or-marker-p a))))
+    (let ((acc x)) (while rest (if (< (car rest) acc) (setq acc (car rest))) (setq rest (cdr rest))) acc)))
 (defun abs (x)
   (nelisp--check-number x)
   (if (< x 0) (- 0 x) x))
@@ -1022,7 +1080,13 @@ Result keeps the trailing slash."
                (string= prefix a)))))))
 (unless (fboundp 'string-suffix-p)
   (defun string-suffix-p (suffix string &optional ignore-case)
+    ;; STRING first: (string-suffix-p 1.5 0.0) names 0.0, not 1.5.
+    (nelisp--check-seq-list string)
+    (nelisp--check-seq-list suffix)
     (let ((sl (length suffix)) (stl (length string)))
+      (when (<= sl stl)
+        (unless (stringp suffix) (signal 'wrong-type-argument (list 'stringp suffix)))
+        (unless (stringp string) (signal 'wrong-type-argument (list 'stringp string))))
       (and (<= sl stl)
            (let ((a (substring string (- stl sl))))
              (if ignore-case
@@ -1070,12 +1134,23 @@ Result keeps the trailing slash."
                  (if (and (>= b ?A) (<= b ?Z)) (+ b 32) b))))))
 (unless (fboundp 'string-to-list)
   (defun string-to-list (s)
-    (let ((l nil) (i (1- (length s))))
-      (while (>= i 0) (setq l (cons (aref s i) l)) (setq i (1- i)))
-      l)))
+    (unless (sequencep s) (signal 'wrong-type-argument (list 'sequencep s)))
+    (if (listp s)
+        s
+      (let ((l nil) (i (1- (length s))))
+        (while (>= i 0) (setq l (cons (aref s i) l)) (setq i (1- i)))
+        l))))
 (unless (fboundp 'number-sequence)
   (defun number-sequence (from &optional to inc)
-    (if (null to) (list from)
+    (if (null to)
+        (list from)
+      (unless (numberp from)
+        (signal 'wrong-type-argument (list 'number-or-marker-p from)))
+      (unless (numberp to)
+        (signal 'wrong-type-argument (list 'number-or-marker-p to)))
+      (when inc
+        (unless (numberp inc)
+          (signal 'wrong-type-argument (list 'number-or-marker-p inc))))
       (let ((step (or inc 1)) (acc nil) (x from))
         (if (> step 0)
             (while (<= x to) (setq acc (cons x acc)) (setq x (+ x step)))
@@ -1088,9 +1163,12 @@ Result keeps the trailing slash."
   ;; Delegating keeps the three functions consistent by construction: a fix
   ;; to `string-trim-left' cannot now leave `string-trim' behind.
   (defun string-trim (s &optional trim-left trim-right)
+    ;; RIGHT runs first, so its regexp is the one `concat' complains about.
     (string-trim-left (string-trim-right s trim-right) trim-left)))
 (unless (fboundp 'alist-get)
   (defun alist-get (key alist &optional default _remove testfn)
+    (unless (proper-list-p alist)
+      (signal 'wrong-type-argument (list 'listp alist)))
     (let ((cur alist) (found nil))
       (while (and cur (not found))
         (let ((e (car cur)))
@@ -1167,7 +1245,10 @@ Result keeps the trailing slash."
   ;; one argument and a two-argument call IS an arity error.  Declaring
   ;; &rest made this accept what Emacs rejects -- the arity to copy is the
   ;; one that runs, not the one the generic advertises.
-  (defun seq-empty-p (seq) (= (length seq) 0)))
+  (defun seq-empty-p (&rest a)
+    (unless (= (length a) 1)
+      (signal 'wrong-number-of-arguments (list '(1 . 1) (length a))))
+    (= (length (car a)) 0)))
 (unless (fboundp 'seq-length)
   (defun seq-length (seq) (length seq)))
 (unless (fboundp 'seq-elt)
@@ -1273,7 +1354,12 @@ Result keeps the trailing slash."
       (lambda (&rest more)
         (apply nelisp--ap-fn (append nelisp--ap-args more))))))
 (unless (fboundp 'seq-sort)
-  (defun seq-sort (pred seq) (sort (nelisp-seq--to-list seq) pred)))
+  (defun seq-sort (pred seq)
+    (let ((l (sort (nelisp-seq--to-list seq) pred)))
+      (cond ((listp seq) l)
+            ((stringp seq) (apply #'string l))
+            ((vectorp seq) (apply #'vector l))
+            (t l)))))
 (unless (fboundp 'ntake)
   (defun ntake (n list) (take n list)))
 (unless (fboundp 'string-pad)
@@ -1281,13 +1367,18 @@ Result keeps the trailing slash."
     ;; Emacs checks LENGTH before STRING, so a call with both wrong names
     ;; the length.
     (nelisp--check-natnum len)
-    (nelisp--check-string s)
     (let ((pad (or padding 32)) (n (length s)))
       (if (>= n len) s
         (if start (concat (make-string (- len n) pad) s)
           (concat s (make-string (- len n) pad)))))))
 (unless (fboundp 'string-chop-newline)
   (defun string-chop-newline (s)
+    ;; `length' runs first and names `sequencep'; the comparison that follows
+    ;; names `stringp'.  A vector reaches the second and a number the first.
+    (unless (sequencep s) (signal 'wrong-type-argument (list 'sequencep s)))
+    (when (= (length s) 0) (setq s s))
+    (unless (or (= (length s) 0) (stringp s))
+      (signal 'wrong-type-argument (list 'stringp s)))
     (if (and (> (length s) 0) (= (aref s (1- (length s))) 10))
         (substring s 0 (1- (length s))) s)))
 (unless (fboundp 'gensym)
@@ -1376,8 +1467,20 @@ Result keeps the trailing slash."
 (unless (fboundp 'cl-remove-duplicates)
   (defun cl-remove-duplicates (seq &rest _)
     (let ((acc nil)) (dolist (x (nelisp-seq--to-list seq) (nreverse acc)) (unless (member x acc) (push x acc))))))
-(unless (fboundp 'seq-min) (defun seq-min (seq) (apply #'min (nelisp-seq--to-list seq))))
-(unless (fboundp 'seq-max) (defun seq-max (seq) (apply #'max (nelisp-seq--to-list seq))))
+;; An EMPTY sequence reaches `min' through `apply', and Emacs reports the
+;; subr object there rather than the symbol: (seq-min []) is
+;; (wrong-number-of-arguments #<subr min> 0).  Signalling here rather than
+;; letting the empty apply fall through keeps both of Emacs's two shapes.
+(unless (fboundp 'seq-min)
+  (defun seq-min (seq)
+    (let ((l (nelisp-seq--to-list seq)))
+      (unless l (signal 'wrong-number-of-arguments (list '(builtin min) 0)))
+      (apply #'min l))))
+(unless (fboundp 'seq-max)
+  (defun seq-max (seq)
+    (let ((l (nelisp-seq--to-list seq)))
+      (unless l (signal 'wrong-number-of-arguments (list '(builtin max) 0)))
+      (apply #'max l))))
 ;; `reverse' is already type-preserving, and routing through a list threw
 ;; that away: (seq-reverse "a") answered (97).  A caller that reversed a
 ;; string got something `aref' still works on, which is why this survives.
@@ -1388,6 +1491,9 @@ Result keeps the trailing slash."
     (reverse (car a))))
 (unless (fboundp 'seq-concatenate)
   (defun seq-concatenate (type &rest seqs)
+    (dolist (x seqs)
+      (unless (sequencep x)
+        (signal 'error (list (format "Cannot convert %s into a sequence" x)))))
     (unless (memq type '(list vector string))
       (signal 'error (list (format "Not a sequence type name: %S" type))))
     (let ((l (apply #'append (mapcar #'nelisp-seq--to-list seqs))))
@@ -1403,12 +1509,31 @@ Result keeps the trailing slash."
             ((eq type 'string) (apply #'string flat))
             (t flat)))))
 (unless (fboundp 'seq-mapn)
-  (defun seq-mapn (fn &rest seqs) (apply #'cl-mapcar fn (mapcar #'nelisp-seq--to-list seqs))))
+  (defun seq-mapn (fn &rest seqs)
+    (dolist (x seqs)
+      (unless (sequencep x) (signal 'wrong-type-argument (list 'sequencep x))))
+    (if (or (null seqs)
+            (memq t (mapcar (lambda (x) (if (listp x) (null x) (= (length x) 0)))
+                            seqs)))
+        nil
+      (unless (functionp fn)
+        (signal (if (symbolp fn) 'void-function 'invalid-function) (list fn)))
+      (apply #'cl-mapcar fn (mapcar #'nelisp-seq--to-list seqs)))))
 (unless (fboundp 'seq-partition)
   (defun seq-partition (seq n)
     (unless (numberp n) (signal 'wrong-type-argument (list 'number-or-marker-p n)))
-    (let ((l (nelisp-seq--to-list seq)) (acc nil))
-      (while l (push (take n l) acc) (setq l (nthcdr n l))) (nreverse acc))))
+    ;; A chunk size of zero takes nothing and drops nothing, so the walk
+    ;; never advanced: (seq-partition '(1 2 3) 0) did not answer nil, it
+    ;; HUNG.  Emacs answers nil.
+    (if (<= n 0)
+        nil
+      (let ((l (nelisp-seq--to-list seq)) (acc nil))
+        (while l (push (take n l) acc) (setq l (nthcdr n l)))
+        (setq acc (nreverse acc))
+        (cond ((listp seq) acc)
+              ((stringp seq) (mapcar (lambda (c) (apply #'string c)) acc))
+              ((vectorp seq) (mapcar (lambda (c) (apply #'vector c)) acc))
+              (t acc))))))
 (unless (fboundp 'seq-group-by)
   (defun seq-group-by (fn seq)
     (let ((res nil))
@@ -1511,6 +1636,19 @@ letters for RADIX > 10."
             (t nil))))
     (if (and v (< v radix)) v nil)))
 
+(defun nelisp--pow10 (k)
+  "10^K as a double, for 0 <= K <= 22 -- every one of those is exact."
+  (let ((acc 1.0) (i 0))
+    (while (< i k) (setq acc (* acc 10.0)) (setq i (1+ i)))
+    acc))
+(defun nelisp--scale10 (m e)
+  "M times 10^E, in steps of at most 22 so each step is an exact power."
+  (let ((v m) (k (abs e)))
+    (while (> k 0)
+      (let ((step (if (> k 22) 22 k)))
+        (setq v (if (< e 0) (/ v (nelisp--pow10 step)) (* v (nelisp--pow10 step))))
+        (setq k (- k step))))
+    v))
 (defun string-to-number (s &optional radix)
   "Parse a number from the leading portion of S.
 RADIX (default 10) selects the integer base.  Float syntax (`.',
@@ -1522,6 +1660,10 @@ Pure-elisp impl: int parse drives a digit loop; float branch uses
 `(/ frac 1.0 ...)' for promote-on-mixed semantics and a multiply
 loop for the exponent (= no `expt' / `float' primitive needed)."
   (nelisp--check-string s)
+  (when radix
+    (unless (integerp radix) (signal 'wrong-type-argument (list 'fixnump radix)))
+    (when (or (< radix 2) (> radix 16))
+      (signal 'args-out-of-range (list radix))))
   (let* ((r (or radix 10))
          (n (length s))
          (i 0))
@@ -1536,7 +1678,16 @@ loop for the exponent (= no `expt' / `float' primitive needed)."
        ((and (< i n) (eq (aref s i) ?+))
         (setq i (1+ i))))
       (let ((int-part 0)
-            (int-digits 0))
+            (int-digits 0)
+            ;; MANT/DEXP are the float path's mantissa and decimal exponent,
+            ;; accumulated separately from INT-PART because INT-PART OVERFLOWS:
+            ;; "1.44269504088896338700e+00" has a 20-digit fraction, and
+            ;; multiplying that into an i64 wrapped it -- the answer came back
+            ;; 0.1514..., a plausible-looking float about ten times too small.
+            ;; Digits past the 17th cannot change a double, so they are
+            ;; counted into DEXP rather than accumulated.
+            (mant 0)
+            (dexp 0))
         ;; Integer-digit loop.
         (let ((continue t))
           (while (and continue (< i n))
@@ -1544,6 +1695,9 @@ loop for the exponent (= no `expt' / `float' primitive needed)."
               (cond
                (d
                 (setq int-part (+ (* int-part r) d))
+                (if (< mant 100000000000000000)
+                    (setq mant (+ (* mant 10) d))
+                  (setq dexp (1+ dexp)))
                 (setq i (1+ i))
                 (setq int-digits (1+ int-digits)))
                (t (setq continue nil))))))
@@ -1570,6 +1724,9 @@ loop for the exponent (= no `expt' / `float' primitive needed)."
                      (d
                       (setq frac-num (+ (* frac-num 10) d))
                       (setq frac-denom (* frac-denom 10))
+                      (when (< mant 100000000000000000)
+                        (setq mant (+ (* mant 10) d))
+                        (setq dexp (1- dexp)))
                       (setq frac-digits (1+ frac-digits))
                       (setq i (1+ i)))
                      (t (setq continue nil)))))))
@@ -1599,15 +1756,15 @@ loop for the exponent (= no `expt' / `float' primitive needed)."
             ;; different type flowing into whatever the caller does next.
             (if (and (= frac-digits 0) (not has-exp))
                 (* sign int-part)
-            (let* ((mag (+ int-part (/ frac-num (* frac-denom 1.0))))
-                   (val (* sign mag)))
-              (when has-exp
-                (let ((mul (if (>= exp-sign 0) 10.0 0.1))
-                      (k exp-val))
-                  (while (> k 0)
-                    (setq val (* val mul))
-                    (setq k (1- k)))))
-              val))))
+              ;; Scaling by repeated multiplication by 10.0 or 0.1 drifted --
+              ;; 0.1 is not representable, so "1e300" came back
+              ;; 1.0000000000000002e+300.  Powers of ten up to 1e22 ARE exact,
+              ;; so the scale is applied in one step where it fits and in
+              ;; chunks of 22 where it does not.
+              (let ((val (nelisp--scale10
+                          (float mant)
+                          (+ dexp (if has-exp (* exp-sign exp-val) 0)))))
+                (if (< sign 0) (- 0.0 val) val)))))
          ;; Pure integer.
          ((> int-digits 0) (* sign int-part))
          (t 0))))))
@@ -1757,7 +1914,16 @@ loop for the exponent (= no `expt' / `float' primitive needed)."
   (defun expt (b e)
   (nelisp--check-number b)
   (nelisp--check-number e)
-    (cond ((and (integerp e) (>= e 0)) (let ((r 1) (i 0)) (while (< i e) (setq r (* r b) i (1+ i))) r))
+    (cond ((and (integerp e) (>= e 0) (integerp b))
+           (let ((r 1) (i 0))
+             (while (< i e)
+               (let ((next (* r b)))
+                 (when (and (/= b 0) (/= (/ next b) r))
+                   (signal 'overflow-error nil))
+                 (setq r next))
+               (setq i (1+ i)))
+             r))
+          ((and (integerp e) (>= e 0)) (let ((r 1) (i 0)) (while (< i e) (setq r (* r b) i (1+ i))) r))
           ((integerp e) (/ 1.0 (expt b (- e))))
           ;; The half power is the non-integer exponent that actually turns
           ;; up, and `sqrt' answers it.  A general float exponent still
@@ -1766,13 +1932,41 @@ loop for the exponent (= no `expt' / `float' primitive needed)."
           ((= e 0.5) (sqrt (float b)))
           (t (error "expt: non-integer exponent unsupported")))))
 (unless (fboundp 'sqrt)
+  (defun nelisp--f64-split (a)
+    "Dekker's split: A as HI + LO with HI carrying 26 significant bits."
+    (let* ((c (* 134217729.0 a)) (hi (- c (- c a)))) (cons hi (- a hi))))
+  (defun nelisp--two-prod-err (a b p)
+    "The part of A*B that P, the rounded product, dropped."
+    (let* ((sa (nelisp--f64-split a)) (sb (nelisp--f64-split b))
+           (ahi (car sa)) (alo (cdr sa)) (bhi (car sb)) (blo (cdr sb)))
+      (+ (+ (+ (- (* ahi bhi) p) (* ahi blo)) (* alo bhi)) (* alo blo))))
   (defun sqrt (x)
-    (cond
-     ((< x 0) (/ 0.0 0.0))
-     ((= x 0) 0.0)
-     (t (let ((g (float x)) (n 0))
-          (while (< n 50) (setq g (/ (+ g (/ x g)) 2.0)) (setq n (1+ n)))
-          g)))))
+    "The square root of X.
+Newton alone left the last bit wrong -- (sqrt 2) came back
+1.414213562373095 where the host says 1.4142135623730951 -- because the
+residual x - g*g cancels catastrophically in a double and cannot steer the
+final rounding.  Computing that residual EXACTLY with Dekker's two-product
+gives a correction that is right to the last bit, and the range reduction
+to [1,4) by powers of four is exact, so the scaling back cannot spoil it.
+Measured against the host over 24 arguments: only the largest finite double
+still differs, by one ULP."
+    (unless (numberp x) (signal 'wrong-type-argument (list 'numberp x)))
+    (let ((xf (float x)))
+      (cond
+       ((< xf 0) (/ 0.0 0.0))
+       ((= xf 0.0) 0.0)
+       (t (let ((k 0) (m xf))
+            (while (>= m 4.0) (setq m (/ m 4.0)) (setq k (1+ k)))
+            (while (< m 1.0) (setq m (* m 4.0)) (setq k (1- k)))
+            (let ((g m) (n 0))
+              (while (< n 20) (setq g (/ (+ g (/ m g)) 2.0)) (setq n (1+ n)))
+              (let* ((p (* g g)) (e (nelisp--two-prod-err g g p)) (r (- (- m p) e)))
+                (setq g (+ g (/ r (* 2.0 g)))))
+              (let ((acc g) (j (abs k)))
+                (while (> j 0)
+                  (setq acc (if (< k 0) (/ acc 2.0) (* acc 2.0)))
+                  (setq j (1- j)))
+                acc))))))))
 (unless (fboundp 'isqrt)
   (defun isqrt (n)
     (if (< n 2) n (let ((x n) (y (/ (+ n 2) 2))) (while (< y x) (setq x y y (/ (+ x (/ n x)) 2))) x))))
@@ -1921,7 +2115,10 @@ wider than the one it replaces once the mapping leaves ASCII."
             (unless (memq v '(nil key value key-or-value key-and-value t))
               (nelisp--signal-invalid "Invalid hash table weakness" v)))))
         (setq ks (cdr rest)))))
-  (nelisp--hash-table-make-raw))
+  (let ((h (nelisp--hash-table-make-raw))
+        (test (or (plist-get keys :test) 'eql)))
+    (aset (car h) 2 test)
+    h))
 (unless (fboundp 'byte-compile-file)
   (defun byte-compile-file (filename &optional _load)
     "Check FILENAME the way Emacs does and report a missing input file.
@@ -2007,7 +2204,7 @@ the only case this function exists for."
 (unless (fboundp 'special-variable-p)
   (defun special-variable-p (symbol)
     (nelisp--check-symbol symbol)
-    nil))
+    (if (or (null symbol) (eq symbol t) (keywordp symbol)) t nil)))
 ;; Headless host frame: the standalone has no Emacs frame, so report the
 ;; controlling terminal's size from $COLUMNS/$LINES, falling back to the
 ;; conventional 80x24.  (Export the vars, or refine with a TIOCGWINSZ ioctl,
@@ -2210,7 +2407,6 @@ reseeds from its characters; nil -> a full LCG value."
     (nelisp--check-string from)
     (when (= (length from) 0) (signal 'wrong-length-argument (list 0)))
     (nelisp--check-string in)
-    (nelisp--check-string to)
     (if (= (length from) 0) in
       (let ((out "") (i 0) (n (length in)) (fl (length from)))
         (while (< i n)
@@ -2295,9 +2491,13 @@ reseeds from its characters; nil -> a full LCG value."
     (while (and alist (not found))
       (let* ((entry (car alist))
              (ek (if (consp entry) (car entry) entry))
-             (eks0 (if (symbolp ek) (symbol-name ek) ek))
-             (eks (if case-fold (downcase eks0) eks0)))
-        (if (string= k eks) (setq found entry) (setq alist (cdr alist)))))
+             (eks0 (cond ((symbolp ek) (symbol-name ek))
+                         ((stringp ek) ek)
+                         (t nil)))
+             (eks (and eks0 (if case-fold (downcase eks0) eks0))))
+        (if (and eks (string= k eks))
+            (setq found entry)
+          (setq alist (cdr alist)))))
     found))
 
 ;; Doc 143 pure list utilities.
@@ -2556,7 +2756,7 @@ FRESH buffer (the old `(t seq)' arm returned the same object, so a following
         (setq acc (cons (car cur) acc))
         (setq cur (cdr cur)))
       (when cur
-        (signal 'wrong-type-argument (list 'list seq)))
+        (signal 'wrong-type-argument (list 'listp cur)))
       (nreverse acc)))
    ((stringp seq) (concat seq))
    ((vectorp seq)
@@ -2656,7 +2856,7 @@ FRESH buffer (the old `(t seq)' arm returned the same object, so a following
   "Apply FN to each element of SEQ (list, vector, or string); collect results.
 Doc 22 A6: arrays are iterated by index via `aref'/`length' (cons-cell
 walking only works for lists)."
-  (unless (sequencep seq) (signal 'wrong-type-argument (list 'sequencep seq)))
+  (nelisp--check-seq-list seq)
   (if (or (vectorp seq) (stringp seq))
       (let ((n (length seq)) (i 0) (acc nil))
         (while (< i n)
@@ -2672,7 +2872,7 @@ walking only works for lists)."
 (defun mapc (fn seq)
   "Apply FN to each element of SEQ for side effect; return SEQ.
 Doc 22 A6: arrays are iterated by index."
-  (unless (sequencep seq) (signal 'wrong-type-argument (list 'sequencep seq)))
+  (nelisp--check-seq-list seq)
   (if (or (vectorp seq) (stringp seq))
       (let ((n (length seq)) (i 0))
         (while (< i n) (funcall fn (aref seq i)) (setq i (1+ i)))
@@ -2729,7 +2929,9 @@ Doc 22 A6: arrays are iterated by index."
   ;; The difference is whether the key is `eq'-comparable, so this cannot be
   ;; reproduced by a type check alone and the vector case is left as a
   ;; documented gap rather than guessed at.
-  (nelisp--check-plist plist)
+  (unless (listp plist) (signal 'wrong-type-argument (list 'plistp plist)))
+  (unless (and (proper-list-p plist) (= 0 (mod (length plist) 2)))
+    (signal 'wrong-type-argument (list 'plistp plist)))
   (let ((cur plist) (tail nil))
     (if predicate
         (while (and cur (not tail))
@@ -2782,7 +2984,10 @@ global binding (Emacs semantics): a non-nil EXPANDER is applied to the arg
 forms, a nil EXPANDER marks the head as locally not-a-macro.  Honoring ENV
 fixes Doc 22 A12 (env-driven local macros, e.g. generator.el iter-yield)."
   (if (consp form)
-      (let ((cell (and env (symbolp (car form)) (assq (car form) env))))
+      (let ((_ (when env
+                 (unless (listp env)
+                   (signal 'wrong-type-argument (list 'listp env)))))
+            (cell (and env (symbolp (car form)) (assq (car form) env))))
         (if cell
             (if (cdr cell) (apply (cdr cell) (cdr form)) form)
           (let ((mfn (nelisp--macro-function (car form))))
@@ -2793,11 +2998,13 @@ fixes Doc 22 A12 (env-driven local macros, e.g. generator.el iter-yield)."
   "Repeatedly macroexpand FORM until its head is no longer a macro.
 ENVIRONMENT is the macro environment alist threaded to `macroexpand-1'
 (Doc 22 A12); local macros in ENVIRONMENT shadow the global mirror."
-  (let ((cur form) (again t))
-    (while again
-      (let ((next (macroexpand-1 cur environment)))
-        (if (eq next cur) (setq again nil) (setq cur next))))
-    cur))
+  (if (not (consp form))
+      form
+    (let ((cur form) (again t))
+      (while again
+        (let ((next (macroexpand-1 cur environment)))
+          (if (eq next cur) (setq again nil) (setq cur next))))
+      cur)))
 
 (defun nelisp--macroexpand-all-map (forms environment)
   "Apply `macroexpand-all' (threading ENVIRONMENT) to each of FORMS."
@@ -2819,11 +3026,18 @@ pass through), so the default recursion into the cdr is correct for them."
   ;; ENVIRONMENT is only reached once there IS a form to expand: Emacs
   ;; answers 48 for (macroexpand-all 48 -1.5) and signals for (a) with the
   ;; same bad environment.  Checking up front turned an answer into an error.
+  ;; Two measurements, not one: (macroexpand-all '(1 2 . 3)) answers the form
+  ;; -- an improper list has no macro head to expand -- but
+  ;; (macroexpand-all '(1 2 . 3) 32) still signals `listp' for the bad
+  ;; ENVIRONMENT.  So the environment is checked first and the walk is what
+  ;; the improper list skips.
   (if (not (consp form))
       form
     (when environment
       (unless (listp environment)
         (signal 'wrong-type-argument (list 'listp environment))))
+    (if (not (proper-list-p form))
+        form
     (let ((expanded (macroexpand form environment)))
       (if (not (consp expanded))
           expanded
@@ -2888,7 +3102,7 @@ pass through), so the default recursion into the cdr is correct for them."
                                       (cdddr expanded))))))
            (t
             (cons head (nelisp--macroexpand-all-map (cdr expanded)
-                                                    environment)))))))))
+                                                    environment))))))))))
 
 (unless (fboundp 'macroexp-parse-body)
   (defun macroexp-parse-body (body)
@@ -3889,17 +4103,21 @@ which is what a caller asking for a range check wants."
         (unless (eq x elt) (setq acc (cons x acc)))))))
 (unless (fboundp 'memql)
   (defun memql (elt list)
-    (unless (listp list) (signal 'wrong-type-argument (list 'listp list)))
-    (let ((probe list))
-      (while (consp probe) (setq probe (cdr probe)))
-      (unless (null probe) (signal 'wrong-type-argument (list 'listp list))))
     "Return the tail of LIST whose car is `eql' to ELT, or nil."
-    (while (and list (not (eql elt (car list)))) (setq list (cdr list)))
-    list))
+    (unless (listp list) (signal 'wrong-type-argument (list 'listp list)))
+    (let ((orig list) (found nil) (done nil))
+      (while (not (or found done))
+        (cond
+         ((null list) (setq done t))
+         ((not (consp list)) (signal 'wrong-type-argument (list 'listp orig)))
+         ((eql elt (car list)) (setq found t))
+         (t (setq list (cdr list)))))
+      (and found list))))
 (unless (fboundp 'decode-char)
   (defun decode-char (charset code-point)
     "Minimal `decode-char': return CODE-POINT unchanged (ucs identity)."
-    (unless (symbolp charset) (signal 'wrong-type-argument (list 'charsetp charset)))
+    (unless (memq charset '(ucs unicode iso-10646-1 emacs eight-bit ascii))
+      (signal 'wrong-type-argument (list 'charsetp charset)))
     code-point))
 (unless (fboundp 'car-less-than-car)
   ;; Sort predicate over (KEY . _) cells; rx's `(any "abc")' sorts char
@@ -4111,11 +4329,34 @@ which is what a caller asking for a range check wants."
 (unless (fboundp 'help-add-fundoc-usage)
   (defun help-add-fundoc-usage (docstring arglist)
     "Append the usage line Emacs appends, rather than dropping ARGLIST."
+    (cond
+     ((eq arglist t) (if (stringp docstring) docstring ""))
+     ((stringp arglist)
+      (if (string-match "\\`([^ ]+\\(.*\\))\\'" arglist)
+          (concat (if (stringp docstring) docstring "")
+                  "\n\n(fn" (match-string 1 arglist) ")")
+        (signal 'error (list "Unrecognized usage format"))))
+     (t (nelisp--check-seq-list arglist)
+        (nelisp--help-fundoc-usage docstring arglist)))))
+(unless (fboundp 'nelisp--help-fundoc-usage)
+  (defun nelisp--help-fundoc-usage (docstring arglist)
     (concat (if (stringp docstring) docstring "")
             "\n\n(fn"
-            ;; Emacs UPCASES the argument names in the usage line -- that is
-            ;; what makes them read as placeholders rather than as values.
-            (mapconcat (lambda (a) (concat " " (upcase (format "%s" a))))
+            ;; Emacs UPCASES the argument NAMES -- that is what makes them
+            ;; read as placeholders -- but only the names.  Anything that is
+            ;; not a symbol is printed as itself, so (fn "a" "b") rather
+            ;; than the (fn A B) an unconditional upcase produced.
+            (mapconcat (lambda (a)
+                         (concat " "
+                                 (cond
+                                  ((not (symbolp a)) (format "%S" a))
+                                  ;; `&optional' and `&rest' are lambda-list
+                                  ;; keywords, not placeholders, and Emacs
+                                  ;; leaves them alone.
+                                  ((and (> (length (symbol-name a)) 0)
+                                        (= (aref (symbol-name a) 0) ?&))
+                                   (symbol-name a))
+                                  (t (upcase (symbol-name a))))))
                        (append arglist nil) "")
             ")")))
 (unless (fboundp 'help-split-fundoc)
@@ -4143,8 +4384,9 @@ cons made them use nil as the usage line."
     "Conservative: return the BINDINGS whose variable appears anywhere in SEXP.
 A safe over-approximation of \"which bindings might be used\" — enough for the
 cl-generic method-arg liveness heuristic."
-  (unless (listp bindings) (signal 'wrong-type-argument (list 'listp bindings)))
     (unless (listp bindings) (signal 'wrong-type-argument (list 'listp bindings)))
+    (unless (proper-list-p bindings)
+      (signal 'wrong-type-argument (list 'listp bindings)))
     (let ((res nil))
       (dolist (b bindings (nreverse res))
         (let ((sym (if (consp b) (car b) b))
@@ -5482,6 +5724,16 @@ been killed when none had."
      (t 'exit))))
 (unless (fboundp 'process-status)
   (defun process-status (process)
+    ;; nil means the CURRENT BUFFER, and a buffer with no process is an
+    ;; error naming that buffer -- not a type complaint about nil, which is
+    ;; a perfectly good argument here.
+    (when (null process)
+      (signal 'error
+              (list (format "Buffer %s has no process"
+                            (if (and (vectorp nelisp--current-buffer)
+                                     (> (length nelisp--current-buffer) 1))
+                                (aref nelisp--current-buffer 1)
+                              "*scratch*")))))
     ;; A STRING is a process NAME and answers nil; anything else is
     ;; `processp'.  Measured -- the two look the same from a single failing
     ;; case, and the earlier reading here came from a string argument.
@@ -5531,8 +5783,11 @@ been killed when none had."
     (delete-process process)))
 (unless (fboundp 'executable-find)
   (defun executable-find (command &optional _remote)
-    (unless (and (stringp command) (> (length command) 0))
-      (signal 'wrong-type-argument (list 'stringp command)))
+    (nelisp--check-string command)
+    ;; "" is a string that names nothing, so the answer is nil -- not the
+    ;; type complaint an emptiness check used to raise about a valid string.
+    (if (= (length command) 0)
+        nil
     (if (string-match-p "/" command)
         (and (file-exists-p command) command)
       (let* ((separator (if (boundp 'path-separator) path-separator ":"))
@@ -5548,7 +5803,7 @@ been killed when none had."
             (when (file-exists-p path)
               (setq found path)))
           (setq dirs (cdr dirs)))
-        found))))
+        found)))))
 (unless (fboundp 'make-process)
   (defun make-process (&rest plist)
     (let* ((name (or (plist-get plist :name) "process"))
@@ -5618,7 +5873,9 @@ No-ops on substrates without `nelisp--syscall-path-int' (the historic stub)."
     (when (fboundp 'nelisp--syscall-path-int)
       (let ((rc (nelisp--syscall-path-int 90 filename mode)))   ; chmod
         (unless (= rc 0)
-          (error "set-file-modes: rc=%S %s" rc filename))))
+          (signal 'file-missing
+                  (list "Doing chmod" "No such file or directory"
+                        (expand-file-name filename))))))
     nil))
 
 ;; --- Wave-2 (C): sort (stable merge sort, 2-arg PREDICATE form) ----------
@@ -5799,12 +6056,14 @@ Doc 156: was `(apply #\\='vector ...)', but the reader now exposes a native
 ;; `maphash' overrides the stub, and `hash-table-p' keys off the integer car
 ;; (an alist has a cons car, a plist a keyword car, so the discrimination is
 ;; clean for the shapes Elisp passes to `hash-table-p').
+;; Keyed off the NAMED marker, not "a cons whose car is an integer" -- under
+;; the old rule '(1) was a hash table, so (gethash K '(1 2 3)) answered nil
+;; instead of signalling, and nothing could tell a table from a pair well
+;; enough to print one.
 (defun hash-table-p (x)
-  (and (consp x) (integerp (car x))
-       (let ((c (cdr x)))
-         ;; Current core repr: cdr is the bucket VECTOR.  Tolerate the legacy
-         ;; flat-alist shape (cdr a cons / nil) too.
-         (or (null c) (vectorp c) (and (consp c) (consp (car c)))))))
+  (and (consp x)
+       (let ((m (car x)))
+         (and (vectorp m) (> (length m) 1) (eq (aref m 0) 'hash-table)))))
 (defun maphash (fn table)
   (unless (hash-table-p table) (signal 'wrong-type-argument (list 'hash-table-p table)))
   ;; The core `make-hash-table' returns (Int(0) . BUCKETS) where BUCKETS is a
@@ -5836,11 +6095,13 @@ Doc 156: was `(apply #\\='vector ...)', but the reader now exposes a native
 ;; `hash-table-p' keys off, so the requested `:test' cannot be stashed there.
 (unless (fboundp 'hash-table-test)
   (defun hash-table-test (table)
-    ;; Answering `equal' for a non-table hid the type error AND the fact
-    ;; that the requested test is not recorded (see partial-accepted).
+    ;; The requested test IS recorded now -- marker slot 2 -- so this reports
+    ;; what the caller asked for instead of a fixed answer.  Lookup is still
+    ;; `equal'-shaped underneath; that is a separate divergence and is not
+    ;; hidden by reporting the request accurately.
     (unless (hash-table-p table)
       (signal 'wrong-type-argument (list 'hash-table-p table)))
-    'equal))
+    (or (and (> (length (car table)) 2) (aref (car table) 2)) 'eql)))
 (unless (fboundp 'copy-hash-table)
   (defun copy-hash-table (table)
     (unless (hash-table-p table)
@@ -6057,6 +6318,47 @@ needs escaping because the reader consumes it as an escape prefix."
     (nelisp--prn-chunks-add chunks ")")
     (nelisp--prn-chunks-string chunks)))
 
+(defun nelisp--prn-deref-env (env)
+  "ENV with each captured CELL replaced by the value it holds.
+The cell has to go before the list is printed, not while it is being
+printed: a value that is itself a list has to be seen as a cons for the
+printer to write (a 1) rather than (a . (1))."
+  (if (not (consp env))
+      env
+    (let ((out nil) (l env))
+      (while (consp l)
+        (let ((e (car l)))
+          (setq out (cons (if (consp e)
+                              (cons (car e) (nelisp--cell-value (cdr e)))
+                            e)
+                          out)))
+        (setq l (cdr l)))
+      (nreverse out))))
+(defun nelisp--prn-hash-table-p (x)
+  (and (consp x)
+       (let ((m (car x)))
+         (and (vectorp m) (> (length m) 1) (eq (aref m 0) 'hash-table)))))
+(defun nelisp--prn-hash-table (obj escape)
+  "Print OBJ as Emacs prints a hash table.
+The entries come out in bucket order rather than insertion order -- this
+representation does not record insertion order at all, so the ORDER is not
+claimed to match, only the shape."
+  (let ((parts nil))
+    (maphash (lambda (k v)
+               (setq parts
+                     (cons (concat (nelisp--prn-to-string k escape 0) " "
+                                   (nelisp--prn-to-string v escape 0))
+                           parts)))
+             obj)
+    (let* ((m (car obj))
+           (tst (and (> (length m) 2) (aref m 2)))
+           (head (if (and tst (not (eq tst 'eql)))
+                     (concat "#s(hash-table test " (symbol-name tst))
+                   "#s(hash-table")))
+      (if (null parts)
+          (concat head ")")
+        (concat head " data ("
+                (mapconcat 'identity (nreverse parts) " ") "))")))))
 (defun nelisp--prn-to-string (obj escape &optional depth)
   (setq depth (or depth 0))
   (cond
@@ -6070,6 +6372,20 @@ needs escaping because the reader consumes it as an escape prefix."
       (symbol-name obj)))
    ((stringp obj)
     (if escape (concat "\"" (nelisp--prn-string-escaped obj) "\"") obj))
+   ;; Tagged objects print as themselves.  A buffer came out as
+   ;; [buffer "x" "" t], a hash table as its 2048-slot bucket vector, and a
+   ;; closure as the (closure ENV ARGS . BODY) list it is made of -- each of
+   ;; them readable Lisp that means something else.
+   ((nelisp--prn-hash-table-p obj) (nelisp--prn-hash-table obj escape))
+   ((and (consp obj) (eq (car obj) 'builtin) (consp (cdr obj)))
+    (concat "#<subr " (symbol-name (car (cdr obj))) ">"))
+   ((and (consp obj) (eq (car obj) 'closure)
+         (consp (cdr obj)) (consp (cdr (cdr obj))))
+    (concat "#[" (nelisp--prn-to-string (car (cdr (cdr obj))) escape depth)
+            " " (nelisp--prn-to-string (cdr (cdr (cdr obj))) escape depth)
+            " " (nelisp--prn-to-string (nelisp--prn-deref-env (car (cdr obj)))
+                                       escape depth)
+            "]"))
    ((consp obj)
     ;; Depth is a PARAMETER, not a special variable.  A free
     ;; `nelisp--prn-depth' worked in the standalone and broke
@@ -6084,12 +6400,47 @@ needs escaping because the reader consumes it as an escape prefix."
    ;; [1 [2 [3 [4]]]] in full at print-level 2, and only the list arm above
    ;; counts depth.  Measured rather than assumed; the first cut guarded
    ;; both and truncated vectors Emacs does not.
+   ((and (vectorp obj) (> (length obj) 1) (eq (aref obj 0) 'buffer))
+    (concat "#<buffer " (aref obj 1) ">"))
    ((vectorp obj) (nelisp--prn-vector obj escape (1+ depth)))
    ((recordp obj) (nelisp--prn-record obj escape))
-   (t (format "#<unprintable %S>" obj))))
+   ;; NOT (format "#<unprintable %S>" obj): `%S' re-enters this function on
+   ;; the same object, and for a lexical binding CELL -- which is what a
+   ;; closure's captured environment holds -- that recursed until the nesting
+   ;; limit.  So (format "%S" (let ((a 1)) (lambda () a))) did not print a
+   ;; closure, it ABORTED, and every caller that formats a function value hit
+   ;; it.  The fallback has to be a literal.
+   ;; A lexical CELL is the one remaining shape, and it is what a closure's
+   ;; captured environment holds -- deref it so (let ((a 1)) (lambda () a))
+   ;; prints its ((a . 1)) the way Emacs does.
+   ((not (eq (nelisp--cell-value obj) obj))
+    (nelisp--prn-to-string (nelisp--cell-value obj) escape depth))
+   (t "#<unprintable>")))
 
+;; OVERRIDES: a non-list is `(wrong-type-argument . consp)' -- the data is
+;; the bare symbol, not a list -- and an unrecognised key reports
+;; `symbolp nil'.  Accepting anything meant a caller's print settings were
+;; dropped with nothing to show for it.
+(defconst nelisp--print-override-keys
+  '(length level circle quoting escape-newlines escape-control-characters
+    escape-nonascii escape-multibyte charset-text-property
+    unreadable-function float-format integers-as-characters)
+  "Keys `prin1' accepts in its OVERRIDES argument.")
+(defun nelisp--check-print-overrides (overrides)
+  (cond
+   ((null overrides) nil)
+   ((eq overrides t) nil)
+   ((not (consp overrides)) (signal 'wrong-type-argument 'consp))
+   (t (let ((l overrides))
+        (while (consp l)
+          (let ((e (car l)))
+            (unless (consp e) (signal 'wrong-type-argument 'consp))
+            (unless (memq (car e) nelisp--print-override-keys)
+              (signal 'wrong-type-argument (list 'symbolp nil))))
+          (setq l (cdr l)))))))
 (unless (fboundp 'prin1-to-string)
-  (defun prin1-to-string (object &optional noescape _overrides)
+  (defun prin1-to-string (object &optional noescape overrides)
+    (nelisp--check-print-overrides overrides)
     (nelisp--prn-to-string object (not noescape))))
 
 ;; --- Doc 143: minimal read-from-string for the reader runtime -------------
@@ -6268,6 +6619,8 @@ are numbers; `1.' is the integer 1."
     (nelisp--check-string string)
     (when start (unless (integerp start) (signal 'wrong-type-argument (list 'integerp start))))
     (when end (unless (integerp end) (signal 'wrong-type-argument (list 'integerp end))))
+    (when (and end (> end (length string)))
+      (signal 'args-out-of-range (list string start end)))
     (let* ((base (or start 0))
            (s (if (or start end) (substring string base (or end (length string))) string))
            (r (nelisp--rd-one s 0 (length s))))
@@ -6539,14 +6892,19 @@ first `getenv' is not overwritten by the value the process started with."
             (mtime (nelisp--syscall-stat-field filename 88)))
         (list nil 1 0 0 0 mtime 0 size "" nil nil nil)))))
 (unless (fboundp 'file-attribute-size)
-  (defun file-attribute-size (attrs)
-    (let ((l attrs) (i 7))
+  (defun nelisp--file-attribute-nth (attrs i)
+    "ATTRS element I, naming the TAIL of an improper list as `listp'.
+`nth' over the same value names the whole list; these accessors do not,
+and only running both says which."
+    (let ((l attrs))
       (while (and (> i 0) (consp l)) (setq l (cdr l)) (setq i (1- i)))
       (cond ((consp l) (car l))
             ((null l) nil)
-            (t (signal 'wrong-type-argument (list 'listp l)))))))
+            (t (signal 'wrong-type-argument (list 'listp l))))))
+  (defun file-attribute-size (attrs) (nelisp--file-attribute-nth attrs 7)))
 (unless (fboundp 'file-attribute-modification-time)
-  (defun file-attribute-modification-time (attrs) (nth 5 attrs)))
+  (defun file-attribute-modification-time (attrs)
+    (nelisp--file-attribute-nth attrs 5)))
 (defun nelisp--split-on-char (string char omit-empty)
   (let ((start 0)
         (idx 0)
@@ -6588,7 +6946,11 @@ first `getenv' is not overwritten by the value the process started with."
 (unless (fboundp 'file-writable-p)
   (defun file-writable-p (filename)
     (nelisp--check-string filename)
-    (= 0 (nelisp--syscall-path-int 21 filename 2))))
+    (let ((full (expand-file-name filename)))
+      (if (file-exists-p full)
+          (= 0 (nelisp--syscall-path-int 21 full 2))
+        (= 0 (nelisp--syscall-path-int
+              21 (or (file-name-directory full) ".") 2))))))
 (unless (fboundp 'delete-file)
   (defun delete-file (filename &optional _trash) (nelisp--syscall-path 87 filename) nil))
 (defun nelisp--delete-directory-recursive (path)
@@ -6603,6 +6965,7 @@ first `getenv' is not overwritten by the value the process started with."
         (nelisp--syscall-path 87 path)))))
 (unless (fboundp 'delete-directory)
   (defun delete-directory (directory &optional recursive _trash)
+    (nelisp--check-string directory)
     (if recursive
         (nelisp--delete-directory-recursive directory)
       (nelisp--syscall-path 84 directory))
@@ -6654,7 +7017,8 @@ first `getenv' is not overwritten by the value the process started with."
     (nelisp--check-string file)
     (nelisp--check-string newname)
     (when (and (not ok-if-already-exists) (file-exists-p newname))
-      (error "rename-file: target exists: %s" newname))
+      (signal 'file-already-exists
+              (list "File already exists" (expand-file-name newname))))
     (let ((rc (nelisp--syscall-path2 82 file newname)))
       (unless (= rc 0)
         (error "rename-file: rc=%S %s -> %s" rc file newname)))
@@ -6671,8 +7035,10 @@ first `getenv' is not overwritten by the value the process started with."
     nil))
 (unless (fboundp 'file-executable-p)
   (defun file-executable-p (filename)
+    ;; "" is `default-directory' after expansion, and a directory you can
+    ;; enter is executable -- testing the empty name itself answered nil.
     (nelisp--check-string filename)
-    (= 0 (nelisp--syscall-path-int 21 filename 1))))  ; access X_OK
+    (= 0 (nelisp--syscall-path-int 21 (expand-file-name filename) 1))))  ; X_OK
 (unless (fboundp 'make-temp-file)
   (defun make-temp-file (prefix &optional dir-flag suffix text)
     (unless (sequencep prefix) (signal 'wrong-type-argument (list 'sequencep prefix)))
@@ -6742,12 +7108,13 @@ first `getenv' is not overwritten by the value the process started with."
   ;;     except under `file-error' / `end-of-file' / `user-error', which
   ;;     `princ' them.
   (defun error-message-string (error-descriptor)
-    (unless (or (stringp error-descriptor) (listp error-descriptor))
+    (unless (listp error-descriptor)
       (signal 'wrong-type-argument (list 'listp error-descriptor)))
     (if (not (consp error-descriptor))
-        (if (stringp error-descriptor) error-descriptor
-          (format "%S" error-descriptor))
+        "peculiar error"
       (let* ((errname (car error-descriptor))
+             (_ (unless (symbolp errname)
+                  (signal 'wrong-type-argument (list 'symbolp errname))))
              (from-data (or (eq errname 'error) (eq errname 'user-error)))
              (file-error (and (not from-data)
                               (memq 'file-error (get errname 'error-conditions))))
@@ -6891,8 +7258,27 @@ first `getenv' is not overwritten by the value the process started with."
         (setq chunks (cons (apply 'concat (nreverse parts)) chunks)))
       (apply 'concat (nreverse chunks)))))
 (unless (fboundp 'base64-decode-string)
-  (defun base64-decode-string (string &optional _base64url _ignore-invalid)
+  (defun base64-decode-string (string &optional base64url ignore-invalid)
     (nelisp--check-string string)
+    ;; Emacs REFUSES what it cannot decode: a character outside the alphabet
+    ;; and a group short of four both signal, and skipping them quietly
+    ;; produced a shorter string that read as a successful decode.  In
+    ;; base64url mode the padding is optional, which is why the same input
+    ;; can be an error in one mode and two bytes in the other.
+    (let ((j 0) (n (length string)) (kept 0))
+      (while (< j n)
+        (let ((ch (aref string j)))
+          (cond
+           ((or (= ch 10) (= ch 13) (= ch 9) (= ch 32)) nil)
+           ((= ch ?=) (setq kept (1+ kept)))
+           ((and base64url (or (= ch ?-) (= ch ?_))) (setq kept (1+ kept)))
+           ((>= (nelisp--base64-value ch) 0) (setq kept (1+ kept)))
+           (t (unless ignore-invalid (signal 'error (list "Invalid base64 data"))))))
+        (setq j (1+ j)))
+      (if (or base64url ignore-invalid)
+          (when (= 1 (mod kept 4)) (signal 'error (list "Invalid base64 data")))
+        (unless (= 0 (mod kept 4))
+          (signal 'error (list "Invalid base64 data")))))
     (let ((i 0)
           (len (length string))
           (vals-count 0)
@@ -6949,6 +7335,15 @@ first `getenv' is not overwritten by the value the process started with."
                 (setq byte-count 0))
               (setq vals-count 0))))
         (setq i (1+ i)))
+      (when (>= vals-count 2)
+        ;; A PADDING character reached this flush as -2 and was shifted in as
+        ;; a value, so an ignore-invalid decode of "a!b=" produced two bytes
+        ;; of noise instead of one byte of answer.
+        (let ((triple (logior (ash a 18) (ash b 12)
+                              (if (and (>= vals-count 3) (>= c 0)) (ash c 6) 0))))
+          (setq bytes (cons (char-to-string (logand (ash triple -16) 255)) bytes))
+          (when (and (>= vals-count 3) (>= c 0))
+            (setq bytes (cons (char-to-string (logand (ash triple -8) 255)) bytes)))))
       (setq chunks (nelisp--base64-flush-chunk bytes chunks))
       (apply 'concat (nreverse chunks)))))
 ;; nelisp stdlib lowering helpers (referenced by the dotimes/loop macro
@@ -6969,6 +7364,11 @@ first `getenv' is not overwritten by the value the process started with."
 ;; value (expires-at:nil -> JSON null).  Provide a self-contained encoder that
 ;; maps hash-table->object, list->array, nil->null, t->true, with minimal string
 ;; escaping -- enough for anvil-pkg-state's JSON shape.
+(unless (fboundp 'nelisp--json-key)
+  (defun nelisp--json-key (sym)
+    "SYM's name as a JSON key: a keyword loses its leading colon."
+    (let ((n (symbol-name sym)))
+      (if (and (> (length n) 0) (= (aref n 0) ?:)) (substring n 1) n))))
 (unless (fboundp 'nelisp--json-escape)
   (defun nelisp--json-escape (s)
     (let ((out "") (i 0) (n (length s)))
@@ -6986,7 +7386,7 @@ first `getenv' is not overwritten by the value the process started with."
     (when (and _keys (not (and (listp _keys) (= 0 (mod (length _keys) 2)))))
       (signal 'wrong-type-argument (list 'plistp _keys)))
     (cond
-     ((null obj) "null")
+     ((null obj) "{}")
      ((eq obj t) "true")
      ((eq obj :null) "null")
      ((eq obj :json-false) "false")
@@ -7002,11 +7402,39 @@ first `getenv' is not overwritten by the value the process started with."
                          first nil))
                  obj)
         (concat "{" parts "}")))
-     ((listp obj)
-      (let ((parts "") (first t))
-        (while obj (setq parts (concat parts (if first "" ",") (json-serialize (car obj)))
-                         first nil obj (cdr obj)))
+     ;; A LIST is an OBJECT in Emacs -- an alist or a plist, with symbol
+     ;; keys -- not an array.  Serialising it as [..] produced valid JSON of
+     ;; the wrong shape, which is the failure a caller finds last.  Only a
+     ;; vector is an array.
+     ((vectorp obj)
+      (let ((parts "") (first t) (i 0) (n (length obj)))
+        (while (< i n)
+          (setq parts (concat parts (if first "" ",") (json-serialize (aref obj i)))
+                first nil i (1+ i)))
         (concat "[" parts "]")))
+     ((consp obj)
+      (if (consp (car obj))
+          (let ((parts "") (first t) (l obj))
+            (while (consp l)
+              (let ((e (car l)))
+                (unless (and (consp e) (symbolp (car e)))
+                  (signal 'wrong-type-argument
+                          (list 'symbolp (if (consp e) (car e) e))))
+                (setq parts (concat parts (if first "" ",")
+                                    "\"" (nelisp--json-escape
+                                           (nelisp--json-key (car e))) "\":"
+                                    (json-serialize (cdr e)))
+                      first nil l (cdr l))))
+            (concat "{" parts "}"))
+        (let ((parts "") (first t) (l obj))
+          (while (consp l)
+            (let ((k (car l)))
+              (unless (symbolp k) (signal 'wrong-type-argument (list 'symbolp k)))
+              (setq parts (concat parts (if first "" ",")
+                                  "\"" (nelisp--json-escape (nelisp--json-key k)) "\":"
+                                  (json-serialize (car (cdr l))))
+                    first nil l (cdr (cdr l)))))
+          (concat "{" parts "}"))))
      ((symbolp obj) (concat "\"" (nelisp--json-escape (symbol-name obj)) "\""))
      (t (concat "\"" (nelisp--json-escape (format "%s" obj)) "\"")))))
 
@@ -7171,8 +7599,19 @@ strings compare equal."
 ;; A5: native `substring' returned garbage for vectors.  Slice vectors in
 ;; elisp via `aref'/`aset'; defer strings to the (correct) native path.
 (unless (fboundp 'nelisp--native-substring) (fset 'nelisp--native-substring (symbol-function 'substring)))
-(defun substring (seq from &optional to)
-  "Return the SEQ slice [FROM, TO); vector support added (Doc 22 A5)."
+(defun substring (seq &optional from to)
+  "Return the SEQ slice [FROM, TO); vector support added (Doc 22 A5).
+FROM is OPTIONAL in Emacs -- (substring \"abc\") is \"abc\" -- and requiring
+it here turned that call into a `wrong-number-of-arguments'.  Both indices
+are checked for integerness BEFORE any range arithmetic, so
+(substring \"abcdef\" 12354 \"z\") names \"z\" rather than reporting a range
+computed from it."
+  (unless (arrayp seq) (signal 'wrong-type-argument (list 'arrayp seq)))
+  (when from
+    (unless (integerp from) (signal 'wrong-type-argument (list 'integerp from))))
+  (when to
+    (unless (integerp to) (signal 'wrong-type-argument (list 'integerp to))))
+  (setq from (or from 0))
   (if (vectorp seq)
       (let* ((n (length seq))
              (s (if (< from 0) (+ n from) from))
@@ -7370,7 +7809,7 @@ buffer = best-effort insert; nil/t/other = native stdout."
   ;; ignored it and printed to stdout, so output went somewhere the caller
   ;; did not ask for and nothing said so.
   "Print OBJECT with no quoting to STREAM or `standard-output' (Doc 22 A9)."
-  (when (and stream (not (functionp stream)))
+  (when (and stream (not (eq stream t)) (not (functionp stream)))
     (signal (if (symbolp stream) 'void-function 'invalid-function)
             (list stream)))
   (let ((s (or stream standard-output)))
@@ -7380,12 +7819,13 @@ buffer = best-effort insert; nil/t/other = native stdout."
        (if (stringp object) object (nelisp--native-format "%s" object)) s)))
   object)
 
-(defun prin1 (object &optional stream)
+(defun prin1 (object &optional stream overrides)
   ;; A STREAM that is not a function is `invalid-function' in Emacs -- this
   ;; ignored it and printed to stdout, so output went somewhere the caller
   ;; did not ask for and nothing said so.
   "Print OBJECT in read syntax to STREAM or `standard-output' (Doc 22 A9)."
-  (when (and stream (not (functionp stream)))
+  (nelisp--check-print-overrides overrides)
+  (when (and stream (not (eq stream t)) (not (functionp stream)))
     (signal (if (symbolp stream) 'void-function 'invalid-function)
             (list stream)))
   (let ((s (or stream standard-output)))
@@ -7395,9 +7835,14 @@ buffer = best-effort insert; nil/t/other = native stdout."
   object)
 
 (defun terpri (&optional stream _ensure)
-  "Output a newline to STREAM or `standard-output' (Doc 22 A9)."
-  ;; The LATER definition is the live one -- an earlier copy in this file
-  ;; already had this check and it never ran.
+  "Output a newline to STREAM or `standard-output' (Doc 22 A9).
+The LATER definition is the live one -- an earlier copy in this file
+already had this check and it never ran.
+
+ENSURE is accepted and not acted on: Emacs only skips the newline when it
+can see the output COLUMN, which it can for a buffer or a marker, and this
+runtime has neither.  Measured directly, every non-function stream is
+`invalid-function' with ENSURE set or not."
   (when (and stream (not (functionp stream)) (not (eq stream t)))
     (signal (if (symbolp stream) 'void-function 'invalid-function) (list stream)))
   (let ((s (or stream standard-output)))
@@ -7408,7 +7853,7 @@ buffer = best-effort insert; nil/t/other = native stdout."
 
 (unless (fboundp 'print)
   (defun print (object &optional stream)
-    (when (and stream (not (functionp stream)))
+    (when (and stream (not (eq stream t)) (not (functionp stream)))
       ;; A SYMBOL stream is looked up as a function first, so it reports
       ;; `void-function'; anything else is `invalid-function'.
       (signal (if (symbolp stream) 'void-function 'invalid-function)

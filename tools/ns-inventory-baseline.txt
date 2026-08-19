@@ -178,7 +178,18 @@ ns-collision 178
 # check helpers the repairs use are prelude-only).  Raised rather than
 # synced, because syncing would move code that the hosted modules cannot
 # call into files that do not load the prelude.
-ns-collision-divergent 107
+# 107 -> 111 on 2026-08-20: `mapc', `mapcar', `prin1-to-string' and
+# `nelisp--prn-to-string'.  The first three gained argument checks that need
+# prelude-only helpers; the printer gained the tagged-object cases -- a hash
+# table, a buffer and a closure all have representations the hosted side does
+# not share, so there is nothing to sync it TO.  Each has its own note in
+# scripts/nl-ns-accepted.el.
+# 111 -> 115 on 2026-08-20: `copy-sequence', `lsh', `plist-put' and
+# `set-file-modes'.  Each prelude copy now carries a rule measured against
+# the host that the hosted copy does not have -- the improper-list tail, the
+# sign-dependent COUNT predicate, the odd-length plist, and `file-missing'
+# with its three fields.  Notes in scripts/nl-ns-accepted.el.
+ns-collision-divergent 115
 # 850 -> 851 on 2026-08-19: `nl-check-file-quoted-unsafe', the entry point
 # that reports the unsafe calls inside quoted forms.  Same situation as the
 # nl-ns pair above -- it is public because tools/nl-check-inventory.el calls
