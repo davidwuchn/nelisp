@@ -4734,10 +4734,20 @@ needs escaping because the reader consumes it as an escape prefix."
 (unless (fboundp 'error-message-string)
   (defun error-message-string (error-descriptor)
     (cond
-     ((and (consp error-descriptor)
-           (stringp (cadr error-descriptor)))
-      (cadr error-descriptor))
      ((stringp error-descriptor) error-descriptor)
+     ;; `(error FORMAT ARG...)' reaches a handler with FORMAT and ARGs still
+     ;; separate, so apply `format' here -- otherwise the message shows its
+     ;; own "%s" instead of the value that explains the failure.
+     ((and (consp error-descriptor)
+           (eq (car error-descriptor) 'error)
+           (stringp (cadr error-descriptor)))
+      (if (cddr error-descriptor)
+          (apply (function format) (cdr error-descriptor))
+        (cadr error-descriptor)))
+     ;; Every other condition keeps its symbol AND all of its data.  Returning
+     ;; `(cadr ...)' alone reported a failed `compile-runtime-image' as a bare
+     ;; path, with nothing to say which of its errors had fired.
+     ((consp error-descriptor) (format "%S" error-descriptor))
      (t (format "%S" error-descriptor)))))
 (unless (fboundp 'format-time-string)
   (defun format-time-string (&rest _args)

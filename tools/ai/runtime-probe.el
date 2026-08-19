@@ -39,6 +39,25 @@ probe in a lambda would have made the wrapper the thing measured."
   (princ (format "PROBE %-22s %-28s %s" name value note))
   (terpri))
 
+;;;; Diagnostics ---------------------------------------------------------
+
+;; First, because every other answer on this page is read through an error
+;; message when it goes wrong.  This one said "lost" until 2026-08-19: the
+;; runtime stashed the arguments AFTER the format string as the error data,
+;; so `(error "msg")' raised a bare `(error)' and `(error "fmt %s" x)' raised
+;; `(error x)'.  Every diagnostic the runtime produced arrived with its own
+;; message deleted, which is why `compile-runtime-image' failed for two
+;; sessions with nothing to say beyond a path.
+(let* ((raised (probe-safe (error "probe message %s" 42)))
+       (text (cdr raised))
+       (kept (and (eq (car raised) 'err)
+                  (stringp text)
+                  (string-match-p "probe message" text))))
+  (probe-report "error keeps its message" (if kept "kept" "lost")
+                (if kept
+                    "a failure can say what failed"
+                  "read no other probe until this one is fixed")))
+
 ;;;; Environment ---------------------------------------------------------
 
 (let* ((result (probe-safe (getenv "PATH")))

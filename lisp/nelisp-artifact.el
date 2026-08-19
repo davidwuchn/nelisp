@@ -1925,7 +1925,12 @@ top-level `defun' forms remain visible to the `.neln' native compiler."
          (forms (nelisp-artifact--read-all-from-string source))
          (out nil))
     (unless (string-match-p "\\`;;; nelisp-runtime-image source-v1\r?\n" source)
-      (error "unsupported runtime image format: %s" image-path))
+      ;; Say what was read, not just which path was asked for: a reader that
+      ;; answers "" for a file it could not open is indistinguishable here
+      ;; from a genuinely foreign image unless the length is in the message.
+      (error "unsupported runtime image format: %s (read %d chars, starts %S)"
+             image-path (length source)
+             (substring source 0 (min 48 (length source)))))
     (dolist (form forms)
       (if (and (consp form) (eq (car form) 'progn))
           (setq out (append out (cdr form)))

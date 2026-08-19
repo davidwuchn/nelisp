@@ -7017,7 +7017,12 @@ unresolved at link time."
         (seq
          (ptr-write-u64 ebuf 0 491496043109)              ; "error" packed LE
          (nl_alloc_symbol ebuf 5 268435480)               ; TAG slot <- Symbol "error"
-         (bf_sig_copy32 268435512 (nl_cons_cdr_ptr args)) ; VAL slot <- (MSG ...)
+         ;; VAL slot <- (FORMAT ARG...), the whole argument list.  This took
+         ;; `(nl_cons_cdr_ptr args)' -- everything AFTER the message -- so
+         ;; `(error "msg")' raised a bare `(error)' with no data at all and
+         ;; `(error "fmt %s" x)' raised `(error x)'.  Every diagnostic this
+         ;; runtime raised arrived with its own message deleted.
+         (bf_sig_copy32 268435512 args)
          (ptr-write-u64 268435472 0 1)                    ; raise flag
          (atomic-fetch-add 268435544 1)
          1)))
