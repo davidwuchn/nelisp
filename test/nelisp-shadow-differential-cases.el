@@ -465,6 +465,16 @@
  (list (string-trim "xxaxx" "x+" "x+") (string-trim "xxa" "x+") (string-trim "  a  ")
        (seq-mapcat #'list '(1 2) 'vector) (seq-mapcat #'list '(1 2))
        (split-string "a,,b" "," t) (split-string " a , b " "," nil " +"))
+
+ ;; Calling a non-function ENDED THE PROCESS -- uncatchable, so nothing
+ ;; downstream could defend against it.  Found by `make parity-fuzz'.
+ (list (condition-case e (funcall "abc" 1) (error e))
+       (condition-case e (funcall 1 1) (error e))
+       (condition-case e (mapcar "abc" (list 1)) (error e))
+       (condition-case e (apply "abc" (list 1)) (error e))
+       (condition-case e (funcall 'no-such-fn-zz 1) (error e))
+       (funcall 'car (list 1 2))
+       (funcall (lambda (x) (* x 2)) 21))
 )
 
 ;;; nelisp-shadow-differential-cases.el ends here
