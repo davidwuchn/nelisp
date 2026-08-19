@@ -42,7 +42,7 @@
 # add-to-list a C subr, where before it became an elisp shim.
 # nelisp--cli-batch-ensure-host, which loads that file, already gated its own
 # fallback stub this way.
-shared-shadowing 245
+shared-shadowing 247
 
 # 2026-08-19, reviewing the 245 rather than counting them.  The table now
 # carries the defining file, which is half of what makes a class actionable:
@@ -99,4 +99,13 @@ shared-shadowing 245
 #
 # Unconditional, like the prelude's other 111: that file IS the standalone's
 # stdlib, and there is no host definition for it to defer to.
+
+# 245 -> 247 on 2026-08-19: `safe-length' and `proper-list-p'.  They are
+# added because `length' now signals on an improper list, as Emacs does --
+# and without the tolerant counterparts Emacs pairs it with there would be
+# no way to ask about a dotted list at all.  Adding a check and removing the
+# only way around it would be a worse tree than the one that answered wrong.
+#
+# Unconditional, like the prelude's others: that file is the standalone's
+# stdlib and has no host definition to defer to.
 

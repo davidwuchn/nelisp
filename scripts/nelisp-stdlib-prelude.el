@@ -468,6 +468,25 @@ from `(defvar X nil)'."
 ;; sets `default-directory' at startup so that fallback never fired
 ;; in practice and is dropped here.
 
+;; `length' signals on an improper list, as Emacs does, so the tolerant
+;; counterparts Emacs provides have to exist too -- without them there is no
+;; way to ask about a dotted list at all.  `safe-length' counts cons cells
+;; and stops; `proper-list-p' answers the length only when the list really
+;; ends in nil, and nil otherwise.
+(defun safe-length (list)
+  (let ((n 0) (cur list))
+    (while (consp cur)
+      (setq n (1+ n))
+      (setq cur (cdr cur)))
+    n))
+
+(defun proper-list-p (object)
+  (let ((n 0) (cur object) (ok t))
+    (while (if ok (consp cur) nil)
+      (setq n (1+ n))
+      (setq cur (cdr cur)))
+    (if (null cur) n nil)))
+
 (defun nelisp--path-split (s)
   ;; Split S on / and drop empty components, so a// collapses like Emacs.
   (let ((out nil) (cur "") (i 0) (n (length s)))

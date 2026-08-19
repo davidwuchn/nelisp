@@ -190,6 +190,27 @@
  (progn 42 (funcall (lambda ())))
  (let ((n 0)) (while (< n 1) (setq n 1)) (nl-diff-empty))
  (list 42 (nl-diff-empty))
+ ;; `length' used to answer a number for anything: an improper list got the
+ ;; count of its cons cells, a SYMBOL got the length of its NAME -- (length
+ ;; 'foo) was 3 -- and everything else got 0, so (length 5) was 0 rather
+ ;; than an error.  A record was 0 too, where Emacs counts the type tag.
+ ;; The tolerant counterparts Emacs provides did not exist, which is why
+ ;; they are here: without them there is no way to ask about a dotted list.
+ (length (list 1 2 3))
+ (length nil)
+ (length [1 2 3])
+ (length "abc")
+ (length (record 'a 1 2))
+ (condition-case e (length '(1 2 . 3)) (error e))
+ (condition-case e (length 'foo) (error e))
+ (condition-case e (length 5) (error e))
+ (safe-length '(1 2 . 3))
+ (safe-length (list 1 2))
+ (safe-length nil)
+ (proper-list-p '(1 2 . 3))
+ (proper-list-p (list 1 2))
+ (proper-list-p nil)
+ (proper-list-p 5)
  ;; maphash reaches every entry
  (let ((h (make-hash-table :test 'equal)) (n 0))
    (puthash "b" 2 h) (puthash "a" 1 h) (puthash "c" 3 h)

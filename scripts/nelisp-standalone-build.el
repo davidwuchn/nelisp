@@ -3525,7 +3525,7 @@ argument (reachability + in-arena bounds checks).")
     ((:lit "hash-table-count") . (wf_write_int out (nl_ht_count_table (nl_ht_data_slot (wf_arg_ptr args 0)))))
     ((:lit "maphash")          . (nl_ht_maphash args out))
     ;; --- M5 strings + format ---
-    ((:lit "length")           . (wf_write_int out (m5_length (wf_arg_ptr args 0))))
+    ((:lit "length")           . (bf_length_checked (wf_arg_ptr args 0) out))
     ;; Doc 161: byte-level access + count for byte-IO (length is now chars).
     ((:lit "string-byte")      . (wf_write_int out
                                   (str-byte-at (wf_arg_ptr args 0)
@@ -7191,6 +7191,76 @@ unresolved at link time."
          (ptr-write-u64 268435472 0 1)
          (atomic-fetch-add 268435544 1)
          1)))
+    ;; Same shape as `bf_wrong_type_consp', for the two predicates `length'
+    ;; needs to name.
+    (defun bf_wrong_type_listp (offender)
+      (let* ((wbuf (alloc-bytes 24 1))
+             (cbuf (alloc-bytes 8 1))
+             (expected (alloc-bytes 32 8))
+             (nil-slot (alloc-bytes 32 8))
+             (data-tail (alloc-bytes 32 8)))
+        (seq
+         (ptr-write-u64 wbuf 0 8751669898145395319)
+         (ptr-write-u64 (+ wbuf 8) 0 7887324063363589488)
+         (ptr-write-u64 (+ wbuf 16) 0 7630437)
+         (nl_alloc_symbol wbuf 19 268435480)
+         (ptr-write-u64 cbuf 0 482990057836) ; "listp"
+         (nl_alloc_symbol cbuf 5 expected)
+         (wf_write_nil nil-slot)
+         (nelisp_cons_construct offender nil-slot data-tail)
+         (nelisp_cons_construct expected data-tail 268435512)
+         (ptr-write-u64 268435472 0 1)
+         (atomic-fetch-add 268435544 1)
+         1)))
+    (defun bf_wrong_type_sequencep (offender)
+      (let* ((wbuf (alloc-bytes 24 1))
+             (cbuf (alloc-bytes 16 1))
+             (expected (alloc-bytes 32 8))
+             (nil-slot (alloc-bytes 32 8))
+             (data-tail (alloc-bytes 32 8)))
+        (seq
+         (ptr-write-u64 wbuf 0 8751669898145395319)
+         (ptr-write-u64 (+ wbuf 8) 0 7887324063363589488)
+         (ptr-write-u64 (+ wbuf 16) 0 7630437)
+         (nl_alloc_symbol wbuf 19 268435480)
+         (ptr-write-u64 cbuf 0 7305804402566194547) ; "sequence"
+         (ptr-write-u64 (+ cbuf 8) 0 112)           ; "p"
+         (nl_alloc_symbol cbuf 9 expected)
+         (wf_write_nil nil-slot)
+         (nelisp_cons_construct offender nil-slot data-tail)
+         (nelisp_cons_construct expected data-tail 268435512)
+         (ptr-write-u64 268435472 0 1)
+         (atomic-fetch-add 268435544 1)
+         1)))
+    ;; length, with the type checks Emacs makes.  `m5_length' answered a
+    ;; number for anything: an improper list got the count of its cons cells
+    ;; ((length '(1 2 . 3)) was 2), a SYMBOL got the length of its NAME
+    ;; ((length 'foo) was 3), and everything else got 0 -- so (length 5) was
+    ;; 0 rather than an error.  Emacs signals `(wrong-type-argument listp
+    ;; TAIL)' for the first and `(wrong-type-argument sequencep OBJ)' for the
+    ;; others.  Measured 2026-08-19 against Emacs 30.1.
+    ;;
+    ;; A record is a sequence in Emacs and its length counts the type tag:
+    ;; (length (record 'a 1 2)) is 3, which is slot-count + 1.  It used to be
+    ;; 0 here.
+    (defun bf_length_list (cur acc out)
+      (seq
+       (while (= (ptr-read-u64 cur 0) 7)
+         (seq (setq cur (nl_cons_cdr_ptr cur))
+              (setq acc (+ acc 1))))
+       (if (= (ptr-read-u64 cur 0) 0)
+           (seq (wf_write_int out acc) 0)
+         (bf_wrong_type_listp cur))))
+    (defun bf_length_checked (p out)
+      (let* ((tag (ptr-read-u64 p 0)))
+        (if (= tag 0) (seq (wf_write_int out 0) 0)
+          (if (= tag 7) (bf_length_list p 0 out)
+            (if (= tag 8) (seq (wf_write_int out (vector-len p)) 0)
+              (if (= tag 5) (seq (wf_write_int out (nl_str_charlen p)) 0)
+                (if (= tag 6) (seq (wf_write_int out (nl_str_charlen p)) 0)
+                  (if (= tag 12)
+                      (seq (wf_write_int out (+ (record-slot-count p) 1)) 0)
+                    (bf_wrong_type_sequencep p)))))))))
     ;; fboundp/boundp: look up in the env mirror.  env+0 = mirror, env+64 = unbound.
     ;; nelisp_env_lookup_function(mirror, unbound, sym, out_slot) returns 0 if found.
     (defun bf_fboundp (args env out)
@@ -8291,7 +8361,7 @@ too (they need the dynamic build's PLT/GOT)."
     (lambda (entry)
       (cond
        ((equal (car entry) '(:lit "length"))
-        '((:lit "length") . (wf_write_int out (bf_length (wf_arg_ptr args 0)))))
+        '((:lit "length") . (bf_length_checked (wf_arg_ptr args 0) out)))
        ((equal (car entry) '(:u8 "eq"))
         '((:u8 "eq") . (bf_eq args out)))
        ((equal (car entry) '(:u8 "car"))
