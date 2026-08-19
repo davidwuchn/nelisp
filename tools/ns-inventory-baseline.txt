@@ -139,7 +139,10 @@
 # 171 -> 175 on 2026-08-20: `bool-vector-p', `point-min', `point-max' and
 # `locate-library', absent from the standalone and now in both the prelude
 # and the lisp/ mirror that already named them.  Byte-identical copies.
-ns-collision 176
+# 176 -> 178 on 2026-08-20: `file-truename' and `mod', each brought into
+# line with its lisp/ mirror rather than left to differ.  Byte-identical, so
+# this is the benign same-definition kind.
+ns-collision 178
 # 97 -> 96 on 2026-08-19: `string-equal' no longer differs between the two
 # files -- the prelude's now signals for a non-string instead of falling
 # through to `equal', and the lisp copy was brought with it.  Ratcheted down

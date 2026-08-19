@@ -726,6 +726,28 @@
        (locate-file "" '(1 2 3) "x")
        (condition-case e (char-to-string -1) (error e)) (char-to-string 97)
        (condition-case e (intern "x" 1) (error e)))
+
+ ;; An improper list: `rassq' names the whole ARGUMENT and the seq- walkers
+ ;; name the TAIL they hit.  Measured -- they genuinely differ, and one rule
+ ;; for both would be wrong for one of them.
+ (list (condition-case e (process-status -1) (error e)) (process-status "x")
+       (condition-case e (json-serialize "s" "k") (error e)) (json-serialize "s")
+       ;; `byte-compile-file' is NOT compared: src/nelisp-bytecode.el has a
+       ;; real one that the standalone does not load, and a prelude stub
+       ;; that answers nil would shadow it on the host.  Leaving it
+       ;; void-function in the standalone is the honest state.
+       (condition-case e (string-version-lessp 48 97) (error e))
+       (string-version-lessp "a1" "a2")
+       (condition-case e (plist-put -1 ["a"] "e") (error e))
+       (plist-put (list :a 1 :b 2) :b 3)
+       (condition-case e (rassq ["a"] '(1 . 2)) (error e)) (rassq 1 '((a . 1)))
+       (condition-case e (seq-do #'identity '(1 2 . 3)) (error e))
+       (seq-do #'identity '(1 2))
+       (condition-case e (seq-position '(1 . 2) 48) (error e))
+       (condition-case e (seq-reverse [] 1) (error (car e)))
+       (condition-case e (seq-empty-p '(1 . 2) -1) (error (car e)))
+       (condition-case e (file-truename nil 'x 0.0) (error e))
+       (condition-case e (generate-new-buffer ["a"] nil) (error e)))
 )
 
 ;;; nelisp-shadow-differential-cases.el ends here

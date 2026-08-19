@@ -364,8 +364,14 @@ streams fall back to stdout."
 ;; measured against Emacs 30.1: a trailing ~, and a trailing .~N~ where N
 ;; is digits.  Nothing else: "a~b.txt" and "foo.txt.~1~x" are left alone.
 
-(defun file-truename (path)
-    (nelisp--check-string path)
+(defun file-truename (path &optional _counter _prev-dirs)
+    ;; Two predicates, by what the argument is: a SYMBOL (nil included) gets
+    ;; `arrayp', anything else `stringp'.  Measured across nil / 1 / a
+    ;; symbol / a vector / a float -- guessing one name gets three of the
+    ;; five wrong.
+    (unless (stringp path)
+      (signal 'wrong-type-argument
+              (list (if (symbolp path) 'arrayp 'stringp) path)))
     (expand-file-name path))
 
 ;; Rust-min batch 7c (2026-05-07, Doc 50 stage 2): `directory-files'

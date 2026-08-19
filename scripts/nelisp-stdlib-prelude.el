@@ -135,8 +135,14 @@
 ;; which is the honest half of what Emacs does (recorded in
 ;; tools/partial-accepted.txt).
 (unless (fboundp 'file-truename)
-  (defun file-truename (path)
-    (nelisp--check-string path)
+  (defun file-truename (path &optional _counter _prev-dirs)
+    ;; Two predicates, by what the argument is: a SYMBOL (nil included) gets
+    ;; `arrayp', anything else `stringp'.  Measured across nil / 1 / a
+    ;; symbol / a vector / a float -- guessing one name gets three of the
+    ;; five wrong.
+    (unless (stringp path)
+      (signal 'wrong-type-argument
+              (list (if (symbolp path) 'arrayp 'stringp) path)))
     (expand-file-name path)))
 (unless (fboundp 'buffer-file-name)
   (defun buffer-file-name (&optional buffer)
@@ -1081,6 +1087,10 @@ Result keeps the trailing slash."
       (while (and l ok) (unless (funcall pred (car l)) (setq ok nil)) (setq l (cdr l)))
       ok)))
 (unless (fboundp 'seq-empty-p)
+  ;; `func-arity' reports (1 . many) for a cl-generic, but the METHOD takes
+  ;; one argument and a two-argument call IS an arity error.  Declaring
+  ;; &rest made this accept what Emacs rejects -- the arity to copy is the
+  ;; one that runs, not the one the generic advertises.
   (defun seq-empty-p (seq) (= (length seq) 0)))
 (unless (fboundp 'seq-length)
   (defun seq-length (seq) (length seq)))
@@ -1098,6 +1108,10 @@ Result keeps the trailing slash."
 (unless (fboundp 'seq-do)
   (defun seq-do (fn seq)
     (unless (sequencep seq) (signal 'wrong-type-argument (list 'sequencep seq)))
+    (let ((probe seq))
+      (while (consp probe) (setq probe (cdr probe)))
+      (unless (or (null probe) (not (consp seq)))
+        (signal 'wrong-type-argument (list 'listp probe))))
     (let ((l (nelisp-seq--to-list seq)))
       (while l (funcall fn (car l)) (setq l (cdr l)))
       ;; Emacs answers the SEQUENCE, not nil -- `seq-do' is the one in the
@@ -1736,6 +1750,8 @@ wider than the one it replaces once the mapping leaves ASCII."
   (defun string-version-lessp (a b)
     ;; Takes a string OR a symbol, like `string-lessp'.  A symbol compares by
     ;; its NAME, so nil is "nil" -- not the empty string.
+    (unless (or (stringp a) (symbolp a)) (signal 'wrong-type-argument (list 'stringp a)))
+    (unless (or (stringp b) (symbolp b)) (signal 'wrong-type-argument (list 'stringp b)))
     (string-lessp (if (stringp a) a (symbol-name a))
                   (if (stringp b) b (symbol-name b)))))
 ;; Doc 160 breadth round 3: control / binding macros.
@@ -1857,7 +1873,7 @@ reseeds from its characters; nil -> a full LCG value."
          (unwind-protect (progn ,@(nreverse sets) ,@body)
            ,@(nreverse restores))))))
 (unless (fboundp 'seq-take)
-  (defun seq-take (seq n) (take n (nelisp-seq--to-list seq))))
+  (defun seq-take (seq &optional n) (take n (nelisp-seq--to-list seq))))
 (unless (fboundp 'seq-drop)
   (defun seq-drop (seq n) (nthcdr n (nelisp-seq--to-list seq))))
 (unless (fboundp 'seq-count)
@@ -1871,6 +1887,10 @@ reseeds from its characters; nil -> a full LCG value."
     ;; DOTTED pair, which is a cons and passes `listp' -- the name Emacs
     ;; reports there comes from a later walk, not from this check.
     (unless (sequencep seq) (signal 'wrong-type-argument (list 'sequencep seq)))
+    (let ((probe seq))
+      (while (consp probe) (setq probe (cdr probe)))
+      (unless (or (null probe) (not (consp seq)))
+        (signal 'wrong-type-argument (list 'listp probe))))
     (let ((l (nelisp-seq--to-list seq)) (i 0) (found nil) (idx nil))
       (while (and l (not found))
         (when (if testfn (funcall testfn elt (car l)) (equal elt (car l)))
@@ -1994,6 +2014,9 @@ reseeds from its characters; nil -> a full LCG value."
 ;; Doc 143 pure list utilities.
 (unless (fboundp 'rassq)
   (defun rassq (value alist)
+    (let ((probe alist))
+      (while (consp probe) (setq probe (cdr probe)))
+      (unless (null probe) (signal 'wrong-type-argument (list 'listp alist))))
     (let ((found nil))
       (while (and alist (not found))
         (if (and (consp (car alist)) (eq (cdr (car alist)) value))
@@ -2401,9 +2424,7 @@ Doc 22 A6: arrays are iterated by index."
 
 (defun plist-put (plist key value &optional predicate)
   ;; Measured: `plist-put' and `plist-member' signal `plistp'; only
-  ;; `plist-get' answers nil.  An earlier reading of one fuzz case had this
-  ;; backwards -- the case passed a VECTOR key, and the vector was what the
-  ;; answer came from, not the leniency.
+  ;; `plist-get' answers nil.
   (nelisp--check-plist plist)
   (let ((cur plist) (tail nil))
     (if predicate
@@ -4978,7 +4999,7 @@ Rust-min migration (= moved out of build-tool/src/eval/special_forms.rs)."
 (defvar system-type 'gnu/linux)
 (defvar system-configuration "x86_64-pc-linux-gnu")
 (unless (fboundp 'generate-new-buffer)
-  (defun generate-new-buffer (name)
+  (defun generate-new-buffer (name &optional _inhibit-buffer-hooks)
     (nelisp--check-string name)
     (nelisp--check-string name)
     (vector 'buffer name "" t)))
@@ -5068,10 +5089,12 @@ Rust-min migration (= moved out of build-tool/src/eval/special_forms.rs)."
      (t 'exit))))
 (unless (fboundp 'process-status)
   (defun process-status (process)
-    ;; NO type check: Emacs's `process-status' answers nil for anything that
-    ;; is not a process, because it also accepts a buffer or a process NAME.
-    ;; Adding one "for consistency" with `process-put' would be consistent
-    ;; and wrong -- the two have different contracts.
+    ;; A STRING is a process NAME and answers nil; anything else is
+    ;; `processp'.  Measured -- the two look the same from a single failing
+    ;; case, and the earlier reading here came from a string argument.
+    (unless (or (stringp process) (processp process)
+                (and (vectorp process) (eq (aref process 0) 'process)))
+      (signal 'wrong-type-argument (list 'processp process)))
     (cond
      ((and (fboundp 'nelisp-process-object-p)
            (nelisp-process-object-p process))
@@ -6478,7 +6501,10 @@ first `getenv' is not overwritten by the value the process started with."
       out)))
 (unless (fboundp 'json-serialize)
   (defun json-serialize (obj &rest _keys)
-    (unless (listp _keys) (signal 'wrong-type-argument (list 'plistp _keys)))
+    ;; The offender Emacs names is the whole KEYS list, not the element the
+    ;; walk stopped at.
+    (when (and _keys (not (and (listp _keys) (= 0 (mod (length _keys) 2)))))
+      (signal 'wrong-type-argument (list 'plistp _keys)))
     (cond
      ((null obj) "null")
      ((eq obj t) "true")

@@ -67,3 +67,6 @@ prin1-to-string|lisp/nelisp-stdlib-prn.el|_overrides|OVERRIDES ignored; byte-ide
 locate-library|scripts/nelisp-stdlib-prelude.el|_interactive-call _nosuffix _path|NOSUFFIX/PATH/INTERACTIVE-CALL ignored: the search is always load-path with .el and no suffix
 bool-vector-p|scripts/nelisp-stdlib-prelude.el|_x|always nil: bool vectors are plain vectors here, so nothing can be one
 bool-vector-p|lisp/nelisp-stdlib-plist-str.el|_x|always nil; byte-identical to the prelude copy
+generate-new-buffer|scripts/nelisp-stdlib-prelude.el|_inhibit-buffer-hooks|there are no buffer hooks here, so nothing can be inhibited
+file-truename|scripts/nelisp-stdlib-prelude.el|_counter _prev-dirs|symlink-loop detection is not implemented: the answer is `expand-file-name', so a symlink cycle is neither followed nor reported
+file-truename|lisp/nelisp-stdlib-misc.el|_counter _prev-dirs|the same; byte-identical to the prelude copy
