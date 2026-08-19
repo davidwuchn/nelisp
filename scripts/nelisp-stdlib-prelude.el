@@ -4449,11 +4449,58 @@ are numbers; `1.' is the integer 1."
 (defvar load-path nil)
 (defvar features nil)
 (defvar nelisp--environment nil)
+(defvar nelisp--environment-loaded nil
+  "Non-nil once the OS environment has been read into `nelisp--environment'.")
+
+(defun nelisp--environment-load ()
+  "Seed `nelisp--environment' from the operating system, once.
+
+`getenv' answered nil for everything here, and had since this runtime
+existed: the alist it reads was never filled from anywhere.  Nothing was
+broken -- nothing had been connected.  Measured 2026-08-19: anything keyed
+on HOME or XDG_CACHE_HOME therefore did not work, the native-exec cache
+among them, and `PROBE getenv' read `nil' with the note \"pass parameters
+as variables in a driver file\".
+
+/proc/self/environ needs no new primitive: it is a file, the runtime can
+read files, and its contents are NUL-separated VAR=VAL.  Off Linux the read
+returns nil and this is exactly as it was, which is why the probe reports
+what it measured rather than assuming.
+
+Entries already in `nelisp--environment' win, so a `setenv' before the
+first `getenv' is not overwritten by the value the process started with."
+  (unless nelisp--environment-loaded
+    (setq nelisp--environment-loaded t)
+    (let ((raw (and (fboundp 'nelisp--syscall-read-file)
+                    (nelisp--syscall-read-file "/proc/self/environ"))))
+      (when (stringp raw)
+        (let ((n (length raw)) (i 0) (start 0))
+          (while (<= i n)
+            (when (or (= i n) (= (aref raw i) 0))
+              (when (> i start)
+                (let* ((entry (substring raw start i))
+                       (m (length entry))
+                       (j 0)
+                       (split nil))
+                  (while (and (< j m) (null split))
+                    (when (= (aref entry j) 61) (setq split j))
+                    (setq j (1+ j)))
+                  (when (and split (> split 0))
+                    (let ((name (substring entry 0 split)))
+                      (unless (assoc name nelisp--environment)
+                        (setq nelisp--environment
+                              (cons (cons name (substring entry (1+ split)))
+                                    nelisp--environment)))))))
+              (setq start (1+ i)))
+            (setq i (1+ i))))))))
+
 (unless (fboundp 'getenv)
   (defun getenv (variable)
+    (nelisp--environment-load)
     (cdr (assoc variable nelisp--environment))))
 (unless (fboundp 'setenv)
   (defun setenv (variable value &optional _substitute)
+    (nelisp--environment-load)
     (let ((cell (assoc variable nelisp--environment)))
       (if value
           (if cell

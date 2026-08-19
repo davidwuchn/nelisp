@@ -6,7 +6,7 @@
         standalone-tarball standalone-tarball-verify \
         verify-elisp-fixtures \
         standalone-eval standalone-eval-clean standalone-eval-test standalone-eval-j \
-        standalone-reader standalone-reader-test standalone-reader-load-smoke standalone-reader-checked standalone-reader-fmt-smoke standalone-reader-prelude-equal-reload-smoke standalone-reader-declare-strip-smoke standalone-reader-nested-backquote-macro-smoke standalone-reader-derived-mode-shape-smoke standalone-reader-pcase-quote-literal-smoke standalone-reader-catch-throw-tag-smoke standalone-reader-cond-let-shape-smoke standalone-reader-ffi-smoke standalone-reader-tls-smoke standalone-reader-process-smoke standalone-reader-realrt-smoke standalone-reader-repl-smoke standalone-reader-prelude-test standalone-reader-intern-soft-smoke standalone-reader-intern-soft-loop-smoke standalone-reader-number-token-smoke standalone-selfhost-test standalone-selfhost-mt-test standalone-parallel-compile-test standalone-chunk-growth-test \
+        standalone-reader standalone-reader-test standalone-reader-load-smoke standalone-reader-checked standalone-reader-fmt-smoke standalone-reader-prelude-equal-reload-smoke standalone-reader-declare-strip-smoke standalone-reader-nested-backquote-macro-smoke standalone-reader-derived-mode-shape-smoke standalone-reader-pcase-quote-literal-smoke standalone-reader-catch-throw-tag-smoke standalone-reader-cond-let-shape-smoke standalone-reader-ffi-smoke standalone-reader-tls-smoke standalone-reader-process-smoke standalone-reader-realrt-smoke standalone-reader-repl-smoke standalone-reader-prelude-test standalone-reader-intern-soft-smoke standalone-reader-intern-soft-loop-smoke standalone-reader-number-token-smoke standalone-reader-getenv-smoke standalone-selfhost-test standalone-selfhost-mt-test standalone-parallel-compile-test standalone-chunk-growth-test \
         standalone-reader-mod-float-smoke standalone-reader-match-data-smoke standalone-reader-current-time-smoke standalone-reader-require-provide-smoke \
         alloc-check-collect \
         nelisp-performance-gate nelisp-nelix-command-gate nelisp-native-artifact-gate nelisp-nelix-native-hot-gate \
@@ -638,6 +638,29 @@ standalone-reader-recursion-guard-smoke: standalone-reader
 	  windows*) bin=./target/nelisp.exe;; \
 	esac; \
 	timeout 180 $$bin --load tools/recursion-guard-smoke.el
+
+# The environment, read back through `getenv' from a child that was given
+# one.  Written on wip/uncommitted-2026-08-18 by whoever first noticed that
+# `getenv' answered nil, and brought over here with the fix rather than
+# rewritten -- a second smoke asking the same question would be a second
+# owner of the answer.
+#
+# It answered nil because nothing ever filled the list `getenv' reads: three
+# implementations of it in this tree, all reading an in-process alist, and no
+# startup step connecting that alist to the process.  Everything keyed on the
+# environment was therefore dead, the native-exec cache root among them --
+# it fell past XDG_CACHE_HOME and HOME to /tmp on every run.
+.PHONY: standalone-reader-getenv-smoke
+standalone-reader-getenv-smoke: standalone-reader
+	@mkdir -p target
+	@printf '%s\n' '(list (getenv "HOME") (getenv "NELISP_ENV_SMOKE"))' > target/standalone-reader-getenv-smoke.el
+	@out="$$(HOME=/tmp/nelisp-getenv-smoke-home NELISP_ENV_SMOKE=nelisp-getenv-smoke ./target/nelisp --load target/standalone-reader-getenv-smoke.el)"; \
+	if [ "$$out" = '("/tmp/nelisp-getenv-smoke-home" "nelisp-getenv-smoke")' ]; then \
+	  echo "[standalone-reader-getenv-smoke] PASS: --load -> $$out"; \
+	else \
+	  echo "[standalone-reader-getenv-smoke] FAIL: --load -> $$out (expected (\"/tmp/nelisp-getenv-smoke-home\" \"nelisp-getenv-smoke\"))"; \
+	  exit 1; \
+	fi
 
 standalone-reader-intern-soft-smoke: standalone-reader
 	@mkdir -p target
