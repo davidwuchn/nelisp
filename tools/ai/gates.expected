@@ -26,6 +26,7 @@ reader-surface-audit
 pkg-graph
 pkg-load-lists
 fallback-inventory
+bootstrap-contract
 
 # Developer-loop gates: useful, but not evidence about the whole tree.
 ert-focus?

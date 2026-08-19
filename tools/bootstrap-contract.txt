@@ -1,0 +1,16 @@
+# Terms every standalone bootstrap's generated source must contain.
+# One per line; '#' comments and blank lines ignored.  Matched literally.
+#
+# Add a line when a fact has to hold on every entry point, and the gate will
+# say which bootstrap does not have it yet.  Remove one only as a decision,
+# stating here why the bootstraps are allowed to disagree about it.
+#
+# nelisp-standalone--load-path-src
+#   Baked at build time; `require' cannot resolve a tree feature without it.
+#   Measured 2026-08-19: present in the REPL prelude only, so `--eval' saw 36
+#   load-path entries and `compile-elisp-artifact' saw none, and the same
+#   `(require 'nelisp-core-fileio)' answered ok or file-missing depending on
+#   the entry point.  Wiring it took three passes -- one bootstrap, then
+#   three, then the fourth -- which is the argument for asking mechanically.
+
+build-time load-path (nelisp-standalone--load-path-src)

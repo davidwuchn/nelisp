@@ -321,6 +321,17 @@ nl-violation-corpus:
 	  --eval '(setq load-prefer-newer t)' \
 	  -l tools/nl-violation-corpus.el
 
+# Bootstrap contract.  The standalone has several bootstraps, each
+# assembling its own source, and nothing checked that they agree -- so a
+# fact added to one was absent from the others and the same code answered
+# differently per entry point.  Measured 2026-08-19 three times over
+# (load-path, string-match-p, install-core-macros).  Bootstraps are
+# discovered, not listed, so a new one is checked from the day it exists.
+.PHONY: bootstrap-contract
+bootstrap-contract:
+	$(EMACS) --batch -Q -L lisp -L src -L scripts \
+	  -l tools/nelisp-bootstrap-contract.el
+
 # Silent-degradation inventory.  Counts error handlers that neither
 # record nor re-raise, and fails when a kind exceeds
 # tools/fallback-inventory-baseline.txt.  Same ratchet rule as above.
