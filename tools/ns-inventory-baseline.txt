@@ -102,7 +102,15 @@
 # not load.  Same shape as `compare-strings', `lsh', `string-to-number'
 # before it: the code was right and in the wrong place.  Byte-identical in
 # both files, so this is the benign same-definition kind.
-ns-collision 162
+# 162 -> 163 on 2026-08-20: `nelisp--check-string', the one place that
+# decides what "this argument must be a string" means.  Four string stubs and
+# five string functions were signalling `sequencep' -- what `length' checks --
+# where Emacs signals `stringp', so a handler written for the documented
+# condition never fired.  It lives in both files because the prelude and
+# lisp/nelisp-stdlib-misc.el each carry copies of the functions that use it;
+# byte-identical, so this is the benign same-definition kind and `make
+# ns-gate' is what keeps it that way.
+ns-collision 163
 # 97 -> 96 on 2026-08-19: `string-equal' no longer differs between the two
 # files -- the prelude's now signals for a non-string instead of falling
 # through to `equal', and the lisp copy was brought with it.  Ratcheted down

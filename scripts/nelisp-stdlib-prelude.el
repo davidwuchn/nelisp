@@ -298,6 +298,7 @@ from `(defvar X nil)'."
 ;; downwards forever -- except `(null list)' stopped it, so the answer came
 ;; back nil for every negative index instead.
 (defun nthcdr (n list)
+  (unless (integerp n) (signal 'wrong-type-argument (list 'integerp n)))
   (if (<= n 0) list (if (null list) nil (nthcdr (1- n) (cdr list)))))
 
 ;;; nelisp-stdlib-list.el --- Sweep 9 G1 list operations  -*- lexical-binding: t; -*-
@@ -1515,7 +1516,8 @@ wider than the one it replaces once the mapping leaves ASCII."
 (unless (fboundp 'message) (defun message (fmt &rest args) (if (null fmt) nil (apply #'format fmt args))))
 (unless (fboundp 'string-equal-ignore-case)
   (defun string-equal-ignore-case (a b) (string-equal (downcase a) (downcase b))))
-(unless (fboundp 'string-greaterp) (defun string-greaterp (a b) (string-lessp b a)))
+(unless (fboundp 'string-greaterp)
+  (defun string-greaterp (a b) (string-lessp b a)))
 (unless (fboundp 'string-version-lessp)
   (defun string-version-lessp (a b)
     (string-lessp (nelisp--check-string a) (nelisp--check-string b))))
@@ -4609,13 +4611,21 @@ Rust-min migration (= moved out of build-tool/src/eval/special_forms.rs)."
 (unless (fboundp 'unibyte-string-p)
   (defun unibyte-string-p (_obj) nil))
 (unless (fboundp 'string-as-multibyte)
-  (defun string-as-multibyte (s) s))
+  (defun string-as-multibyte (s)
+    "NeLisp stub: identity, but STRINGP is still checked."
+    (nelisp--check-string s)))
 (unless (fboundp 'string-as-unibyte)
-  (defun string-as-unibyte (s) s))
+  (defun string-as-unibyte (s)
+    "NeLisp stub: identity (= already UTF-8 bytes); STRINGP is still checked."
+    (nelisp--check-string s)))
 (unless (fboundp 'string-make-multibyte)
-  (defun string-make-multibyte (s) s))
+  (defun string-make-multibyte (s)
+    "NeLisp stub: identity, but STRINGP is still checked."
+    (nelisp--check-string s)))
 (unless (fboundp 'string-make-unibyte)
-  (defun string-make-unibyte (s) s))
+  (defun string-make-unibyte (s)
+    "NeLisp stub: identity, but STRINGP is still checked."
+    (nelisp--check-string s)))
 (unless (fboundp 'write-region)
   (defun write-region (start end filename &optional append _visit _lockname _mustbenew)
     (unless (stringp start)
@@ -4993,6 +5003,7 @@ No-ops on substrates without `nelisp--syscall-path-int' (the historic stub)."
 ;; thing they touch is `length' and `length' checks the weaker predicate.  A
 ;; handler written for the condition Emacs documents does not fire, which is
 ;; worse than the wrong message: the caller's recovery path never runs.
+;; Byte-identical to the prelude copy so `make ns-gate' polices the two.
 (unless (fboundp 'nelisp--check-string)
   (defun nelisp--check-string (x)
     (unless (stringp x) (signal 'wrong-type-argument (list 'stringp x)))

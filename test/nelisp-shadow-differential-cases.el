@@ -507,6 +507,23 @@
        (last t) (last '(1 2 3)) (last '(1 2 3) 2) (last nil)
        (condition-case e (capitalize nil) (error e)) (capitalize "ab cd")
        (condition-case e (mapcan #'list :key) (error e)) (mapcan #'list '(1 2)))
+
+ ;; Predicate names, from `make parity-fuzz': each of these answered rather
+ ;; than signalling, or signalled a predicate a handler would not match.
+ (list (condition-case e (elt 0 '(1 2)) (error e))
+       (condition-case e (elt 'foo 0) (error e))
+       (elt '(1 2 3) 1) (elt [1 2 3] 2) (elt "abc" 1) (elt nil 0)
+       (condition-case e (concat t) (error e))
+       (condition-case e (concat 'foo) (error e))
+       (concat "a" '(98) [99]) (concat nil) (concat)
+       (condition-case e (hash-table-count 0) (error e))
+       (hash-table-count (make-hash-table))
+       (condition-case e (string-as-multibyte 0) (error e))
+       (string-as-multibyte "ab")
+       (condition-case e (string-make-unibyte 0) (error e))
+       (condition-case e (nthcdr "" '(1)) (error e))
+       (condition-case e (nth "" '(1)) (error e))
+       (nthcdr 1 '(1 2 3)) (nth 1 '(1 2 3)) (nthcdr -1 '(1 2)))
 )
 
 ;;; nelisp-shadow-differential-cases.el ends here

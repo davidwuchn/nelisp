@@ -11,6 +11,7 @@
 ;; Kept in step with scripts/nelisp-stdlib-prelude.el, the copy the
 ;; standalone runs; `make ns-gate' reports any drift.
 (defun nthcdr (n list)
+  (unless (integerp n) (signal 'wrong-type-argument (list 'integerp n)))
   (if (<= n 0) list (if (null list) nil (nthcdr (1- n) (cdr list)))))
 
 ;;; nelisp-stdlib-list.el --- Sweep 9 G1 list operations  -*- lexical-binding: t; -*-

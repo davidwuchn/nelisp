@@ -3625,7 +3625,12 @@ argument (reachability + in-arena bounds checks).")
     ((:lit "puthash")          . (seq (wf_dirty) (nl_ht_put args out)))
     ((:lit "gethash")          . (nl_ht_get args out))
     ((:lit "remhash")          . (seq (wf_dirty) (nl_ht_rem args out)))
-    ((:lit "hash-table-count") . (wf_write_int out (nl_ht_count_table (nl_ht_data_slot (wf_arg_ptr args 0)))))
+    ;; This read a count out of whatever it was handed: (hash-table-count 0)
+    ;; answered 0, which is also what an empty table answers.
+    ((:lit "hash-table-count") . (let* ((h (wf_arg_ptr args 0)))
+                                   (if (= (bf_hash_table_p_raw h) 1)
+                                       (wf_write_int out (nl_ht_count_table (nl_ht_data_slot h)))
+                                     (bf_wrong_type_hash_table h))))
     ((:lit "maphash")          . (nl_ht_maphash args out))
     ;; --- M5 strings + format ---
     ((:lit "length")           . (bf_length_checked (wf_arg_ptr args 0) out))
@@ -3670,10 +3675,13 @@ argument (reachability + in-arena bounds checks).")
                                         (nl_u8_repeat ms (ptr-read-u64 (wf_arg_ptr args 0) 8)
                                                       (ptr-read-u64 (wf_arg_ptr args 1) 8))
                                         (mut-str-finalize ms out) 0)))
-    ((:lit "concat")           . (let* ((ms (alloc-bytes 32 8)))
-                                   (seq (mut-str-make-empty ms 16)
-                                        (m5_concat_walk ms args)
-                                        (mut-str-finalize ms out) 0)))
+    ((:lit "concat")           . (let* ((bad (m5_concat_first_bad args)))
+                                   (if (= bad 0)
+                                       (let* ((ms (alloc-bytes 32 8)))
+                                         (seq (mut-str-make-empty ms 16)
+                                              (m5_concat_walk ms args)
+                                              (mut-str-finalize ms out) 0))
+                                     (bf_wrong_type_sequencep bad))))
     ;; An out-of-range FROM/TO was clamped by the byte walk and came back as a
     ;; shorter slice: (substring "abc" 0 9) answered "abc" and
     ;; (substring "abc" 2 1) answered "".  Emacs signals both, and a caller
@@ -6896,6 +6904,16 @@ unresolved at link time."
       (if (>= i n) 1
         (seq (m5_push_char ms (ptr-read-u64 (vector-ref-ptr v i) 8))
              (m5_concat_chars_vec ms v (+ i 1) n))))
+    ;; `concat' takes SEQUENCES.  Anything else fell through to prin1 and came
+    ;; back as its printed form -- (concat t) answered "t" -- which is a
+    ;; string, so nothing downstream could tell it apart from a real result.
+    (defun m5_concat_first_bad (cur)
+      (if (= (ptr-read-u64 cur 0) 7)
+          (let* ((a (nl_cons_car_ptr cur)) (tg (ptr-read-u64 a 0)))
+            (if (if (= tg 0) 1 (if (= tg 7) 1 (if (= tg 8) 1 (if (= tg 5) 1 (if (= tg 6) 1 0)))))
+                (m5_concat_first_bad (nl_cons_cdr_ptr cur))
+              a))
+        0))
     (defun m5_concat_one (ms carp)
       (let* ((tg (ptr-read-u64 carp 0)))
         (if (= tg 0) 1
@@ -7288,7 +7306,12 @@ unresolved at link time."
               (seq (wf_write_nil out) 0)
             (if (if (= tg 8) (bf_ct_top_p seqp) 0)
                 (bf_ct_top_lookup seqp (ptr-read-u64 (wf_arg_ptr args 1) 8) out)
-              (bf_aref args out))))))
+              ;; `elt' takes a SEQUENCE, so a non-sequence is `sequencep' --
+              ;; delegating to `bf_aref' named `arrayp', which is the
+              ;; predicate for the array-only `aref' and a different claim.
+              (if (if (= tg 8) 1 (if (= tg 12) 1 (if (= tg 5) 1 (if (= tg 6) 1 0))))
+                  (bf_aref args out)
+                (bf_wrong_type_sequencep seqp)))))))
     ;; aset ARR IDX VAL: vector slot set (string aset not supported -> 0).
     ;; Writes VAL (possibly a box) into a PRE-EXISTING vector -> persistent
     ;; escape -> bump the mutation epoch (NO-ESCAPE gate).
@@ -7516,6 +7539,33 @@ unresolved at link time."
     ;; `substring' names THREE things in its error data -- the sequence, FROM
     ;; and TO -- where `aref' names two, and TO is reported as it was passed
     ;; (nil when omitted), not as the length it defaults to.
+    ;; A hash table is a cons whose car is an Int in this runtime -- the same
+    ;; test the prelude's `hash-table-p' uses, so the guard and the predicate
+    ;; cannot disagree about what a table is.
+    (defun bf_hash_table_p_raw (h)
+      (if (= (ptr-read-u64 h 0) 7)
+          (if (= (ptr-read-u64 (nl_cons_car_ptr h) 0) 2) 1 0)
+        0))
+    (defun bf_wrong_type_hash_table (offender)
+      (let* ((wbuf (alloc-bytes 24 1))
+             (cbuf (alloc-bytes 16 1))
+             (expected (alloc-bytes 32 8))
+             (nil-slot (alloc-bytes 32 8))
+             (data-tail (alloc-bytes 32 8)))
+        (seq
+         (ptr-write-u64 wbuf 0 8751669898145395319)
+         (ptr-write-u64 (+ wbuf 8) 0 7887324063363589488)
+         (ptr-write-u64 (+ wbuf 16) 0 7630437)
+         (nl_alloc_symbol wbuf 19 268435480)
+         (ptr-write-u64 cbuf 0 7089075026832613736)   ; "hash-tab"
+         (ptr-write-u64 (+ cbuf 8) 0 1882023276)      ; "le-p"
+         (nl_alloc_symbol cbuf 12 expected)
+         (wf_write_nil nil-slot)
+         (nelisp_cons_construct offender nil-slot data-tail)
+         (nelisp_cons_construct expected data-tail 268435512)
+         (ptr-write-u64 268435472 0 1)
+         (atomic-fetch-add 268435544 1)
+         1)))
     (defun bf_args_out_of_range3 (arr a b)
       (let* ((wbuf (alloc-bytes 24 1))
              (nil-slot (alloc-bytes 32 8))

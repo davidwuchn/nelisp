@@ -723,14 +723,27 @@ Only `utf-8' CODING is supported; others signal `error'."
   (defun multibyte-string-p (obj) "NeLisp stub: t for stringp." (stringp obj)))
 (unless (fboundp 'unibyte-string-p)
   (defun unibyte-string-p (_obj) "NeLisp stub: nil (= all strings multibyte)." nil))
+;; Byte-identical to the prelude copy so `make ns-gate' polices the two.
+(unless (fboundp 'nelisp--check-string)
+  (defun nelisp--check-string (x)
+    (unless (stringp x) (signal 'wrong-type-argument (list 'stringp x)))
+    x))
 (unless (fboundp 'string-as-multibyte)
-  (defun string-as-multibyte (s) "NeLisp stub: identity." s))
+  (defun string-as-multibyte (s)
+    "NeLisp stub: identity, but STRINGP is still checked."
+    (nelisp--check-string s)))
 (unless (fboundp 'string-as-unibyte)
-  (defun string-as-unibyte (s) "NeLisp stub: identity (= already UTF-8 bytes)." s))
+  (defun string-as-unibyte (s)
+    "NeLisp stub: identity (= already UTF-8 bytes); STRINGP is still checked."
+    (nelisp--check-string s)))
 (unless (fboundp 'string-make-multibyte)
-  (defun string-make-multibyte (s) "NeLisp stub: identity." s))
+  (defun string-make-multibyte (s)
+    "NeLisp stub: identity, but STRINGP is still checked."
+    (nelisp--check-string s)))
 (unless (fboundp 'string-make-unibyte)
-  (defun string-make-unibyte (s) "NeLisp stub: identity." s))
+  (defun string-make-unibyte (s)
+    "NeLisp stub: identity, but STRINGP is still checked."
+    (nelisp--check-string s)))
 
 ;; Buffer ops collapsed = NeLisp standalone has no buffer Sexp,
 ;; all I/O is string-based.  Stubs are no-op / nil.
