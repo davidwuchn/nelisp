@@ -147,7 +147,10 @@
 # does not load it, so a stub would shadow it on the host), and the count
 # followed.  Lowering it in the commit that shrank the surface is what the
 # ratchet notice asks for.
-ns-collision 177
+# 177 -> 178 on 2026-08-20: `equal-including-properties', absent from the
+# standalone and aliased to `equal' in both files -- there are no text
+# properties here, so the two are the same function.
+ns-collision 178
 # 97 -> 96 on 2026-08-19: `string-equal' no longer differs between the two
 # files -- the prelude's now signals for a non-string instead of falling
 # through to `equal', and the lisp copy was brought with it.  Ratcheted down

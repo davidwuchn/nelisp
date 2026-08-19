@@ -222,6 +222,10 @@ rounded -- said rather than implied."
     (unless (integerp end)
       (signal 'wrong-type-argument (list 'integer-or-marker-p end)))
     ""))
+;; No text properties in this runtime, so this is `equal' -- and the same
+;; `defalias' the lisp/ mirror uses, so `make ns-gate' sees one definition.
+(unless (fboundp 'equal-including-properties)
+  (defalias 'equal-including-properties 'equal))
 (unless (fboundp 'locate-file)
   (defun locate-file (filename path &optional suffixes _predicate)
     "Find FILENAME in PATH, trying each of SUFFIXES; nil when not found."
@@ -624,7 +628,13 @@ from `(defvar X nil)'."
 (defun natnump (x) (and (integerp x) (>= x 0)))
 (defun int-to-string (n) (number-to-string (nelisp--check-number n)))
 (defun prefix-numeric-value (arg)
-  (cond ((null arg) 1) ((eq arg '-) -1) ((consp arg) (car arg)) (t arg)))
+  ;; Emacs answers 1 for anything it does not recognise as a prefix -- a
+  ;; STRING included -- rather than handing the argument back.
+  (cond ((null arg) 1) ((eq arg '-) -1) ((consp arg) (car arg))
+        ((integerp arg) arg)
+        ;; Anything else is not a prefix argument, and Emacs answers 1 --
+        ;; handing the argument back made a string flow on as a "count".
+        (t 1)))
 
 ;; Doc 143 arithmetic (helper-free, via >/</- which are reader primitives).
 (defun max (x &rest rest)
@@ -1334,6 +1344,8 @@ Result keeps the trailing slash."
 (unless (fboundp 'seq-reverse) (defun seq-reverse (seq) (reverse seq)))
 (unless (fboundp 'seq-concatenate)
   (defun seq-concatenate (type &rest seqs)
+    (unless (memq type '(list vector string))
+      (signal 'error (list (format "Not a sequence type name: %S" type))))
     (let ((l (apply #'append (mapcar #'nelisp-seq--to-list seqs))))
       (cond ((eq type 'vector) (apply #'vector l)) ((eq type 'string) (apply #'string l)) (t l)))))
 (unless (fboundp 'seq-mapcat)
@@ -1385,12 +1397,21 @@ Result keeps the trailing slash."
 ;; cannot regress the callers that pass no REGEXP.
 (unless (fboundp 'string-trim-left)
   (defun string-trim-left (s &optional re)
+    ;; REGEXP is checked before STRING.  The predicate differs between the
+    ;; two: LEFT reports the cdr of a cons REGEXP as `listp' (it walks it),
+    ;; RIGHT reports the REGEXP itself as `sequencep'.  Measured; one rule
+    ;; for both is wrong for one of them.
+    (when re (unless (stringp re)
+               (signal 'wrong-type-argument
+                       (list 'listp (if (consp re) (cdr re) re)))))
     (nelisp--check-string s)
     (if (null re)
         (let ((i 0) (n (length s))) (while (and (< i n) (memq (aref s i) '(32 9 10 13))) (setq i (1+ i))) (substring s i))
       (if (string-match (concat "\\`\\(?:" re "\\)") s) (substring s (match-end 0)) s))))
 (unless (fboundp 'string-trim-right)
   (defun string-trim-right (s &optional re)
+    (when re (unless (stringp re)
+               (signal 'wrong-type-argument (list 'sequencep re))))
     (nelisp--check-string s)
     (if (null re)
         (let ((n (length s))) (while (and (> n 0) (memq (aref s (1- n)) '(32 9 10 13))) (setq n (1- n))) (substring s 0 n))
@@ -1810,7 +1831,13 @@ wider than the one it replaces once the mapping leaves ASCII."
 (unless (fboundp 'string<) (defun string< (a b) (string-lessp a b)))
 (unless (fboundp 'message) (defun message (fmt &rest args) (if (null fmt) nil (apply #'format fmt args))))
 (unless (fboundp 'string-equal-ignore-case)
-  (defun string-equal-ignore-case (a b) (string-equal (downcase a) (downcase b))))
+  (defun string-equal-ignore-case (a b)
+    ;; Check STRINGP first: routing through `downcase' named
+    ;; `char-or-string-p', which is a different claim from what Emacs makes
+    ;; about this function's arguments.
+    (nelisp--check-string a)
+    (nelisp--check-string b)
+    (string-equal (downcase a) (downcase b))))
 (unless (fboundp 'string-greaterp)
   (defun string-greaterp (a b) (string-lessp b a)))
 (unless (fboundp 'string-version-lessp)
@@ -2033,6 +2060,8 @@ reseeds from its characters; nil -> a full LCG value."
       (nreverse acc))))
 (unless (fboundp 'seq-into)
   (defun seq-into (seq type)
+    (unless (memq type '(list vector string))
+      (signal 'error (list (format "Not a sequence type name: %S" type))))
     (let ((l (nelisp-seq--to-list seq)))
       (cond ((eq type 'list) l)
             ((eq type 'vector) (apply #'vector l))
@@ -3966,6 +3995,8 @@ cons made them use nil as the usage line."
     "Conservative: return the BINDINGS whose variable appears anywhere in SEXP.
 A safe over-approximation of \"which bindings might be used\" — enough for the
 cl-generic method-arg liveness heuristic."
+  (unless (listp bindings) (signal 'wrong-type-argument (list 'listp bindings)))
+    (unless (listp bindings) (signal 'wrong-type-argument (list 'listp bindings)))
     (let ((res nil))
       (dolist (b bindings (nreverse res))
         (let ((sym (if (consp b) (car b) b))
@@ -5039,7 +5070,12 @@ Rust-min migration (= moved out of build-tool/src/eval/special_forms.rs)."
       (fset sym def))
     sym))
 (unless (fboundp 'fmakunbound)
-  (defun fmakunbound (sym) (nelisp--check-symbol sym) (fset sym nil) sym))
+  (defun fmakunbound (sym)
+    (nelisp--check-symbol sym)
+    ;; nil and t are constants: Emacs refuses to unbind them, and says so
+    ;; with `setting-constant' rather than a type error.
+    (when (memq sym '(nil t)) (signal 'setting-constant (list sym)))
+    (fset sym nil) sym))
 (unless (fboundp 'functionp)
   (defun functionp (x)
     ;; nil and t are symbols but can never be fbound, and `fboundp' signals
@@ -6503,6 +6539,8 @@ first `getenv' is not overwritten by the value the process started with."
   ;;     except under `file-error' / `end-of-file' / `user-error', which
   ;;     `princ' them.
   (defun error-message-string (error-descriptor)
+    (unless (or (stringp error-descriptor) (listp error-descriptor))
+      (signal 'wrong-type-argument (list 'listp error-descriptor)))
     (if (not (consp error-descriptor))
         (if (stringp error-descriptor) error-descriptor
           (format "%S" error-descriptor))

@@ -846,6 +846,24 @@
        (condition-case e (capitalize -1) (error e))
        (condition-case e (downcase 1.5) (error e))
        (condition-case e (upcase 1.5) (error e)))
+
+ ;; `string-trim-left' and `-right' disagree about which predicate a bad
+ ;; REGEXP names -- LEFT walks it and reports the cdr as `listp', RIGHT
+ ;; reports the regexp itself as `sequencep'.  One rule for both is wrong
+ ;; for one of them.
+ (list (condition-case e (error-message-string 1.5) (error e))
+       (error-message-string '(error "m"))
+       (condition-case e (macroexp--fgrep "x" :key) (error e))
+       (condition-case e (fmakunbound nil) (error e))
+       (condition-case e (fmakunbound t) (error e))
+       (prefix-numeric-value "e") (prefix-numeric-value 3) (prefix-numeric-value '(4))
+       (equal-including-properties 32 -1.5) (equal-including-properties "a" "a")
+       (condition-case e (string-equal-ignore-case "e" '(1 2 . 3)) (error e))
+       (string-equal-ignore-case "AB" "ab")
+       (condition-case e (seq-into '(1 2 . 3) -7) (error e)) (seq-into '(1 2) 'vector)
+       (condition-case e (seq-concatenate "x") (error e))
+       (condition-case e (string-trim-left '(1 2 3) '(1 . 2)) (error e))
+       (condition-case e (string-trim-right 7 2) (error e)))
 )
 
 ;;; nelisp-shadow-differential-cases.el ends here
