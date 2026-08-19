@@ -2614,6 +2614,21 @@ Minimal: PLACE is evaluated twice (cl-generic's places are side-effect free)."
 ;; history; cl-generic and other libs `push' onto it.  Reading it unbound is an
 ;; uncatchable abort in the reader — declare it special with a nil default.
 (defvar current-load-list nil)
+;; In Emacs these two are always BOUND -- nil when nothing is being loaded
+;; from a file, a path when there is one -- so `(or load-file-name
+;; buffer-file-name)', which is how a file asks where it lives, always reads.
+;; Here they were undeclared, so that idiom raised `void-variable' instead:
+;; `src/nelisp-cc-runtime.el' died on it at load time, and with it
+;; `nelisp-aot-compiler' and every native compile that needed it.  nil is a
+;; value Emacs itself produces for both, and the one call site in this tree
+;; says so in its own docstring ("nil at runtime").
+;;
+;; What is still missing is the other half of the contract: this runtime's
+;; `load' does not SET `load-file-name' while it loads.  Measured, not
+;; assumed -- `PROBE load-file-name during load' in tools/ai/runtime-probe.el
+;; reports which of the two answers this binary gives.
+(defvar load-file-name nil)
+(defvar buffer-file-name nil)
 (unless (fboundp 'closurep)
   ;; The reader represents a closure as a `(closure ENV ARGS BODY)' list.
   (defun closurep (object) (eq (car-safe object) 'closure)))

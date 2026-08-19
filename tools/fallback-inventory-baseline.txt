@@ -23,7 +23,13 @@
 
 silent-fallback 91
 ignore-errors   32
-bare-handler    34
+# 34 -> 32 on 2026-08-19: the two handlers in
+# `nelisp-artifact--ensure-native-compiler' now record the error instead of
+# discarding it.  Between them they had hidden a chain of six failures --
+# macroexp, seq, pcase, a reader defect, add-hook, load-file-name -- each of
+# which had to be found by bisecting a require by hand, while the manifest
+# said only "native compiler unavailable".
+bare-handler    32
 
 # 0, and it should stay 0.  `nl_dbg_note' has no enable flag on purpose --
 # a flag has to be turned off by whoever turned it on, and forgetting is

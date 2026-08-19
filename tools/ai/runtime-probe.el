@@ -129,6 +129,30 @@ probe in a lambda would have made the wrapper the thing measured."
                     "a file the reader cannot finish is loud"
                   "SILENT: `load' returns t for a file it abandoned")))
 
+;; Emacs binds `load-file-name' to the file it is loading, which is how a
+;; file finds out where it lives.  Undeclared here until 2026-08-19, so
+;; `(or load-file-name buffer-file-name)' raised `void-variable' and took
+;; `src/nelisp-cc-runtime.el' -- and the native compiler behind it -- down at
+;; load time.  Declared now; whether `load' also SETS it is the other half of
+;; the contract and this is the line that says which half this binary has.
+(ignore-errors
+  (write-region
+   "(setq probe-lfn-during-load (and (boundp 'load-file-name) load-file-name))\n"
+   nil "target/ai/probe-lfn-file.el"))
+(defvar probe-lfn-during-load :unset)
+(let* ((loaded (probe-safe (load "target/ai/probe-lfn-file.el" nil t)))
+       (seen probe-lfn-during-load))
+  (probe-report "load-file-name during load"
+                (cond ((eq (car loaded) 'err) "load signalled")
+                      ((eq seen :unset) "unbound")
+                      ((null seen) "nil")
+                      (t "set"))
+                (cond ((eq (car loaded) 'err) "could not measure it")
+                      ((eq seen :unset) "reading it is a void-variable")
+                      ((null seen)
+                       "a file cannot find its own path; `load' does not set it")
+                      (t "a file can find its own path"))))
+
 ;;;; Files ---------------------------------------------------------------
 
 (let* ((result (probe-safe (write-region "abc\n" nil "target/ai/probe-ascii.txt"))))

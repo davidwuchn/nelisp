@@ -1255,13 +1255,49 @@ standalone build pipeline."
     (and (fboundp 'nelisp-aot-compile-to-object)
          (fboundp 'nelisp-aot-compile-to-link-unit))))
 
+(defun nelisp-artifact--load-path-hit (err)
+  "Return the `load-path' directory holding the file ERR says is missing.
+`file-missing' names a FEATURE, and on its own that is the same message
+whether `load-path' was never wired or is wired and the feature still does
+not resolve.  Those are different bugs and the second one is the surprising
+one, so say which it is."
+  (let* ((feat (and (consp err) (eq (car err) 'file-missing) (cdr err)))
+         (name (and feat (symbolp feat) (symbol-name feat)))
+         (hit nil))
+    (when name
+      (dolist (dir load-path)
+        (when (and (not hit) (stringp dir)
+                   (file-exists-p (concat dir "/" name ".el")))
+          (setq hit dir))))
+    hit))
+
+(defvar nelisp-artifact--native-compiler-error nil
+  "Why the last `nelisp-artifact--ensure-native-compiler' call came back nil.
+Both attempts it makes used to discard their error, so \"native compiler
+unavailable\" was the whole account of a fallback that cost every hot defun
+its native code -- and the actual cause turned out to be a chain of six
+different failures, each of which had to be found by bisecting the require
+by hand.  Recorded here and reported in the manifest instead.")
+
 (defun nelisp-artifact--ensure-native-compiler ()
   "Ensure the native AOT compiler entry points are loaded."
+  (setq nelisp-artifact--native-compiler-error nil)
   (unless (and (fboundp 'nelisp-aot-compile-to-object)
                (fboundp 'nelisp-aot-compile-to-link-unit))
-    (condition-case nil
+    (condition-case err
         (require 'nelisp-aot-compiler)
-      (error nil)))
+      (error
+       ;; The load-path length travels with the message on purpose: a
+       ;; `file-missing' says nothing about WHICH of the two situations it is
+       ;; -- load-path never got wired, or it is wired and the feature still
+       ;; does not resolve -- and telling those apart by hand cost two build
+       ;; cycles the last time (B-1).
+       (setq nelisp-artifact--native-compiler-error
+             (let ((hit (nelisp-artifact--load-path-hit err)))
+               (format "require nelisp-aot-compiler: %s [load-path %d entries%s]"
+                       (error-message-string err)
+                       (length load-path)
+                       (if hit (format "; the file IS in %s" hit) "")))))))
   (unless (and (fboundp 'nelisp-aot-compile-to-object)
                (fboundp 'nelisp-aot-compile-to-link-unit))
     (let ((candidates (nelisp-artifact--native-compiler-candidates))
@@ -1270,11 +1306,19 @@ standalone build pipeline."
         (let* ((path (car candidates))
                (dir (file-name-directory path)))
           (when (and (file-exists-p path) dir)
-            (condition-case nil
+            (condition-case err
                 (setq loaded
                       (nelisp-artifact--load-native-compiler-from-path path))
-              (error nil))))
-        (setq candidates (cdr candidates)))))
+              (error
+               (setq nelisp-artifact--native-compiler-error
+                     (format "%s load %s: %s"
+                             (or nelisp-artifact--native-compiler-error "")
+                             path (error-message-string err)))))))
+        (setq candidates (cdr candidates)))
+      (unless (or loaded nelisp-artifact--native-compiler-error)
+        (setq nelisp-artifact--native-compiler-error
+              (format "no compiler among %d candidate path(s)"
+                      (length (nelisp-artifact--native-compiler-candidates)))))))
   (and (fboundp 'nelisp-aot-compile-to-object)
        (fboundp 'nelisp-aot-compile-to-link-unit)))
 
@@ -1412,7 +1456,10 @@ module."
         (not compiler-ready))
       (setq nelisp-artifact--last-native-compile-report
             (nelisp-artifact--native-unsupported-report
-             forms "native compiler unavailable"))
+             forms (if nelisp-artifact--native-compiler-error
+                       (format "native compiler unavailable: %s"
+                               nelisp-artifact--native-compiler-error)
+                     "native compiler unavailable")))
       nil)
      (t
       (setq stage-start (nelisp-artifact--profile-time))
