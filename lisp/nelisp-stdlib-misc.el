@@ -182,13 +182,15 @@ call time, so it is safe for FN to mutate TABLE during the walk
 ;; side effect (two consecutive `intern-soft' calls on the same
 ;; never-interned name both return nil; a name only starts returning its
 ;; symbol once something ELSE actually `intern's it).
-(defun intern-soft (name &optional _obarray)
+(defun intern-soft (name &optional obarray)
   "Return the symbol named NAME if it is interned, else nil.
 NeLisp has one global intern table and no first-class obarray object, so a
 non-nil OBARRAY is not honoured.  The probe is `nelisp--intern-lookup\', which
 reports a miss instead of interning -- falling back to `intern\', which never
 answers nil, is what made a `(while (setq x (intern-soft ...)))\' probe loop
 run forever."
+  (when (and obarray (not (obarrayp obarray)))
+    (signal 'wrong-type-argument (list 'obarrayp obarray)))
   (cond ((symbolp name) name)
         ((stringp name) (nelisp--intern-lookup name))
         (t (signal 'wrong-type-argument (list 'stringp name)))))

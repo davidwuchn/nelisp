@@ -85,6 +85,24 @@
 ;; Byte-identical to the lisp/nelisp-stdlib.el copy, so `make ns-gate'
 ;; polices the two rather than letting them drift.  It was void in the
 ;; standalone, so (sequencep 0) was `void-function' where Emacs answers nil.
+;; This runtime has one global intern table and no first-class obarray
+;; object, so nothing here can BE an obarray -- but Emacs still type-checks
+;; the argument, and answering for a vector hid the fact that OBARRAY is
+;; ignored (recorded in tools/partial-accepted.txt).
+(unless (fboundp 'obarrayp)
+  (defun obarrayp (_x) nil))
+(unless (fboundp 'locate-file)
+  (defun locate-file (filename path &optional suffixes _predicate)
+    "Find FILENAME in PATH, trying each of SUFFIXES; nil when not found."
+    (nelisp--check-string filename)
+    (let ((dirs path) (hit nil))
+      (while (and dirs (not hit))
+        (let ((dir (car dirs)))
+          (dolist (suf (or suffixes '("")))
+            (let ((cand (concat (file-name-as-directory (or dir ".")) filename suf)))
+              (when (and (not hit) (file-exists-p cand)) (setq hit cand)))))
+        (setq dirs (cdr dirs)))
+      hit)))
 (unless (fboundp 'sequencep)
   (defun sequencep (x)
     "Return t if X is a sequence (= nil, cons, string, or vector)."
@@ -1202,13 +1220,15 @@ Result keeps the trailing slash."
 ;; run forever.  This shadows nothing: `intern-soft' was in
 ;; lisp/nelisp-stdlib-misc.el and never reached the prelude, so the
 ;; standalone had no `intern-soft' at all.
-(defun intern-soft (name &optional _obarray)
+(defun intern-soft (name &optional obarray)
   "Return the symbol named NAME if it is interned, else nil.
 NeLisp has one global intern table and no first-class obarray object, so a
 non-nil OBARRAY is not honoured.  The probe is `nelisp--intern-lookup\', which
 reports a miss instead of interning -- falling back to `intern\', which never
 answers nil, is what made a `(while (setq x (intern-soft ...)))\' probe loop
 run forever."
+  (when (and obarray (not (obarrayp obarray)))
+    (signal 'wrong-type-argument (list 'obarrayp obarray)))
   (cond ((symbolp name) name)
         ((stringp name) (nelisp--intern-lookup name))
         (t (signal 'wrong-type-argument (list 'stringp name)))))
@@ -1579,7 +1599,10 @@ wider than the one it replaces once the mapping leaves ASCII."
 ;; local bindings a generator introduces are lexical: answer nil so the lexical
 ;; rewrite path is taken.  (Free references to genuinely-special vars are NOT
 ;; let-bindings, so they are untouched by this and still resolve dynamically.)
-(unless (fboundp 'special-variable-p) (defun special-variable-p (_symbol) nil))
+(unless (fboundp 'special-variable-p)
+  (defun special-variable-p (symbol)
+    (nelisp--check-symbol symbol)
+    nil))
 ;; Headless host frame: the standalone has no Emacs frame, so report the
 ;; controlling terminal's size from $COLUMNS/$LINES, falling back to the
 ;; conventional 80x24.  (Export the vars, or refine with a TIOCGWINSZ ioctl,
@@ -2164,7 +2187,13 @@ Doc 22 A6: arrays are iterated by index."
     (let ((orig seq))
       (while seq (funcall fn (car seq)) (setq seq (cdr seq))) orig)))
 
+(unless (fboundp 'nelisp--check-plist)
+  (defun nelisp--check-plist (x)
+    (unless (listp x) (signal 'wrong-type-argument (list 'plistp x)))
+    x))
+
 (defun plist-member (plist key &optional predicate)
+  (nelisp--check-plist plist)
   (let ((cur plist) (found nil))
     (if predicate
         (while (and cur (not found))
@@ -2176,6 +2205,13 @@ Doc 22 A6: arrays are iterated by index."
     found))
 
 (defun plist-get (plist key &optional predicate)
+  ;; Emacs's `plist-get' ANSWERS NIL for a malformed plist, while
+  ;; `plist-member' and `plist-put' signal `plistp'.  Checking all three "for
+  ;; consistency" would be consistent with each other and wrong against
+  ;; Emacs.  The early return is needed because the walk calls `car', and
+  ;; `car' signals `listp' now -- so leniency has to be explicit rather than
+  ;; inherited from a primitive that used to answer nil for anything.
+  (unless (listp plist) (setq plist nil))
   (let ((cur plist) (found nil) (value nil))
     (if predicate
         (while (and cur (not found))
@@ -2189,6 +2225,7 @@ Doc 22 A6: arrays are iterated by index."
     value))
 
 (defun plist-put (plist key value &optional predicate)
+  (nelisp--check-plist plist)
   (let ((cur plist) (tail nil))
     (if predicate
         (while (and cur (not tail))

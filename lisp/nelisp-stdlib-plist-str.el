@@ -1,60 +1,57 @@
 ;;; nelisp-stdlib-plist-str.el --- Sweep 9 G4 plist + simple string  -*- lexical-binding: t; -*-
 
+(unless (fboundp 'nelisp--check-plist)
+  (defun nelisp--check-plist (x)
+    (unless (listp x) (signal 'wrong-type-argument (list 'plistp x)))
+    x))
+
 (defun plist-member (plist key &optional predicate)
-  (let ((cur plist)
-        (found nil))
+  (nelisp--check-plist plist)
+  (let ((cur plist) (found nil))
     (if predicate
         (while (and cur (not found))
-          (if (funcall predicate (car cur) key)
-              (setq found cur)
+          (if (funcall predicate (car cur) key) (setq found cur)
             (setq cur (cdr (cdr cur)))))
       (while (and cur (not found))
-        (if (eq (car cur) key)
-            (setq found cur)
+        (if (eq (car cur) key) (setq found cur)
           (setq cur (cdr (cdr cur))))))
     found))
 
 (defun plist-get (plist key &optional predicate)
-  (let ((cur plist)
-        (found nil)
-        (value nil))
+  ;; Emacs's `plist-get' ANSWERS NIL for a malformed plist, while
+  ;; `plist-member' and `plist-put' signal `plistp'.  Checking all three "for
+  ;; consistency" would be consistent with each other and wrong against
+  ;; Emacs.  The early return is needed because the walk calls `car', and
+  ;; `car' signals `listp' now -- so leniency has to be explicit rather than
+  ;; inherited from a primitive that used to answer nil for anything.
+  (unless (listp plist) (setq plist nil))
+  (let ((cur plist) (found nil) (value nil))
     (if predicate
         (while (and cur (not found))
           (if (funcall predicate (car cur) key)
-              (progn
-                (setq found t)
-                (setq value (car (cdr cur))))
+              (progn (setq found t) (setq value (car (cdr cur))))
             (setq cur (cdr (cdr cur)))))
       (while (and cur (not found))
         (if (eq (car cur) key)
-            (progn
-              (setq found t)
-              (setq value (car (cdr cur))))
+            (progn (setq found t) (setq value (car (cdr cur))))
           (setq cur (cdr (cdr cur))))))
     value))
 
 (defun plist-put (plist key value &optional predicate)
-  (let ((cur plist)
-        (tail nil))
+  (nelisp--check-plist plist)
+  (let ((cur plist) (tail nil))
     (if predicate
         (while (and cur (not tail))
-          (if (funcall predicate (car cur) key)
-              (setq tail cur)
+          (if (funcall predicate (car cur) key) (setq tail cur)
             (setq cur (cdr (cdr cur)))))
       (while (and cur (not tail))
-        (if (eq (car cur) key)
-            (setq tail cur)
+        (if (eq (car cur) key) (setq tail cur)
           (setq cur (cdr (cdr cur))))))
-    (if tail
-        (progn (setcar (cdr tail) value) plist)
-      ;; absent: append "key value" by walking to the end
-      (if (null plist)
-          (cons key (cons value nil))
-        (let ((end plist))
-          (while (cdr (cdr end))
-            (setq end (cdr (cdr end))))
-          (setcdr (cdr end) (cons key (cons value nil)))
-          plist)))))
+    (if tail (progn (setcar (cdr tail) value) plist)
+      (if (null plist) (cons key (cons value nil))
+	(let ((end plist))
+	  (while (cdr (cdr end)) (setq end (cdr (cdr end))))
+	  (setcdr (cdr end) (cons key (cons value nil))) plist)))))
 
 ;; Kept in step with scripts/nelisp-stdlib-prelude.el, the copy the
 ;; standalone runs; `make ns-gate' reports any drift.

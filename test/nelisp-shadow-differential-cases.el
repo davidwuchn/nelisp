@@ -548,6 +548,22 @@
        (progn (defun zzf () 1) (fmakunbound 'zzf) (fboundp 'zzf))
        (let ((s 'zz-alias-a)) (defalias s 'car) (list (fboundp 'zz-alias-a) (fboundp 's)))
        (progn (defalias 'zz-alias-d (lambda (x) (* x 3))) (zz-alias-d 5)))
+
+ ;; `plistp', `obarrayp', and a `locate-file' that was simply absent.
+ ;; `plist-get' is deliberately the lenient one -- Emacs answers nil there
+ ;; and signals for the other two.
+ (list (condition-case e (plist-member "s" 'k) (error e))
+       (plist-get "s" 'k)
+       (condition-case e (plist-put "s" 'k 1) (error e))
+       (plist-member '(:a 1 :b 2) :b) (plist-get '(:a 1) :a) (plist-get '(:a 1) :z)
+       (plist-put (list :a 1) :b 2) (plist-get nil :a)
+       (condition-case e (special-variable-p "s") (error e))
+       (condition-case e (intern-soft "x" 65) (error e))
+       (intern-soft "car") (intern-soft "zz-never-zz")
+       (list (obarrayp 1) (obarrayp [1 2]))
+       (condition-case e (locate-file 7 [] 1) (error e))
+       (condition-case e (locate-file nil '("a")) (error e))
+       (locate-file "zz-no-such-file" '("/tmp")))
 )
 
 ;;; nelisp-shadow-differential-cases.el ends here

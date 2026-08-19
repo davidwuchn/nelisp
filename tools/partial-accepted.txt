@@ -38,8 +38,6 @@ ignore|scripts/nelisp-stdlib-prelude.el|_arguments|not yet reviewed
 insert-file-contents|lisp/nelisp-stdlib-misc.el|_path|not yet reviewed
 insert-file-contents|scripts/nelisp-stdlib-prelude.el|_args|not yet reviewed
 insert|lisp/nelisp-stdlib-misc.el|_args|not yet reviewed
-intern-soft|lisp/nelisp-stdlib-misc.el|_obarray|OBARRAY ignored: one global intern table, no first-class obarray object (Doc 163)
-intern-soft|scripts/nelisp-stdlib-prelude.el|_obarray|OBARRAY ignored: one global intern table, no first-class obarray object (Doc 163)
 json-serialize|scripts/nelisp-stdlib-prelude.el|_keys|not yet reviewed
 kill-process|scripts/nelisp-stdlib-prelude.el|_current-group|not yet reviewed
 load|lisp/nelisp-stdlib-misc.el|_must-suffix _nomessage _nosuffix|not yet reviewed
@@ -65,3 +63,4 @@ terpri|scripts/nelisp-stdlib-prelude.el|_stream|STREAM ignored, same reason as p
 write-region|lisp/nelisp-stdlib-misc.el|_lockname _mustbenew _visit|not yet reviewed
 write-region|scripts/nelisp-stdlib-prelude.el|_lockname _mustbenew _visit|not yet reviewed
 base64-decode-string|scripts/nelisp-stdlib-prelude.el|_base64url _ignore-invalid|accepted so a 3-argument call raises the type error Emacs raises rather than an arity error; the URL alphabet and invalid-char tolerance are not implemented
+locate-file|scripts/nelisp-stdlib-prelude.el|_predicate|PREDICATE ignored: the search is file-exists-p only, so a caller asking for executable-only or readable-only gets any existing file
