@@ -20,6 +20,13 @@
 ;;   `nelisp--install-primitives' hit `void-function' on every
 ;;   `eval-elisp-artifact'.  Recorded in a comment in the substrate it broke.
 ;;
+;;   `string-match-p' present in every bootstrap and MEANING something different
+;;   in one of them: the artifact command runtime defined it as five literal
+;;   regexps plus a substring search for the regexp text, so
+;;   `compile-runtime-image' rejected every well-formed runtime image
+;;   (2026-08-19).  This gate passed the whole time -- the name was there.  The
+;;   contract now requires the engine, not the name.
+;;
 ;;   `(nelisp--install-core-macros)' and the prelude macro capture present on
 ;;   the full-source route and missing from the cache route, so a
 ;;   `--flat-artifact-cache' replay died on the first `cl-defstruct'.  Recorded
@@ -40,10 +47,15 @@
 ;; change.
 ;;
 ;; What this deliberately does NOT do is diff the bootstraps against each
-;; other.  They differ for real reasons -- the REPL one carries the regexp
-;; matcher, the artifact ones carry the artifact runtime -- so a raw
-;; comparison is mostly noise, and a gate that reports mostly noise gets
-;; ignored.  A stated contract is the part that can be enforced.
+;; other.  They differ for real reasons -- the artifact ones carry the artifact
+;; runtime -- so a raw comparison is mostly noise, and a gate that reports
+;; mostly noise gets ignored.  A stated contract is the part that can be
+;; enforced.
+;;
+;; This comment used to name the regexp matcher as one of those real
+;; differences.  It was not one: every bootstrap that has a `string-match-p'
+;; needs it to mean the same thing, and the one that went without answered
+;; wrong instead of not at all.
 ;;
 ;; Run from the repo root:
 ;;   emacs --batch -Q -L lisp -L src -L scripts -l tools/nelisp-bootstrap-contract.el

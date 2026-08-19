@@ -12218,6 +12218,49 @@ runtime cache does not replay source file loads on every command invocation."
    (nelisp-standalone--artifact-runtime-file-src
     "scripts/nelisp-stdlib-prelude.el" inline)
    (nelisp-standalone--load-path-src)
+   ;; Doc 143 regexp matcher, wired the same way the source-command substrate
+   ;; below already wires it.  This substrate used to carry a `string-match-p'
+   ;; that recognised five literal regexps and answered every other one with a
+   ;; SUBSTRING SEARCH FOR THE REGEXP TEXT -- so
+   ;; `"\\`;;; nelisp-runtime-image source-v1\r?\n"' was looked for verbatim in
+   ;; the image and never found, and `compile-runtime-image' rejected every
+   ;; well-formed image it was given.  A matcher that guesses is worse than one
+   ;; that is absent: absent is a `void-function' at the call site.
+   (nelisp-standalone--artifact-runtime-file-src
+    "lisp/nelisp-stdlib-regexp.el" inline)
+   "(unless (fboundp 'string-match)\n"
+   "  (defun string-match (re s &optional start)\n"
+   "    (if (and (stringp re) (stringp s))\n"
+   "        (nlre-string-match re s start)\n"
+   "      (signal 'wrong-type-argument (list 'stringp (if (stringp re) s re))))))\n"
+   "(unless (fboundp 'string-match-p)\n"
+   "  (defun string-match-p (re s &optional start)\n"
+   "    (if (and (stringp re) (stringp s))\n"
+   "        (nlre-string-match re s start)\n"
+   "      (signal 'wrong-type-argument (list 'stringp (if (stringp re) s re))))))\n"
+   "(unless (fboundp 'match-beginning)\n"
+   "  (defun match-beginning (n) (nlre-match-beginning n)))\n"
+   "(unless (fboundp 'match-end)\n"
+   "  (defun match-end (n) (nlre-match-end n)))\n"
+   "(unless (fboundp 'match-string)\n"
+   "  (defun match-string (n &optional str)\n"
+   "    (let ((b (nlre-match-beginning n)) (e (nlre-match-end n)))\n"
+   "      (if (and str b e) (substring str b e) nil))))\n"
+   "(unless (fboundp 'match-data)\n"
+   "  (defun match-data (&optional _integers _reuse _reseat)\n"
+   "    (if (null nlre--last-caps)\n"
+   "        nil\n"
+   "      (let ((i 0) (n (length nlre--last-caps)) (out nil))\n"
+   "        (while (< i n)\n"
+   "          (let ((c (aref nlre--last-caps i)))\n"
+   "            (setq out (cons (if c (cdr c) nil) (cons (if c (car c) nil) out))))\n"
+   "          (setq i (1+ i)))\n"
+   "        (nreverse out)))))\n"
+   "(unless (fboundp 'save-match-data)\n"
+   "  (defmacro save-match-data (&rest body)\n"
+   "    `(let ((nlre--smd-saved nlre--last-caps))\n"
+   "       (unwind-protect (progn ,@body)\n"
+   "         (setq nlre--last-caps nlre--smd-saved)))))\n"
    (nelisp-standalone--artifact-runtime-file-src
     "src/nelisp-read.el" inline)
    (nelisp-standalone--artifact-runtime-file-src
@@ -12256,50 +12299,6 @@ runtime cache does not replay source file loads on every command invocation."
    "              ((consp tail) (setq tail (cdr tail)))\n"
    "              (t (setq ok nil) (setq done t))))\n"
    "      ok)))\n"
-   "(defun nelisp-standalone-artifact--contains (needle haystack)\n"
-   "  (let ((i 0) (n (length needle)) (h (length haystack)) (found nil))\n"
-   "    (while (and (not found) (<= (+ i n) h))\n"
-   "      (when (equal (substring haystack i (+ i n)) needle)\n"
-   "        (setq found t))\n"
-   "      (setq i (1+ i)))\n"
-   "    found))\n"
-   "(defun nelisp-standalone-artifact--all-hex-p (s)\n"
-   "  (let ((i 0) (n (length s)) (ok (> (length s) 0)) c)\n"
-   "    (while (and ok (< i n))\n"
-   "      (setq c (aref s i))\n"
-   "      (unless (or (and (>= c ?0) (<= c ?9))\n"
-   "                  (and (>= c ?a) (<= c ?f))\n"
-   "                  (and (>= c ?A) (<= c ?F)))\n"
-   "        (setq ok nil))\n"
-   "      (setq i (1+ i)))\n"
-   "    ok))\n"
-   "(defun nelisp-standalone-artifact--number-token-p (s)\n"
-   "  (let ((i 0) (n (length s)) (digits 0) (ok (> (length s) 0)) c)\n"
-   "    (while (and ok (< i n))\n"
-   "      (setq c (aref s i))\n"
-   "      (cond ((and (>= c ?0) (<= c ?9)) (setq digits (1+ digits)))\n"
-   "            ((or (= c ?+) (= c ?-) (= c ?.) (= c ?e) (= c ?E)) nil)\n"
-   "            (t (setq ok nil)))\n"
-   "      (setq i (1+ i)))\n"
-   "    (and ok (> digits 0))))\n"
-   "(unless (fboundp 'string-match-p)\n"
-   "  (defun string-match-p (regexp string &optional _start)\n"
-   "    (cond\n"
-   "     ((equal regexp \"[.eE]\")\n"
-   "      (or (nelisp-standalone-artifact--contains \".\" string)\n"
-   "          (nelisp-standalone-artifact--contains \"e\" string)\n"
-   "          (nelisp-standalone-artifact--contains \"E\" string)))\n"
-   "     ((equal regexp \"x86_64\\\\|amd64\")\n"
-   "      (or (nelisp-standalone-artifact--contains \"x86_64\" string)\n"
-   "          (nelisp-standalone-artifact--contains \"amd64\" string)))\n"
-   "     ((equal regexp \"aarch64\\\\|arm64\")\n"
-   "      (or (nelisp-standalone-artifact--contains \"aarch64\" string)\n"
-   "          (nelisp-standalone-artifact--contains \"arm64\" string)))\n"
-   "     ((equal regexp \"\\\\`[0-9a-fA-F]+\\\\'\")\n"
-   "      (nelisp-standalone-artifact--all-hex-p string))\n"
-   "     ((nelisp-standalone-artifact--contains \"[0-9]\" regexp)\n"
-   "      (nelisp-standalone-artifact--number-token-p string))\n"
-   "     (t (nelisp-standalone-artifact--contains regexp string)))))\n"
    "(unless (fboundp 'rename-file)\n"
    "  (defun rename-file (oldname newname &optional ok-if-already-exists)\n"
    "    (when (and (not ok-if-already-exists) (file-exists-p newname))\n"
@@ -12736,6 +12735,16 @@ same artifact command dispatch used by the full source path."
 	   "         (replayed (nelisp-standalone-artifact-cache--replay-module\n"
    "                    content artifact))\n"
    "         (last (car replayed)))\n"
+   ;; This bootstrap deliberately loads a minimum substrate and takes
+   ;; everything else from the replayed module, the one regexp engine
+   ;; included -- so the contract term is met here by asserting the fact
+   ;; rather than by loading 400 lines the cache route exists to skip.
+   ;; A cache built before the engine was wired replays without it, and the
+   ;; commands then run against whatever `string-match-p' they can find.
+   ;; That is how a five-regexp guesser stayed in service long enough to
+   ;; reject every well-formed runtime image.
+   "    (unless (fboundp 'nlre-string-match)\n"
+   "      (error \"artifact cache %s replayed without the regexp engine (nlre-string-match)\" artifact))\n"
 	   "    last))\n"
    (nelisp-standalone--artifact-command-cache-dispatch-src
     nelisp-standalone--artifact-runtime-cache-path)))
