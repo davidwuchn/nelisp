@@ -98,17 +98,35 @@
      (t nil))))
 
 (unless (fboundp 'nelisp-sys-access)
-  (defun nelisp-sys-access (path _mode)
-    "Return 0 when PATH exists in a minimal standalone runtime."
-    (if (and (fboundp 'file-exists-p) (file-exists-p path)) 0 -1)))
+  (defun nelisp-sys-access (path mode)
+    "Return 0 when PATH satisfies MODE in a minimal standalone runtime.
+
+MODE is honoured rather than ignored.  This read `(path _mode)\=' and
+answered 0 for any existing file, while the owner in
+packages/nelisp-sys/src/nelisp-sys.el checks `file-executable-p\=' for mode
+1 -- and every caller here passes 1.  A fallback that answers \"yes\" for a
+file that is not executable does not degrade gracefully, it gives a wrong
+answer: `nelisp-sys-executable-find\=' below trusts this result and would
+report a non-executable file as the program to run."
+    (if (pcase mode
+          ((or 1 'x 'exec 'executable)
+           (and (fboundp 'file-executable-p) (file-executable-p path)))
+          (_ (and (fboundp 'file-exists-p) (file-exists-p path))))
+        0
+      -1)))
 
 (unless (fboundp 'nelisp-sys-executable-find)
   (defun nelisp-sys-executable-find (command)
     "Return an executable path for COMMAND in minimal standalone runtimes."
     (unless (and (stringp command) (> (length command) 0))
       (signal 'wrong-type-argument (list 'stringp command)))
+    ;; The owner returns an ABSOLUTE path for a slash-containing command
+    ;; (nelisp-sys.el `expand-file-name\=' before the access check); this
+    ;; returned the caller's string unchanged, so the same call answered a
+    ;; relative path here and an absolute one there.
     (if (string-match-p "/" command)
-        (and (zerop (nelisp-sys-access command 1)) command)
+        (let ((path (expand-file-name command)))
+          (and (zerop (nelisp-sys-access path 1)) path))
       (let ((dirs (split-string (or (nelisp-sys-getenv "PATH") "")
                                 path-separator))
             found)
