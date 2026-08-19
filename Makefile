@@ -8,7 +8,7 @@
         standalone-eval standalone-eval-clean standalone-eval-test standalone-eval-j \
         standalone-reader standalone-reader-test standalone-reader-load-smoke standalone-reader-checked standalone-reader-fmt-smoke standalone-reader-prelude-equal-reload-smoke standalone-reader-declare-strip-smoke standalone-reader-nested-backquote-macro-smoke standalone-reader-derived-mode-shape-smoke standalone-reader-pcase-quote-literal-smoke standalone-reader-catch-throw-tag-smoke standalone-reader-cond-let-shape-smoke standalone-reader-ffi-smoke standalone-reader-tls-smoke standalone-reader-process-smoke standalone-reader-realrt-smoke standalone-reader-repl-smoke standalone-reader-prelude-test standalone-reader-intern-soft-smoke standalone-reader-intern-soft-loop-smoke standalone-reader-number-token-smoke standalone-reader-getenv-smoke standalone-selfhost-test standalone-selfhost-mt-test standalone-parallel-compile-test standalone-chunk-growth-test \
         standalone-reader-mod-float-smoke standalone-reader-match-data-smoke standalone-reader-current-time-smoke standalone-reader-require-provide-smoke \
-        alloc-check-collect standalone-reader-checked-soak standalone-reader-shadow-smoke \
+        alloc-check-collect standalone-reader-checked-soak standalone-reader-shadow-smoke standalone-reader-elt-smoke \
         nelisp-performance-gate nelisp-nelix-command-gate nelisp-native-artifact-gate nelisp-nelix-native-hot-gate \
         nelisp-nelix-operational-gate \
         nelisp-runtime-image-cache-gate nelisp-source-command-substrate-gate
@@ -579,6 +579,40 @@ standalone-reader-checked: standalone-reader
 	  echo "[standalone-reader-checked] FAIL: $$rep"; \
 	  exit 1; \
 	fi
+
+# `elt' on an empty sequence used to SEGFAULT the process: no bounds check
+# on the vector arm, and an else-arm that fell through to `str-byte-at' and
+# dereferenced nil.  Both crash inputs are pinned here because a crash is
+# the one failure a value-comparing test cannot report -- there is no value
+# to compare, only an exit code.
+.PHONY: standalone-reader-elt-smoke
+standalone-reader-elt-smoke: $(if $(wildcard target/nelisp target/nelisp.exe),,standalone-reader)
+	@bin=./target/nelisp; \
+	case "$(NELISP_STANDALONE_TARGET)$$NELISP_STANDALONE_TARGET" in \
+	  windows*) bin=./target/nelisp.exe;; \
+	esac; \
+	fail=0; \
+	for expr in '(elt nil 0)' '(elt nil 5)' '(elt nil -1)' '(elt (list) 0)' '(elt [] 0)'; do \
+	  out="$$($$bin --eval "$$expr" 2>&1)"; rc=$$?; \
+	  if [ "$$rc" -ne 0 ]; then \
+	    echo "[elt-smoke] FAIL $$expr exited $$rc (139 = SIGSEGV)"; fail=1; \
+	  elif [ "$$out" != "nil" ]; then \
+	    echo "[elt-smoke] FAIL $$expr -> $$out, expected nil"; fail=1; \
+	  else \
+	    echo "[elt-smoke] ok   $$expr -> nil"; \
+	  fi; \
+	done; \
+	for pair in '(elt (list 1 2 3) 1)|2' '(elt [10 20 30] 2)|30' '(elt "abc" 1)|98' '(elt "あい" 0)|12354' '(elt (list 1 2) 5)|nil'; do \
+	  expr="$${pair%%|*}"; want="$${pair##*|}"; \
+	  out="$$($$bin --eval "$$expr" 2>&1)"; rc=$$?; \
+	  if [ "$$rc" -ne 0 ] || [ "$$out" != "$$want" ]; then \
+	    echo "[elt-smoke] FAIL $$expr -> $$out (rc=$$rc), expected $$want"; fail=1; \
+	  else \
+	    echo "[elt-smoke] ok   $$expr -> $$out"; \
+	  fi; \
+	done; \
+	if [ "$$fail" -ne 0 ]; then exit 1; fi; \
+	echo "[elt-smoke] PASS"
 
 # A name the standalone provides natively AND the prelude redefines
 # unconditionally has two implementations, and which one runs depends on

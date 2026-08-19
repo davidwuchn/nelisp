@@ -7061,17 +7061,36 @@ unresolved at link time."
               (seq (wf_copy32 out (nl_cons_car_ptr node)) 0)
             (bf_elt_list_walk (nl_cons_cdr_ptr node) (- idx 1) out))
         (seq (wf_write_nil out) 0)))
+    ;; elt SEQ N.  Emacs defines this as `nth' for a list and `aref' for
+    ;; anything else, and that is now literally what it does -- because the
+    ;; hand-written version was `bf_aref' minus every repair `bf_aref' has
+    ;; had.  It had no bounds check, so `(elt [] 0)' read off the end of an
+    ;; empty vector; and its else-arm fell through to `str-byte-at', so
+    ;; `(elt nil 0)' dereferenced nil's offset-16 word as a string data
+    ;; pointer.  Both SEGFAULTed the process -- measured 2026-08-19, exit
+    ;; 139 on `--eval "(elt nil 0)"', where Emacs answers nil.
+    ;;
+    ;; That is the same fall-through the A14 note above records fixing in
+    ;; `bf_aref' for records, in the same words, on the same line of the
+    ;; same shape.  Delegating means the next repair to one is a repair to
+    ;; both, which is the only reason this file has two of them at all.
+    ;;
+    ;; Three things follow from the delegation beyond not crashing: a string
+    ;; index now yields the CHARACTER, as `aref' does and as Emacs does,
+    ;; rather than a raw UTF-8 byte; a record is indexed by `aref''s
+    ;; tag-at-0 rule instead of being read as a string; and an out-of-range
+    ;; array index answers nil rather than a fabricated 0.  Emacs signals
+    ;; `args-out-of-range' there and this still does not -- `bf_aref' has
+    ;; always answered nil, and making both signal is a separate change with
+    ;; its own callers to check.
     (defun bf_elt (args out)
       (let* ((seqp (wf_arg_ptr args 0))
-             (idx (ptr-read-u64 (wf_arg_ptr args 1) 8))
              (tg (ptr-read-u64 seqp 0)))
-        (cond
-         ((= tg 8)
-          (if (= (bf_ct_top_p seqp) 1)
-              (bf_ct_top_lookup seqp idx out)
-            (seq (wf_copy32 out (vector-ref-ptr seqp idx)) 0)))
-         ((= tg 7) (bf_elt_list_walk seqp idx out))
-         (t (wf_write_int out (str-byte-at seqp idx))))))
+        (if (= tg 7)
+            (bf_elt_list_walk seqp (ptr-read-u64 (wf_arg_ptr args 1) 8) out)
+          (if (if (= tg 8) (bf_ct_top_p seqp) 0)
+              (bf_ct_top_lookup seqp (ptr-read-u64 (wf_arg_ptr args 1) 8) out)
+            (bf_aref args out)))))
     ;; aset ARR IDX VAL: vector slot set (string aset not supported -> 0).
     ;; Writes VAL (possibly a box) into a PRE-EXISTING vector -> persistent
     ;; escape -> bump the mutation epoch (NO-ESCAPE gate).
