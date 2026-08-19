@@ -96,7 +96,13 @@
 # and simply in the wrong place.  All four are byte-identical across the two
 # files, so this is the benign same-definition kind and `make ns-gate' is
 # what keeps them that way.
-ns-collision 161
+# 161 -> 162 on 2026-08-20: `sequencep'.  It was void in the standalone --
+# (sequencep 0) answered `void-function' where Emacs answers nil -- and the
+# body already existed in lisp/nelisp-stdlib.el, which the standalone does
+# not load.  Same shape as `compare-strings', `lsh', `string-to-number'
+# before it: the code was right and in the wrong place.  Byte-identical in
+# both files, so this is the benign same-definition kind.
+ns-collision 162
 # 97 -> 96 on 2026-08-19: `string-equal' no longer differs between the two
 # files -- the prelude's now signals for a non-string instead of falling
 # through to `equal', and the lisp copy was brought with it.  Ratcheted down

@@ -1082,7 +1082,10 @@ from `(defvar X nil)'."
     (let ((acc nil)) (dolist (x (nelisp-seq--to-list seq) (nreverse acc)) (unless (member x acc) (push x acc))))))
 (unless (fboundp 'seq-min) (defun seq-min (seq) (apply #'min (nelisp-seq--to-list seq))))
 (unless (fboundp 'seq-max) (defun seq-max (seq) (apply #'max (nelisp-seq--to-list seq))))
-(unless (fboundp 'seq-reverse) (defun seq-reverse (seq) (reverse (nelisp-seq--to-list seq))))
+;; `reverse' is already type-preserving, and routing through a list threw
+;; that away: (seq-reverse "a") answered (97).  A caller that reversed a
+;; string got something `aref' still works on, which is why this survives.
+(unless (fboundp 'seq-reverse) (defun seq-reverse (seq) (reverse seq)))
 (unless (fboundp 'seq-concatenate)
   (defun seq-concatenate (type &rest seqs)
     (let ((l (apply #'append (mapcar #'nelisp-seq--to-list seqs))))
@@ -1476,6 +1479,8 @@ loop for the exponent (= no `expt' / `float' primitive needed)."
     "Title-case OBJ: upcase each word-initial letter, downcase the rest.
 Built from `concat\' rather than `aset\' because a mapped character can be
 wider than the one it replaces once the mapping leaves ASCII."
+    (unless (or (integerp obj) (stringp obj))
+      (signal 'wrong-type-argument (list 'char-or-string-p obj)))
     (if (integerp obj) (nelisp--case-up-char obj)
       (let ((out "") (i 0) (n (length obj)) (prev nil))
         (while (< i n)
@@ -1511,7 +1516,9 @@ wider than the one it replaces once the mapping leaves ASCII."
 (unless (fboundp 'string-equal-ignore-case)
   (defun string-equal-ignore-case (a b) (string-equal (downcase a) (downcase b))))
 (unless (fboundp 'string-greaterp) (defun string-greaterp (a b) (string-lessp b a)))
-(unless (fboundp 'string-version-lessp) (defun string-version-lessp (a b) (string-lessp a b)))
+(unless (fboundp 'string-version-lessp)
+  (defun string-version-lessp (a b)
+    (string-lessp (nelisp--check-string a) (nelisp--check-string b))))
 ;; Doc 160 breadth round 3: control / binding macros.
 ;; `interactive' is a command-declaration marker.  When a command is called
 ;; non-interactively (the only mode on the headless standalone), Emacs skips
@@ -1658,6 +1665,12 @@ reseeds from its characters; nil -> a full LCG value."
 (unless (fboundp 'string-replace)
   (defun string-replace (from to in)
     ;; literal (non-regexp) replace-all of FROM with TO in IN
+    ;; Emacs checks FROM, then IN, then TO -- and the offender it names is
+    ;; the first one that is wrong in THAT order.  Checking in argument order
+    ;; reported a different argument for the same call.
+    (nelisp--check-string from)
+    (nelisp--check-string in)
+    (nelisp--check-string to)
     (if (= (length from) 0) in
       (let ((out "") (i 0) (n (length in)) (fl (length from)))
         (while (< i n)
@@ -1759,8 +1772,12 @@ reseeds from its characters; nil -> a full LCG value."
       found)))
 (unless (fboundp 'last)
   (defun last (list &optional n)
-    (let ((len (length list)) (m (or n 1)))
-      (nthcdr (if (> len m) (- len m) 0) list))))
+    ;; Emacs answers the object itself for a non-list -- (last t) is t --
+    ;; because it walks with `cdr' rather than measuring first.  Measuring
+    ;; with `length' made it signal `sequencep' instead.
+    (if (not (consp list)) list
+      (let ((len (safe-length list)) (m (or n 1)))
+        (nthcdr (if (> len m) (- len m) 0) list)))))
 (unless (fboundp 'butlast)
   (defun butlast (list &optional n)
     (let* ((len (length list)) (m (or n 1)) (keep (- len m)) (acc nil) (i 0))
@@ -3255,6 +3272,8 @@ bodies (= Stage 4 follow-up).  Indent / edebug specs come back when
 (unless (fboundp 'mapcan)
   (defun mapcan (func sequence)
     "Apply FUNC to each element of SEQUENCE, `nconc' the results."
+    (unless (sequencep sequence)
+      (signal 'wrong-type-argument (list 'sequencep sequence)))
     (apply (function nconc) (mapcar func sequence))))
 (unless (fboundp 'remq)
   (defun remq (elt list)
@@ -4970,8 +4989,25 @@ No-ops on substrates without `nelisp--syscall-path-int' (the historic stub)."
 ;; number-to-string/substring/symbol-name are reader primitives, string-search
 ;; + the record accessors are added here.
 
+;; These signal `sequencep' where Emacs signals `stringp', because the first
+;; thing they touch is `length' and `length' checks the weaker predicate.  A
+;; handler written for the condition Emacs documents does not fire, which is
+;; worse than the wrong message: the caller's recovery path never runs.
+(unless (fboundp 'nelisp--check-string)
+  (defun nelisp--check-string (x)
+    (unless (stringp x) (signal 'wrong-type-argument (list 'stringp x)))
+    x))
+;; Byte-identical to the lisp/nelisp-stdlib.el copy, so `make ns-gate'
+;; polices the two rather than letting them drift.  It was void in the
+;; standalone, so (sequencep 0) was `void-function' where Emacs answers nil.
+(unless (fboundp 'sequencep)
+  (defun sequencep (x)
+    "Return t if X is a sequence (= nil, cons, string, or vector)."
+    (or (null x) (consp x) (stringp x) (vectorp x))))
 (unless (fboundp 'string-search)
   (defun string-search (needle haystack &optional start)
+    (nelisp--check-string needle)
+    (nelisp--check-string haystack)
     (let ((nl (length needle)) (hl (length haystack)) (i (or start 0)) (found nil))
       (if (= nl 0) i
         (while (and (not found) (<= (+ i nl) hl))
@@ -5478,9 +5514,16 @@ are numbers; `1.' is the integer 1."
 
 (unless (fboundp 'read-from-string)
   (defun read-from-string (string &optional start end)
+    (nelisp--check-string string)
     (let* ((base (or start 0))
            (s (if (or start end) (substring string base (or end (length string))) string))
            (r (nelisp--rd-one s 0 (length s))))
+      ;; Nothing but whitespace is `end-of-file' in Emacs, not a nil value at
+      ;; position 0.  Answering (nil . 0) means a caller reading forms in a
+      ;; loop never learns it reached the end, and reads nil for ever.
+      (when (and (null (car r)) (>= (cdr r) (length s))
+                 (not (string-match-p "[^ \t\n\r\f]" s)))
+        (signal 'end-of-file nil))
       (cons (car r) (+ base (cdr r))))))
 
 (unless (fboundp 'read)
@@ -6024,7 +6067,8 @@ first `getenv' is not overwritten by the value the process started with."
         (setq chunks (cons (apply 'concat (nreverse parts)) chunks)))
       (apply 'concat (nreverse chunks)))))
 (unless (fboundp 'base64-decode-string)
-  (defun base64-decode-string (string)
+  (defun base64-decode-string (string &optional _base64url _ignore-invalid)
+    (nelisp--check-string string)
     (let ((i 0)
           (len (length string))
           (vals-count 0)

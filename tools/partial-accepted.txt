@@ -64,3 +64,4 @@ string-trim|lisp/nelisp-stdlib-plist-str.el|_trim-left _trim-right|not yet revie
 terpri|scripts/nelisp-stdlib-prelude.el|_stream|STREAM ignored, same reason as princ
 write-region|lisp/nelisp-stdlib-misc.el|_lockname _mustbenew _visit|not yet reviewed
 write-region|scripts/nelisp-stdlib-prelude.el|_lockname _mustbenew _visit|not yet reviewed
+base64-decode-string|scripts/nelisp-stdlib-prelude.el|_base64url _ignore-invalid|accepted so a 3-argument call raises the type error Emacs raises rather than an arity error; the URL alphabet and invalid-char tolerance are not implemented

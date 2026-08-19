@@ -491,6 +491,22 @@
  (list (+ 1 2 3) (+) (- 10 3) (- 5) (* 2 3 4) (*) (/ 7 2) (/ 7.0 2)
        (mod -7 2) (% -7 2) (1+ 5) (1- 5) (1+ 1.5) (= 1 1.0) (< 1 2 3)
        (>= 3 2) (/= 1 2) (+ 1 2.5) (* 2 1.5))
+
+ ;; String functions signalled `sequencep' where Emacs signals `stringp',
+ ;; because the first thing they touch is `length'.  A handler written for
+ ;; the documented condition never fired.
+ (list (condition-case e (string-replace "a" '(1) ["b"]) (error e))
+       (string-replace "a" "b" "aaa")
+       (condition-case e (base64-decode-string 0 "x" "y") (error e))
+       (base64-decode-string "YWJj")
+       (condition-case e (read-from-string "") (error (car e)))
+       (condition-case e (read-from-string "  ") (error (car e)))
+       (read-from-string "(1 2)") (read-from-string "nil") (read-from-string "xx(1)" 2)
+       (list (sequencep 0) (sequencep "a") (sequencep '(1)) (sequencep [1]) (sequencep nil))
+       (seq-reverse "ab") (seq-reverse '(1 2)) (seq-reverse [1 2])
+       (last t) (last '(1 2 3)) (last '(1 2 3) 2) (last nil)
+       (condition-case e (capitalize nil) (error e)) (capitalize "ab cd")
+       (condition-case e (mapcan #'list :key) (error e)) (mapcan #'list '(1 2)))
 )
 
 ;;; nelisp-shadow-differential-cases.el ends here
