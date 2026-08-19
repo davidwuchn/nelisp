@@ -818,6 +818,17 @@
        (condition-case e (buffer-substring-no-properties '(1 2 3) "x") (error e))
        (condition-case e (plist-put -1 ["a" "b"] "e") (error e))
        (condition-case e (lsh [] 97) (error e)) (condition-case e (lsh 1 1.5) (error e)))
+
+ ;; `featurep' takes nil and t -- they ARE symbols, and rejecting them made
+ ;; a feature probe signal.  `file-missing' reports the ABSOLUTE name; a
+ ;; relative one leaves the reader guessing which directory the call was in.
+ (list (condition-case e (featurep t 1) (error e)) (featurep 'zz-no-feature)
+       ;; `insert-file-contents-literally' is NOT a case: in `emacs -Q' the
+       ;; scratch buffer is read-only, so Emacs raises `buffer-read-only'
+       ;; before it looks at the file.  The two disagree about which error
+       ;; comes first for a reason that has nothing to do with the file, and
+       ;; the file-missing data itself is checked by hand above.
+       )
 )
 
 ;;; nelisp-shadow-differential-cases.el ends here

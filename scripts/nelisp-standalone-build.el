@@ -8532,7 +8532,9 @@ Wave-2 (C) appends bf_ash (shl/sar compose) + bf_str_lt (byte-lexicographic).")
                           (bf_wrong_type_symbolp (wf_arg_ptr args 0))))
     ((:lit "fboundp")  . (bf_fboundp args env out))
     ((:lit "boundp")   . (bf_boundp args env out))
-    ((:lit "featurep") . (if (= (ptr-read-u64 (wf_arg_ptr args 0) 0) 4)
+    ((:lit "featurep") . (if (if (= (ptr-read-u64 (wf_arg_ptr args 0) 0) 4) 1
+                                 (if (= (ptr-read-u64 (wf_arg_ptr args 0) 0) 0) 1
+                                   (if (= (ptr-read-u64 (wf_arg_ptr args 0) 0) 1) 1 0)))
                             (bf_featurep args env out)
                           (bf_wrong_type_symbolp (wf_arg_ptr args 0))))
     ((:lit "provide")  . (bf_provide args env out))

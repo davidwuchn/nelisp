@@ -106,6 +106,11 @@
     file-readable-p file-directory-p file-regular-p directory-files
     start-process call-process make-process accept-process-output
     delete-process kill-process sleep-for sit-for
+    ;; reads STDIN when its stream is nil, which eats the rest of the
+    ;; driver file -- the case after it then goes unreported and reads as an
+    ;; abort.  `read-from-string' covers the same code with a stream that
+    ;; cannot do that.
+    read
     ;; interactive / display / buffer state
     message read-string read-from-minibuffer y-or-n-p
     insert erase-buffer current-buffer get-buffer-create set-buffer

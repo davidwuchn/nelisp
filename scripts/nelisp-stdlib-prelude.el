@@ -5177,7 +5177,10 @@ Rust-min migration (= moved out of build-tool/src/eval/special_forms.rs)."
   (defun insert-file-contents-literally (filename &rest args)
     (nelisp--check-string filename)
     (unless (file-exists-p filename)
-      (signal 'file-missing (list "Opening input file" "No such file or directory" filename)))
+      ;; Emacs reports the ABSOLUTE name -- a relative one leaves the
+      ;; reader guessing which directory the call was made from.
+      (signal 'file-missing (list "Opening input file" "No such file or directory"
+                                  (expand-file-name filename))))
     (apply #'insert-file-contents filename args)))
 (unless (fboundp 'processp)
   (defun processp (process)
