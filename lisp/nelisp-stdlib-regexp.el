@@ -207,14 +207,22 @@ Return (REVERSED-EXPANSION-NODES . newpos)."
          ;; to the default arm and matched the literal character `b'.
          ((eq d ?b) (cons (list :wordb nil) (+ i 2)))
          ((eq d ?B) (cons (list :wordb t) (+ i 2)))
+         ;; \< / \> word edges, \_< / \_> symbol edges.  None were parsed, so
+         ;; \< fell through to the default arm and matched a literal `<'.
+         ((eq d ?<) (cons (list :wordedge nil) (+ i 2)))
+         ((eq d ?>) (cons (list :wordedge t) (+ i 2)))
+         ((and (eq d ?_) (< (+ i 2) n) (eq (aref pat (+ i 2)) ?<))
+          (cons (list :symedge nil) (+ i 3)))
+         ((and (eq d ?_) (< (+ i 2) n) (eq (aref pat (+ i 2)) ?>))
+          (cons (list :symedge t) (+ i 3)))
          ((eq d ?s)
-          ;; \s- = whitespace; consume the class char if present
-          (let ((j (+ i 2)))
-            (when (< j n) (setq j (1+ j)))
-            (cons (list :space nil) j)))
+          (let ((j (+ i 2)) (class nil))
+            (when (< j n) (setq class (aref pat j)) (setq j (1+ j)))
+            (cons (list :syntax class nil) j)))
          ((eq d ?S)
-          (let ((j (+ i 2))) (when (< j n) (setq j (1+ j)))
-               (cons (list :space t) j)))
+          (let ((j (+ i 2)) (class nil))
+            (when (< j n) (setq class (aref pat j)) (setq j (1+ j)))
+            (cons (list :syntax class t) j)))
          ((eq d 96) (cons (list :bos) (+ i 2)))  ;; \` = beginning of string
          ((eq d 39) (cons (list :eos) (+ i 2)))  ;; \' = end of string
          (t (cons (list :lit d) (+ i 2))))))
@@ -294,9 +302,34 @@ Return (REVERSED-EXPANSION-NODES . newpos)."
         (t c)))
 
 (defun nlre--space-p (c) (or (= c 32) (= c 9) (= c 10) (= c 13) (= c 12)))
+;; `_' is a SYMBOL constituent, not a word constituent, in the standard
+;; syntax table -- (string-match "\\w" "_") is nil in Emacs.  Counting it as a
+;; word character also moved every \\b boundary: (string-match "\\bx" "_x")
+;; answered nil where Emacs answers 1.
 (defun nlre--word-p (c)
   (or (and (>= c ?a) (<= c ?z)) (and (>= c ?A) (<= c ?Z))
-      (and (>= c ?0) (<= c ?9)) (= c ?_)))
+      (and (>= c ?0) (<= c ?9))))
+
+(defun nlre--symbol-p (c)
+  (or (nlre--word-p c) (= c ?_)))
+
+;; `\\sC' matches a character whose SYNTAX CLASS is C.  The class character was
+;; parsed and thrown away, so every \\sC behaved as \\s- (whitespace) and every
+;; \\SC as its negation: (string-match "\\Sw" "a") answered 0 where Emacs
+;; answers nil.  A class this does not model matches nothing, which is wrong
+;; in a stated direction rather than in an arbitrary one.
+(defun nlre--syntax-p (class c)
+  (cond ((eq class ?w) (nlre--word-p c))
+        ((eq class ?_) (= c ?_))
+        ((or (eq class ?-) (eq class 32)) (nlre--space-p c))
+        ((eq class ?.) (and (> c 32) (< c 127)
+                            (not (nlre--word-p c)) (/= c ?_)
+                            (not (memq c '(?\( ?\) ?\[ ?\] ?{ ?} ?\" ?\\)))))
+        ((eq class ?\() (memq c '(?\( ?\[ ?{)))
+        ((eq class ?\)) (memq c '(?\) ?\] ?})))
+        ((eq class ?\") (= c ?\"))
+        ((eq class ?\\) (= c ?\\))
+        (t nil)))
 
 (defun nlre--set-in-ranges (ranges c)
   (let ((hit nil) (rs ranges))
@@ -324,6 +357,21 @@ Does NOT continue to any rest (used for one repetition)."
      ((eq tag :set) (and (< pos n) (nlre--set-match (nth 1 node) (nth 2 node) (aref s pos)) (1+ pos)))
      ((eq tag :word) (and (< pos n) (let ((w (nlre--word-p (aref s pos)))) (if (nth 1 node) (not w) w)) (1+ pos)))
      ((eq tag :space) (and (< pos n) (let ((w (nlre--space-p (aref s pos)))) (if (nth 1 node) (not w) w)) (1+ pos)))
+     ((eq tag :syntax)
+      (and (< pos n)
+           (let ((m (nlre--syntax-p (nth 1 node) (aref s pos))))
+             (if (nth 2 node) (not m) m))
+           (1+ pos)))
+     ((eq tag :wordedge)
+      (let ((before (and (> pos 0) (nlre--word-p (aref s (1- pos))) t))
+            (after (and (< pos n) (nlre--word-p (aref s pos)) t)))
+        (and (if (nth 1 node) (and before (not after)) (and after (not before)))
+             pos)))
+     ((eq tag :symedge)
+      (let ((before (and (> pos 0) (nlre--symbol-p (aref s (1- pos))) t))
+            (after (and (< pos n) (nlre--symbol-p (aref s pos)) t)))
+        (and (if (nth 1 node) (and before (not after)) (and after (not before)))
+             pos)))
      ((eq tag :wordb)
       (let* ((before (and (> pos 0) (nlre--word-p (aref s (1- pos))) t))
              (after (and (< pos n) (nlre--word-p (aref s pos)) t))

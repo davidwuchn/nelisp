@@ -436,6 +436,29 @@
        (condition-case e 5 (:success 1 2 (list 'v e)))
        (condition-case a (condition-case b 7 (:success (* b 2))) (:success (+ a 1)))
        (let ((e 99)) (list (condition-case e 5 (:success e)) e)))
+
+ ;; `regexp-opt' is Emacs's algorithm now, so the generated TEXT is compared,
+ ;; not just what it matches.
+ (list (regexp-opt '("ab" "ac")) (regexp-opt '("abc")) (regexp-opt '())
+       (regexp-opt '("a" "b" "c")) (regexp-opt '("a" "b" "c" "d" "e" "f"))
+       (regexp-opt '("a" "bc" "b" "cd")) (regexp-opt '("axz" "byz"))
+       (regexp-opt '("" "a" "ab")) (regexp-opt '("ab" "ac") t)
+       (regexp-opt '("ab" "ac") "\\(?1:") (regexp-opt '("if" "then" "else") 'words)
+       (regexp-opt '("car" "cdr") 'symbols)
+       (regexp-opt '("defun" "defvar" "defmacro" "defconst"))
+       (regexp-opt '("a." "a*" "a+")) (regexp-opt '("]" "^" "-" "a"))
+       (regexp-opt '("ad" "d")) (regexp-opt '("alpha" "alpine" "alps" "beta" "betamax"))
+       (regexp-opt '("0" "1" "2" "3" "7" "8" "9")))
+ ;; Word and symbol edges, and syntax classes: `_' is a symbol constituent,
+ ;; not a word one, which moves every \b boundary that touches it.
+ (list (string-match "\\bx" "_x") (string-match "\\bx" " x") (string-match "\\bx" "ax")
+       (string-match "\\w" "_") (string-match "\\w" "a")
+       (string-match "\\<x" "_x") (string-match "\\<x" " x") (string-match "\\<x" "ax")
+       (string-match "x\\>" "x ") (string-match "x\\>" "xa") (string-match "x\\>" "x_")
+       (string-match "\\_<x" "_x") (string-match "\\_<x" " x")
+       (string-match "x\\_>" "x_") (string-match "x\\_>" "x ")
+       (string-match "\\Sw" "a") (string-match "\\W" "a") (string-match "\\W" " ")
+       (string-match (regexp-opt '("if" "then") 'words) "x then y"))
 )
 
 ;;; nelisp-shadow-differential-cases.el ends here

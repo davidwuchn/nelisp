@@ -3275,11 +3275,141 @@ bodies (= Stage 4 follow-up).  Indent / edebug specs come back when
   ;; intervals with it (a void sort predicate is an uncatchable abort).
   (defun car-less-than-car (a b) (< (car a) (car b))))
 (unless (fboundp 'regexp-opt)
+  ;; This was a plain alternation: (regexp-opt '("ab" "ac")) produced
+  ;; "\\(?:ab\\|ac\\)" where Emacs produces "\\(?:a[bc]\\)".  Both match the same
+  ;; strings, so nothing failed -- but `regexp-opt' output is embedded in
+  ;; font-lock keyword tables and compared, and the two runtimes disagreeing
+  ;; on the TEXT of a generated regexp is a difference that surfaces far from
+  ;; here.  This is Emacs 30.1's algorithm: common prefix, then common suffix,
+  ;; then split on the first character, with runs of single characters folded
+  ;; into ranges.
+  ;;
+  ;; `regexp-opt-charset' uses a char-table in Emacs and a sorted list here.
+  ;; The output is identical because a char-table iterates in increasing code
+  ;; order, which is what the sort reproduces -- and a char-table would need
+  ;; `map-char-table', which this runtime does not have.
+  (defvar regexp-unmatchable "\\`a\\`"
+    "A regexp that never matches anything.")
+
+  (defun nelisp--common-prefix (strings)
+    "Longest common prefix of STRINGS -- `try-completion\' with an empty seed."
+    (if (null strings) ""
+      (let ((pre (car strings)))
+        (dolist (s (cdr strings))
+          (let ((i 0) (n (min (length pre) (length s))))
+            (while (and (< i n) (eq (aref pre i) (aref s i))) (setq i (1+ i)))
+            (setq pre (substring pre 0 i))))
+        pre)))
+
+  (defun nelisp--leading-run (prefix strings)
+    "The leading run of STRINGS that starts with PREFIX -- `all-completions\'."
+    (let ((out nil) (cur strings) (done nil))
+      (while (and cur (not done))
+        (if (string-prefix-p prefix (car cur))
+            (setq out (cons (car cur) out))
+          (setq done t))
+        (setq cur (cdr cur)))
+      (nreverse out)))
+
+  (defun regexp-opt-charset (chars)
+    "Return a regexp matching a character in CHARS."
+    (let ((bracket "") (dash "") (caret "") (rest nil))
+      (dolist (char chars)
+        (cond ((eq char ?\]) (setq bracket "]"))
+              ((eq char ?^) (setq caret "^"))
+              ((eq char ?-) (setq dash "-"))
+              (t (setq rest (cons char rest)))))
+      (setq rest (sort (delete-dups (nreverse rest)) (function <)))
+      (let ((charset "") (start -1) (end -2))
+        (dolist (c rest)
+          (if (= (1- c) end)
+              (setq end c)
+            (if (> end (+ start 2))
+                (setq charset (format "%s%c-%c" charset start end))
+              (while (>= end start)
+                (setq charset (format "%s%c" charset start))
+                (setq start (1+ start))))
+            (setq start c)
+            (setq end c)))
+        (when (>= end start)
+          (if (> end (+ start 2))
+              (setq charset (format "%s%c-%c" charset start end))
+            (while (>= end start)
+              (setq charset (format "%s%c" charset start))
+              (setq start (1+ start)))))
+        ;; `]\' must be first, `^\' must not be, `-\' must be first or last.
+        (let ((all (concat bracket charset caret dash)))
+          (cond ((= (length all) 0) regexp-unmatchable)
+                ((= (length all) 1) (regexp-quote all))
+                ((string-equal all "^-") "[-^]")
+                (t (concat "[" all "]")))))))
+
+  (defun regexp-opt-group (strings &optional paren lax)
+    "Return a regexp matching a string in the sorted list STRINGS."
+    (let* ((open-group (cond ((stringp paren) paren) (paren "\\(?:") (t "")))
+           (close-group (if paren "\\)" ""))
+           (open-charset (if lax "" open-group))
+           (close-charset (if lax "" close-group)))
+      (cond
+       ((= (length strings) 0) "")
+       ((= (length strings) 1)
+        (if (= (length (car strings)) 1)
+            (concat open-charset (regexp-quote (car strings)) close-charset)
+          (concat open-group (regexp-quote (car strings)) close-group)))
+       ((= (length (car strings)) 0)
+        (concat open-charset (regexp-opt-group (cdr strings) t t) "?" close-charset))
+       ((and (= (length (car strings)) 1)
+             (let ((strs (cdr strings)))
+               (while (and strs (/= (length (car strs)) 1)) (setq strs (cdr strs)))
+               strs))
+        (let ((letters nil) (rest nil))
+          (dolist (s strings)
+            (if (= (length s) 1)
+                (setq letters (cons (string-to-char s) letters))
+              (setq rest (cons s rest))))
+          (if rest
+              (concat open-group
+                      (regexp-opt-group (nreverse rest))
+                      "\\|" (regexp-opt-charset letters)
+                      close-group)
+            (concat open-charset (regexp-opt-charset letters) close-charset))))
+       (t
+        (let ((prefix (nelisp--common-prefix strings)))
+          (if (> (length prefix) 0)
+              (let* ((n (length prefix))
+                     (suffixes (mapcar (lambda (s) (substring s n)) strings)))
+                (concat open-group (regexp-quote prefix)
+                        (regexp-opt-group suffixes t t) close-group))
+            (let* ((sgnirts (mapcar (function reverse) strings))
+                   (xiffus (nelisp--common-prefix sgnirts)))
+              (if (> (length xiffus) 0)
+                  (let* ((n (- (length xiffus)))
+                         ;; Sorting matters for cases such as ("ad" "d").
+                         (prefixes (sort (mapcar (lambda (s) (substring s 0 n)) strings)
+                                         (function string-lessp))))
+                    (concat open-group
+                            (regexp-opt-group prefixes t t)
+                            (regexp-quote (reverse xiffus))
+                            close-group))
+                (let* ((char (substring (car strings) 0 1))
+                       (half1 (nelisp--leading-run char strings))
+                       (half2 (nthcdr (length half1) strings)))
+                  (concat open-group
+                          (regexp-opt-group half1)
+                          "\\|" (regexp-opt-group half2)
+                          close-group)))))))))) 
+
   (defun regexp-opt (strings &optional paren)
-    "Return a regexp matching any of STRINGS (un-optimised alternation).
-PAREN nil → shy group `\\(?:...\\)'; t → `\\(...\\)'; a string → that open paren."
-    (let ((open (cond ((stringp paren) paren) (paren "\\(") (t "\\(?:"))))
-      (concat open (mapconcat (function regexp-quote) strings "\\|") "\\)"))))
+    "Return a regexp matching any string in STRINGS, as Emacs builds it."
+    (let* ((open (cond ((stringp paren) paren) (paren "\\(")))
+           (re (if strings
+                   (regexp-opt-group
+                    (delete-dups (sort (copy-sequence strings) (function string-lessp)))
+                    (or open t) (not open))
+                 (concat (or open "\\(?:") regexp-unmatchable "\\)"))))
+      (cond ((eq paren (quote words)) (concat "\\<" re "\\>"))
+            ((eq paren (quote symbols)) (concat "\\_<" re "\\_>"))
+            (t re)))))
 ;; `kbd' and `key-description' were absent, so a caller got `void-function'.
 ;; This pair covers the modifier-prefixed and named keys that appear in key
 ;; sequences written as text; a full `read-kbd-macro' (angle-bracket function
