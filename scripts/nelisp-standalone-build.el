@@ -7390,7 +7390,28 @@ unresolved at link time."
                     (setq more 2))))
              (setq more 0)))))
       more)
+    ;; `load' reported success for a path that does not exist.  Not by
+    ;; ignoring an error: `nl_bi_read_file' hands back an EMPTY STRING for a
+    ;; file it could not open (`wf_copy32_strnil'), which is the same value an
+    ;; empty file produces, so nothing downstream could tell them apart.  The
+    ;; loop then parsed nothing, found no error, and wrote t.
+    ;;
+    ;; `bf_require' already worked around this by probing first, with a
+    ;; comment saying why; the probe belongs here instead, where every caller
+    ;; of `load' gets it.  NOERROR is `load''s SECOND argument (index 1) --
+    ;; `require''s is its third, which is what `bf_require_noerror_p' reads,
+    ;; so this cannot reuse that one.
+    (defun bf_load_noerror_p (args)
+      (if (= (bf_require_arg_present_p args 1) 1)
+          (if (= (ptr-read-u64 (wf_arg_ptr args 1) 0) 0) 0 1)
+        0))
     (defun bf_load (args env out)
+      (if (= (bf_require_file_readable_p (wf_arg_ptr args 0)) 1)
+          (bf_load_readable args env out)
+        (if (= (bf_load_noerror_p args) 1)
+            (seq (wf_write_nil out) 0)
+          (bf_require_file_missing (wf_arg_ptr args 0)))))
+    (defun bf_load_readable (args env out)
       ;; Doc 147 Phase 1.5 Group P — the reader parse pool is now a RAW
       ;; 32B-slot buffer (cap*32 bytes) instead of a GC-managed
       ;; Sexp::Vector.  `pool' IS the buffer base; slot N lives at
