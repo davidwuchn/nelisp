@@ -359,6 +359,16 @@ ns-inventory:
 # in the .PHONY block at the top of this file: that list has produced a
 # merge conflict on every integration branch so far, and a one-line
 # .PHONY beside its target costs nothing.
+#
+# Also scans src/ and lisp/, which the package scan does not reach, and
+# reports what they require that nothing in the tree provides -- split into
+# hard and optional, and ratcheted on the hard count against
+# tools/pkg-host-requires-baseline.txt.  Measured 2026-08-19: every host
+# library that has stopped the standalone runtime lived in those two
+# directories and was invisible to this gate.  The last of them,
+# `(require 'seq)' in one file, took the native compiler down with it and
+# reported "native compiler unavailable"; finding it meant bisecting a
+# require by hand.
 .PHONY: pkg-graph
 pkg-graph:
 	$(EMACS) --batch -Q -L packages/nelisp-pkg/src \
