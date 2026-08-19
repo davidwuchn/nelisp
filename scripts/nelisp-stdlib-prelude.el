@@ -3618,11 +3618,18 @@ Rust-min migration (= moved out of build-tool/src/eval/special_forms.rs)."
                    ((integerp end) (substring start 0 end))
                    (t (signal 'wrong-type-argument
                               (list '(or null integerp) end)))))
-           (rc (wrf filename bytes)))
-      (unless (= rc (length bytes))
+           (rc (wrf filename bytes))
+           ;; `wrf' reports bytes written; `length' counts characters.  The
+           ;; two agree only on ASCII, so this compared a short read against
+           ;; a correct one and signalled on every write that carried a
+           ;; multibyte character -- with the file on disk already right.
+           ;; The compiler writes its own object file through here, which is
+           ;; how an ASCII source still lost native compilation.
+           (expected (string-bytes bytes)))
+      (unless (= rc expected)
         (signal 'error
-                (list (format "write-region stub: wrf returned %S (expected %S) path=%s"
-                              rc (length bytes) filename)))))
+                (list (format "write-region stub: wrf returned %S (expected %S bytes) path=%s"
+                              rc expected filename)))))
 	    nil))
 (defvar nelisp--with-temp-file-contents nil)
 (unless (fboundp 'insert)
