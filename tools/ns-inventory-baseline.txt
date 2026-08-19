@@ -60,7 +60,13 @@
 # tightening is the better of the two, and it matches what the file already
 # does: `expand-file-name' itself is duplicated there on purpose, and both
 # copies now carry a note saying `make ns-gate' polices the drift.
-ns-collision 149
+# 149 -> 150 on 2026-08-19: `compare-strings'.  It existed only in
+# lisp/nelisp-stdlib-plist-str.el, which the standalone does not load, so it
+# was `void-function' at runtime -- the body was fine and simply in the
+# wrong place.  Moving a copy to the prelude makes it exist where it runs;
+# the two are byte-identical, so this is the benign same-definition kind and
+# ns-collision-divergent stays at 97.
+ns-collision 150
 ns-collision-divergent 97
 # 850 -> 851 on 2026-08-19: `nl-check-file-quoted-unsafe', the entry point
 # that reports the unsafe calls inside quoted forms.  Same situation as the

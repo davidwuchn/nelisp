@@ -588,14 +588,54 @@ from `(defvar X nil)'."
     (if (or (< idx 0) (= idx 0)) path (substring path 0 (+ dir-len idx)))))
 
 ;; Doc 143 common pure string/seq predicates + builders.
+;; IGNORE-CASE was accepted and ignored here too, so a case-insensitive
+;; prefix or suffix test answered nil for anything that differed only in
+;; case.  Same fold as `assoc-string', and the same reach.
 (unless (fboundp 'string-prefix-p)
-  (defun string-prefix-p (prefix string &optional _ignore-case)
+  (defun string-prefix-p (prefix string &optional ignore-case)
     (let ((pl (length prefix)))
-      (and (<= pl (length string)) (string= prefix (substring string 0 pl))))))
+      (and (<= pl (length string))
+           (let ((a (substring string 0 pl)))
+             (if ignore-case
+                 (string= (downcase prefix) (downcase a))
+               (string= prefix a)))))))
 (unless (fboundp 'string-suffix-p)
-  (defun string-suffix-p (suffix string &optional _ignore-case)
+  (defun string-suffix-p (suffix string &optional ignore-case)
     (let ((sl (length suffix)) (stl (length string)))
-      (and (<= sl stl) (string= suffix (substring string (- stl sl)))))))
+      (and (<= sl stl)
+           (let ((a (substring string (- stl sl))))
+             (if ignore-case
+                 (string= (downcase suffix) (downcase a))
+               (string= suffix a)))))))
+;; `compare-strings' existed only in lisp/nelisp-stdlib-plist-str.el, which
+;; the standalone does not load, so it was `void-function' here.  Same body,
+;; moved to where it runs.
+(unless (fboundp 'compare-strings)
+  (defun compare-strings (str1 start1 end1 str2 start2 end2 &optional ignore-case)
+    (let* ((s1 str1) (s2 str2)
+           (a (or start1 0))
+           (b (or end1 (length s1)))
+           (c (or start2 0))
+           (d (or end2 (length s2)))
+           (len1 (- b a))
+           (len2 (- d c))
+           (n (if (< len1 len2) len1 len2))
+           (i 0)
+           (result t))
+      (while (and (< i n) (eq result t))
+        (let* ((ch1 (aref s1 (+ a i)))
+               (ch2 (aref s2 (+ c i)))
+               (k1 (if ignore-case (downcase ch1) ch1))
+               (k2 (if ignore-case (downcase ch2) ch2)))
+          (cond
+           ((< k1 k2) (setq result (- (1+ i))))
+           ((> k1 k2) (setq result (1+ i)))
+           (t (setq i (1+ i))))))
+      (cond
+       ((not (eq result t)) result)
+       ((= len1 len2) t)
+       ((< len1 len2) (- (1+ n)))
+       (t (1+ n))))))
 (unless (fboundp 'char-equal)
   (defun char-equal (a b) (eq a b)))
 (unless (fboundp 'string-to-list)
@@ -1207,12 +1247,21 @@ reseeds from its characters; nil -> a full LCG value."
   object)
 (defun format-message (fmt &rest args)
   (apply #'format (cons fmt args)))
-(defun assoc-string (key alist &optional _case-fold)
-  (let ((k (if (symbolp key) (symbol-name key) key)) (found nil))
+;; CASE-FOLD was accepted and ignored -- the parameter was even named
+;; `_case-fold' to say so -- so `(assoc-string "ABC" (list "abc") t)'
+;; answered nil where Emacs answers "abc".  A caller that asked for a
+;; case-insensitive lookup got a case-sensitive one and no indication.
+;; Folding is `downcase', so it reaches as far as `downcase' does: ASCII
+;; today, which is where this was failing anyway.
+(defun assoc-string (key alist &optional case-fold)
+  (let* ((k0 (if (symbolp key) (symbol-name key) key))
+         (k (if case-fold (downcase k0) k0))
+         (found nil))
     (while (and alist (not found))
       (let* ((entry (car alist))
              (ek (if (consp entry) (car entry) entry))
-             (eks (if (symbolp ek) (symbol-name ek) ek)))
+             (eks0 (if (symbolp ek) (symbol-name ek) ek))
+             (eks (if case-fold (downcase eks0) eks0)))
         (if (string= k eks) (setq found entry) (setq alist (cdr alist)))))
     found))
 

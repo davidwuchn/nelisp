@@ -224,6 +224,33 @@
  ;; cannot be a fixed case in a file.
  (and (boundp 'default-directory) (stringp default-directory))
  (eq (aref default-directory (1- (length default-directory))) ?/)
+ ;; CASE-FOLD and IGNORE-CASE were accepted and ignored -- the parameters
+ ;; were even named `_case-fold' and `_ignore-case' to say so -- so a caller
+ ;; that asked for a case-insensitive lookup got a case-sensitive one and no
+ ;; indication.  It failed on plain ASCII, not just on the non-ASCII these
+ ;; still cannot fold.  `compare-strings' existed only in a file the
+ ;; standalone does not load, so it was void-function.
+ (assoc-string "abc" '("abc"))
+ (assoc-string "ABC" '("abc") t)
+ (assoc-string "ABC" '("abc") nil)
+ (assoc-string "A" '((a . 1)) t)
+ (assoc-string "KEY" '(("key" . 1) ("other" . 2)) t)
+ (assoc-string "A" '("a" "A") t)
+ (assoc-string "zzz" '("abc") t)
+ (string-prefix-p "AB" "abcd" t)
+ (string-prefix-p "ab" "abcd")
+ (string-prefix-p "" "abc")
+ (string-prefix-p "abcd" "abc")
+ (string-suffix-p "CD" "abcd" t)
+ (string-suffix-p "" "abc")
+ (compare-strings "ABC" nil nil "abc" nil nil t)
+ (compare-strings "abc" nil nil "abc" nil nil)
+ (compare-strings "abd" nil nil "abc" nil nil)
+ (compare-strings "xabcy" 1 4 "abc" nil nil)
+ (compare-strings "ab" nil nil "abc" nil nil)
+ (compare-strings "abc" nil nil "ab" nil nil)
+ (compare-strings "" nil nil "" nil nil)
+ (compare-strings "ABD" nil nil "abc" nil nil t)
  ;; maphash reaches every entry
  (let ((h (make-hash-table :test 'equal)) (n 0))
    (puthash "b" 2 h) (puthash "a" 1 h) (puthash "c" 3 h)
