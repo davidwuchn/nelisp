@@ -4467,11 +4467,25 @@ read files, and its contents are NUL-separated VAR=VAL.  Off Linux the read
 returns nil and this is exactly as it was, which is why the probe reports
 what it measured rather than assuming.
 
+Since 2026-08-19 this is the fallback rather than the source on Linux: the
+boot walker fills the alist from the entry stack before any Lisp runs, which
+the checked allocator needs (it has to decide whether to arm before the boot
+watermark freezes, long before a file can be read).  This function still
+matters where that walker is a no-op -- macOS today -- and as the path that
+runs when the alist arrives empty for any other reason.
+
 Entries already in `nelisp--environment' win, so a `setenv' before the
 first `getenv' is not overwritten by the value the process started with."
   (unless nelisp--environment-loaded
     (setq nelisp--environment-loaded t)
-    (let ((raw (and (fboundp 'nelisp--syscall-read-file)
+    ;; A non-empty alist here means the boot walker already published the
+    ;; real environment -- from the entry stack on Linux, from
+    ;; GetEnvironmentStringsW on Windows -- and reading /proc would only
+    ;; re-derive what is already present, since existing entries win
+    ;; anyway.  `setenv' loads before it writes, so a user entry can
+    ;; never be what this sees.
+    (unless nelisp--environment
+      (let ((raw (and (fboundp 'nelisp--syscall-read-file)
                     (nelisp--syscall-read-file "/proc/self/environ"))))
       (when (stringp raw)
         (let ((n (length raw)) (i 0) (start 0))
@@ -4492,7 +4506,7 @@ first `getenv' is not overwritten by the value the process started with."
                               (cons (cons name (substring entry (1+ split)))
                                     nelisp--environment)))))))
               (setq start (1+ i)))
-            (setq i (1+ i))))))))
+            (setq i (1+ i)))))))))
 
 (unless (fboundp 'getenv)
   (defun getenv (variable)

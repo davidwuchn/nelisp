@@ -527,9 +527,15 @@ standalone-reader-require-provide-smoke: standalone-reader
 #      explicit garbage-collect, then assert via the report:
 #      enable=1, armed=1, generation/checked-allocs/verified-frees > 0,
 #      redzone violations = 0, alloc-site id round-trips.
-# The runtime env probe is wired on the Windows standalone target; on
-# targets without runtime env inheritance enable via
-# `(nelisp--debug-switch 19)' instead (stamping + poison, no verify).
+# The runtime env probe is wired on the Windows and Linux standalone
+# targets.  macOS has no boot env yet, so enable there via
+# `(nelisp--debug-switch 19)' instead -- and note that switch stamps and
+# poisons but deliberately does NOT arm the verifier (arming mid-run
+# false-positives on blocks allocated before it), so run 3's armed=1
+# assertion cannot pass that way.  That is why this whole target could
+# only ever run on Windows until the Linux boot probe landed
+# (2026-08-19); measured on linux-x86_64 the same day, run 3 reports
+# 269820 verified frees and 0 redzone violations.
 # NB: pass NELISP_STANDALONE_TARGET as a make VARIABLE (not just env) —
 # MSYS make drops it from recipe environments otherwise:
 #   make standalone-reader-checked NELISP_STANDALONE_TARGET=windows-x86_64

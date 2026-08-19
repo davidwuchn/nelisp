@@ -29,11 +29,18 @@
   "tools/unsafe-inventory-baseline.txt")
 
 (defun nl-check-inventory--baseline ()
-  "Read the integer baseline, or nil when the file is absent."
+  "Read the integer baseline, or nil when there is no `unsafe-call\=' line.
+A named line rather than the whole buffer, so the file can carry the
+reason for its number the way tools/ns-inventory-baseline.txt and
+tools/fallback-inventory-baseline.txt carry theirs -- `string-to-number\='
+on the buffer would read 0 from any file that led with a comment, and
+a baseline of 0 is a different claim from an unreadable one."
   (when (file-exists-p nl-check-inventory--baseline-file)
     (with-temp-buffer
       (insert-file-contents nl-check-inventory--baseline-file)
-      (string-to-number (buffer-string)))))
+      (goto-char (point-min))
+      (when (re-search-forward "^unsafe-call +\\([0-9]+\\)" nil t)
+        (string-to-number (match-string 1))))))
 
 (defun nl-check-inventory-run ()
   "Scan lisp/ and scripts/, print the inventory, enforce the baseline."

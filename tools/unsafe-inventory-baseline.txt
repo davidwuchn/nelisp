@@ -1,1 +1,33 @@
-318
+# Unsafe-surface baseline (tools/nl-check-inventory.el, Doc 170 sec 4.3).
+# The count is calls to a `nl-safe-unsafe-primitives' name made outside an
+# `nl-unsafe' block, across lisp/ and scripts/.  Raise it only in the commit
+# that introduces the calls, and say here what they are.
+#
+# 318 -> 369 on 2026-08-19, and the two halves of that +51 are different
+# things, so they are recorded separately rather than as one number:
+#
+#   +10  new code.  `nelisp-standalone--reader-posix-env-forms' walks the
+#        Linux entry stack at boot to publish the process environment,
+#        which is what arms the Doc 170 sec 5 checked allocator -- see that
+#        section's 2026-08-19 note.  Raw loads are the whole point of the
+#        function: it reads argc, then a NULL-terminated envp vector, then
+#        NUL-terminated bytes, none of which exists as anything but memory
+#        at that moment.  Measured alone: 10 findings.
+#
+#   +41  code that was already there and that this gate could not see.  The
+#        two Linux arms of the per-target OS forms were quoted lists, and
+#        quoted forms are not scanned by design (the rule exists so the AOT
+#        grammar data is not mistaken for code).  Splicing the walker in
+#        turned them into backquotes, and 41 pre-existing calls -- 32 of
+#        them `syscall-direct' in nl_os_open_read and friends -- became
+#        visible.  Measured by taking the file at HEAD and changing nothing
+#        but those two quotes: 295 -> 336.
+#
+# The second half is the interesting one: this gate has been reporting the
+# per-target OS layer as clean because of how the layer is written, not
+# because of what it contains.  The macOS arm is still a quoted list, and
+# unquoting it as well takes the same file 346 -> 378, so 32 more calls are
+# still outside this number.  Fixing that means either scanning quoted
+# forms in these generators or making the arms backquotes too, and either
+# is its own change -- but nobody should read 369 as "369 is the surface".
+unsafe-call 369

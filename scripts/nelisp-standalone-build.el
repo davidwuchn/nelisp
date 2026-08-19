@@ -714,9 +714,12 @@ cross-unit call) before the freed payload is poisoned."
 `nelisp-standalone--alloc-check-env-name' and the value is exactly
 \"1\" it calls `nl_alloc_check_env_enable' (arena unit).  The name is
 compared with four unaligned u64 loads + one u32 load against
-compile-time UTF-16LE constants.  Linux / macOS standalone targets do
-not populate the runtime environment yet, so the probe is
-Windows-only; use `(nelisp--debug-switch 19)' there instead."
+compile-time UTF-16LE constants.  The Linux targets have their own
+byte-wise probe on the same boot path -- see
+`nelisp-standalone--reader-posix-env-forms'.  macOS still has neither,
+because its `nl_os_environ_init' is a no-op; use
+`(nelisp--debug-switch 19)' there, remembering it stamps without
+arming."
   (pcase-let ((`(,w0 ,w1 ,w2 ,w3 ,w4)
                (nelisp-standalone--alloc-check-env-name-words)))
     `((defun nl_alloc_check_env_probe (block off eqpos end)
@@ -737,6 +740,130 @@ Windows-only; use `(nelisp--debug-switch 19)' there instead."
                   0)
               0)
           0)))))
+
+(defun nelisp-standalone--alloc-check-env-name-byte-words ()
+  "Pack `nelisp-standalone--alloc-check-env-name' as little-endian bytes.
+Returns (U32-0 U32-1 U32-2 U32-3 U16-TAIL) covering the 18 ASCII
+characters: four u32 words of 4 bytes each, then one u16 of the final
+2.  The POSIX probe compares an entry against the variable name with
+five unaligned loads instead of 18 per-byte reads, the same trick the
+Windows probe plays on UTF-16LE code units.
+
+u32 rather than the u64 pair the byte count invites: a u64 whose top
+byte is an ASCII letter is about 4.7e18, past `most-positive-fixnum'
+(2.3e18), so the constant would reach the code generator as a bignum.
+Four u32 loads cost one more instruction and stay in fixnum range."
+  (let ((s nelisp-standalone--alloc-check-env-name)
+        (words nil))
+    (unless (= (length s) 18)
+      (error "alloc-check env name must be 18 chars, got %S" s))
+    (dotimes (w 4)
+      (let ((acc 0))
+        (dotimes (i 4)
+          (setq acc (logior acc (ash (aref s (+ (* w 4) i)) (* 8 i)))))
+        (push acc words)))
+    (push (logior (aref s 16) (ash (aref s 17) 8)) words)
+    (nreverse words)))
+
+(defun nelisp-standalone--reader-posix-env-forms ()
+  "Entry-stack environment walker + boot alloc-check probe for Linux.
+
+Doc 170 Stage 2 shipped the checked allocator with its verifier armed
+only by the boot environment probe, and that probe existed only on
+Windows because `nl_os_environ_init' was a `wf_write_nil' no-op
+everywhere else.  Measured on linux-x86_64 2026-08-19, with
+NELISP_ALLOC_CHECK=1 exported and `getenv' answering \"1\":
+
+  boot                        (enable 0 armed 0 ...)
+  after (nelisp--debug-switch 19)  (enable 1 armed 0 ...)
+
+so redzone verification had never run on this platform.  The manual
+switch enables stamping and deliberately does not arm the verifier --
+mid-run arming false-positives on blocks allocated before it -- which
+left no path to an armed verifier on Linux at all.  Doc 170 rates this
+allocator the highest bug-detection-per-effort item in the design, so
+the platform it cannot run on is the one where that is worth the least.
+
+Nothing new is needed to reach the environment here: the Linux entry
+stack already holds it.  At SP the kernel leaves argc, then argv[0..],
+a NULL, then envp[0..] and a second NULL, so envp[j] is at slot
+argc+2+j -- no syscall, no /proc, and the same `sp0' the argv walk
+above already takes.  The prelude's `getenv' reads /proc/self/environ,
+which works but is far too late: it runs after the boot watermark is
+frozen, and the arming decision has to be made before it.
+
+The macOS arm keeps the no-op.  Its `nl_os_argv_init' is not the
+identity -- it reconstructs argv through sysctl KERN_PROCARGS2 -- so
+`sp' there is not the vector this walk assumes, and guessing is how a
+walker reads whatever happens to be on the stack."
+  (pcase-let ((`(,w0 ,w1 ,w2 ,w3 ,w4)
+               (nelisp-standalone--alloc-check-env-name-byte-words)))
+    `(;; Offset of the first `=' in the NUL-terminated entry at PTR, or
+      ;; -1 when the entry ends without one.
+      (defun nl_posix_env_find_eq (ptr i)
+        (if (= (ptr-read-u8 ptr i) 0)
+            -1
+          (if (= (ptr-read-u8 ptr i) 61)
+              i
+            (nl_posix_env_find_eq ptr (+ i 1)))))
+      ;; (NAME . VALUE) for the entry at PTR, whose `=' is at EQPOS and
+      ;; whose NUL is at END.  `nl_alloc_str' copies an explicit length,
+      ;; so neither half needs a NUL-terminated copy first.
+      (defun nl_posix_env_pair (ptr eqpos end)
+        (let* ((name_sx (alloc-bytes 32 8))
+               (val_sx (alloc-bytes 32 8))
+               (cell (alloc-bytes 32 8)))
+          (seq
+           (nl_alloc_str ptr eqpos name_sx)
+           (nl_alloc_str (+ ptr eqpos 1) (- end (+ eqpos 1)) val_sx)
+           (nelisp_cons_construct name_sx val_sx cell)
+           cell)))
+      ;; Doc 170 Stage 2 boot probe, byte flavour.  Same shape as the
+      ;; Windows UTF-16LE probe: compare the 18-byte name, require the
+      ;; value to be exactly "1", then enable + arm.  Runs before the
+      ;; BOOT WATERMARK freeze, so every block the armed verifier can
+      ;; later meet on a free carries a guard.
+      (defun nl_alloc_check_env_probe_bytes (ptr eqpos end)
+        (if (= eqpos 18)
+            (if (= (ptr-read-u32 ptr 0) ,w0)
+                (if (= (ptr-read-u32 ptr 4) ,w1)
+                    (if (= (ptr-read-u32 ptr 8) ,w2)
+                        (if (= (ptr-read-u32 ptr 12) ,w3)
+                            (if (= (ptr-read-u16 ptr 16) ,w4)
+                                (if (= (- end eqpos) 2)
+                                    (if (= (ptr-read-u8 ptr 19) 49)
+                                        (nl_alloc_check_env_enable)
+                                      0)
+                                  0)
+                              0)
+                          0)
+                      0)
+                  0)
+              0)
+          0))
+      ;; Cons one (NAME . VALUE) per envp entry from slot I onwards.
+      ;; An entry with no `=' is skipped rather than stored under a
+      ;; whole-entry name: `getenv' would answer nil for it either way,
+      ;; and a bogus key in the alist is visible to `setenv'.
+      (defun nl_posix_environ_walk (sp i out)
+        (let ((ptr (ptr-read-u64 sp (* i 8))))
+          (if (= ptr 0)
+              (wf_write_nil out)
+            (let* ((end (nl_cstr_len ptr))
+                   (eqpos (nl_posix_env_find_eq ptr 0)))
+              (if (< eqpos 0)
+                  (nl_posix_environ_walk sp (+ i 1) out)
+                (let* ((pair (nl_posix_env_pair ptr eqpos end))
+                       (rest (alloc-bytes 32 8)))
+                  (seq
+                   (nl_alloc_check_env_probe_bytes ptr eqpos end)
+                   (nl_posix_environ_walk sp (+ i 1) rest)
+                   (nelisp_cons_construct pair rest out))))))))
+      (defun nl_os_environ_init (sp out)
+        (if (= sp 0)
+            (wf_write_nil out)
+          (nl_posix_environ_walk
+           sp (+ (logand (ptr-read-u64 sp 0) 4294967295) 2) out))))))
 
 (defun nelisp-standalone--target-uses-dynamic-arena-base-p (&optional target)
   "Return non-nil when TARGET stores chunk 0's runtime base in `nl_arena_base'."
@@ -13969,7 +14096,7 @@ boundary (Doc 151 Phase B):
               (nl_alloc_check_env_probe block off eqpos end)
               (nl_win_environ_walk block (+ end 1) rest)
               (nelisp_cons_construct pair rest result-slot)))))
-       (defun nl_os_environ_init (result-slot)
+       (defun nl_os_environ_init (_sp result-slot)
          (let* ((block (extern-call GetEnvironmentStringsW)))
            (seq
             (nl_win_environ_walk block 0 result-slot)
@@ -13979,7 +14106,10 @@ boundary (Doc 151 Phase B):
      ;; constants; see the generator's docstring).
      (nelisp-standalone--alloc-check-env-probe-forms)))
     ('macos-aarch64
-     '((defun nl_os_environ_init (result-slot) (wf_write_nil result-slot))
+     '(;; No-op on purpose: `nl_os_argv_init' below rebuilds argv through
+       ;; sysctl KERN_PROCARGS2, so SP is not the entry-stack vector the
+       ;; Linux walk reads (see `nelisp-standalone--reader-posix-env-forms').
+       (defun nl_os_environ_init (_sp result-slot) (wf_write_nil result-slot))
        (defun nl_darwin_skip_to_nul (ptr off)
          (if (= (ptr-read-u8 ptr off) 0)
              off
@@ -14083,7 +14213,7 @@ boundary (Doc 151 Phase B):
      ;; absent — use openat(56, AT_FDCWD=-100)/dup3(24)/pipe2(59)/clone(220,
      ;; flags=SIGCHLD)/ppoll(73).  Entry stack already has the Linux
      ;; argc/argv shape, so argv init is the identity, same as x86_64.
-     '((defun nl_os_environ_init (result-slot) (wf_write_nil result-slot))
+     `(,@(nelisp-standalone--reader-posix-env-forms)
        (defun nl_os_argv_init (sp) sp)
        (defun nl_os_open_read (path)
          (syscall-direct 56 -100 path 0 0 0 0))
@@ -14149,7 +14279,7 @@ boundary (Doc 151 Phase B):
        (defun nl_os_syscall_nr_fcntl () 25)
        (defun nl_os_syscall_nr_exit () 93)))
     (_
-     '((defun nl_os_environ_init (result-slot) (wf_write_nil result-slot))
+     `(,@(nelisp-standalone--reader-posix-env-forms)
        (defun nl_os_argv_init (sp) sp)
        (defun nl_os_open_read (path)
          (syscall-direct 2 path 0 0 0 0 0))
@@ -15133,7 +15263,7 @@ correctly."
         ;; GetEnvironmentStringsW-backed populator on Windows and a
         ;; `wf_write_nil' no-op (POSIX unchanged) everywhere else -- same
         ;; per-target-real/per-target-identity idiom as `nl_os_argv_init' above.
-        (nl_os_environ_init environ_list)
+        (nl_os_environ_init sp0 environ_list)
         (nl_env_set_value ctx environ_sym environ_list)
         ;; rec_max 100000.  RE-MEASURED 2026-08-16: the real ceiling on the 1 GiB
 ;; mmap'd native stack is ~136k rec levels, not the ~404k this comment used to

@@ -94,10 +94,19 @@ jobs:
         continue-on-error: true
         shell: bash
         run: make bench-aot-tco
-      - name: "Standalone NeLisp CHECKED allocator smoke (Doc 170 Stage 2 redzone/generation/leak report; Windows x86_64 -- the only standalone target with a runtime env probe, which NELISP_ALLOC_CHECK=1 arming needs)"
+      - name: "Standalone NeLisp CHECKED allocator smoke (Doc 170 Stage 2 redzone/generation/leak report; Windows x86_64)"
         if: runner.os == 'Windows'
         shell: bash
         run: make standalone-reader-checked NELISP_STANDALONE_TARGET=windows-x86_64
+      # Windows was the only lane that could run this, because arming the
+      # redzone verifier needs the boot env probe and `nl_os_environ_init'
+      # was a no-op off Windows.  It reads envp off the Linux entry stack
+      # since 2026-08-19, so the highest-value check in Doc 170 now runs on
+      # the platform most of the development happens on.
+      - name: "Standalone NeLisp CHECKED allocator smoke (Doc 170 Stage 2; Linux x86_64)"
+        if: runner.os == 'Linux'
+        shell: bash
+        run: make standalone-reader-checked
 
       # Placed before the ERT suite so a pre-existing test failure does
       # not skip the Mach-O toolchain-acceptance signal.
