@@ -345,6 +345,28 @@ bootstrap-contract:
 fallback-inventory:
 	$(EMACS) --batch -Q -l tools/nelisp-fallback-inventory.el
 
+# Does the classifier answer correctly?  Six handlers with known answers in
+# tools/fallback-inventory-fixture/, which the scanner is pointed at instead
+# of the tree.  Added 2026-08-19 with the first review of the aggregate,
+# which had been wrong in both directions and unnoticed: 23 handlers that
+# re-raise or print to stderr counted as silent, 18 that mention a logger
+# writing only under a profiling flag counted as innocent.
+.PHONY: fallback-inventory-selftest
+fallback-inventory-selftest:
+	@out="$$(NELISP_FALLBACK_INVENTORY_ROOTS=tools/fallback-inventory-fixture \
+	         $(EMACS) --batch -Q -l tools/nelisp-fallback-inventory.el 2>&1)"; \
+	echo "$$out" | grep -E '^(silent-fallback|ignore-errors|bare-handler|dbg-note)'; \
+	ok=1; \
+	echo "$$out" | grep -qE '^silent-fallback +3 ' || { echo "  expected silent-fallback 3"; ok=0; }; \
+	echo "$$out" | grep -qE '^ignore-errors +1 ' || { echo "  expected ignore-errors 1"; ok=0; }; \
+	echo "$$out" | grep -qE '^bare-handler +1 ' || { echo "  expected bare-handler 1"; ok=0; }; \
+	echo "$$out" | grep -qE '^dbg-note +0 ' || { echo "  expected dbg-note 0"; ok=0; }; \
+	if [ "$$ok" = 1 ]; then \
+	  echo "[fallback-inventory-selftest] PASS"; \
+	else \
+	  echo "[fallback-inventory-selftest] FAIL"; exit 1; \
+	fi
+
 # Doc 169 defect #6: namespace boundaries, checked instead of enforced
 # by a reader extension.  Counts nl-ns cross-file collisions, stray
 # definitions, and references through another file's `--' private

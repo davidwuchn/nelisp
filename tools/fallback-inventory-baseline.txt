@@ -21,7 +21,53 @@
 # counted apart for that reason.  bare-handler means `condition-case'
 # discarded the error object before anyone could record it.
 
-silent-fallback 91
+# 91 -> 48 on 2026-08-19, by reviewing the number rather than lowering it.
+# 91 was never 91 silent degradations; it was 91 handlers the classifier
+# could not read, in both directions:
+#
+#   23 re-raised or reported and were counted anyway.  13 in
+#   nelisp-jit-strategy.el call `nelisp--signal-wrong-type' /
+#   `nelisp--signal-arith', which are two-line wrappers around `signal' --
+#   they raise a MORE specific error than the one they caught.  The rest
+#   call this tree's own stderr printers: `nelisp-artifact--print-error',
+#   `nelisp--cli-print-error', `nelisp-runtime-image--print-error'.  All
+#   five names were verified to reach `signal' or stderr before being added
+#   to the lists; none was taken on its name.
+#
+#   Going the other way, `nelisp-artifact--profile-log' was IN the recording
+#   list while writing only when `nelisp-artifact-profile-stages' is set,
+#   which it is not in a normal run -- so 18 handlers were being called
+#   innocent for mentioning a logger that says nothing.  And five names in
+#   that list (nl-safe-report, nl-safe-report-record, nelisp--log,
+#   nelisp-log, nelisp--warn) are not defined anywhere in this tree, so they
+#   could never have matched: an intention, not a measurement.
+#
+# What the remaining 48 are, having looked at every one:
+#
+#   ~30 are fast-path/slow-path falls where the slow path gives the same
+#   answer -- a faster reader falling back to `read', a manifest fast parse
+#   falling back to the full one, `find(1)' falling back to an elisp walk.
+#   They are silent about WHICH path ran, which is a real cost when the fast
+#   one is wrong, and no cost otherwise.
+#
+#   ~10 return nil as a documented contract: `--try-compile-defun' answers
+#   nil for "did not compile", `load-source-file' answers nil for an invalid
+#   or stale artifact so the caller reads source.  The nil IS the answer.
+#
+#   The rest are the actionable kind, and the founding case is among them:
+#   a native compile falling back to bytecode.  That one now records its
+#   reason (bare-handler 34 -> 32, same day) and the manifest carries it.
+#
+# Not covered: this scans lisp/ scripts/ tools/.  Adding src/ takes
+# silent-fallback to 80, ignore-errors to 45 and bare-handler to 34 --
+# measured, not estimated -- and most of those 32 build a
+# `(list :status 'fail :error ...)' the classifier cannot see either.  The
+# same review has to be done there before the roots can move, or the number
+# goes back to being one nobody has read.
+#
+# To read them rather than count them:
+#   NELISP_FALLBACK_INVENTORY_LIST=silent-fallback make fallback-inventory
+silent-fallback 48
 ignore-errors   32
 # 34 -> 32 on 2026-08-19: the two handlers in
 # `nelisp-artifact--ensure-native-compiler' now record the error instead of

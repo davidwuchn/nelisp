@@ -67,18 +67,89 @@ can check.")
 
 (defconst nelisp-fallback-inventory--recording-functions
   '(message princ warn display-warning
+    ;; This tree's own way of saying something went wrong.  Verified to
+    ;; reach stderr unconditionally, 2026-08-19: `--print-error' calls
+    ;; `--write-stderr', which calls `nelisp--write-stderr-line' or prints
+    ;; to `external-debugging-output'.
+    nelisp-artifact--print-error
+    nelisp--cli-print-error
+    nelisp-runtime-image--print-error
+    nelisp-artifact--write-stderr
+    nelisp--write-stderr-line
+    ;; Records into a variable that is reported later -- the native
+    ;; dispatch report, and the reason the manifest gives for a fallback.
     nelisp-artifact--note-native-dispatch
-    nelisp-artifact--profile-log
-    nl-safe-report nl-safe-report-record
-    nelisp--log nelisp-log nelisp--warn)
-  "Names whose presence in a handler counts as leaving a trace.")
+    nelisp-artifact--native-compiler-error)
+  "Names whose presence in a handler counts as leaving a trace.
+
+Reviewed 2026-08-19, the first time anything in this inventory was looked
+at rather than counted.  Five names were removed:
+
+  nelisp-artifact--profile-log  writes only when `nelisp-artifact-profile-
+    stages' is non-nil, which it is not in a normal run.  A handler that
+    mentions it leaves no trace where it matters, and this list was calling
+    18 such handlers innocent.
+
+  nl-safe-report, nl-safe-report-record, nelisp--log, nelisp-log,
+  nelisp--warn  are not defined anywhere in this tree.  Matching is by
+    exact symbol, so they could never have exonerated anything: they were
+    an intention rather than a measurement, and a list of names nobody
+    checked is the same failure this gate exists to count.")
 
 (defconst nelisp-fallback-inventory--reraising-functions
-  '(signal error throw)
+  '(signal error throw
+    ;; Thin wrappers around `signal' in lisp/nelisp-jit-substrate.el.  A
+    ;; handler calling one of these raises a MORE specific error than the
+    ;; one it caught; counting it as a silent fallback was wrong in 13
+    ;; places, all in nelisp-jit-strategy.el.
+    nelisp--signal-wrong-type
+    nelisp--signal-arith)
   "Names whose presence in a handler counts as not swallowing the error.")
 
 (defconst nelisp-fallback-inventory--kinds
   '(silent-fallback ignore-errors bare-handler dbg-note))
+
+(defvar nelisp-fallback-inventory--current-file nil
+  "File being scanned, for the site listing.")
+
+(defvar nelisp-fallback-inventory--current-toplevel nil
+  "Name of the top-level form being scanned, for the site listing.")
+
+(defvar nelisp-fallback-inventory--sites nil
+  "Collected (KIND FILE TOPLEVEL CONDITION) records, newest first.")
+
+(defun nelisp-fallback-inventory--listing-p ()
+  "Return non-nil when the run should print one line per finding.
+A count is what a gate needs and the wrong thing to hand a person: 91 is
+not reviewable, and the number sat unreviewed for exactly that reason.
+Same classifier either way -- a second implementation of \"what counts\"
+would answer a different question than the gate does.
+
+  NELISP_FALLBACK_INVENTORY_LIST=1 make fallback-inventory
+  NELISP_FALLBACK_INVENTORY_LIST=silent-fallback make fallback-inventory"
+  (let ((v (getenv "NELISP_FALLBACK_INVENTORY_LIST")))
+    (and v (> (length v) 0) v)))
+
+(defun nelisp-fallback-inventory--note-site (kind form)
+  "Record a KIND finding at FORM for the listing."
+  (when (nelisp-fallback-inventory--listing-p)
+    (push (list kind
+                nelisp-fallback-inventory--current-file
+                nelisp-fallback-inventory--current-toplevel
+                form)
+          nelisp-fallback-inventory--sites)))
+
+(defun nelisp-fallback-inventory--toplevel-name (form)
+  "Return a short name for top-level FORM, or nil."
+  (when (consp form)
+    (let ((head (car form))
+          (name (nth 1 form)))
+      (cond
+       ((and (symbolp name) name (memq head '(defun defmacro defsubst defvar
+                                              defconst defcustom cl-defun
+                                              cl-defmacro define-error)))
+        (format "%s %s" head name))
+       ((symbolp head) (format "%s" head))))))
 
 (defun nelisp-fallback-inventory--baseline ()
   "Read the baseline as an alist of (KIND . COUNT), or nil when absent."
@@ -122,20 +193,24 @@ can check.")
       (cond
        ((memq head '(ignore-errors with-demoted-errors))
         (unless (nelisp-fallback-inventory--traced-p form)
+          (nelisp-fallback-inventory--note-site 'ignore-errors form)
           (puthash 'ignore-errors (1+ (gethash 'ignore-errors counts 0)) counts)))
        ;; Only a CALL counts.  In `(defun nl_dbg_note ...)' the name is the
        ;; second element, not the head, so the definition is not its own
        ;; finding.
        ((eq head 'nl_dbg_note)
+        (nelisp-fallback-inventory--note-site 'dbg-note form)
         (puthash 'dbg-note (1+ (gethash 'dbg-note counts 0)) counts))
        ((eq head 'condition-case)
         (let ((var (nth 1 form))
               (handlers (nthcdr 3 form)))
           (when (null var)
+            (nelisp-fallback-inventory--note-site 'bare-handler form)
             (puthash 'bare-handler (1+ (gethash 'bare-handler counts 0)) counts))
           (dolist (h handlers)
             (when (consp h)
               (unless (nelisp-fallback-inventory--traced-p (cdr h))
+                (nelisp-fallback-inventory--note-site 'silent-fallback h)
                 (puthash 'silent-fallback
                          (1+ (gethash 'silent-fallback counts 0))
                          counts))))))))))
@@ -191,7 +266,9 @@ where the read BEGAN, not from where it stopped."
                        nil)
                       (error (setq done 'unreadable) nil))))
           (when form
-            (nelisp-fallback-inventory--walk form counts))))
+            (let ((nelisp-fallback-inventory--current-toplevel
+                   (nelisp-fallback-inventory--toplevel-name form)))
+              (nelisp-fallback-inventory--walk form counts)))))
       done)))
 
 (defun nelisp-fallback-inventory-run ()
@@ -203,8 +280,22 @@ where the read BEGAN, not from where it stopped."
       (when (file-directory-p dir)
         (dolist (f (directory-files dir t "\\.el\\'"))
           (setq scanned (1+ scanned))
-          (when (eq (nelisp-fallback-inventory--scan-file f counts) 'unreadable)
-            (push f unreadable)))))
+          (let ((nelisp-fallback-inventory--current-file f))
+            (when (eq (nelisp-fallback-inventory--scan-file f counts) 'unreadable)
+              (push f unreadable))))))
+    (let ((want (nelisp-fallback-inventory--listing-p)))
+      (when want
+        (dolist (site (nreverse nelisp-fallback-inventory--sites))
+          (when (or (equal want "1")
+                    (equal want (symbol-name (nth 0 site))))
+            (princ (format "SITE %-15s %-34s %-46s %s\n"
+                           (nth 0 site)
+                           (file-name-nondirectory (or (nth 1 site) "?"))
+                           (or (nth 2 site) "(top level)")
+                           (let ((s (format "%S" (nth 3 site))))
+                             (if (> (length s) 110)
+                                 (concat (substring s 0 110) " ...")
+                               s))))))))
     (let* ((baseline (nelisp-fallback-inventory--baseline))
            (total 0)
            (over nil))
