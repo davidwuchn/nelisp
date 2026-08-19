@@ -936,7 +936,17 @@ sq(9) = 81 -> exit 81."
                                  (if (< page 4096)
                                      99
                                    (seq ,@writes
-                                        (call-ptr (+ page ,offset) x)))))
+                                        ;; A parameter of a runtime-entered
+                                        ;; defun is a value word: an immediate
+                                        ;; integer N is 4N+1 (2441f5ebc).  This
+                                        ;; is the caller side of that ABI, hand
+                                        ;; written, so it encodes here -- the C
+                                        ;; driver in nelisp-artifact.el does the
+                                        ;; same thing with (atol(v[i])*4+1).
+                                        ;; Passing 9 raw made the body read
+                                        ;; (9-1)/4 = 2 and answer 4.
+                                        (call-ptr (+ page ,offset)
+                                                  (+ (* x 4) 1))))))
                              (exit (native-exec 9)))))
                 (nelisp-aot-compile-sexp sexp path)
                 (should (file-executable-p path))

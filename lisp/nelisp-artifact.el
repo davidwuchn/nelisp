@@ -2838,18 +2838,16 @@ native object, or SYMBOL is not one of its native functions."
                                           (format "--redefine-sym=%s=%s" symbol csym)
                                           obj obj2))
                 (error "objcopy symbol rename failed for %s" symbol))
+              ;; The same generator the fast path uses.  This function
+              ;; carried its own copy of the driver, and so kept handing the
+              ;; compiled body bare `long's after 2441f5ebc made every
+              ;; runtime-entered parameter a value word -- `(* x x)' at 9
+              ;; answered 4, because the body read (9-1)/4 = 2.  d62690849
+              ;; fixed the convention and folded the one other copy it found
+              ;; into the shared generator; this third copy was missed, which
+              ;; is the argument for there being one.
               (with-temp-file csrc
-                (insert "#include <stdlib.h>\n#include <stdio.h>\n")
-                (insert (format "extern long %s(%s);\n" csym
-                                (if (= argc 0) "void"
-                                  (mapconcat (lambda (_) "long") args ","))))
-                (insert "int main(int c,char**v){(void)c;")
-                (insert (format "printf(\"%%ld\\n\",%s(%s));return 0;}\n"
-                                csym
-                                (mapconcat (lambda (i)
-                                             (format "atol(v[%d])" i))
-                                           (number-sequence 1 argc)
-                                           ","))))
+                (insert (nelisp-artifact--native-fast-driver-c csym argc)))
               (unless (eq 0 (call-process cc nil nil nil "-O2" "-o" exe csrc obj2))
                 (error "native link failed for %s" symbol))
               (with-temp-buffer
