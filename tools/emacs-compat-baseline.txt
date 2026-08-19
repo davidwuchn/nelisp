@@ -33,4 +33,13 @@
 # docs/emacs-compat-table.txt; the ones worth moving first are the ones a
 # host would also define -- arithmetic and core special forms are in here.
 
-shared-shadowing 250
+# 250 -> 245 on 2026-08-19: the five functions in lisp/nelisp-build-host.el
+# (getenv, setenv, add-to-list, make-directory, system-name) now gate on
+# fboundp.  That file says its own job is to "fill the gap between the
+# nelisp standalone runtime and the Emacs batch-mode functions", and a
+# gap-filler that defines unconditionally does not fill a gap -- it replaces
+# what was there.  Measured after: loading it into a host Emacs leaves
+# add-to-list a C subr, where before it became an elisp shim.
+# nelisp--cli-batch-ensure-host, which loads that file, already gated its own
+# fallback stub this way.
+shared-shadowing 245
