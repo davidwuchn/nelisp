@@ -3628,7 +3628,9 @@ argument (reachability + in-arena bounds checks).")
     ;; --- M4 hash tables (cons-alist v1) ---
     ((:lit "make-hash-table")  . (nl_ht_make out))
     ((:lit "puthash")          . (seq (wf_dirty) (nl_ht_put args out)))
-    ((:lit "gethash")          . (nl_ht_get args out))
+    ((:lit "gethash")          . (if (= (bf_hash_table_p_raw (wf_arg_ptr args 1)) 1)
+                            (nl_ht_get args out)
+                          (bf_wrong_type_hash_table (wf_arg_ptr args 1))))
     ((:lit "remhash")          . (seq (wf_dirty) (nl_ht_rem args out)))
     ;; This read a count out of whatever it was handed: (hash-table-count 0)
     ;; answered 0, which is also what an empty table answers.
@@ -3646,9 +3648,11 @@ argument (reachability + in-arena bounds checks).")
     ((:lit "string-bytes")     . (wf_write_int out (str-len (wf_arg_ptr args 0))))
     ((:lit "string=")          . (if (= (m5_streq (wf_arg_ptr args 0) (wf_arg_ptr args 1)) 1)
                                       (wf_write_t out) (wf_write_nil out)))
-    ((:lit "string-to-char")   . (wf_write_int out
+    ((:lit "string-to-char")   . (if (if (= (ptr-read-u64 (wf_arg_ptr args 0) 0) 5) 1 (if (= (ptr-read-u64 (wf_arg_ptr args 0) 0) 6) 1 0))
+                            (wf_write_int out
                                   (if (= (str-len (wf_arg_ptr args 0)) 0) 0
-                                    (nl_u8_decode (wf_arg_ptr args 0) 0))))
+                                    (nl_u8_decode (wf_arg_ptr args 0) 0)))
+                          (bf_wrong_type_stringp (wf_arg_ptr args 0))))
     ((:lit "string-to-number") . (wf_write_int out (m5_s2n (wf_arg_ptr args 0))))
     ((:lit "number-to-string") . (let* ((ms (alloc-bytes 32 8))
                                         (arg (wf_arg_ptr args 0)))
@@ -3669,11 +3673,13 @@ argument (reachability + in-arena bounds checks).")
                                             (ptr-read-u64 (wf_arg_ptr args 2) 8)
                                             buf sc)
                                          (mut-str-finalize ms out) 0)))
-    ((:lit "char-to-string")   . (let* ((ms (alloc-bytes 32 8)))
+    ((:lit "char-to-string")   . (if (= (ptr-read-u64 (wf_arg_ptr args 0) 0) 2)
+                            (let* ((ms (alloc-bytes 32 8)))
                                    (seq (mut-str-make-empty ms 4)
                                         ;; Doc 161: UTF-8-encode the codepoint
                                         (nl_u8_encode ms (ptr-read-u64 (wf_arg_ptr args 0) 8))
-                                        (mut-str-finalize ms out) 0)))
+                                        (mut-str-finalize ms out) 0))
+                          (bf_wrong_type_characterp (wf_arg_ptr args 0))))
     ((:lit "make-string")      . (let* ((ms (alloc-bytes 32 8)))
                                    (seq (mut-str-make-empty ms 16)
                                         ;; Doc 161: COUNT copies of CHAR's UTF-8
@@ -7520,6 +7526,42 @@ unresolved at link time."
     ;; `zerop' is (= N 0), and `=' names `number-or-marker-p' when its
     ;; argument is not a number -- not `numberp'.  Same shape as
     ;; `bf_wrong_type_listp'; the 18-byte predicate name needs three writes.
+    (defun bf_wrong_type_named (offender cbuf-w0 cbuf-w1 cbuf-w2 clen)
+      (let* ((wbuf (alloc-bytes 24 1))
+             (cbuf (alloc-bytes 24 1))
+             (expected (alloc-bytes 32 8))
+             (nil-slot (alloc-bytes 32 8))
+             (data-tail (alloc-bytes 32 8)))
+        (seq
+         (ptr-write-u64 wbuf 0 8751669898145395319)
+         (ptr-write-u64 (+ wbuf 8) 0 7887324063363589488)
+         (ptr-write-u64 (+ wbuf 16) 0 7630437)
+         (nl_alloc_symbol wbuf 19 268435480)
+         (ptr-write-u64 cbuf 0 cbuf-w0)
+         (ptr-write-u64 (+ cbuf 8) 0 cbuf-w1)
+         (ptr-write-u64 (+ cbuf 16) 0 cbuf-w2)
+         (nl_alloc_symbol cbuf clen expected)
+         (wf_write_nil nil-slot)
+         (nelisp_cons_construct offender nil-slot data-tail)
+         (nelisp_cons_construct expected data-tail 268435512)
+         (ptr-write-u64 268435472 0 1)
+         (atomic-fetch-add 268435544 1)
+         1)))
+    ;; Each of these names a DIFFERENT predicate, and a handler matches on the
+    ;; name -- so one generic "bad type" signal would be no better than none.
+    (defun bf_wrong_type_integerp (offender)
+      (bf_wrong_type_named offender 8102650174351109737 0 0 8))
+    (defun bf_wrong_type_int_or_marker (offender)
+      (bf_wrong_type_named offender 3274791373809938025 7308060583107850863 7351666 19))
+    (defun bf_wrong_type_characterp (offender)
+      (bf_wrong_type_named offender 7310577365311121507 28786 0 10))
+    (defun bf_first_non_integer (args)
+      (if (= (sexp-tag args) 7)
+          (let* ((a (nl_cons_car_ptr args)))
+            (if (= (ptr-read-u64 a 0) 2)
+                (bf_first_non_integer (nl_cons_cdr_ptr args))
+              a))
+        0))
     (defun bf_wrong_type_symbolp (offender)
       (let* ((wbuf (alloc-bytes 24 1))
              (cbuf (alloc-bytes 8 1))
@@ -8419,8 +8461,22 @@ Wave-2 (C) appends bf_ash (shl/sar compose) + bf_str_lt (byte-lexicographic).")
     ;; --- symbol ops ---
     ;; symbol-name: a Symbol (tag 4) already has the str layout (ptr@16/len@24);
     ;; produce a Str (tag 5) sharing those bytes via nl_alloc_str.
-    ((:lit "symbol-name") . (let* ((s (wf_arg_ptr args 0)))
-                              (seq (nl_alloc_str (ptr-read-u64 s 16) (ptr-read-u64 s 24) out) 0)))
+    ;; nil and t are their OWN tags here, not Symbols, so the name pointer at
+    ;; offset 16 and the length at 24 are both zero -- and (symbol-name nil)
+    ;; answered the empty string.  Emacs answers "nil" and "t".  That reaches
+    ;; further than it looks: `string-equal' and everything built on it
+    ;; compares a symbol by its name, so (string= nil "") was t here and nil
+    ;; in Emacs, and `string-empty-p' inherited it.
+    ((:lit "symbol-name") . (let* ((s (wf_arg_ptr args 0)) (tg (ptr-read-u64 s 0)))
+                              (if (= tg 4)
+                                  (seq (nl_alloc_str (ptr-read-u64 s 16) (ptr-read-u64 s 24) out) 0)
+                                (if (= tg 0)
+                                    (let* ((b (alloc-bytes 8 1)))
+                                      (seq (ptr-write-u64 b 0 7104878) (nl_alloc_str b 3 out) 0))
+                                  (if (= tg 1)
+                                      (let* ((b (alloc-bytes 8 1)))
+                                        (seq (ptr-write-u64 b 0 116) (nl_alloc_str b 1 out) 0))
+                                    (bf_wrong_type_symbolp s))))))
     ;; intern / make-symbol: take a Str (tag 5/6), build a Symbol (tag 4).
     ;; `intern' takes a STRING.  A symbol argument used to pass through --
     ;; `(intern 'foo)' answered foo -- because `bf_str_ptr' reads a Symbol's
@@ -8510,9 +8566,15 @@ Wave-2 (C) appends bf_ash (shl/sar compose) + bf_str_lt (byte-lexicographic).")
                                            (+ (* (ptr-read-u64 buf 0) 1000000)
                                               (ptr-read-u64 buf 8))))))
     ;; --- Wave-2 (C) bitwise / shift (2-arg forms; n-ary folds in prelude) ---
-    ((:lit "ash")     . (wf_write_int out (bf_ash (wf_argval args 0) (wf_argval args 1))))
-    ((:lit "logand")  . (wf_write_int out (wf_logand_fold args (- 0 1))))
-    ((:lit "logior")  . (wf_write_int out (wf_logior_fold args 0)))
+    ((:lit "ash")     . (if (= (ptr-read-u64 (wf_arg_ptr args 0) 0) 2)
+                            (wf_write_int out (bf_ash (wf_argval args 0) (wf_argval args 1)))
+                          (bf_wrong_type_integerp (wf_arg_ptr args 0))))
+    ((:lit "logand")  . (if (= (bf_first_non_integer args) 0)
+                            (wf_write_int out (wf_logand_fold args (- 0 1)))
+                          (bf_wrong_type_int_or_marker (bf_first_non_integer args))))
+    ((:lit "logior")  . (if (= (bf_first_non_integer args) 0)
+                            (wf_write_int out (wf_logior_fold args 0))
+                          (bf_wrong_type_int_or_marker (bf_first_non_integer args))))
     ((:lit "logxor")  . (wf_write_int out (wf_logxor_fold args 0)))
     ;; lognot X = -X-1 (two's complement bitwise NOT).
     ((:lit "lognot")  . (wf_write_int out (- (- 0 (wf_argval args 0)) 1)))

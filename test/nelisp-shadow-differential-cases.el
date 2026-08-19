@@ -580,6 +580,47 @@
        (let ((h (make-hash-table))) (puthash 1 2 h) (gethash 1 (copy-hash-table h)))
        (condition-case e (cancel-timer "x") (error e))
        (condition-case e (process-put "x" 'k 1) (error e)))
+
+ ;; One helper per PREDICATE, not one per function: Emacs names a specific
+ ;; predicate for each requirement and a handler matches on that name, so
+ ;; getting the name wrong is the same failure as not checking at all.
+ (list (condition-case e (ash "" 3) (error e)) (ash 8 -1)
+       (condition-case e (logand "x" 1) (error e)) (logand 12 10)
+       (condition-case e (logior '("a") 1) (error e)) (logior 12 10)
+       (condition-case e (string-to-char 65) (error e)) (string-to-char "abc")
+       (condition-case e (char-to-string '(1 2)) (error e)) (char-to-string 97)
+       (condition-case e (gethash 1 'foo) (error e))
+       (condition-case e (string-empty-p 12354) (error e)) (string-empty-p "")
+       (condition-case e (int-to-string '((a . 1))) (error e)) (int-to-string 42)
+       (condition-case e (string nil) (error e)) (string 97 98)
+       (condition-case e (fceiling ["a"]) (error e)) (fceiling 1.2)
+       (condition-case e (file-name-absolute-p -1) (error e)) (file-name-absolute-p "/a")
+       (condition-case e (string-pad "ab" -1.5) (error e)) (string-pad "ab" 4)
+       (condition-case e (add-to-list 1 'x) (error e))
+       (condition-case e (frame-height -1.5) (error e))
+       (condition-case e (generate-new-buffer ["a"]) (error e))
+       (condition-case e (set-file-modes "/tmp/x" '(1)) (error e))
+       (condition-case e (rename-file '(1 2) "b") (error e))
+       (condition-case e (seq-do #'identity 3) (error e)) (seq-do #'identity '(1 2))
+       (condition-case e (seq-position 2 1) (error e)) (seq-position '(1 2 3) 2))
+
+ ;; (symbol-name nil) answered "" -- nil and t are their own tags here, not
+ ;; Symbols, so the name pointer and length are both zero.  It reaches
+ ;; further than it looks: `string-equal' compares a symbol BY ITS NAME, so
+ ;; (string= nil "") was t here and nil in Emacs, and `string-empty-p'
+ ;; inherited that.
+ (list (symbol-name nil) (symbol-name t) (symbol-name 'foo) (length (symbol-name nil))
+       (string-equal nil "") (string-equal nil "nil") (string-equal 'foo "foo")
+       (condition-case e (string-empty-p nil) (error e))
+       (condition-case e (string-empty-p 12354) (error e))
+       (string-empty-p "") (string-empty-p 'foo))
+
+ ;; NOTE: `cl-defstruct' with a leading docstring is NOT a case here.  It was
+ ;; taken for a slot name until today, and it only worked because
+ ;; `symbol-name' answered for a string -- the moment that signalled
+ ;; `symbolp', every `cl-defstruct' with a docstring stopped compiling, which
+ ;; is how it was found.  It cannot be compared here because `cl-defstruct'
+ ;; does not exist in `emacs -Q'; `standalone-reader-test' covers it instead.
 )
 
 ;;; nelisp-shadow-differential-cases.el ends here

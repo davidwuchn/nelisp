@@ -55,7 +55,7 @@
 
 ;; Kept in step with scripts/nelisp-stdlib-prelude.el, the copy the
 ;; standalone runs; `make ns-gate' reports any drift.
-(defun string-empty-p (s) (and (stringp s) (= (length s) 0)))
+(defun string-empty-p (s) (string-equal s ""))
 
 ;; ---- macroexpand (Doc 47 self-host / compiler frontend) ----
 ;;

@@ -845,8 +845,9 @@ for the full contract."
 (unless (fboundp 'set-file-modes)
   (defun set-file-modes (filename mode &optional _flag)
     "Apply MODE to FILENAME via chmod(2) when a syscall primitive exists.
-Falls back to a no-op (nl-write-file's default 0644 stands) on substrates
-without `nelisp--syscall-path-int'."
+No-ops on substrates without `nelisp--syscall-path-int' (the historic stub)."
+    (nelisp--check-string filename)
+    (unless (integerp mode) (signal 'wrong-type-argument (list 'fixnump mode)))
     (when (fboundp 'nelisp--syscall-path-int)
       (let ((rc (nelisp--syscall-path-int 90 filename mode)))   ; chmod
         (unless (= rc 0)

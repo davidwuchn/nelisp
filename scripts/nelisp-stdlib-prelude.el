@@ -73,6 +73,35 @@
 ;; the first caller, because the prelude calls its own functions while it
 ;; loads -- defining them further down made `file-name-directory' hit
 ;; void-function during boot.
+(unless (fboundp 'nelisp--check-float-arg)
+  ;; `fceiling' and its siblings name `floatp' -- the result is a float and
+  ;; that is the requirement Emacs states -- even though an integer argument
+  ;; is accepted.  Naming `numberp' here would be a different claim.
+  (defun nelisp--check-float-arg (x)
+    (unless (numberp x) (signal 'wrong-type-argument (list 'floatp x)))
+    x))
+(unless (fboundp 'nelisp--check-number)
+  (defun nelisp--check-number (x)
+    (unless (numberp x) (signal 'wrong-type-argument (list 'numberp x)))
+    x))
+(unless (fboundp 'nelisp--check-integer)
+  (defun nelisp--check-integer (x)
+    (unless (integerp x) (signal 'wrong-type-argument (list 'integerp x)))
+    x))
+(unless (fboundp 'nelisp--check-natnum)
+  (defun nelisp--check-natnum (x)
+    (unless (and (integerp x) (>= x 0))
+      (signal 'wrong-type-argument (list 'natnump x)))
+    x))
+(unless (fboundp 'nelisp--check-character)
+  (defun nelisp--check-character (x)
+    (unless (and (integerp x) (>= x 0) (<= x 4194303))
+      (signal 'wrong-type-argument (list 'characterp x)))
+    x))
+(unless (fboundp 'nelisp--check-list)
+  (defun nelisp--check-list (x)
+    (unless (listp x) (signal 'wrong-type-argument (list 'listp x)))
+    x))
 (unless (fboundp 'nelisp--check-symbol)
   (defun nelisp--check-symbol (x)
     (unless (symbolp x) (signal 'wrong-type-argument (list 'symbolp x)))
@@ -481,7 +510,7 @@ from `(defvar X nil)'."
 
 ;; Doc 143 (pure, no-helper primitives): high-frequency, dependency-free.
 (defun natnump (x) (and (integerp x) (>= x 0)))
-(defun int-to-string (n) (number-to-string n))
+(defun int-to-string (n) (number-to-string (nelisp--check-number n)))
 (defun prefix-numeric-value (arg)
   (cond ((null arg) 1) ((eq arg '-) -1) ((consp arg) (car arg)) (t arg)))
 
@@ -977,9 +1006,12 @@ Result keeps the trailing slash."
       found)))
 (unless (fboundp 'seq-do)
   (defun seq-do (fn seq)
+    (unless (sequencep seq) (signal 'wrong-type-argument (list 'sequencep seq)))
     (let ((l (nelisp-seq--to-list seq)))
       (while l (funcall fn (car l)) (setq l (cdr l)))
-      nil)))
+      ;; Emacs answers the SEQUENCE, not nil -- `seq-do' is the one in the
+      ;; family whose return value is its argument, and callers chain on it.
+      seq)))
 (unless (fboundp 'cl-remove-if)
   (defun cl-remove-if (pred seq) (seq-remove pred seq)))
 (unless (fboundp 'cl-remove-if-not)
@@ -1047,6 +1079,8 @@ Result keeps the trailing slash."
   (defun ntake (n list) (take n list)))
 (unless (fboundp 'string-pad)
   (defun string-pad (s len &optional padding start)
+    (nelisp--check-string s)
+    (nelisp--check-natnum len)
     (let ((pad (or padding 32)) (n (length s)))
       (if (>= n len) s
         (if start (concat (make-string (- len n) pad) s)
@@ -1515,9 +1549,9 @@ loop for the exponent (= no `expt' / `float' primitive needed)."
   (defun remove (item seq)
     (let (acc) (dolist (x (nelisp-seq--to-list seq) (nreverse acc)) (unless (equal x item) (push x acc))))))
 (unless (fboundp 'ffloor) (defun ffloor (x) (float (floor x))))
-(unless (fboundp 'fceiling) (defun fceiling (x) (float (ceiling x))))
-(unless (fboundp 'ftruncate) (defun ftruncate (x) (float (truncate x))))
-(unless (fboundp 'fround) (defun fround (x) (float (floor (+ x 0.5)))))
+(unless (fboundp 'fceiling) (defun fceiling (x) (float (ceiling (nelisp--check-float-arg x)))))
+(unless (fboundp 'ftruncate) (defun ftruncate (x) (float (truncate (nelisp--check-float-arg x)))))
+(unless (fboundp 'fround) (defun fround (x) (float (floor (+ (nelisp--check-float-arg x) 0.5)))))
 (unless (fboundp 'cl-floor) (defun cl-floor (x &optional y) (let* ((d (or y 1)) (q (floor x d))) (list q (- x (* q d))))))
 (unless (fboundp 'cl-ceiling) (defun cl-ceiling (x &optional y) (let* ((d (or y 1)) (q (ceiling x d))) (list q (- x (* q d))))))
 (unless (fboundp 'cl-truncate) (defun cl-truncate (x &optional y) (let* ((d (or y 1)) (q (truncate x d))) (list q (- x (* q d))))))
@@ -1612,7 +1646,9 @@ wider than the one it replaces once the mapping leaves ASCII."
     (let ((c (getenv "COLUMNS")))
       (if (and c (> (length c) 0)) (string-to-number c) 80))))
 (unless (fboundp 'frame-height)
-  (defun frame-height (&rest _)
+  (defun frame-height (&optional frame)
+    ;; There are no frames here, so nothing can BE one; Emacs still checks.
+    (when frame (signal 'wrong-type-argument (list 'framep frame)))
     (let ((l (getenv "LINES")))
       (if (and l (> (length l) 0)) (string-to-number l) 24))))
 ;; `random' via a 31-bit LCG (glibc constants).  Deterministic -- adequate for
@@ -1712,6 +1748,7 @@ reseeds from its characters; nil -> a full LCG value."
       c)))
 (unless (fboundp 'seq-position)
   (defun seq-position (seq elt &optional testfn)
+    (unless (sequencep seq) (signal 'wrong-type-argument (list 'sequencep seq)))
     (let ((l (nelisp-seq--to-list seq)) (i 0) (found nil) (idx nil))
       (while (and l (not found))
         (when (if testfn (funcall testfn elt (car l)) (equal elt (car l)))
@@ -1786,6 +1823,7 @@ reseeds from its characters; nil -> a full LCG value."
 
 ;; Doc 143 more pure primitives.
 (defun string (&rest chars)
+  (dolist (c chars) (nelisp--check-character c))
   (apply #'concat (mapcar #'char-to-string chars)))
 (defun prin1 (object &optional _stream)
   (nelisp--write-stdout-bytes (nelisp--prn-to-string object t))
@@ -2251,7 +2289,11 @@ Doc 22 A6: arrays are iterated by index."
 ;; `(string-empty-p nil)' answered t, because `(length nil)' is 0 -- so the
 ;; commonest "no string here" value reported itself as an empty string.
 ;; Emacs compares with `string=', which is nil for a non-string.
-(defun string-empty-p (s) (and (stringp s) (= (length s) 0)))
+;; Emacs's is (string= STRING ""), and `string=' accepts a SYMBOL as well
+;; as a string -- so (string-empty-p nil) is nil, not an error, while
+;; (string-empty-p 12354) signals `stringp'.  Checking for a string outright
+;; got the number right and the symbol wrong.
+(defun string-empty-p (s) (string-equal s ""))
 
 ;; ---- macroexpand (Doc 47 self-host / compiler frontend) ----
 ;;
@@ -3158,13 +3200,18 @@ parent's accessor indices remain valid for the child record.  The
 parent's predicate continues to satisfy child records via the
 runtime chain walk in `nelisp-cl-macros--struct-isa'.
 
-Limitations: no `:type', no `setf' integration, no docstring slot
-form.
+Limitations: no `:type', no `setf' integration.  A leading docstring IS
+accepted (and discarded), which it previously was not -- it was taken for a
+slot name.  That only worked because `symbol-name' used to answer for a
+string; once it signalled `symbolp', as Emacs does, every `cl-defstruct'
+with a docstring stopped compiling.
 
 Note: `(declare ...)' metadata is intentionally omitted because the
 NeLisp Rust evaluator does not yet strip declare forms from macro
 bodies (= Stage 4 follow-up).  Indent / edebug specs come back when
 `defmacro' grows declare-handling parity with host Emacs."
+  (when (and (stringp (car slots)) (cdr slots))
+    (setq slots (cdr slots)))
   (let* ((name (nelisp-cl-macros--struct-name-or-options name-or-options))
          (options (nelisp-cl-macros--struct-options name-or-options))
          (parent-form (nelisp-cl-macros--struct-opt :include options))
@@ -3585,6 +3632,7 @@ bodies (= Stage 4 follow-up).  Indent / edebug specs come back when
 (unless (fboundp 'help-split-fundoc)
   (defun help-split-fundoc (docstring _def &optional _section)
     "Minimal stub: no embedded usage line, so return (nil . DOCSTRING)."
+    (when docstring (nelisp--check-string docstring))
     (if (stringp docstring) (cons nil docstring) nil)))
 
 ;; cl-macs / macroexp helpers that cl-generic.el (and other gv/cl users) need at
@@ -4773,6 +4821,7 @@ Rust-min migration (= moved out of build-tool/src/eval/special_forms.rs)."
 (defvar system-configuration "x86_64-pc-linux-gnu")
 (unless (fboundp 'generate-new-buffer)
   (defun generate-new-buffer (name)
+    (nelisp--check-string name)
     (vector 'buffer name "" t)))
 (unless (fboundp 'buffer-live-p)
   (defun buffer-live-p (buffer)
@@ -4972,6 +5021,8 @@ Rust-min migration (= moved out of build-tool/src/eval/special_forms.rs)."
   (defun set-file-modes (filename mode &optional _flag)
     "Apply MODE to FILENAME via chmod(2) when a syscall primitive exists.
 No-ops on substrates without `nelisp--syscall-path-int' (the historic stub)."
+    (nelisp--check-string filename)
+    (unless (integerp mode) (signal 'wrong-type-argument (list 'fixnump mode)))
     (when (fboundp 'nelisp--syscall-path-int)
       (let ((rc (nelisp--syscall-path-int 90 filename mode)))   ; chmod
         (unless (= rc 0)
@@ -5972,12 +6023,15 @@ first `getenv' is not overwritten by the value the process started with."
 ;; convention above: rename=82, symlink=88, chmod=90, access(X_OK)=21.
 (unless (fboundp 'file-name-absolute-p)
   (defun file-name-absolute-p (filename)
+    (nelisp--check-string filename)
     (and (stringp filename)
          (> (length filename) 0)
          (let ((c (aref filename 0)))
            (or (= c 47) (= c 126))))))      ; "/" or "~"
 (unless (fboundp 'rename-file)
   (defun rename-file (file newname &optional ok-if-already-exists)
+    (nelisp--check-string file)
+    (nelisp--check-string newname)
     (when (and (not ok-if-already-exists) (file-exists-p newname))
       (error "rename-file: target exists: %s" newname))
     (let ((rc (nelisp--syscall-path2 82 file newname)))
@@ -6019,6 +6073,7 @@ first `getenv' is not overwritten by the value the process started with."
       alist)))
 (unless (fboundp 'add-to-list)
   (defun add-to-list (list-var element &optional append compare-fn)
+    (nelisp--check-symbol list-var)
     (let* ((lst (symbol-value list-var))
            (test (or compare-fn (function equal)))
            (cur lst)
