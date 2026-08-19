@@ -224,6 +224,28 @@ macOS は no-op のまま。=nl_os_argv_init= が sysctl KERN_PROCARGS2 で argv
 検証アロケータ有効版でも実行する。redzone 破損・リーク検出を
 それぞれ blocker とする。
 
+*実装ノート (2026-08-19) — SHIPPED*: =make standalone-reader-checked-soak=。
+§5.2 の boot arming が Linux で効くようになって初めて意味を持つ項目。
+
+- **ラウンドは 1 プロセス内**で回す。最初の実装は各ラウンドを別 =--load= に
+  していたが、それでは live-blocks が構造上必ず一致し **leak blocker が
+  発火しえない**。検査にならない検査は無いより悪いので作り直した
+- blocker 2 つ: =violations != 0= (redzone)、および round 2 以降の
+  live-blocks 増加 (leak)。各ラウンドは =garbage-collect= で終わるので、
+  残っているものは garbage ではなく retention
+- round 1 を比較対象にしないのは prelude 読み込みの一回限りの確保があるため
+- 追加で「enable/armed が 1 でない」「verified-frees が 0」も FAIL にする。
+  どちらも「下の検査が実は何も見ていなかった」状態を素通りさせないため
+- known-answer で leak blocker の発火を確認: 2000 cons を GC 越しに保持すると
+  live-blocks が 153479 → 157705 → 161705 と増え、gate が FAIL する
+- 実測 (3 rounds): verified-frees 3122456 → 5811706 → 8501170 (同一プロセスで
+  累積)、violations 0、live-blocks 147619 → 147845 → 147845 で平坦
+- 1h 壁時計ではなくラウンド反復にした。時間はソークの確信を、反復はリークの
+  確信を与える。リーク検査に要るのは後者
+- 併せて =alloc-check-collect= に記録されていた欠陥 (prelude load 後の
+  =garbage-collect= が =NELISP_ALLOC_CHECK=1= で無言終了、2026-08-15 の binary)
+  の再現を試み、**現行 binary では解消**を確認 (5 回とも rc=0、同一レポート)
+
 * 6. Stage 3 — 資源と Drop
 
 ** 6.1 API

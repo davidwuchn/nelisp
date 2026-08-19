@@ -8,7 +8,7 @@
         standalone-eval standalone-eval-clean standalone-eval-test standalone-eval-j \
         standalone-reader standalone-reader-test standalone-reader-load-smoke standalone-reader-checked standalone-reader-fmt-smoke standalone-reader-prelude-equal-reload-smoke standalone-reader-declare-strip-smoke standalone-reader-nested-backquote-macro-smoke standalone-reader-derived-mode-shape-smoke standalone-reader-pcase-quote-literal-smoke standalone-reader-catch-throw-tag-smoke standalone-reader-cond-let-shape-smoke standalone-reader-ffi-smoke standalone-reader-tls-smoke standalone-reader-process-smoke standalone-reader-realrt-smoke standalone-reader-repl-smoke standalone-reader-prelude-test standalone-reader-intern-soft-smoke standalone-reader-intern-soft-loop-smoke standalone-reader-number-token-smoke standalone-reader-getenv-smoke standalone-selfhost-test standalone-selfhost-mt-test standalone-parallel-compile-test standalone-chunk-growth-test \
         standalone-reader-mod-float-smoke standalone-reader-match-data-smoke standalone-reader-current-time-smoke standalone-reader-require-provide-smoke \
-        alloc-check-collect \
+        alloc-check-collect standalone-reader-checked-soak \
         nelisp-performance-gate nelisp-nelix-command-gate nelisp-native-artifact-gate nelisp-nelix-native-hot-gate \
         nelisp-nelix-operational-gate \
         nelisp-runtime-image-cache-gate nelisp-source-command-substrate-gate
@@ -579,6 +579,102 @@ standalone-reader-checked: standalone-reader
 	  echo "[standalone-reader-checked] FAIL: $$rep"; \
 	  exit 1; \
 	fi
+
+# Doc 170 section 5.3: the soak, run with the verifying allocator armed,
+# with redzone corruption and leaks each a blocker.
+#
+# Section 5 rates this allocator the highest bug-detection-per-effort item
+# in that design, and until 2026-08-19 it could not be armed off Windows at
+# all -- `nl_os_environ_init' was a no-op, so NELISP_ALLOC_CHECK=1 never
+# reached the boot probe.  It reads envp off the Linux entry stack now, so
+# this lane exists.
+#
+# Two blockers, from `(nelisp--alloc-check-report)':
+#
+#   redzone   violations must be 0.  A guard word is stamped into every
+#             allocation's suffix and checked on free, so a write past the
+#             end of a block is caught at the free rather than wherever the
+#             corruption later surfaced.
+#
+#   leak      live-blocks must not grow across rounds.  Each round runs the
+#             same workload and ends with `garbage-collect', so what is
+#             still reachable afterwards is retention, not garbage.  A
+#             round-over-round rise means the runtime is holding something
+#             the previous round already finished with.
+#
+# ROUNDS defaults to 3 for a CI-shaped run; the release lane passes more.
+# Deliberately NOT the 1h wall-clock of `soak-1h': an hour of the same loop
+# adds confidence about time, and rounds add confidence about repetition,
+# which is what a leak test actually needs.
+#
+# The rounds run INSIDE one process.  A first cut ran each round as its own
+# `--load' and compared live-blocks across them, which cannot fail: a fresh
+# process starts with a fresh heap, so the numbers were identical by
+# construction and the leak blocker was decorative.
+.PHONY: standalone-reader-checked-soak
+STANDALONE_CHECKED_SOAK_ROUNDS ?= 3
+standalone-reader-checked-soak: $(if $(wildcard target/nelisp target/nelisp.exe),,standalone-reader)
+	@mkdir -p target
+	@printf '%s\n' \
+	  '(load "scripts/nelisp-stdlib-prelude.el")' \
+	  '(defun checked-soak-round ()' \
+	  '  (let* ((i 0) (acc nil))' \
+	  '    (while (< i 4000) (setq acc (cons (make-string 48 66) acc)) (setq i (+ i 1))))' \
+	  '  (let* ((i 0) (acc nil))' \
+	  '    (while (< i 4000) (setq acc (cons (make-vector 12 i) acc)) (setq i (+ i 1))))' \
+	  '  (let* ((i 0) (acc nil))' \
+	  '    (while (< i 8000) (setq acc (cons (cons i i) acc)) (setq i (+ i 1))))' \
+	  '  (garbage-collect)' \
+	  '  (princ (format "ROUND %S\n" (nelisp--alloc-check-report))))' \
+	  '(let ((r 0))' \
+	  '  (while (< r $(STANDALONE_CHECKED_SOAK_ROUNDS))' \
+	  '    (checked-soak-round)' \
+	  '    (setq r (+ r 1))))' \
+	  > target/checked-soak.el
+	@bin=./target/nelisp; \
+	case "$(NELISP_STANDALONE_TARGET)$$NELISP_STANDALONE_TARGET" in \
+	  windows*) bin=./target/nelisp.exe;; \
+	esac; \
+	rounds_file=target/checked-soak-rounds.txt; \
+	NELISP_ALLOC_CHECK=1 $$bin --load target/checked-soak.el 2>&1 \
+	  | grep '^ROUND ' > $$rounds_file || true; \
+	n=$$(wc -l < $$rounds_file); \
+	if [ "$$n" -ne "$(STANDALONE_CHECKED_SOAK_ROUNDS)" ]; then \
+	  echo "[checked-soak] FAIL: $$n of $(STANDALONE_CHECKED_SOAK_ROUNDS) round(s) reported -- the run died partway"; \
+	  exit 1; \
+	fi; \
+	i=0; settled=""; last=""; lives=""; \
+	while read -r _tag rest; do \
+	  i=$$(( i + 1 )); \
+	  set -- $$(echo "$$rest" | tr -d "()"); \
+	  echo "[checked-soak] round $$i/$(STANDALONE_CHECKED_SOAK_ROUNDS) armed=$$2 verified-frees=$$5 violations=$$6 live-blocks=$$9"; \
+	  if [ "$$1" != "1" ] || [ "$$2" != "1" ]; then \
+	    echo "[checked-soak] FAIL round $$i: allocator not enabled+armed (enable=$$1 armed=$$2) -- the boot env probe did not fire, so nothing below was checked"; \
+	    exit 1; \
+	  fi; \
+	  if [ "$${5:-0}" -le 0 ]; then \
+	    echo "[checked-soak] FAIL round $$i: 0 frees verified -- the workload never reached the verifier"; \
+	    exit 1; \
+	  fi; \
+	  if [ "$$6" != "0" ]; then \
+	    echo "[checked-soak] FAIL round $$i: $$6 redzone violation(s), first bad header $$7, alloc site $$8"; \
+	    exit 1; \
+	  fi; \
+	  lives="$$lives $$9"; \
+	  if [ "$$i" -eq 2 ]; then settled=$$9; fi; \
+	  last=$$9; \
+	done < $$rounds_file; \
+	rm -f $$rounds_file; \
+	echo "[checked-soak] live-blocks per round:$$lives"; \
+	if [ -z "$$settled" ]; then \
+	  echo "[checked-soak] PASS (fewer than 2 rounds: no leak comparison possible)"; \
+	  exit 0; \
+	fi; \
+	if [ "$$last" -gt "$$settled" ]; then \
+	  echo "[checked-soak] FAIL: live blocks grew $$settled -> $$last after the first round (each round ends with garbage-collect, so this is retention rather than garbage)"; \
+	  exit 1; \
+	fi; \
+	echo "[checked-soak] PASS"
 
 # Doc 168 Phase 6 gate data collection (Doc 170 sections 3.3 / 5).  Runs
 # the checked-allocator workloads with NELISP_ALLOC_CHECK=1 and appends
