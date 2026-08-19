@@ -544,13 +544,28 @@
     ;; Returns: 0=Ok (last body value in *out), 1=Err.
     ;; Arity 6 (even).
     (defun nl_apply_lambda_inner (captured formals body-list args-list env out)
-      (if (= (sexp-tag captured) 0)
-          ;; No captured env: skip push_captured, cap-flag=0.
-          (nl_ali_push_frame formals body-list args-list env out 0)
-        ;; Has captured env: push it FIRST ✓, cap-flag=1 on success.
-        (nl_ali_after_cap
-         (extern-call nl_env_push_captured env captured)
-         formals body-list args-list env out))))
+      ;; OUT is documented above as "Sexp::Nil on entry", and that was an
+      ;; assumption about every caller rather than something enforced here.
+      ;; Callers reuse a slot, so a lambda with an EMPTY body -- which walks
+      ;; to `nl_ali_body' with a Nil body-list and finishes without ever
+      ;; writing OUT -- returned whatever the previous form had left in it.
+      ;; Measured 2026-08-19: `(progn 42 (f))' answered 42 where Emacs
+      ;; answers nil, and the same in a `let' body, an `if' branch, an `or',
+      ;; and after a `while'.  `(funcall (lambda ()))' too, so it was never
+      ;; about `defun'.  Only a top-level call and `list' -- which gives each
+      ;; element its own slot -- came out right.
+      ;;
+      ;; Establishing the contract instead of assuming it: one write, and a
+      ;; non-empty body overwrites it with the last form's value as before.
+      (seq
+       (nl_cons_write_nil out)
+       (if (= (sexp-tag captured) 0)
+           ;; No captured env: skip push_captured, cap-flag=0.
+           (nl_ali_push_frame formals body-list args-list env out 0)
+         ;; Has captured env: push it FIRST ✓, cap-flag=1 on success.
+         (nl_ali_after_cap
+          (extern-call nl_env_push_captured env captured)
+          formals body-list args-list env out)))))
 
   "AOT source for `nl_apply_lambda_inner'
 (eval/mod.rs apply_lambda_inner → elisp).

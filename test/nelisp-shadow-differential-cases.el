@@ -176,6 +176,20 @@
  (file-name-extension "foo.txt")
  (file-name-extension "foo")
  (file-name-extension "foo.~12~")
+ ;; A call to a function with an EMPTY body used to leave its output slot
+ ;; untouched, so it answered whatever the previous form had left there:
+ ;; (progn 42 (f)) was 42.  Every context that reuses a slot was affected --
+ ;; progn, a let body, an if branch, or, after a while -- and it was never
+ ;; about `defun': an empty `lambda' did it too.  Only a top-level call and
+ ;; `list', which gives each element its own slot, came out right.
+ (progn (defun nl-diff-empty ()) 42 (nl-diff-empty))
+ (progn "abc" (nl-diff-empty))
+ (let ((x 9)) 7 (nl-diff-empty))
+ (if t (progn 42 (nl-diff-empty)) 'no)
+ (or nil (progn 42 (nl-diff-empty)))
+ (progn 42 (funcall (lambda ())))
+ (let ((n 0)) (while (< n 1) (setq n 1)) (nl-diff-empty))
+ (list 42 (nl-diff-empty))
  ;; maphash reaches every entry
  (let ((h (make-hash-table :test 'equal)) (n 0))
    (puthash "b" 2 h) (puthash "a" 1 h) (puthash "c" 3 h)
