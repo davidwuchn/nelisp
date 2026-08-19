@@ -153,6 +153,23 @@ probe in a lambda would have made the wrapper the thing measured."
                        "a file cannot find its own path; `load' does not set it")
                       (t "a file can find its own path"))))
 
+;; `provide' and `featurep' have to be talking about the same list.  They
+;; were not: `provide' writes the innermost dynamic binding of `features'
+;; while `featurep' read the global mirror, so inside any `let' over
+;; `features' one said yes and the other no -- and `require', which checks
+;; the way `featurep' does, raised `file-missing' for a file it had just
+;; loaded and whose `(provide ...)' had just run.  That is what left the
+;; native compiler unavailable and every hot defun on the bytecode path.
+(let* ((result (probe-safe
+                (let ((features (list 'probe-features-sentinel)))
+                  (provide 'probe-agreement)
+                  (featurep 'probe-agreement))))
+       (agree (and (eq (car result) 'ok) (cdr result))))
+  (probe-report "provide/featurep agree" (if agree "agree" "disagree")
+                (if agree
+                    "both read the binding `provide' wrote"
+                  "`provide' writes one list and `featurep' reads another")))
+
 ;;;; Files ---------------------------------------------------------------
 
 (let* ((result (probe-safe (write-region "abc\n" nil "target/ai/probe-ascii.txt"))))

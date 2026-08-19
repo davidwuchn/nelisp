@@ -7064,11 +7064,25 @@ unresolved at link time."
              (nl_alloc_symbol buf 8 out)
              0)))
     (defun bf_features_get (env out)
+      ;; Frame stack first, then the mirror -- the same lookup
+      ;; `bf_load_path_get' does two definitions below, and the same fix the
+      ;; comment on `bf_symbol_value' describes for reading a special
+      ;; variable.  Reading the mirror alone made `provide' and `featurep'
+      ;; answer about different lists whenever `features' was dynamically
+      ;; bound: `provide' writes the innermost binding, so
+      ;;
+      ;;   (let ((features (list 'aa)))
+      ;;     (provide 'x)        ; -> x
+      ;;     (featurep 'x))      ; -> nil
+      ;;
+      ;; and `require', which checks the same way `featurep' does, raised
+      ;; `file-missing' for a file it had just loaded and whose `(provide ...)'
+      ;; had just run.
       (let* ((sym (alloc-bytes 32 8)))
         (seq
          (bf_features_symbol sym)
-         (if (= (nelisp_mirror_is_bound (+ env 0) sym) 1)
-             (nelisp_mirror_lookup_value (+ env 0) sym out)
+         (if (= (nelisp_env_lookup_value (+ env 0) (+ env 32) sym out) 0)
+             0
            (wf_write_nil out))
          0)))
     (defun bf_feature_member_p (feature features)
@@ -12313,13 +12327,26 @@ runtime cache does not replay source file loads on every command invocation."
    (nelisp-standalone--artifact-runtime-file-src
     "src/nelisp-bytecode.el" inline)
    "(defvar features nil)\n"
-   "(fset 'provide\n"
-   "      (lambda (feature)\n"
-   "        (unless (memq feature features)\n"
-   "          (setq features (cons feature features)))\n"
-   "        feature))\n"
-   "(fset 'featurep\n"
-   "      (lambda (feature) (if (memq feature features) t nil)))\n"
+   ;; Only when the runtime does not already have them.  These fsets used to
+   ;; be unconditional, and they landed on top of working builtins: `provide'
+   ;; and `featurep' became elisp closures over the elisp `features' variable
+   ;; while `require' stayed native and read the mirror, so the three stopped
+   ;; agreeing about the same feature.  What that looked like from outside --
+   ;; measured from inside a compile through `--preload' -- was
+   ;; `(require 'nelisp-asm-arm64)' raising `file-missing' for a file it had
+   ;; just found and loaded, because the file's own `(provide ...)' went to
+   ;; the elisp list and `bf_require' checked the mirror, while `featurep'
+   ;; answered t the whole time.  Every hot defun compiled to bytecode
+   ;; because of it.
+   "(unless (fboundp 'provide)\n"
+   "  (fset 'provide\n"
+   "        (lambda (feature)\n"
+   "          (unless (memq feature features)\n"
+   "            (setq features (cons feature features)))\n"
+   "          feature)))\n"
+   "(unless (fboundp 'featurep)\n"
+   "  (fset 'featurep\n"
+   "        (lambda (feature) (if (memq feature features) t nil))))\n"
    "(provide 'cl-lib)\n"
    "(provide 'nelisp-read)\n"
    "(provide 'nelisp-eval)\n"
@@ -12460,13 +12487,26 @@ same artifact command dispatch used by the full source path."
            (expand-file-name "src/nelisp-bytecode.el"
                              nelisp-standalone--repo-root))
    "(defvar features nil)\n"
-   "(fset 'provide\n"
-   "      (lambda (feature)\n"
-   "        (unless (memq feature features)\n"
-   "          (setq features (cons feature features)))\n"
-   "        feature))\n"
-   "(fset 'featurep\n"
-   "      (lambda (feature) (if (memq feature features) t nil)))\n"
+   ;; Only when the runtime does not already have them.  These fsets used to
+   ;; be unconditional, and they landed on top of working builtins: `provide'
+   ;; and `featurep' became elisp closures over the elisp `features' variable
+   ;; while `require' stayed native and read the mirror, so the three stopped
+   ;; agreeing about the same feature.  What that looked like from outside --
+   ;; measured from inside a compile through `--preload' -- was
+   ;; `(require 'nelisp-asm-arm64)' raising `file-missing' for a file it had
+   ;; just found and loaded, because the file's own `(provide ...)' went to
+   ;; the elisp list and `bf_require' checked the mirror, while `featurep'
+   ;; answered t the whole time.  Every hot defun compiled to bytecode
+   ;; because of it.
+   "(unless (fboundp 'provide)\n"
+   "  (fset 'provide\n"
+   "        (lambda (feature)\n"
+   "          (unless (memq feature features)\n"
+   "            (setq features (cons feature features)))\n"
+   "          feature)))\n"
+   "(unless (fboundp 'featurep)\n"
+   "  (fset 'featurep\n"
+   "        (lambda (feature) (if (memq feature features) t nil))))\n"
    "(provide 'cl-lib)\n"
    "(provide 'nelisp-read)\n"
    "(provide 'nelisp-eval)\n"
@@ -12893,14 +12933,20 @@ artifact before wiring that artifact into the marker command path."
      (nelisp-standalone--artifact-runtime-file-src
       "src/nelisp-bytecode.el" t)
      "(defvar features nil)\n"
-     "(fset 'provide\n"
-     "      (lambda (feature)\n"
-     "        (if (memq feature features)\n"
-     "            nil\n"
-     "          (setq features (cons feature features)))\n"
-     "        feature))\n"
-     "(fset 'featurep\n"
-     "      (lambda (feature) (if (memq feature features) t nil)))\n"
+     ;; Gated for the same reason as the copies in
+     ;; `--artifact-command-runtime-src' and `--artifact-command-cache-src':
+     ;; an unconditional fset here replaced working builtins and split
+     ;; `provide'/`featurep' from the native `require'.
+     "(unless (fboundp 'provide)\n"
+     "  (fset 'provide\n"
+     "        (lambda (feature)\n"
+     "          (if (memq feature features)\n"
+     "              nil\n"
+     "            (setq features (cons feature features)))\n"
+     "          feature)))\n"
+     "(unless (fboundp 'featurep)\n"
+     "  (fset 'featurep\n"
+     "        (lambda (feature) (if (memq feature features) t nil))))\n"
      "(provide 'cl-lib)\n"
      "(provide 'nelisp-read)\n"
      "(provide 'nelisp-eval)\n"

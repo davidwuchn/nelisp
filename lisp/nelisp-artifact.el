@@ -933,12 +933,12 @@ becomes (:eval FORM) replayed through `nelisp-eval' at load."
 
 (defun nelisp-artifact--collect-features (forms)
   "Collect top-level provided feature symbols from FORMS."
-  (let ((features nil))
+  (let ((provided nil))
     (dolist (form forms)
       (let ((feature (nelisp-artifact--extract-provided-feature form)))
-        (when (and feature (not (memq feature features)))
-          (setq features (append features (list feature))))))
-    features))
+        (when (and feature (not (memq feature provided)))
+          (setq provided (append provided (list feature))))))
+    provided))
 
 (defun nelisp-artifact--compiler-plist ()
   "Return the Doc 142 §6.1 compiler descriptor."
@@ -1864,8 +1864,16 @@ native object for the standalone runtime, Doc 142 §6.4)."
          (source nil)
          (forms nil)
          (eval-source nil)
+         ;; NOT `features': that is Emacs's list of loaded features, and a
+         ;; `let' over it rebinds the global for the whole compile.  Anything
+         ;; that `provide's while the binding is live is discarded when it
+         ;; ends, and anything that reads the list sees an empty one.  In this
+         ;; runtime it was fatal rather than merely wasteful -- `provide'
+         ;; wrote the binding, `featurep' and `require' read the mirror, so
+         ;; `(require 'nelisp-asm-arm64)' raised `file-missing' for a file it
+         ;; had just loaded, and every hot defun fell back to bytecode.
          (module nil)
-         (features nil)
+         (provided-features nil)
          (native nil)
          (native-report nil)
          (artifact-payload nil)
@@ -1897,11 +1905,11 @@ native object for the standalone runtime, Doc 142 §6.4)."
      "module-build" stage-start
      (list :forms (length forms) :module-policy module-policy))
     (setq stage-start (nelisp-artifact--profile-time))
-    (setq features (nelisp-artifact--collect-features forms))
+    (setq provided-features (nelisp-artifact--collect-features forms))
     (nelisp-artifact--profile-log
      "collect-features" stage-start
-     (list :features (length features)))
-    (when (and requested-feature (not (memq requested-feature features)))
+     (list :features (length provided-features)))
+    (when (and requested-feature (not (memq requested-feature provided-features)))
       (error "compile-elisp-artifact: source did not provide %S" requested-feature))
     (when (eq kind 'neln)
       (setq stage-start (nelisp-artifact--profile-time))
@@ -1915,7 +1923,7 @@ native object for the standalone runtime, Doc 142 §6.4)."
        (list :native-policy native-policy)))
     (setq stage-start (nelisp-artifact--profile-time))
     (setq artifact-payload
-          (nelisp-artifact--artifact-payload source-path module features
+          (nelisp-artifact--artifact-payload source-path module provided-features
                                              (length forms) kind native
                                              native-report module-policy))
     (when (and (eq module-policy 'eval-only)
@@ -1931,7 +1939,7 @@ native object for the standalone runtime, Doc 142 §6.4)."
     (setq stage-start (nelisp-artifact--profile-time))
     (setq manifest
           (nelisp-artifact--manifest-plist
-           source-path features (length forms) target
+           source-path provided-features (length forms) target
 	           (secure-hash 'sha256 artifact-content)
            (length artifact-content)
 	           (nelisp-artifact--preload-records preloads)
@@ -2000,7 +2008,7 @@ self-contained `.wasm' via `nelisp-aot-compile-to-object'."
   (unless (nelisp-artifact--ensure-native-compiler)
     (error "native compiler unavailable"))
   (let* ((forms nil)
-         (features nil)
+         (provided-features nil)
          (program nil)
          (load-path (append load-paths load-path))
          (nelisp-load-path (append load-paths nelisp-load-path)))
@@ -2008,8 +2016,8 @@ self-contained `.wasm' via `nelisp-aot-compile-to-object'."
       (load preload nil t))
     (setq forms (nelisp-artifact--runtime-image-forms image-path))
     (nelisp-artifact-check-forms forms image-path)
-    (setq features (nelisp-artifact--collect-features forms))
-    (when (and requested-feature (not (memq requested-feature features)))
+    (setq provided-features (nelisp-artifact--collect-features forms))
+    (when (and requested-feature (not (memq requested-feature provided-features)))
       (error "compile-runtime-image: source did not provide %S" requested-feature))
     (setq program (if forms (cons 'seq forms) 0))
     (nelisp-aot-compile-to-object
