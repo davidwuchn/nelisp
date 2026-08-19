@@ -87,6 +87,34 @@
  (string-match-p (regexp-quote "a|b") "za|by")
  (string-match-p (regexp-quote "a.b") "zaXby")
  (string-match-p (regexp-quote "a|b") "za")
+ ;; The sequence functions take the sequences Emacs takes.  `reverse' used
+ ;; to walk any argument as a list, so a vector answered (nil) -- one
+ ;; element, and the wrong one; `mapconcat' answered the empty string for a
+ ;; vector because the walk never entered; `nreverse' signalled on a vector;
+ ;; and `nconc' skipped a non-cons argument instead of making it the tail,
+ ;; so the dotted-tail idiom silently lost data.
+ (reverse (list 1 2 3))
+ (reverse [1 2 3])
+ (reverse "abc")
+ (reverse nil)
+ (type-of (reverse [1 2]))
+ (type-of (reverse "ab"))
+ (nreverse (list 1 2 3))
+ (nreverse (vector 1 2 3))
+ (nreverse (copy-sequence "abc"))
+ ;; in place for a vector, as in Emacs: the caller's object changes
+ (let ((v (vector 1 2 3))) (nreverse v) v)
+ ;; and NOT in place for `reverse'
+ (let ((v (vector 1 2 3))) (reverse v) v)
+ (mapconcat #'identity (list "a" "b") "-")
+ (mapconcat #'identity ["a" "b"] "-")
+ (mapconcat #'char-to-string "abc" "-")
+ (mapconcat #'identity nil "-")
+ (nconc (list 1 2) 3)
+ (nconc (list 1) (list 2))
+ (nconc nil 5)
+ (nconc (list 1) nil)
+ (nconc)
  ;; maphash reaches every entry
  (let ((h (make-hash-table :test 'equal)) (n 0))
    (puthash "b" 2 h) (puthash "a" 1 h) (puthash "c" 3 h)

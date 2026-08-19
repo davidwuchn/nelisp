@@ -1078,15 +1078,18 @@ may be modified.  Callers depending on input identity should
    (t
     (signal 'wrong-type-argument (list 'sequencep seq)))))
 
+;; Kept byte-for-byte in step with the copy in
+;; scripts/nelisp-stdlib-prelude.el, which is the one baked into the
+;; standalone.  `make ns-gate' reports these as an ns-collision-divergent
+;; the moment they differ, and it did: fixing only the prelude produced
+;; exactly the drift that made this file's `split-string' and `sort' stale
+;; enough to send a review chasing code nothing runs.
 (defun mapconcat (fn seq &optional sep)
-  "Apply FN to each element of SEQ; concat the resulting strings,
-joined by SEP (default empty string).  SEQ is iterated as a list
-(matching the Rust builtin's MVP contract — vector / string SEQ
-forms are out of scope)."
-  (let ((out "")
-        (first t)
-        (joiner (or sep ""))
-        (tail seq))
+  (let* ((items (if (if (null seq) 1 (consp seq)) seq (append seq nil)))
+         (out "")
+         (first t)
+         (joiner (or sep ""))
+         (tail items))
     (while tail
       (unless first
         (setq out (concat out joiner)))

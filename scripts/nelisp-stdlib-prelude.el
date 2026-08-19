@@ -379,15 +379,24 @@ from `(defvar X nil)'."
   (let ((acc x)) (while rest (if (< (car rest) acc) (setq acc (car rest))) (setq rest (cdr rest))) acc))
 (defun abs (x) (if (< x 0) (- 0 x) x))
 
+;; SEQ may be a list, a vector or a string, as in Emacs.  The vector and
+;; string forms used to be documented as out of scope, and out of scope
+;; meant a vector answered the empty string: a vector is not nil, so the
+;; list walk never entered and the empty accumulator came back.  No error,
+;; no content.  `append' normalises the sequence, and for a string it
+;; yields characters, which is what Emacs passes to FN.
+;;
+;; The explanation lives here rather than in a docstring because the
+;; example needs quotation marks, and an unescaped one ends the string --
+;; which is exactly what happened on the first attempt at this fix: the
+;; docstring closed early, the rest of it parsed as forms, and `mapconcat'
+;; answered void-variable.
 (defun mapconcat (fn seq &optional sep)
-  "Apply FN to each element of SEQ; concat the resulting strings,
-joined by SEP (default empty string).  SEQ is iterated as a list
-(matching the Rust builtin's MVP contract — vector / string SEQ
-forms are out of scope)."
-  (let ((out "")
-        (first t)
-        (joiner (or sep ""))
-        (tail seq))
+  (let* ((items (if (if (null seq) 1 (consp seq)) seq (append seq nil)))
+         (out "")
+         (first t)
+         (joiner (or sep ""))
+         (tail items))
     (while tail
       (unless first
         (setq out (concat out joiner)))
@@ -1069,14 +1078,23 @@ reseeds from its characters; nil -> a full LCG value."
 ;; Doc 143: purecopy (no pure space -> identity), destructive nconc (setcdr),
 ;; princ/terpri (via the wired printer + nelisp--write-stdout-bytes).
 (defun purecopy (x) x)
+;; A non-cons argument becomes the tail rather than being skipped.  Emacs
+;; allows it as the LAST argument and that is the dotted-tail idiom:
+;; `(nconc (list 1 2) 3)' is (1 2 . 3).  This dropped it silently and
+;; answered (1 2), so data handed to the last argument simply vanished --
+;; and `(nconc 5)', which Emacs answers 5, came back nil.  nil arguments
+;; are still skipped, which is what makes `(nconc (list 1) nil)' = (1).
 (defun nconc (&rest lists)
   (let ((result nil) (tail nil))
     (while lists
       (let ((l (car lists)))
-        (when (consp l)
-          (if tail (setcdr tail l) (setq result l))
-          (setq tail l)
-          (while (consp (cdr tail)) (setq tail (cdr tail)))))
+        (if (consp l)
+            (progn
+              (if tail (setcdr tail l) (setq result l))
+              (setq tail l)
+              (while (consp (cdr tail)) (setq tail (cdr tail))))
+          (when l
+            (if tail (setcdr tail l) (setq result l)))))
       (setq lists (cdr lists)))
     result))
 (defun princ (object &optional _stream)
@@ -1147,20 +1165,65 @@ reseeds from its characters; nil -> a full LCG value."
       (setq length (1- length)))
     acc))
 
-(defun reverse (list)
-  (let ((acc nil))
-    (while list
-      (setq acc (cons (car list) acc)) (setq list (cdr list)))
-    acc))
+;; Emacs `reverse' takes any sequence and answers the SAME type: a vector
+;; reverses to a vector, a string to a string.  This walked its argument as
+;; a list whatever it was, so `(reverse [1 2 3])' answered (nil) -- one
+;; element, and the wrong one -- and `(reverse "abc")' the same.  Not an
+;; error, a plausible-looking value, which is the expensive kind.  Measured
+;; 2026-08-19 against Emacs 30.1.
+(defun reverse (seq)
+  (cond
+   ((null seq) nil)
+   ((consp seq)
+    (let ((acc nil) (tail seq))
+      (while tail
+        (setq acc (cons (car tail) acc))
+        (setq tail (cdr tail)))
+      acc))
+   ((stringp seq)
+    (let ((n (length seq)) (out "") (i 0))
+      (while (< i n)
+        (setq out (concat (substring seq i (1+ i)) out))
+        (setq i (1+ i)))
+      out))
+   ((vectorp seq)
+    (let* ((n (length seq)) (out (make-vector n nil)) (i 0))
+      (while (< i n)
+        (aset out (- (- n 1) i) (aref seq i))
+        (setq i (1+ i)))
+      out))
+   (t (signal 'wrong-type-argument (list 'sequencep seq)))))
 
-(defun nreverse (list)
-  (let ((prev nil) (cur list) next)
-    (while cur
-      (setq next (cdr cur))
-      (setcdr cur prev)
-      (setq prev cur)
-      (setq cur next))
-    prev))
+;; `nreverse' reverses a vector in place, as Emacs does, so a caller holding
+;; the original sees the change.  A string goes through `reverse' and comes
+;; back as a new string instead: this runtime's `aset' on a string is a
+;; byte-level write, and reversing multibyte text in place through it would
+;; scramble the encoding.  The value is right; only the identity differs,
+;; and getting the value wrong to preserve identity would be the worse
+;; trade.  Before this, a vector argument signalled and a string answered
+;; (nil).
+(defun nreverse (seq)
+  (cond
+   ((null seq) nil)
+   ((consp seq)
+    (let ((prev nil) (cur seq) next)
+      (while cur
+        (setq next (cdr cur))
+        (setcdr cur prev)
+        (setq prev cur)
+        (setq cur next))
+      prev))
+   ((vectorp seq)
+    (let* ((n (length seq)) (i 0) (j (- n 1)) tmp)
+      (while (< i j)
+        (setq tmp (aref seq i))
+        (aset seq i (aref seq j))
+        (aset seq j tmp)
+        (setq i (1+ i))
+        (setq j (- j 1)))
+      seq))
+   ((stringp seq) (reverse seq))
+   (t (signal 'wrong-type-argument (list 'sequencep seq)))))
 
 (unless (fboundp 'last)
   (defun last (list &optional n)
