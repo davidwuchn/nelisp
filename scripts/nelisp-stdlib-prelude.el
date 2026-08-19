@@ -486,6 +486,7 @@ from `(defvar X nil)'."
         (ash (logand (ash value -1) (1- (ash 1 61))) (+ count 1))))))
 
 (defun regexp-quote (s)
+  (nelisp--check-string s)
   ;; Emacs escapes exactly these eight: $ * + . ? [ \\ ^ -- the characters
   ;; that ARE special in its regexp syntax.  This escaped six more, and five
   ;; of them made things worse rather than merely noisier: in Emacs regexps
@@ -687,6 +688,7 @@ Result keeps the trailing slash."
         nil
       (substring path 0 (1+ idx)))))
 (defun file-name-nondirectory (path)
+  (nelisp--check-string path)
   (let ((idx -1) (i 0) (n (length path)))
     (while (< i n) (when (eq (aref path i) ?/) (setq idx i)) (setq i (1+ i)))
     (if (< idx 0) path (substring path (1+ idx)))))
@@ -695,6 +697,7 @@ Result keeps the trailing slash."
 ;; which is as wrong as a path result gets.
 (defun file-name-as-directory (path)
   "Return PATH with a trailing `/' appended if not already present."
+  (nelisp--check-string path)
   (cond
    ((= (length path) 0) "./")
    ((eq (aref path (1- (length path))) ?/) path)
@@ -704,6 +707,7 @@ Result keeps the trailing slash."
 ;; directory and so defeats the point of calling this at all.  A name that
 ;; is nothing but slashes keeps one, matching Emacs on "/" and "///".
 (defun directory-file-name (path)
+  (nelisp--check-string path)
   (let ((n (length path)))
     (while (if (> n 1) (eq (aref path (1- n)) ?/) nil)
       (setq n (1- n)))
@@ -835,6 +839,7 @@ Result keeps the trailing slash."
         (if period "" nil)
       (substring non (if period idx (1+ idx))))))
 (defun file-name-sans-extension (path)
+  (nelisp--check-string path)
   (let* ((non (file-name-nondirectory path))
          (dir-len (- (length path) (length non)))
          (n (length non)) (idx -1) (i 0))
@@ -1199,6 +1204,7 @@ Result keeps the trailing slash."
   (defun seq-mapn (fn &rest seqs) (apply #'cl-mapcar fn (mapcar #'nelisp-seq--to-list seqs))))
 (unless (fboundp 'seq-partition)
   (defun seq-partition (seq n)
+    (unless (numberp n) (signal 'wrong-type-argument (list 'number-or-marker-p n)))
     (let ((l (nelisp-seq--to-list seq)) (acc nil))
       (while l (push (take n l) acc) (setq l (nthcdr n l))) (nreverse acc))))
 (unless (fboundp 'seq-group-by)
@@ -1214,11 +1220,14 @@ Result keeps the trailing slash."
   (defun string-remove-suffix (suffix s) (if (string-suffix-p suffix s) (substring s 0 (- (length s) (length suffix))) s)))
 (unless (fboundp 'string-blank-p)
   (defun string-blank-p (s)
-    (let ((i 0) (n (length s)) (blank t))
-      (while (and (< i n) blank) (unless (memq (aref s i) '(32 9 10 13)) (setq blank nil)) (setq i (1+ i)))
-      blank)))
+    ;; Emacs answers the MATCH POSITION (0 for a blank string), not t --
+    ;; it is `string-match-p' underneath, and callers use the index.
+    (nelisp--check-string s)
+    (string-match-p "\\`[ \t\n\r]*\\'" s)))
 (unless (fboundp 'string-split)
-  (defun string-split (s &optional sep omit trim) (split-string s sep omit trim)))
+  (defun string-split (s &optional sep omit trim)
+    (nelisp--check-string s)
+    (split-string s sep omit trim)))
 ;; REGEXP was accepted and ignored -- the parameter was even named `_re' to
 ;; say so -- so (string-trim-left "xxab" "x+") answered "xxab".  A caller
 ;; that asked to strip a specific prefix got the default whitespace strip
@@ -1531,6 +1540,8 @@ loop for the exponent (= no `expt' / `float' primitive needed)."
 (unless (fboundp 'float) (defun float (x) (if (floatp x) x (+ x 0.0))))
 (unless (fboundp 'expt)
   (defun expt (b e)
+  (nelisp--check-number b)
+  (nelisp--check-number e)
     (cond ((and (integerp e) (>= e 0)) (let ((r 1) (i 0)) (while (< i e) (setq r (* r b) i (1+ i))) r))
           ((integerp e) (/ 1.0 (expt b (- e))))
           ;; The half power is the non-integer exponent that actually turns
@@ -1848,6 +1859,7 @@ reseeds from its characters; nil -> a full LCG value."
       (setq i (1+ i)))
     out))
 (defun format-message (fmt &rest args)
+  (nelisp--check-string fmt)
   (apply #'format (cons (nelisp--curve-quotes fmt) args)))
 ;; CASE-FOLD was accepted and ignored -- the parameter was even named
 ;; `_case-fold' to say so -- so `(assoc-string "ABC" (list "abc") t)'
@@ -2173,6 +2185,7 @@ FRESH buffer (the old `(t seq)' arm returned the same object, so a following
 
 (unless (fboundp 'assoc)
   (defun assoc (key alist &optional testfn)
+    (nelisp--check-list alist)
     (let ((found nil))
       (cond
        (testfn
@@ -6182,6 +6195,7 @@ first `getenv' is not overwritten by the value the process started with."
       chunks)))
 (unless (fboundp 'base64-encode-string)
   (defun base64-encode-string (string &optional _no-line-break)
+  (nelisp--check-string string)
     (let ((alphabet "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/")
           (i 0)
           (len (length string))
@@ -6305,6 +6319,7 @@ first `getenv' is not overwritten by the value the process started with."
       out)))
 (unless (fboundp 'json-serialize)
   (defun json-serialize (obj &rest _keys)
+    (unless (listp _keys) (signal 'wrong-type-argument (list 'plistp _keys)))
     (cond
      ((null obj) "null")
      ((eq obj t) "true")
@@ -6373,6 +6388,8 @@ first `getenv' is not overwritten by the value the process started with."
 
 (defun floor (x &optional div)
   "Return the largest integer <= X (1-arg) or <= X/DIV (2-arg)."
+  (nelisp--check-number x)
+  (when div (nelisp--check-number div))
   (cond
    ((null div) (nelisp--native-floor x))
    ((and (integerp x) (integerp div)) (nelisp--int-floor-div x div))
@@ -6385,6 +6402,7 @@ first `getenv' is not overwritten by the value the process started with."
 (defun round (x &optional div)
   "Return X (1-arg) or X/DIV (2-arg) rounded to the nearest integer.
 A half is rounded to the even neighbour, as in Emacs."
+  (nelisp--check-number x)
   (let ((v (if div (/ (float x) (float div)) x)))
     (if (integerp v) v
       (let* ((f (floor v)) (d (- v f)))
@@ -6395,6 +6413,8 @@ A half is rounded to the even neighbour, as in Emacs."
 
 (defun ceiling (x &optional div)
   "Return the smallest integer >= X (1-arg) or >= X/DIV (2-arg)."
+  (nelisp--check-number x)
+  (when div (nelisp--check-number div))
   (cond
    ((null div) (nelisp--native-ceiling x))
    ((and (integerp x) (integerp div))
@@ -6403,6 +6423,8 @@ A half is rounded to the even neighbour, as in Emacs."
 
 (defun truncate (x &optional div)
   "Truncate X (1-arg) or X/DIV (2-arg) toward zero."
+  (nelisp--check-number x)
+  (when div (nelisp--check-number div))
   (cond
    ((null div) (nelisp--native-truncate x))
    ((and (integerp x) (integerp div)) (/ x div))

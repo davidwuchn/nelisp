@@ -142,6 +142,7 @@ jobs:
         if: runner.os == 'Linux'
         shell: bash
         run: |
+          make prelude-toplevel-check
           make partial-inventory
           make parity-coverage
           make gate-selfcheck

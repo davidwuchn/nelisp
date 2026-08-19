@@ -83,7 +83,12 @@ can check.")
     ;; tools/nelisp-parity-fuzz.el: a name whose arity cannot be read
     ;; generates no call, which silently shrinks the search.  The recorder
     ;; collects them and the run summary prints how many and which.
-    nelisp-parity-fuzz--note-unreadable-arity)
+    nelisp-parity-fuzz--note-unreadable-arity
+    ;; tools/nelisp-prelude-toplevel-check.el: one records that a file ended
+    ;; at a form boundary (the loop's exit, not a fallback), the other
+    ;; records where it stopped parsing.  Both are printed in the report.
+    nelisp-prelude-toplevel--note-eof
+    nelisp-prelude-toplevel--note-unreadable)
   "Names whose presence in a handler counts as leaving a trace.
 
 Reviewed 2026-08-19, the first time anything in this inventory was looked

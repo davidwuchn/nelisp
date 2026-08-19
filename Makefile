@@ -356,6 +356,7 @@ bootstrap-contract:
 # were exactly that.  The ratchet is on `shared-shadowing'; the full table is
 # generated into docs/emacs-compat-table.txt so it can be grepped without
 # running anything.
+.PHONY: prelude-toplevel-check
 .PHONY: partial-inventory
 .PHONY: gate-mutation
 .PHONY: gate-selfcheck
@@ -676,6 +677,13 @@ standalone-reader-elt-smoke: $(if $(wildcard target/nelisp target/nelisp.exe),,s
 # mechanical -- an `_'-prefixed parameter in a function stock Emacs also
 # defines -- so the list is visible now and every site has to be
 # acknowledged with what it does instead.
+# An argument check added to a ONE-LINE defun lands after its closing paren
+# and becomes a top-level form: it runs during the prelude load and fails
+# with `void-variable' on the parameter name, nowhere near the function.
+# That happened twice on 2026-08-20.
+prelude-toplevel-check:
+	@$(EMACS) --batch -Q -l tools/nelisp-prelude-toplevel-check.el
+
 partial-inventory:
 	@$(EMACS) --batch -Q -l tools/nelisp-partial-inventory.el
 

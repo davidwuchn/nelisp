@@ -14,4 +14,14 @@ ns-gate|scripts/nelisp-stdlib-prelude.el|s/^(defun round (x \&optional div)/(def
 # The replacement is GLOBAL on purpose.  The first version changed one
 # occurrence of a name that appears ten times, so the name stayed covered and
 # the gate correctly stayed green -- a weak injection reads as a broken gate.
-parity-coverage|test/nelisp-shadow-differential-cases.el|s/regexp-quote/ignore-me-not-a-name/g|a covered name stops being mentioned
+# The injection has to remove a name the corpus mentions ONCE.  An earlier
+# version renamed `regexp-quote', which the corpus has grown many uses of --
+# the coverage count stayed above the baseline and the gate correctly stayed
+# green, which reads as a broken gate.  `nbutlast' is mentioned once.
+# The name has to be one the compat table LISTS and the corpus mentions
+# ONCE.  Two earlier versions failed that: `regexp-quote' is mentioned many
+# times (the count stayed above the floor), and `nbutlast' is not in the
+# generated table at all (so it was never counted, and removing it changed
+# nothing).  Both read as a broken gate when the gate was fine.
+parity-coverage|test/nelisp-shadow-differential-cases.el|s/generate-new-buffer/ignore-me-not-a-name/g|a covered name stops being mentioned
+prelude-toplevel-check|scripts/nelisp-stdlib-prelude.el|s/^(defun string-empty-p (s) (string-equal s ""))$/(defun string-empty-p (s) (string-equal s ""))\n  (nelisp--check-string s)/|a check lands outside a one-line defun

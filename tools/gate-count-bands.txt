@@ -25,6 +25,7 @@ bootstrap-contract 1      500
 parity-coverage   300     900
 emacs-parity      1000    100000
 partial-inventory 20      200
+prelude-toplevel-check 200 3000
 
 # Bands were set from the measured values on 2026-08-19, not guessed:
 # unsafe-inventory scans 253 .el files under lisp/ and scripts/, and

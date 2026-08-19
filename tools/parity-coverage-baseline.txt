@@ -3,4 +3,10 @@
 # mentions.  Raise it whenever cases are added; it may never go down without a
 # stated reason, so a case cannot be deleted quietly.
 
-covered 100
+covered 157
+
+# 100 -> 157 on 2026-08-20.  The gate had been printing "ratchet available"
+# for most of the day while the corpus grew from 100 names to 157; leaving
+# the floor at its first-measured value means it stops being a floor.  It
+# also made the mutation harness report this gate as broken -- removing one
+# covered name drops the count by one, which a floor of 100 cannot notice.

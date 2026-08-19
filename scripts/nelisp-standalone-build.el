@@ -3547,11 +3547,14 @@ argument (reachability + in-arena bounds checks).")
                       (bf_wrong_type_number_or_marker bad))))
     ;; `%' = C-style integer remainder (sign of dividend): x - y*trunc(x/y).
     ;; Dialect `/' is truncating i64 division, so this matches Emacs `%'.
-    ((:u8 "%") . (let* ((bad (wf_first_non_number args)))
+    ;; `%' is INTEGER remainder, so Emacs names `integer-or-marker-p' -- not
+    ;; the `number-or-marker-p' the general arithmetic ops name.  A float is
+    ;; rejected here and accepted by `mod'.
+    ((:u8 "%") . (let* ((bad (bf_first_non_integer args)))
                     (if (= bad 0)
                         (let* ((a (wf_argval args 0)) (b (wf_argval args 1)))
                       (wf_write_int out (- a (* b (/ a b)))))
-                      (bf_wrong_type_number_or_marker bad))))
+                      (bf_wrong_type_int_or_marker bad))))
     ;; `/=' = 2-arg numeric not-equal (int/float via wf_num_eq).
     ((:u8 "/=") . (let* ((r (wf_chain_eq args)))
                     (if (= r 2)
@@ -3621,9 +3624,13 @@ argument (reachability + in-arena bounds checks).")
                          (if (if (= tg 0) 1 (if (= tg 7) 1 0))
                              (wf_memq args out)
                            (bf_wrong_type_listp l))))
-    ((:lit "member") . (wf_member args out))
+    ((:lit "member") . (if (if (= (ptr-read-u64 (wf_arg_ptr args 1) 0) 0) 1 (if (= (ptr-read-u64 (wf_arg_ptr args 1) 0) 7) 1 0))
+                            (wf_member args out)
+                          (bf_wrong_type_listp (wf_arg_ptr args 1))))
     ((:lit "assq")   . (wf_assq args out))
-    ((:lit "assoc")  . (wf_assoc args out))
+    ((:lit "assoc")  . (if (if (= (ptr-read-u64 (wf_arg_ptr args 1) 0) 0) 1 (if (= (ptr-read-u64 (wf_arg_ptr args 1) 0) 7) 1 0))
+                            (wf_assoc args out)
+                          (bf_wrong_type_listp (wf_arg_ptr args 1))))
     ((:lit "rassoc") . (wf_rassoc args out))
     ;; --- M4 hash tables (cons-alist v1) ---
     ((:lit "make-hash-table")  . (nl_ht_make out))

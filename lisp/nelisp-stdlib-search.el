@@ -48,7 +48,13 @@
       found)))
 
 (unless (fboundp 'assoc)
-  (defun assoc (key alist &optional testfn)
+  (unless (fboundp 'nelisp--check-list)
+  (defun nelisp--check-list (x)
+    (unless (listp x) (signal 'wrong-type-argument (list 'listp x)))
+    x))
+
+(defun assoc (key alist &optional testfn)
+    (nelisp--check-list alist)
     (let ((found nil))
       (cond
        (testfn
@@ -60,9 +66,7 @@
        ((stringp key)
         (while (and alist (not found))
           (let ((pair (car alist)))
-            (if (and (consp pair)
-                     (stringp (car pair))
-                     (string= (car pair) key))
+            (if (and (consp pair) (stringp (car pair)) (string= (car pair) key))
                 (setq found pair)
               (setq alist (cdr alist))))))
        ((symbolp key)
@@ -74,9 +78,7 @@
        ((numberp key)
         (while (and alist (not found))
           (let ((pair (car alist)))
-            (if (and (consp pair)
-                     (numberp (car pair))
-                     (= (car pair) key))
+            (if (and (consp pair) (numberp (car pair)) (= (car pair) key))
                 (setq found pair)
               (setq alist (cdr alist))))))
        (t

@@ -621,6 +621,26 @@
  ;; `symbolp', every `cl-defstruct' with a docstring stopped compiling, which
  ;; is how it was found.  It cannot be compared here because `cl-defstruct'
  ;; does not exist in `emacs -Q'; `standalone-reader-test' covers it instead.
+
+ ;; More predicate names.  `%' is INTEGER remainder, so it names
+ ;; `integer-or-marker-p' where the general arithmetic ops name
+ ;; `number-or-marker-p' -- a float is rejected there and accepted by `mod'.
+ (list (condition-case e (base64-encode-string 1) (error e)) (base64-encode-string "abc")
+       (condition-case e (directory-file-name 1) (error e)) (directory-file-name "/a/b/")
+       (condition-case e (file-name-as-directory 1) (error e)) (file-name-as-directory "a")
+       (condition-case e (file-name-nondirectory 1) (error e)) (file-name-nondirectory "/a/b")
+       (condition-case e (file-name-sans-extension 1) (error e)) (file-name-sans-extension "a.b")
+       (condition-case e (regexp-quote 1) (error e)) (regexp-quote "a.b")
+       (condition-case e (format-message 1) (error e)) (format-message "`a'")
+       (condition-case e (string-blank-p 1) (error e)) (string-blank-p "  ")
+       (condition-case e (assoc 1 "s") (error e)) (assoc 'a '((a . 1)))
+       (condition-case e (member 1 "s") (error e)) (member 2 '(1 2))
+       (condition-case e (expt "a" 2) (error e)) (expt 2 10)
+       (condition-case e (floor '(1 2 3)) (error e)) (floor 1.7)
+       (condition-case e (truncate t) (error e)) (truncate -1.5)
+       (condition-case e (mod :key 2) (error e)) (mod -7 2)
+       (condition-case e (% "a" 2) (error e)) (% -7 2)
+       (condition-case e (round "a") (error e)) (round 2.5))
 )
 
 ;;; nelisp-shadow-differential-cases.el ends here

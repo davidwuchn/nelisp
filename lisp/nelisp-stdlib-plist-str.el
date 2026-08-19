@@ -504,20 +504,14 @@ Result keeps the trailing slash."
       (substring path 0 (1+ idx)))))
 
 (defun file-name-nondirectory (path)
-  "Return the non-directory part of PATH (= last `/'-delimited component)."
-  (let ((idx -1)
-        (i 0)
-        (n (length path)))
-    (while (< i n)
-      (when (eq (aref path i) ?/)
-        (setq idx i))
-      (setq i (1+ i)))
-    (if (< idx 0)
-        path
-      (substring path (1+ idx)))))
+  (nelisp--check-string path)
+  (let ((idx -1) (i 0) (n (length path)))
+    (while (< i n) (when (eq (aref path i) ?/) (setq idx i)) (setq i (1+ i)))
+    (if (< idx 0) path (substring path (1+ idx)))))
 
 (defun file-name-as-directory (path)
   "Return PATH with a trailing `/' appended if not already present."
+  (nelisp--check-string path)
   (cond
    ((= (length path) 0) "./")
    ((eq (aref path (1- (length path))) ?/) path)
@@ -527,6 +521,7 @@ Result keeps the trailing slash."
 ;; directory and so defeats the point of calling this at all.  A name that
 ;; is nothing but slashes keeps one, matching Emacs on "/" and "///".
 (defun directory-file-name (path)
+  (nelisp--check-string path)
   (let ((n (length path)))
     (while (if (> n 1) (eq (aref path (1- n)) ?/) nil)
       (setq n (1- n)))

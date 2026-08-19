@@ -120,7 +120,13 @@
 # byte-identical to its prelude copy -- `make ns-gate' named all three the
 # moment they diverged, which is the whole point of duplicating the text
 # rather than the intent.
-ns-collision 165
+# 165 -> 167 on 2026-08-20: `nelisp--check-list' and `nelisp--check-number',
+# following `assoc'/`member' and the numeric wrappers into the lisp/ mirrors.
+# One helper per PREDICATE is the point: Emacs names a specific predicate for
+# each requirement and a handler matches on that name, so a single generic
+# "bad type" check would be no better than none.  Byte-identical copies, so
+# this is the benign same-definition kind.
+ns-collision 167
 # 97 -> 96 on 2026-08-19: `string-equal' no longer differs between the two
 # files -- the prelude's now signals for a non-string instead of falling
 # through to `equal', and the lisp copy was brought with it.  Ratcheted down

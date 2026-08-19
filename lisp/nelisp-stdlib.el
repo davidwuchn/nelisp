@@ -175,9 +175,15 @@
 ;; where Emacs answers 0 and 2.  Emacs rounds halves to the EVEN neighbour,
 ;; and this is the same text the standalone prelude carries, so the two
 ;; substrates cannot drift apart again without `ns-gate' saying so.
+(unless (fboundp 'nelisp--check-number)
+  (defun nelisp--check-number (x)
+    (unless (numberp x) (signal 'wrong-type-argument (list 'numberp x)))
+    x))
+
 (defun round (x &optional div)
   "Return X (1-arg) or X/DIV (2-arg) rounded to the nearest integer.
 A half is rounded to the even neighbour, as in Emacs."
+  (nelisp--check-number x)
   (let ((v (if div (/ (float x) (float div)) x)))
     (if (integerp v) v
       (let* ((f (floor v)) (d (- v f)))
