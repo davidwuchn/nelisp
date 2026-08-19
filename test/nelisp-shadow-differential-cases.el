@@ -475,6 +475,22 @@
        (condition-case e (funcall 'no-such-fn-zz 1) (error e))
        (funcall 'car (list 1 2))
        (funcall (lambda (x) (* x 2)) 21))
+
+ ;; Arithmetic read a non-number through the value word of its Sexp and
+ ;; answered with whatever sat there: (* "" 0) was 0.  Every operator now
+ ;; names `number-or-marker-p', as Emacs does.
+ (list (condition-case e (* "" 0) (error e))
+       (condition-case e (+ 1 "a") (error e))
+       (condition-case e (- nil 1) (error e))
+       (condition-case e (/ "a" 2) (error e))
+       (condition-case e (/= 0 "a") (error e))
+       (condition-case e (= 1 "a") (error e))
+       (condition-case e (< 1 'x) (error e))
+       (condition-case e (1+ "a") (error e))
+       (condition-case e (mod "a" 2) (error e)))
+ (list (+ 1 2 3) (+) (- 10 3) (- 5) (* 2 3 4) (*) (/ 7 2) (/ 7.0 2)
+       (mod -7 2) (% -7 2) (1+ 5) (1- 5) (1+ 1.5) (= 1 1.0) (< 1 2 3)
+       (>= 3 2) (/= 1 2) (+ 1 2.5) (* 2 1.5))
 )
 
 ;;; nelisp-shadow-differential-cases.el ends here
