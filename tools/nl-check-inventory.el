@@ -42,23 +42,57 @@ a baseline of 0 is a different claim from an unreadable one."
       (when (re-search-forward "^unsafe-call +\\([0-9]+\\)" nil t)
         (string-to-number (match-string 1))))))
 
+(defconst nl-check-inventory--quoted-top 6
+  "How many files to name in the quoted-form report.")
+
+(defun nl-check-inventory--report-quoted (rows total)
+  "Print the quoted-form tally: ROWS is (FILE . COUNT), TOTAL their sum.
+Reported, never gated.  A gate that says 531 without saying what it
+excludes gets read as \"531 is the unsafe surface\", and here that is
+wrong by an order of magnitude: this tree writes its runtime as quoted
+generator bodies, so most of the unsafe kernel is inside a quote and
+the scan steps over all of it by design (the same rule correctly
+excludes opcode tables like (ptr-read-u16 . 39), which are data).
+Printing the excluded count turns a silent exclusion into a stated
+one, and leaves the question of whether to gate it to whoever reads
+the number."
+  (princ (format "\n  not counted, inside quoted forms (reported, not gated): %d\n"
+                 total))
+  (let ((shown 0))
+    (dolist (row rows)
+      (when (< shown nl-check-inventory--quoted-top)
+        (princ (format "%6d  %s\n" (cdr row) (car row)))
+        (setq shown (+ shown 1)))))
+  (when (> (length rows) nl-check-inventory--quoted-top)
+    (princ (format "         ... and %d more file(s)\n"
+                   (- (length rows) nl-check-inventory--quoted-top)))))
+
 (defun nl-check-inventory-run ()
   "Scan lisp/ and scripts/, print the inventory, enforce the baseline."
   (let ((total 0)
         (scanned 0)
-        (failed nil))
+        (failed nil)
+        (quoted-total 0)
+        (quoted-rows nil))
     (dolist (dir '("lisp" "scripts"))
       (dolist (f (directory-files dir t "\\.el\\'"))
         (setq scanned (+ scanned 1))
         (condition-case err
             (let ((n (length (nl-check-findings-of-kind
-                              (nl-check-file f) 'unsafe-call))))
+                              (nl-check-file f) 'unsafe-call)))
+                  (q (length (nl-check-file-quoted-unsafe f))))
               (when (> n 0)
                 (princ (format "%6d  %s\n" n f)))
-              (setq total (+ total n)))
+              (setq total (+ total n))
+              (setq quoted-total (+ quoted-total q))
+              (when (> q 0)
+                (setq quoted-rows (cons (cons f q) quoted-rows))))
           (error
            (princ (format "READ-FAIL %s: %S\n" f err))
            (setq failed t)))))
+    (nl-check-inventory--report-quoted
+     (sort quoted-rows (lambda (a b) (> (cdr a) (cdr b))))
+     quoted-total)
     (let ((baseline (nl-check-inventory--baseline)))
       (princ (format "unsafe-inventory: total=%d baseline=%s\n"
                      total (or baseline "ABSENT")))

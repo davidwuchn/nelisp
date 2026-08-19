@@ -25,9 +25,46 @@
 #
 # The second half is the interesting one: this gate has been reporting the
 # per-target OS layer as clean because of how the layer is written, not
-# because of what it contains.  The macOS arm is still a quoted list, and
-# unquoting it as well takes the same file 346 -> 378, so 32 more calls are
-# still outside this number.  Fixing that means either scanning quoted
-# forms in these generators or making the arms backquotes too, and either
-# is its own change -- but nobody should read 369 as "369 is the surface".
-unsafe-call 369
+# because of what it contains.
+#
+# 369 -> 531 on 2026-08-19, chasing that down.  Two causes, measured apart:
+#
+#   +59  a defect in the scanner, not new code.  `nl-check--unsafe-scan'
+#        walked only the cdr of a form, so anything in car position was
+#        never looked at.  A `let' binding list is (BINDING ...) with
+#        BINDING a cons, which put every first binding's initialiser in
+#        exactly that blind spot -- and allocating in the first `let*'
+#        binding is the house idiom of the standalone build.
+#        `(let ((x (alloc-bytes 1 1))) x)' scanned as clean.  Fixed, with
+#        four regression tests; the tree went 369 -> 428 with no code
+#        change at all.
+#
+#  +103  the per-target OS layer, now visible.  Five pcase arms across
+#        `nelisp-standalone--reader-os-base-forms' and
+#        `nelisp-standalone--os-syscall-xlat-forms' were quoted lists and
+#        so were skipped whole; their siblings were backquotes and so were
+#        counted.  Nothing but the quote character decided whether a
+#        target's syscall layer appeared in this number.  The five are
+#        backquotes now, which is value-identical when the template has no
+#        unquote -- checked structurally rather than assumed: 13
+#        quote/backquote nodes compared across both generators, all equal,
+#        none of the converted ones carrying an unquote.
+#
+# What is still excluded, and why the gate now says so out loud: this tree
+# writes its runtime as quoted generator bodies -- (defconst
+# nelisp-cc-...--source '(seq (defun ...) ...)) -- and the scan steps over
+# quoted forms by design.  That rule is right: it is what keeps opcode
+# tables like (ptr-read-u16 . 39) and name lists out of a count of calls.
+# But it also means 4607 unsafe-primitive calls across 85 files sit outside
+# this number, 2182 of them in the standalone build script alone.  The run
+# prints that tally and the files it falls in, so 531 is never read as the
+# unsafe surface -- it is the part of the surface written outside a quote.
+#
+# Gating the other 4607 is a policy question this file does not settle.
+# The two candidate rules were both measured: descending into every quoted
+# form counts 49 opcode-table and name-list entries in
+# lisp/nelisp-aot-compiler.el that are not calls, and restricting it to
+# quoted forms containing a `defun' drops 11 of those but loses 78 real
+# ones in the build script.  Neither is clean, which is the argument for
+# reporting the number rather than pretending a heuristic settles it.
+unsafe-call 531

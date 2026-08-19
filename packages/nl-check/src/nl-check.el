@@ -25,6 +25,9 @@
 ;;   resource-double     a path consumes the same resource twice
 ;;   resource-untracked  the resource left this checker's sight
 ;;   unsafe-call         an unsafe primitive called outside `nl-unsafe'
+;;   unsafe-call-quoted  the same, inside a quoted form -- reported by
+;;                       `nl-check-file-quoted-unsafe', never by
+;;                       `nl-check-file', and never gated
 ;;
 ;; Soundness is deliberately partial, and says so.  Doc 170 section 6.3:
 ;; the moment a resource is captured by a lambda or handed to a function
@@ -420,10 +423,63 @@ its body more than once."
       (setq findings
             (cons (list :kind 'unsafe-call :subject (car form) :form form)
                   findings)))
+    ;; The head is walked too when it is itself a form.  Walking only the
+    ;; cdr reads `(let ((x (alloc-bytes 1 1))) x)' as clean: the binding
+    ;; list is (BINDING ...), BINDING is a cons, and the first one lives
+    ;; in car position where nothing looked.  Measured on this tree the
+    ;; day it was found -- 369 reported, 428 present, and nearly every one
+    ;; of the 59 was an allocation in the first `let*' binding, the
+    ;; house idiom of the standalone build.
+    (when (consp (car form))
+      (setq findings
+            (nl-check--unsafe-scan (car form) inside-unsafe findings)))
     (let ((tail (cdr form)))
       (while (consp tail)
         (setq findings
               (nl-check--unsafe-scan (car tail) inside-unsafe findings))
+        (setq tail (cdr tail))))
+    findings)))
+
+(defun nl-check--unsafe-scan-quoted (form findings)
+  "Collect unsafe-primitive calls that `nl-check--unsafe-scan\=' skips.
+Quoted forms are not code at their own site, which is why the scan
+above steps over them: an opcode table like (ptr-read-u16 . 39) or a
+name list is data, and counting it would be a lie in the other
+direction.
+
+But this tree writes its runtime as quoted generator bodies --
+`(defconst nelisp-cc-...--source \='(seq (defun ...) ...))\=' -- so the
+unsafe kernel itself lives inside quotes, and the gated count sees
+almost none of it.  Reporting that as a separate number is the honest
+position: the exclusion is a real one, and a reader who is told 369
+without being told what it excludes will read it as the surface."
+  (cond
+   ((not (consp form)) findings)
+   ((memq (car form) '(quote function))
+    (nl-check--unsafe-collect (cdr form) findings))
+   (t
+    (let ((tail form))
+      (while (consp tail)
+        (setq findings (nl-check--unsafe-scan-quoted (car tail) findings))
+        (setq tail (cdr tail))))
+    findings)))
+
+(defun nl-check--unsafe-collect (form findings)
+  "Collect every unsafe-primitive head in FORM, quoted or not."
+  (cond
+   ((not (consp form)) findings)
+   (t
+    (when (and (symbolp (car form))
+               (memq (car form) nl-safe-unsafe-primitives))
+      (setq findings
+            (cons (list :kind 'unsafe-call-quoted :subject (car form)
+                        :form form)
+                  findings)))
+    (when (consp (car form))
+      (setq findings (nl-check--unsafe-collect (car form) findings)))
+    (let ((tail (cdr form)))
+      (while (consp tail)
+        (setq findings (nl-check--unsafe-collect (car tail) findings))
         (setq tail (cdr tail))))
     findings)))
 
@@ -503,6 +559,15 @@ Reading only; nothing from PATH is evaluated."
                 (setq done t)
               (setq forms (cons form forms)))))))
     (nl-check-forms (nreverse forms))))
+
+(defun nl-check-file-quoted-unsafe (path)
+  "Return PATH\='s `unsafe-call-quoted\=' findings.
+The calls `nl-check-file\=' steps over because they sit inside a quoted
+form.  Reported, never gated: see `nl-check--unsafe-scan-quoted\='."
+  (let ((findings nil))
+    (dolist (form (nl-check-file-forms path))
+      (setq findings (nl-check--unsafe-scan-quoted form findings)))
+    (nreverse findings)))
 
 (defun nl-check-file-forms (path)
   "Read PATH and return its top-level forms.  Nothing is evaluated."

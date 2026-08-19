@@ -13830,7 +13830,7 @@ boundary (Doc 151 Phase B):
   handle negative rc as failure)."
   (pcase nelisp-standalone--target
     ('linux-aarch64
-     '((defun nl_os_syscall_path (nr cpath)
+     `((defun nl_os_syscall_path (nr cpath)
          (if (= nr 87) (syscall-direct 35 (- 0 100) cpath 0 0 0 0)      ; unlink -> unlinkat
            (if (= nr 84) (syscall-direct 35 (- 0 100) cpath 512 0 0 0)  ; rmdir -> unlinkat+AT_REMOVEDIR
              (if (= nr 80) (syscall-direct 49 cpath 0 0 0 0 0)          ; chdir (native 49)
@@ -13880,7 +13880,7 @@ boundary (Doc 151 Phase B):
        (defun nl_os_nanosleep (ts)
          (syscall-direct 101 ts 0 0 0 0 0))))
     ('linux-x86_64
-     '((defun nl_os_syscall_path (nr cpath) (syscall-direct nr cpath 0 0 0 0 0))
+     `((defun nl_os_syscall_path (nr cpath) (syscall-direct nr cpath 0 0 0 0 0))
        (defun nl_os_syscall_path_int (nr cpath iarg) (syscall-direct nr cpath iarg 0 0 0 0))
        (defun nl_os_syscall_path2 (nr c1 c2) (syscall-direct nr c1 c2 0 0 0 0))
        (defun nl_os_stat_path (cpath buf) (syscall-direct 4 cpath buf 0 0 0 0))
@@ -13892,7 +13892,7 @@ boundary (Doc 151 Phase B):
        (defun nl_os_statx_path (cpath flags buf) (syscall-direct 332 (- 0 100) cpath flags 4095 buf 0))
        (defun nl_os_nanosleep (ts) (syscall-direct 35 ts 0 0 0 0 0))))
     (_
-     '((defun nl_os_syscall_path (_nr _cpath) (- 0 38))
+     `((defun nl_os_syscall_path (_nr _cpath) (- 0 38))
        (defun nl_os_syscall_path_int (_nr _cpath _iarg) (- 0 38))
        (defun nl_os_syscall_path2 (_nr _c1 _c2) (- 0 38))
        (defun nl_os_stat_path (_cpath _buf) (- 0 38))
@@ -13915,7 +13915,7 @@ boundary (Doc 151 Phase B):
   (pcase nelisp-standalone--target
     ((or 'windows-x86_64 'windows-aarch64)
      (append
-     '((defun nl_win_wcs_utf8_dup (src)
+     `((defun nl_win_wcs_utf8_dup (src)
          (let* ((n (extern-call WideCharToMultiByte 65001 0 src -1 0 0 0 0))
                 (cap (if (< n 1) 1 n))
                 (dst (alloc-bytes cap 1)))
@@ -14106,7 +14106,7 @@ boundary (Doc 151 Phase B):
      ;; constants; see the generator's docstring).
      (nelisp-standalone--alloc-check-env-probe-forms)))
     ('macos-aarch64
-     '(;; No-op on purpose: `nl_os_argv_init' below rebuilds argv through
+     `(;; No-op on purpose: `nl_os_argv_init' below rebuilds argv through
        ;; sysctl KERN_PROCARGS2, so SP is not the entry-stack vector the
        ;; Linux walk reads (see `nelisp-standalone--reader-posix-env-forms').
        (defun nl_os_environ_init (_sp result-slot) (wf_write_nil result-slot))

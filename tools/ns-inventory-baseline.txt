@@ -53,6 +53,11 @@
 # round.
 ns-collision 148
 ns-collision-divergent 97
-ns-prefix-violation 850
+# 850 -> 851 on 2026-08-19: `nl-check-file-quoted-unsafe', the entry point
+# that reports the unsafe calls inside quoted forms.  Same situation as the
+# nl-ns pair above -- it is public because tools/nl-check-inventory.el calls
+# it across the boundary, and naming it `nl-check--' would move the finding
+# into ns-private-escape rather than remove it.
+ns-prefix-violation 851
 ns-private-escape 611
 ns-unreadable 0
