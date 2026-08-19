@@ -1097,23 +1097,62 @@ entries carry explicit hex-encoded byte sections."
              (plist-get unit :sections)))
     copy))
 
-(defun nelisp-standalone--cached-unit (name source source-file)
-  "Return the link-unit for NAME, compiling SOURCE only if SOURCE-FILE
-or the toolchain is newer than the cached object.
-SOURCE-FILE may be a single file or a list of dependency files.
-CACHE-STALENESS (2026-07-03): units whose SOURCE comes from a `require'd
-lisp/nelisp-cc-*.el defconst must list that library file here too --
-depending only on this build script left the cached object stale when the
-library changed, so edits to e.g. the combiner-apply source were silently
-not linked."
+(defvar nelisp-standalone--toolchain-digest nil
+  "Memoised SHA-1 over the toolchain sources, computed once per process.")
+
+(defun nelisp-standalone--toolchain-digest ()
+  "Return a digest of the compiler/linker sources that produce a unit."
+  (or nelisp-standalone--toolchain-digest
+      (setq nelisp-standalone--toolchain-digest
+            (secure-hash
+             'sha1
+             (mapconcat
+              (lambda (f)
+                (if (and f (file-readable-p f))
+                    (with-temp-buffer
+                      (set-buffer-multibyte nil)
+                      (insert-file-contents-literally f)
+                      (secure-hash 'sha1 (current-buffer)))
+                  "-"))
+              (nelisp-standalone--dep-files) "\n")))))
+
+(defun nelisp-standalone--unit-cache-key (source)
+  "Content key for SOURCE: what is compiled, plus what compiles it.
+
+`print-length'/`print-level'/`print-circle' are bound OFF deliberately.  A
+truncated print would let two different sources share a key, which is the
+one way a content-addressed cache can be worse than a dependency list --
+it would hand back an object for code that was never compiled."
+  (let ((print-length nil) (print-level nil) (print-circle nil)
+        (print-quoted t) (print-escape-nonascii t))
+    (secure-hash 'sha1 (concat (nelisp-standalone--toolchain-digest) "\0"
+                               (prin1-to-string source)))))
+
+(defun nelisp-standalone--cached-unit (name source &rest _ignored)
+  "Return the link-unit for NAME, compiling SOURCE only on a content miss.
+
+CONTENT-ADDRESSED (2026-08-19).  The cache used to be keyed on NAME with
+freshness decided by mtimes against a hand-written dependency list, and the
+list was wrong at two of the twenty call sites: `sf-cc-flagclear.o' and
+`sf-env-set-value-bind-rest-fix.o' named only this build script, so editing
+the lisp/nelisp-cc-*.el library their source comes from left the cache fresh
+and relinked the OLD object.  The build succeeded, the binary was unchanged,
+and the only symptom was that the edit had no effect -- hours went into
+that on 2026-08-19 with `condition-case' :success.
+
+The key is now a digest of the source sexp itself plus the toolchain, so
+there is no dependency list to get wrong: any change to what is compiled, or
+to what compiles it, is a different key.  Extra arguments are accepted and
+ignored so the twenty call sites did not all have to change in the same
+commit; they carry the old dependency lists, which are now inert.
+
+Stale entries for the same NAME are removed on a miss, so the cache
+directory tracks the tree rather than accumulating every key ever built."
   (let* ((name (nelisp-standalone--target-object-name name))
          (cache-dir (nelisp-standalone--target-cache-dir))
-         (cache (expand-file-name (concat name ".unit") cache-dir))
-         (deps (append (if (listp source-file) source-file (list source-file))
-                       (nelisp-standalone--dep-files)))
-         (fresh (and (file-exists-p cache)
-                     (cl-every (lambda (f) (or (null f) (file-newer-than-file-p cache f))) deps))))
-    (if fresh
+         (key (nelisp-standalone--unit-cache-key source))
+         (cache (expand-file-name (format "%s.%s.unit" name key) cache-dir)))
+    (if (file-exists-p cache)
         (let ((coding-system-for-read 'utf-8-unix))
           (with-temp-buffer
             (insert-file-contents cache)
@@ -1126,6 +1165,9 @@ not linked."
             (let ((print-escape-nonascii t) (print-length nil) (print-level nil))
               (prin1 (nelisp-standalone--unit-cache-encode unit)
                      (current-buffer)))))
+        (dolist (old (directory-files cache-dir t
+                                      (concat "\\`" (regexp-quote name) "\\(\\.[0-9a-f]+\\)?\\.unit\\'")))
+          (unless (string= old cache) (delete-file old)))
         (push name nelisp-standalone--recompiled)
         unit))))
 

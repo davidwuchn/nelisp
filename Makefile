@@ -356,6 +356,7 @@ bootstrap-contract:
 # were exactly that.  The ratchet is on `shared-shadowing'; the full table is
 # generated into docs/emacs-compat-table.txt so it can be grepped without
 # running anything.
+.PHONY: inner
 .PHONY: emacs-parity
 .PHONY: emacs-compat
 emacs-compat:
@@ -634,6 +635,18 @@ standalone-reader-elt-smoke: $(if $(wildcard target/nelisp target/nelisp.exe),,s
 # DIFFERENT NeLisp printer (the native `nelisp--repr'), and the two differ on
 # backslash escaping inside a nested string -- an hour went into that mirage
 # on 2026-08-19.
+# The edit-check loop, measured rather than assumed on 2026-08-19: the
+# standalone rebuild is ~14s and the seven gates together are ~6s, while
+# `make test' alone is ~70s.  So the loop worth optimising was never the
+# build -- it was running the full ERT suite after every one-line change.
+# This target is what to run between edits; run `make test' before the
+# commit, not before each measurement.
+inner: standalone-reader emacs-parity
+	@$(MAKE) --no-print-directory standalone-reader-shadow-smoke
+	@$(MAKE) --no-print-directory standalone-reader-elt-smoke
+	@$(MAKE) --no-print-directory standalone-reader-prelude-test
+	@echo "[inner] build + parity + standalone smokes clean"
+
 emacs-parity: $(if $(wildcard target/nelisp target/nelisp.exe),,standalone-reader)
 	@mkdir -p target
 	@printf '%s\n' '(princ (format "%S" (progn' > target/emacs-parity.el
