@@ -82,16 +82,18 @@ jobs:
         if: runner.os == 'Linux'
         shell: bash
         run: make pkg-load-lists
-      # Reports the ratio on every run but does not fail the build: the
-      # measurement is 0.885x-0.905x, below the 0.95 floor, and Doc 171
-      # sec 11.1 blocks 5.3 (default-on) until that is closed.  Keeping
-      # the step blocking would leave main permanently red and train
-      # everyone to ignore CI, hiding real regressions in the lanes that
-      # are now green.  Re-arm it (drop continue-on-error) together with
-      # the change that reaches the floor.
-      - name: "Doc 171 G4 native TCO benchmark, advisory (TCO-rewritten defun vs hand-written nl-loop, floor 0.95x; Linux is the only lane with the cc + objcopy native-exec toolchain)"
+      # Blocking again since 2026-08-19.  It was advisory because the ratio
+      # sat at 0.885x-0.905x and a permanently red step trains everyone to
+      # ignore CI.  Two things closed that: the back-edge now emits only the
+      # temporaries a later argument actually reads, and the benchmark takes
+      # the median of five rounds of twenty runs instead of one round of
+      # five -- five runs closed the timing window at 25ms, before the CPU
+      # had finished ramping, and could not resolve a 5% floor.  Measured on
+      # the same lane: the pre-change compiler reads 0.955/0.958/0.947 and
+      # the current one 0.995/1.004/1.007, so the step can fail for a real
+      # regression rather than by default.
+      - name: "Doc 171 G4 native TCO benchmark (TCO-rewritten defun vs hand-written nl-loop, floor 0.95x; Linux is the only lane with the cc + objcopy native-exec toolchain)"
         if: runner.os == 'Linux'
-        continue-on-error: true
         shell: bash
         run: make bench-aot-tco
       - name: "Standalone NeLisp CHECKED allocator smoke (Doc 170 Stage 2 redzone/generation/leak report; Windows x86_64)"
