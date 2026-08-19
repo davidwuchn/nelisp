@@ -51,7 +51,8 @@
 ;;   DEPTH       — i64 recursion depth (= caller-provided; the safe
 ;;                 Rust wrapper passes 0).
 ;;
-;; Returns: i64.  1 = success, anything else (-1, 0) = error.  On
+;; Returns: i64.  1 = success, 2 = end of input (no form, not an
+;; error), anything else (-1, 0) = error.  On
 ;; error, `*RESULT-SLOT' is `Sexp::Nil'.
 ;;
 ;; The safe Rust wrapper allocates SLOT-POOL with enough capacity for
@@ -628,7 +629,16 @@
        ((>= kind 20)
         (nelisp_reader_p_leaf kind result-slot
                               (nelisp_reader_p_slot slot-pool 1)))
-       ;; Stray close / dot / EOF / error / record / byte-code → error.
+       ;; EOF: there is no form here, and that is not an error.  It used to
+       ;; share the `(t -1)' arm below with stray close, stray dot and the
+       ;; literals this reader does not support, so every top-level caller
+       ;; got ONE code for "nothing left to read" and "I could not read
+       ;; this" -- and each of them chose to believe the first.  A file that
+       ;; stopped at a token the lexer mis-classified was reported loaded,
+       ;; with the rest of it never evaluated.  2 rather than 0 because 0 is
+       ;; already an error return elsewhere in this parser.
+       ((= kind 0) 2)
+       ;; Stray close / dot / error / record / byte-code → error.
        (t -1)))
 
     ;; ===========================================================

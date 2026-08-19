@@ -7238,6 +7238,20 @@ unresolved at link time."
          (ptr-write-u64 268435472 0 1)
          (atomic-fetch-add 268435544 1)
          1)))
+    (defun bf_read_syntax_error (what)
+      ;; Raised when the reader could not read a form and had not reached the
+      ;; end of the input.  Before this the two were one return code, so the
+      ;; loops below stopped on both and reported success on both.
+      (let* ((buf (alloc-bytes 24 1)))
+        (seq
+         (ptr-write-u64 buf 0 3270855143590358633)  ; "invalid-"
+         (ptr-write-u64 (+ buf 8) 0 7960520455148889458) ; "read-syn"
+         (ptr-write-u64 (+ buf 16) 0 7889268)       ; "tax"
+         (nl_alloc_symbol buf 19 268435480)
+         (bf_sig_copy32 268435512 what)
+         (ptr-write-u64 268435472 0 1)
+         (atomic-fetch-add 268435544 1)
+         1)))
     (defun bf_require_file_readable_p (file)
       (let* ((cpath (nl_bi_make_cpath file))
              (fd (nl_os_open_read cpath)))
@@ -7366,7 +7380,10 @@ unresolved at link time."
                           (ptr-write-u64 268435560 0
                                          (if (< lo hi) hi lo))))
                     (setq more 2))))
-             (setq more 0)))))
+             ;; 2 = end of input, anything else = the reader could not read
+             ;; a form.  These used to be one branch, so a file that stopped
+             ;; on a bad token finished "loaded".
+             (if (= prc 2) (setq more 0) (setq more 3))))))
       more)
     (defun bf_eval_source_string_loop (src cursor result pool env out bsym more)
       (while (= more 1)
@@ -7393,7 +7410,9 @@ unresolved at link time."
                           (ptr-write-u64 268435560 0
                                          (if (< lo hi) hi lo))))
                     (setq more 2))))
-             (setq more 0)))))
+             ;; See `bf_load_eval_loop': 2 = end of input, anything else = the
+             ;; reader could not read a form.
+             (if (= prc 2) (setq more 0) (setq more 3))))))
       more)
     ;; `load' reported success for a path that does not exist.  Not by
     ;; ignoring an error: `nl_bi_read_file' hands back an EMPTY STRING for a
@@ -7448,16 +7467,26 @@ unresolved at link time."
                 (prevcap (ptr-read-u64 268436448 0)))
            (seq
             (ptr-write-u64 268436448 0 cap)
-            (if (= (bf_load_eval_loop src cursor result pool env out bsym 1) 2)
-                (seq
-                 (ptr-write-u64 268436448 0 prevcap)
-                 1)
-              (seq
-               (ptr-write-u64 268435472 0 0)
-               (wf_dirty)
-               (wf_write_t out)
-               (ptr-write-u64 268436448 0 prevcap)
-               0)))))))
+            (let* ((lrc (bf_load_eval_loop src cursor result pool env out bsym 1)))
+              ;; 2 = a form signalled and the signal is already raised.
+              ;; 3 = the reader stopped before the end of the file.  That one
+              ;; used to be indistinguishable from reaching the end, so `load'
+              ;; wrote t for a file it had abandoned -- `provide' at the bottom
+              ;; never ran, and `require' then reported the file missing.
+              (if (= lrc 2)
+                  (seq
+                   (ptr-write-u64 268436448 0 prevcap)
+                   1)
+                (if (= lrc 3)
+                    (seq
+                     (ptr-write-u64 268436448 0 prevcap)
+                     (bf_read_syntax_error (wf_arg_ptr args 0)))
+                  (seq
+                   (ptr-write-u64 268435472 0 0)
+                   (wf_dirty)
+                   (wf_write_t out)
+                   (ptr-write-u64 268436448 0 prevcap)
+                   0)))))))))
     (defun bf_eval_source_string (args env out)
       ;; Doc 147 Phase 1.5 Group P — RAW parse-pool buffer (cap*32 bytes),
       ;; `pool' IS the base; slot N @ pool+N*32 (`nelisp_reader_p_slot').
@@ -7486,9 +7515,13 @@ unresolved at link time."
          (ptr-write-u64 cursor 0 2) (ptr-write-u64 cursor 8 0)
          (ptr-write-u64 268436448 0 (let ((n (* 4 (str-len src))))
                                       (if (< n 256) 256 (if (> n 32768) 32768 n))))
-         (if (= (bf_eval_source_string_loop src cursor result pool env out bsym 1) 2)
-             (seq (ptr-write-u64 268436448 0 prevcap) 1)
-           (seq (wf_dirty) (ptr-write-u64 268436448 0 prevcap) 0)))))
+         (let* ((lrc (bf_eval_source_string_loop src cursor result pool env out bsym 1)))
+           (if (= lrc 2)
+               (seq (ptr-write-u64 268436448 0 prevcap) 1)
+             (if (= lrc 3)
+                 (seq (ptr-write-u64 268436448 0 prevcap)
+                      (bf_read_syntax_error src))
+               (seq (wf_dirty) (ptr-write-u64 268436448 0 prevcap) 0)))))))
     (defun bf_read_all_from_string_native (args out)
       ;; Return all top-level forms from SRC as a proper list using the same
       ;; native reader parser that drives standalone load/eval.  This gives
@@ -7529,10 +7562,18 @@ unresolved at link time."
                       (cons-set-cdr tail node)
                       (wf_copy32 tail node)))
                    0)
-                (setq more 0)))))
-         (wf_copy32 out head)
-         (ptr-write-u64 268436448 0 prevcap)
-         0)))
+                ;; 2 = end of input.  Anything else means the reader gave up
+                ;; part-way, and returning the forms collected so far reads
+                ;; exactly like a complete parse to every caller.
+                (if (= prc 2) (setq more 0) (setq more 3))))))
+         (if (= more 3)
+             (seq
+              (ptr-write-u64 268436448 0 prevcap)
+              (bf_read_syntax_error src))
+           (seq
+            (wf_copy32 out head)
+            (ptr-write-u64 268436448 0 prevcap)
+            0)))))
     ;; length that also handles vectors (tag 8) -> vector-len; else m5_length.
     (defun bf_length (p)
       (if (= (ptr-read-u64 p 0) 8) (vector-len p) (m5_length p)))

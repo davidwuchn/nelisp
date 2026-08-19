@@ -104,7 +104,30 @@ probe in a lambda would have made the wrapper the thing measured."
                          (fboundp 'probe-marker-after-error))
                   "continues"
                 "stops")
-              "a failed require inside a file does not stop the file")
+              ;; The note has to follow the value, or this table lies the way
+              ;; a hand-written one does -- this line read "does not stop the
+              ;; file" for a while after the value had started reading "stops".
+              (if (fboundp 'probe-marker-after-error)
+                  "a failed require inside a file does not stop the file"
+                "a failed require inside a file stops the file"))
+
+;; And does a form the reader cannot READ stop it?  Different question from
+;; the one above, and it had a different answer: the parser returned one code
+;; for "end of input" and for "I could not read this", so every top-level
+;; caller stopped on both and called both success.  `src/nelisp-cc-arm64.el'
+;; came back from `load' with t, two thirds of its definitions missing and its
+;; own `(provide ...)' never run -- after which `require' called the file
+;; missing and the native compiler was reported unavailable.
+(ignore-errors
+  (write-region
+   "(defun probe-marker-before-bad-read () 1)\n(defun probe-marker-after-bad-read () (list 1 2\n"
+   nil "target/ai/probe-bad-read-file.el"))
+(let* ((result (probe-safe (load "target/ai/probe-bad-read-file.el" nil t)))
+       (signalled (eq (car result) 'err)))
+  (probe-report "load past a bad read" (if signalled "signals" "silent")
+                (if signalled
+                    "a file the reader cannot finish is loud"
+                  "SILENT: `load' returns t for a file it abandoned")))
 
 ;;;; Files ---------------------------------------------------------------
 
@@ -120,9 +143,11 @@ probe in a lambda would have made the wrapper the thing measured."
                      (buffer-string))))))
   (probe-report "write-region multibyte"
                 (if (eq (car result) 'err) "signals" "ok")
-                (if (equal back "良\n")
-                    "the file is correct even when it signals"
-                  "the file differs from what was written")))
+                (cond ((not (equal back "良\n"))
+                       "the file differs from what was written")
+                      ((eq (car result) 'err)
+                       "the file is correct even when it signals")
+                      (t "written and read back unchanged"))))
 
 (let* ((result (probe-safe (file-exists-p "Makefile")))
        (value (cdr result)))
