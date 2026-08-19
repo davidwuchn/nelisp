@@ -88,6 +88,8 @@ trampoline is available."
 ;; underlying Vec via Rc clone, so behaviour is unchanged.
 ;; Improper list (= non-nil non-cons tail) signals
 ;; `wrong-type-argument' to match the previous list_elements path.
+;; Kept in step with scripts/nelisp-stdlib-prelude.el, the copy the
+;; standalone runs; `make ns-gate' reports any drift.
 (defun copy-sequence (seq)
   "Return a copy of SEQ.  Doc 22 A4: strings and vectors are copied into a
 FRESH buffer (the old `(t seq)' arm returned the same object, so a following
@@ -111,16 +113,10 @@ FRESH buffer (the old `(t seq)' arm returned the same object, so a following
         (aset copy i (aref seq i))
         (setq i (1+ i)))
       copy))
-   (t seq)))
-
-;; Rust-min batch 6h (2026-05-06): `message' migrated from Rust to
-;; elisp.  The previous `bi_message' was just a 4-step pipeline:
-;;   (1) nil-arg guard (return nil for empty / leading-nil args)
-;;   (2) `bi_format' to substitute %s / %d / %S
-;;   (3) writeln-to-stderr + flush
-;;   (4) return the formatted string
-;; Steps (1) (2) (4) are pure elisp; only (3) needs an I/O
-;; primitive, which is now `nelisp--write-stderr-line'.
+   ;; The old arm here returned the object unchanged, so `(copy-sequence 5)'
+   ;; answered 5 where Emacs signals -- and a caller that copied in order to
+   ;; mutate went on to mutate the original.
+   (t (signal 'wrong-type-argument (list 'sequencep seq)))))
 (defun message (&rest args)
   (cond
    ((null args) nil)
@@ -677,7 +673,22 @@ or signals otherwise.  Replaces the deleted Rust `bi_require'."
 ;; callers can distinguish the canonical name).
 (defalias 'equal-including-properties 'equal)
 (defalias 'eql 'equal)
-(defalias 'lsh 'ash)
+(unless (fboundp 'lsh)
+  (defun lsh (value count)
+    (if (>= count 0)
+        (ash value count)
+      (if (>= value 0)
+          (ash value count)
+        ;; A right shift of a negative value fills with zeros, so the answer
+        ;; is the UNSIGNED 62-bit pattern shifted.  One masked step does the
+        ;; conversion: shift right once arithmetically, then clear the sign
+        ;; bits the shift copied in.  The remaining places are an ordinary
+        ;; `ash' on a value that is now positive.
+        ;;
+        ;; The mask is written `(1- (ash 1 61))' because integers here are
+        ;; 62-bit and `(ash 1 61)' wraps negative -- `most-positive-fixnum'
+        ;; and `integer-length' do not exist in this runtime to ask with.
+        (ash (logand (ash value -1) (1- (ash 1 61))) (+ count 1))))))
 (defalias 'sxhash-equal 'sxhash)
 (defalias 'sxhash-eq 'sxhash)
 (defalias 'sxhash-eql 'sxhash)

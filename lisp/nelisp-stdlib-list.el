@@ -8,10 +8,12 @@
   "Return the cdr of OBJECT if it is a cons cell, otherwise nil."
   (if (consp object) (cdr object) nil))
 
+;; Kept in step with scripts/nelisp-stdlib-prelude.el, the copy the
+;; standalone runs; `make ns-gate' reports any drift.
 (defun nthcdr (n list)
-  (if (= n 0) list
-    (if (null list) nil
-      (nthcdr (1- n) (cdr list)))))
+  (if (<= n 0) list (if (null list) nil (nthcdr (1- n) (cdr list)))))
+
+;;; nelisp-stdlib-list.el --- Sweep 9 G1 list operations  -*- lexical-binding: t; -*-
 
 (defun nth (n list)
   (car (nthcdr n list)))

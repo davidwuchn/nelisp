@@ -251,6 +251,41 @@
  (compare-strings "abc" nil nil "ab" nil nil)
  (compare-strings "" nil nil "" nil nil)
  (compare-strings "ABD" nil nil "abc" nil nil t)
+ ;; A batch of small ones, each the same shape: a parameter accepted and
+ ;; dropped, or a guard that never fired.  `delete' built a fresh list so it
+ ;; removed nothing from the caller's; `nthcdr' walked past a negative N and
+ ;; answered nil for every negative index; `make-list' of a negative length
+ ;; answered nil rather than signalling; `string-equal' fell through to
+ ;; `equal' so (string-equal 5 5) was t; `string-empty-p' called nil empty
+ ;; because (length nil) is 0; `copy-sequence' returned a non-sequence
+ ;; unchanged, so a caller copying in order to mutate mutated the original;
+ ;; and `lsh' did not exist at all.
+ (let ((l (list 1 2 3))) (delete 2 l) l)
+ (delete 2 (list 1 2 3))
+ (delete 1 (list 1 1 2))
+ (delete 1 (vector 1 2 1))
+ (delete ?a "aba")
+ (nth -1 '(1 2 3))
+ (nth 1 '(1 2 3))
+ (nthcdr -1 '(1 2 3))
+ (condition-case e (make-list -1 'a) (error (car e)))
+ (make-list 0 'a)
+ (make-list 3 'a)
+ (condition-case e (string-equal 5 5) (error (car e)))
+ (string-equal "a" "a")
+ (string-equal 'a "a")
+ (string-empty-p nil)
+ (string-empty-p "")
+ (string-empty-p "x")
+ (condition-case e (copy-sequence 5) (error (car e)))
+ (copy-sequence (list 1 2))
+ (lsh -1 -1)
+ (lsh -8 -2)
+ (lsh 1 4)
+ (lsh 16 -2)
+ (alist-get 'a '((a . 1)))
+ (alist-get "a" '(("a" . 1)) nil nil #'equal)
+ (alist-get 'z '((a . 1)) 'dflt)
  ;; maphash reaches every entry
  (let ((h (make-hash-table :test 'equal)) (n 0))
    (puthash "b" 2 h) (puthash "a" 1 h) (puthash "c" 3 h)

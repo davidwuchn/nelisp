@@ -56,18 +56,21 @@
           (setcdr (cdr end) (cons key (cons value nil)))
           plist)))))
 
-(defun string-empty-p (s)
-  (= (length s) 0))
+;; Kept in step with scripts/nelisp-stdlib-prelude.el, the copy the
+;; standalone runs; `make ns-gate' reports any drift.
+(defun string-empty-p (s) (and (stringp s) (= (length s) 0)))
 
-;; Rust-min batch 6s (2026-05-06): `make-string' migrated from Rust
-;; to elisp.  The previous `bi_make_string' (~22 LOC) was mostly
-;; argument validation (non-negative LEN, valid char codepoint)
-;; wrapped around a 1-line `Sexp::mut_str(c.to_string().repeat(n))'.
-;; Migration moves the validation + arity dispatch to elisp; the
-;; "build a fresh `Sexp::MutStr' of N copies of CH" sliver remains
-;; in Rust as `nelisp--make-mut-string' so that callers like
-;; `emacs-redisplay.el' which `aset' into the result keep their
-;; mutable-string contract.
+;; ---- macroexpand (Doc 47 self-host / compiler frontend) ----
+;;
+;; `defmacro' stores a macro as the function value `(macro CLOSURE)' (= a
+;; two-element list: car `macro', cadr the macro CLOSURE).  `nelisp-aot-
+;; compiler--preprocess-source' calls `(macroexpand FORM)' on every form it
+;; does not structurally recognise, relying on (equal expanded form) to detect
+;; "no expansion happened".  These reproduce host Emacs's contract:
+;;   macroexpand-1  expands at most ONE level.
+;;   macroexpand    expands repeatedly until the head is no longer a macro.
+;; The macro CLOSURE is applied to FORM's UNEVALUATED args (= (cdr FORM)); the
+;; result is the expansion, which is NOT evaluated.
 (defun make-string (n ch &optional _multibyte)
   "Return a fresh string of N chars all set to CH (= int codepoint).
 Result is mutable so callers may `aset' into it.  MULTIBYTE arg
@@ -689,24 +692,6 @@ NEEDLE longer than HAYSTACK returns nil."
                   ((symbolp b) (symbol-name b))
                   (t (signal 'wrong-type-argument (list 'stringp b))))))
     (equal sa sb)))
-
-;; Rust-min batch 6n (2026-05-06): `split-string' migrated from Rust
-;; to elisp.  The previous `bi_split_string' (~25 LOC) implemented
-;; the literal-separator subset of host Emacs's contract — when
-;; SEPARATORS is a non-empty string, split on each non-overlapping
-;; occurrence; otherwise split on runs of whitespace and drop
-;; leading/trailing empties (matching Rust's `str::split_whitespace').
-;; The OMIT-NULLS / TRIM args are accepted for API parity but
-;; *ignored* by the Rust impl too — preserved here for behavioural
-;; bug-for-bug compatibility (= callers that pass `t' for omit-nulls
-;; have always silently retained empty fields on NeLisp; raising the
-;; coverage to "real" omit-nulls is a separate batch).
-;;
-;; Whitespace classification uses `nelisp-stdlib--whitespace-p'
-;; (ASCII space/tab/newline/CR/FF/VT) — slightly narrower than
-;; Rust's `char::is_whitespace' which covers Unicode whitespace.
-;; In practice all extant NeLisp / nelisp-emacs callers split on
-;; ASCII separators so the diff is invisible.
 (defun nelisp--split-on-literal (s sep)
   "Split S on each non-overlapping literal occurrence of SEP.
 Returns a list of strings.  SEP must be non-empty."

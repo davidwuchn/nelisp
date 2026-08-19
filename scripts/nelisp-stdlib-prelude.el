@@ -288,8 +288,12 @@ from `(defvar X nil)'."
   "Standalone stub: return NAME."
   (cons 'quote (cons name nil)))
 
+;; A negative N behaves as zero in Emacs, which is why `(nth -1 '(1 2 3))'
+;; is 1 and not nil.  The `(= n 0)' test walked past it and recursed
+;; downwards forever -- except `(null list)' stopped it, so the answer came
+;; back nil for every negative index instead.
 (defun nthcdr (n list)
-  (if (= n 0) list (if (null list) nil (nthcdr (1- n) (cdr list)))))
+  (if (<= n 0) list (if (null list) nil (nthcdr (1- n) (cdr list)))))
 
 ;;; nelisp-stdlib-list.el --- Sweep 9 G1 list operations  -*- lexical-binding: t; -*-
 
@@ -311,13 +315,37 @@ from `(defvar X nil)'."
       (setq list (cdr list)))
     (nreverse acc)))
 
+;; `delete' is destructive in Emacs: it rewrites the list in place and the
+;; caller's variable sees the removal.  This built a fresh list, so
+;; `(let ((l (list 1 2 3))) (delete 2 l) l)' still answered (1 2 3) -- the
+;; element the caller asked to remove was still there.  Emacs also takes
+;; vectors and strings, returning the same type.
 (defun delete (elt seq)
-  (let ((acc nil))
-    (while seq
-      (if (not (equal (car seq) elt))
-          (setq acc (cons (car seq) acc)))
-      (setq seq (cdr seq)))
-    (nreverse acc)))
+  (cond
+   ((null seq) nil)
+   ((consp seq)
+    ;; Drop leading matches, then unlink the rest through `setcdr'.
+    (let ((head seq))
+      (while (and (consp head) (equal (car head) elt))
+        (setq head (cdr head)))
+      (let ((cur head))
+        (while (consp cur)
+          (let ((nxt (cdr cur)))
+            (if (and (consp nxt) (equal (car nxt) elt))
+                (setcdr cur (cdr nxt))
+              (setq cur nxt)))))
+      head))
+   ((or (vectorp seq) (stringp seq))
+    (let ((keep nil) (i 0) (n (length seq)))
+      (while (< i n)
+        (unless (equal (aref seq i) elt)
+          (setq keep (cons (aref seq i) keep)))
+        (setq i (1+ i)))
+      (setq keep (nreverse keep))
+      (if (stringp seq)
+          (apply 'string keep)
+        (apply 'vector keep))))
+   (t (signal 'wrong-type-argument (list 'sequencep seq)))))
 
 (defun delete-dups (list)
   "Destructively remove duplicate elements from LIST using `equal'."
@@ -336,12 +364,41 @@ from `(defvar X nil)'."
 
 ;; Doc 143 (WIRE from lisp/nelisp-stdlib-plist-str.el): high-frequency string
 ;; primitives that were void in the reader runtime.  Low-dependency forms only.
+;; The `t' arms fell through to `equal', so `(string-equal 5 5)' answered t
+;; -- a type bug turned into a plausible-looking yes.  Emacs takes strings
+;; and symbols and signals for anything else.
 (defun string-equal (a b)
-  (let ((sa (cond ((stringp a) a) ((symbolp a) (symbol-name a)) (t a)))
-        (sb (cond ((stringp b) b) ((symbolp b) (symbol-name b)) (t b))))
+  (let ((sa (cond ((stringp a) a)
+                  ((symbolp a) (symbol-name a))
+                  (t (signal 'wrong-type-argument (list 'stringp a)))))
+        (sb (cond ((stringp b) b)
+                  ((symbolp b) (symbol-name b))
+                  (t (signal 'wrong-type-argument (list 'stringp b))))))
     (equal sa sb)))
 
 (defun string= (a b) (string-equal a b))
+
+;; `lsh' was missing entirely (void-function).  It is NOT `ash': a right
+;; shift of a negative number fills with zeros rather than the sign bit, so
+;; `(lsh -1 -1)' is a large positive number where `(ash -1 -1)' is -1.
+;; Aliasing the two -- which is what lisp/nelisp-stdlib-misc.el does -- gets
+;; every bit-packing routine that shifts a sign-bit-set value wrong.
+(unless (fboundp 'lsh)
+  (defun lsh (value count)
+    (if (>= count 0)
+        (ash value count)
+      (if (>= value 0)
+          (ash value count)
+        ;; A right shift of a negative value fills with zeros, so the answer
+        ;; is the UNSIGNED 62-bit pattern shifted.  One masked step does the
+        ;; conversion: shift right once arithmetically, then clear the sign
+        ;; bits the shift copied in.  The remaining places are an ordinary
+        ;; `ash' on a value that is now positive.
+        ;;
+        ;; The mask is written `(1- (ash 1 61))' because integers here are
+        ;; 62-bit and `(ash 1 61)' wraps negative -- `most-positive-fixnum'
+        ;; and `integer-length' do not exist in this runtime to ask with.
+        (ash (logand (ash value -1) (1- (ash 1 61))) (+ count 1))))))
 
 (defun regexp-quote (s)
   ;; Emacs escapes exactly these eight: $ * + . ? [ \\ ^ -- the characters
@@ -662,9 +719,19 @@ from `(defvar X nil)'."
       (substring s a b))))
 
 ;; Doc 143 common modern-elisp pure utilities.
+;; TESTFN was accepted and dropped, and the default arm used `assq' -- which
+;; is right -- but the parameter name said `_testfn', so a caller passing
+;; #'equal got `eq' anyway.  Emacs's default is `eq' and TESTFN replaces it.
 (unless (fboundp 'alist-get)
-  (defun alist-get (key alist &optional default _remove _testfn)
-    (let ((e (assq key alist))) (if e (cdr e) default))))
+  (defun alist-get (key alist &optional default _remove testfn)
+    (let ((cur alist) (found nil))
+      (while (and cur (not found))
+        (let ((e (car cur)))
+          (if (and (consp e)
+                   (if testfn (funcall testfn key (car e)) (eq key (car e))))
+              (setq found e)
+            (setq cur (cdr cur)))))
+      (if found (cdr found) default))))
 (unless (fboundp 'take)
   (defun take (n list)
     (let ((acc nil) (i 0))
@@ -1300,14 +1367,21 @@ reseeds from its characters; nil -> a full LCG value."
         (cons (copy-tree (car tree)) (copy-tree (cdr tree)))
       tree)))
 
+;; A negative N is not an error in Emacs -- `nthcdr' treats it as zero, so
+;; `(nth -1 '(1 2 3))' is 1.  This answered nil, quietly, for any negative
+;; index.
 (defun nth (n list) (car (nthcdr n list)))
 
+;; A negative LENGTH answered nil, silently.  Emacs signals: asking for a
+;; list of minus one thing is a caller bug, not an empty list.
 (defun make-list (length object)
-  (let ((acc nil))
-    (while (> length 0)
-      (setq acc (cons object acc))
-      (setq length (1- length)))
-    acc))
+  (if (or (not (integerp length)) (< length 0))
+      (signal 'wrong-type-argument (list 'natnump length))
+    (let ((acc nil))
+      (while (> length 0)
+        (setq acc (cons object acc))
+        (setq length (1- length)))
+      acc)))
 
 ;; Emacs `reverse' takes any sequence and answers the SAME type: a vector
 ;; reverses to a vector, a string to a string.  This walked its argument as
@@ -1511,7 +1585,10 @@ FRESH buffer (the old `(t seq)' arm returned the same object, so a following
         (aset copy i (aref seq i))
         (setq i (1+ i)))
       copy))
-   (t seq)))
+   ;; The old arm here returned the object unchanged, so `(copy-sequence 5)'
+   ;; answered 5 where Emacs signals -- and a caller that copied in order to
+   ;; mutate went on to mutate the original.
+   (t (signal 'wrong-type-argument (list 'sequencep seq)))))
 
 (unless (fboundp 'memq)
   (defun memq (elt list)
@@ -1655,7 +1732,10 @@ Doc 22 A6: arrays are iterated by index."
 	  (while (cdr (cdr end)) (setq end (cdr (cdr end))))
 	  (setcdr (cdr end) (cons key (cons value nil))) plist)))))
 
-(defun string-empty-p (s) (= (length s) 0))
+;; `(string-empty-p nil)' answered t, because `(length nil)' is 0 -- so the
+;; commonest "no string here" value reported itself as an empty string.
+;; Emacs compares with `string=', which is nil for a non-string.
+(defun string-empty-p (s) (and (stringp s) (= (length s) 0)))
 
 ;; ---- macroexpand (Doc 47 self-host / compiler frontend) ----
 ;;

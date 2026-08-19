@@ -66,8 +66,18 @@
 # wrong place.  Moving a copy to the prelude makes it exist where it runs;
 # the two are byte-identical, so this is the benign same-definition kind and
 # ns-collision-divergent stays at 97.
-ns-collision 150
-ns-collision-divergent 97
+# 150 -> 152 on 2026-08-19: `lsh' and `copy-sequence'.  `lsh' did not exist
+# in the standalone at all (void-function) and lisp/nelisp-stdlib-misc.el
+# aliased it to `ash', which is a different operation -- a right shift of a
+# negative value fills with the sign bit there and with zeros here.  Both
+# files now carry the real definition, byte-identical, so this is the benign
+# same-definition kind.
+ns-collision 152
+# 97 -> 96 on 2026-08-19: `string-equal' no longer differs between the two
+# files -- the prelude's now signals for a non-string instead of falling
+# through to `equal', and the lisp copy was brought with it.  Ratcheted down
+# rather than left, since the gate offered.
+ns-collision-divergent 96
 # 850 -> 851 on 2026-08-19: `nl-check-file-quoted-unsafe', the entry point
 # that reports the unsafe calls inside quoted forms.  Same situation as the
 # nl-ns pair above -- it is public because tools/nl-check-inventory.el calls
