@@ -11471,6 +11471,32 @@ listing it would make the load-path lie about what is reachable."
                      #'string<))))
     (seq-filter #'file-directory-p dirs)))
 
+(defun nelisp-standalone--load-path-src ()
+  "Return the `setq load-path' form every bootstrap must carry.
+`load-path' shipped empty and nothing filled it, so `require' resolved no
+feature even when the file was in this tree.
+
+Baked at build time rather than discovered at run time: argv[0] is
+whatever the caller typed, `/proc/self/exe' needs a readlink this runtime
+does not expose, and `getenv' answers nil here.  A guess that picks the
+wrong root resolves a feature to the WRONG FILE, which is worse than not
+resolving it.  A relocated binary keeps paths that no longer exist and
+finds nothing -- no answer rather than a wrong one.
+
+One producer, called from every bootstrap, because there is more than one
+and they are maintained separately.  The first version of this was
+appended to the REPL prelude only, and `compile-elisp-artifact' -- which
+builds its source through `--artifact-command-runtime-src' and never
+touches that function -- went on failing with `file-missing:
+nelisp-core-fileio' for a file that is in this tree and that `--eval'
+resolved fine.  Same feature, different answer per entry point."
+  (concat
+   "\n;; --- build-time load-path (nelisp-standalone--load-path-src) ---\n"
+   (format "(setq load-path (list %s))\n"
+           (mapconcat (lambda (d) (format "%S" d))
+                      (nelisp-standalone--reader-tree-load-path)
+                      " "))))
+
 (defun nelisp-standalone--reader-repl-prelude-source ()
   "Return source evaluated once before the standalone reader REPL loop.
 Concatenates the stdlib prelude with the pure-elisp regexp matcher (Doc 143)
@@ -11480,27 +11506,7 @@ and the `string-match' family aliases over it."
      (expand-file-name "scripts/nelisp-stdlib-prelude.el"
                        nelisp-standalone--repo-root))
     (goto-char (point-max))
-    ;; `load-path' shipped empty and nothing filled it, so `require' could
-    ;; not resolve a feature even when the file was in this tree -- measured
-    ;; 2026-08-19, the search reads load-path correctly and finds nothing
-    ;; because there is nothing in it.
-    ;;
-    ;; Baked at build time rather than discovered at run time.  Every way of
-    ;; discovering it is a guess: argv[0] is whatever the caller typed,
-    ;; `/proc/self/exe' is Linux-only and unreadable from here without
-    ;; readlink, and `getenv' answers nil in this runtime.  A guess that
-    ;; picks the wrong root would resolve a feature to the wrong file, which
-    ;; is worse than not resolving it.  The build knows the answer exactly.
-    ;;
-    ;; A relocated binary keeps paths that no longer exist; the search then
-    ;; finds nothing, which is exactly today's behaviour -- no answer rather
-    ;; than a wrong one.
-    (insert "\n;; --- build-time load-path (see nelisp-standalone--reader-repl-prelude-source) ---\n")
-    (insert (format "(setq load-path (list %s))\n"
-                    (mapconcat
-                     (lambda (d) (format "%S" d))
-                     (nelisp-standalone--reader-tree-load-path)
-                     " ")))
+    (insert (nelisp-standalone--load-path-src))
     (insert "\n;; --- Doc 143: regexp matcher + string-match family ---\n")
     (insert-file-contents
      (expand-file-name "lisp/nelisp-stdlib-regexp.el"
@@ -12206,6 +12212,7 @@ runtime cache does not replay source file loads on every command invocation."
   (concat
    (nelisp-standalone--artifact-runtime-file-src
     "scripts/nelisp-stdlib-prelude.el" inline)
+   (nelisp-standalone--load-path-src)
    (nelisp-standalone--artifact-runtime-file-src
     "src/nelisp-read.el" inline)
    (nelisp-standalone--artifact-runtime-file-src
@@ -12391,6 +12398,7 @@ same artifact command dispatch used by the full source path."
    (format "(load %S)\n"
            (expand-file-name "scripts/nelisp-stdlib-prelude.el"
                              nelisp-standalone--repo-root))
+   (nelisp-standalone--load-path-src)
    (format "(load %S)\n"
            (expand-file-name "src/nelisp-read.el"
                              nelisp-standalone--repo-root))
@@ -12750,6 +12758,13 @@ artifact before wiring that artifact into the marker command path."
     (concat
      (nelisp-standalone--artifact-runtime-file-src
       "scripts/nelisp-stdlib-prelude.el" t)
+     ;; Fourth consumer.  This substrate is why `require' has to be told the
+     ;; search path four separate times: it assembles its own source and
+     ;; shares nothing with the other three.  The comment directly below
+     ;; records the same class of bug hitting this same file from the other
+     ;; direction, which is the argument for one producer rather than four
+     ;; copies.
+     (nelisp-standalone--load-path-src)
      ;; fix/reader-test-prelude-regression: `src/nelisp-eval.el' (loaded just
      ;; below) ends with an unconditional top-level `(nelisp--install-
      ;; primitives)' call that does `(puthash sym (symbol-function sym)

@@ -96,12 +96,25 @@
 (require 'nelisp-read)
 ;; Phase 6.2.0 — anvil-http port preparation. `url-host' / `url-port' /
 ;; `url-filename' / `url-type' are cl-defstruct accessors defined in
-;; `url-parse'; without an explicit require they remain unbound and the
-;; primitive install loop trips on `symbol-function'.
-(require 'url-parse)
-;; `url-hexify-string' is autoloaded from url-util.  Store the actual function
-;; object in the NeLisp primitive table, not the autoload placeholder.
-(require 'url-util)
+;; `url-parse', and `url-hexify-string' is autoloaded from `url-util'; without
+;; an explicit require they remain unbound, so the primitive install loop
+;; stores an autoload placeholder or nothing at all.
+;;
+;; Optional, because these are host libraries and this file is also loaded by
+;; the standalone runtime, which has no Emacs underneath it to find them in.
+;; A hard require there aborts the load outright -- measured 2026-08-19, once
+;; `load' stopped stepping over signals: `eval-elisp-artifact' died on
+;; `file-missing: url-parse', and every tree library that reaches this file
+;; (nelisp-load, nelisp-macro, nelisp-artifact) died with it.
+;;
+;; Their absence is already handled, and not by being ignored: the install
+;; loop below guards each entry with `fboundp' and skips the ones the host
+;; cannot supply, which defers the failure to a real `void-function' signal at
+;; the point some artifact actually calls `url-host'.  That is louder and
+;; better placed than a load-time abort in a runtime that was never going to
+;; have `url-parse'.  See the docstring on `nelisp--install-primitives'.
+(require 'url-parse nil t)
+(require 'url-util nil t)
 
 (define-error 'nelisp-eval-error
   "NeLisp evaluation error")
