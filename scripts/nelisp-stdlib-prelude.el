@@ -823,19 +823,13 @@ from `(defvar X nil)'."
           (while (>= x to) (setq acc (cons x acc)) (setq x (+ x step))))
         (nreverse acc)))))
 (unless (fboundp 'string-trim)
-  (defun string-trim (s &optional _trim-left _trim-right)
-    (let ((n (length s)) (a 0) (b 0))
-      (setq b n)
-      (while (and (< a b) (let ((c (aref s a))) (or (= c 32) (= c 9) (= c 10) (= c 13) (= c 12))))
-        (setq a (1+ a)))
-      (while (and (> b a) (let ((c (aref s (1- b)))) (or (= c 32) (= c 9) (= c 10) (= c 13) (= c 12))))
-        (setq b (1- b)))
-      (substring s a b))))
-
-;; Doc 143 common modern-elisp pure utilities.
-;; TESTFN was accepted and dropped, and the default arm used `assq' -- which
-;; is right -- but the parameter name said `_testfn', so a caller passing
-;; #'equal got `eq' anyway.  Emacs's default is `eq' and TESTFN replaces it.
+  ;; TRIM-LEFT and TRIM-RIGHT were accepted and ignored, so
+  ;; (string-trim "xxaxx" "x+" "x+") answered "xxaxx" -- the caller asked for
+  ;; a specific trim and got the whitespace default with no indication.
+  ;; Delegating keeps the three functions consistent by construction: a fix
+  ;; to `string-trim-left' cannot now leave `string-trim' behind.
+  (defun string-trim (s &optional trim-left trim-right)
+    (string-trim-left (string-trim-right s trim-right) trim-left)))
 (unless (fboundp 'alist-get)
   (defun alist-get (key alist &optional default _remove testfn)
     (let ((cur alist) (found nil))
@@ -1094,8 +1088,15 @@ from `(defvar X nil)'."
     (let ((l (apply #'append (mapcar #'nelisp-seq--to-list seqs))))
       (cond ((eq type 'vector) (apply #'vector l)) ((eq type 'string) (apply #'string l)) (t l)))))
 (unless (fboundp 'seq-mapcat)
-  (defun seq-mapcat (fn seq &optional _type)
-    (apply #'append (mapcar (lambda (x) (nelisp-seq--to-list (funcall fn x))) (nelisp-seq--to-list seq)))))
+  ;; TYPE was ignored, so (seq-mapcat #'list '(1 2) 'vector) answered a list.
+  ;; A caller that asked for a vector got something `aref' still works on,
+  ;; which is why this kind of ignored argument survives.
+  (defun seq-mapcat (fn seq &optional type)
+    (let ((flat (apply #'append (mapcar (lambda (x) (nelisp-seq--to-list (funcall fn x)))
+                                        (nelisp-seq--to-list seq)))))
+      (cond ((eq type 'vector) (apply #'vector flat))
+            ((eq type 'string) (apply #'string flat))
+            (t flat)))))
 (unless (fboundp 'seq-mapn)
   (defun seq-mapn (fn &rest seqs) (apply #'cl-mapcar fn (mapcar #'nelisp-seq--to-list seqs))))
 (unless (fboundp 'seq-partition)

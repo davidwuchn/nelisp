@@ -136,6 +136,16 @@ jobs:
         shell: bash
         run: make emacs-parity
 
+      # Checks on the checks: every gate must report how much it looked at,
+      # and a name that ignores an argument Emacs defines must say so.
+      - name: "Gate self-check and partial-argument inventory (Linux x86_64)"
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          make partial-inventory
+          make parity-coverage
+          make gate-selfcheck
+
       # Placed before the ERT suite so a pre-existing test failure does
       # not skip the Mach-O toolchain-acceptance signal.
       - name: Mach-O acceptance (NeLisp-emitted arm64 exec + MH_OBJECT vs codesign/clang/ld64; macOS)

@@ -459,6 +459,12 @@
        (string-match "x\\_>" "x_") (string-match "x\\_>" "x ")
        (string-match "\\Sw" "a") (string-match "\\W" "a") (string-match "\\W" " ")
        (string-match (regexp-opt '("if" "then") 'words) "x then y"))
+
+ ;; Arguments that were accepted and ignored -- the shape `make
+ ;; partial-inventory' now enumerates.
+ (list (string-trim "xxaxx" "x+" "x+") (string-trim "xxa" "x+") (string-trim "  a  ")
+       (seq-mapcat #'list '(1 2) 'vector) (seq-mapcat #'list '(1 2))
+       (split-string "a,,b" "," t) (split-string " a , b " "," nil " +"))
 )
 
 ;;; nelisp-shadow-differential-cases.el ends here

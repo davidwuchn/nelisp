@@ -12103,7 +12103,19 @@ and the `string-match' family aliases over it."
             "  `(let ((nlre--smd-saved nlre--last-caps))\n"
             "     (unwind-protect (progn ,@body)\n"
             "       (setq nlre--last-caps nlre--smd-saved))))\n"
-            "(defun split-string (s &optional sep omit trim) (nlre-split-string s sep omit))\n"
+            ;; TRIM was accepted and dropped: (split-string " a , b " ","
+            ;; nil " +") kept the spaces.  Emacs trims each piece with TRIM
+            ;; as a regexp anchored at both ends, and drops a piece that
+            ;; becomes empty when OMIT-NULLS is set.
+            "(defun split-string (s &optional sep omit trim)\n"
+            "  (let ((parts (nlre-split-string s sep omit)))\n"
+            "    (if (null trim) parts\n"
+            "      (let ((out nil))\n"
+            "        (dolist (p parts)\n"
+            "          (let ((q (string-trim-left (string-trim-right p trim) trim)))\n"
+            "            (unless (and omit (equal q \"\"))\n"
+            "              (setq out (cons q out)))))\n"
+            "        (nreverse out)))))\n"
             ;; LIT/SUBEXP/START were accepted and dropped on the floor, so a
             ;; caller asking for a literal replacement got backreference
             ;; expansion and a caller passing SUBEXP had the whole match

@@ -356,6 +356,7 @@ bootstrap-contract:
 # were exactly that.  The ratchet is on `shared-shadowing'; the full table is
 # generated into docs/emacs-compat-table.txt so it can be grepped without
 # running anything.
+.PHONY: partial-inventory
 .PHONY: gate-mutation
 .PHONY: gate-selfcheck
 .PHONY: parity-coverage
@@ -670,6 +671,14 @@ standalone-reader-elt-smoke: $(if $(wildcard target/nelisp target/nelisp.exe),,s
 # `gate-selfcheck' asks whether each gate looked at anything.  This asks the
 # harder question: would it CATCH something.  Each row injects a known
 # defect, requires the gate to go red, and restores the file.
+# The worst defects fixed on 2026-08-19 were all one shape: a function that
+# takes an argument Emacs defines, ignores it, and ANSWERS.  The tell is
+# mechanical -- an `_'-prefixed parameter in a function stock Emacs also
+# defines -- so the list is visible now and every site has to be
+# acknowledged with what it does instead.
+partial-inventory:
+	@$(EMACS) --batch -Q -l tools/nelisp-partial-inventory.el
+
 gate-mutation:
 	@tools/nelisp-gate-mutation.sh
 

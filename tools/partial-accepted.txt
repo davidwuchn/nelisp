@@ -1,0 +1,66 @@
+# Sites where a function stock Emacs also defines accepts an argument and
+# ignores it (tools/nelisp-partial-inventory.el).  Format:
+#
+#   NAME|FILE|IGNORED-ARGS|what happens instead
+#
+# The reason is the point.  "not yet reviewed" is allowed and is COUNTED
+# separately, so the file can be seeded honestly rather than with invented
+# justifications -- but an entry that keeps that text is an admission, not
+# an explanation.
+
+accept-process-output|scripts/nelisp-stdlib-prelude.el|_args|not yet reviewed
+alist-get|lisp/nelisp-stdlib-misc.el|_remove|REMOVE ignored: it only affects setf expansion
+alist-get|scripts/nelisp-stdlib-prelude.el|_remove|REMOVE ignored: it only affects setf expansion, which this alist-get is not used through
+always|scripts/nelisp-stdlib-prelude.el|_arguments|not yet reviewed
+base64-encode-string|scripts/nelisp-stdlib-prelude.el|_no-line-break|not yet reviewed
+buffer-substring-no-properties|lisp/nelisp-stdlib-misc.el|_end _start|not yet reviewed
+bufferp|lisp/nelisp-stdlib-misc.el|_obj|not yet reviewed
+bufferp|scripts/nelisp-stdlib-prelude.el|_obj|not yet reviewed
+byte-code-function-p|scripts/nelisp-stdlib-prelude.el|_object|not yet reviewed
+characterp|scripts/nelisp-stdlib-prelude.el|_ignore|not yet reviewed
+copy-tree|scripts/nelisp-stdlib-prelude.el|_vecp|not yet reviewed
+decode-char|scripts/nelisp-stdlib-prelude.el|_charset|not yet reviewed
+decode-coding-string|lisp/nelisp-stdlib-misc.el|_nocopy|not yet reviewed
+decode-coding-string|scripts/nelisp-stdlib-prelude.el|_nocopy|not yet reviewed
+delete-directory|scripts/nelisp-stdlib-prelude.el|_trash|not yet reviewed
+delete-file|scripts/nelisp-stdlib-prelude.el|_trash|not yet reviewed
+directory-files|scripts/nelisp-stdlib-prelude.el|_nosort|not yet reviewed
+encode-coding-string|lisp/nelisp-stdlib-misc.el|_nocopy|not yet reviewed
+encode-coding-string|scripts/nelisp-stdlib-prelude.el|_nocopy|not yet reviewed
+executable-find|scripts/nelisp-stdlib-prelude.el|_remote|not yet reviewed
+file-attributes|scripts/nelisp-stdlib-prelude.el|_id-format|not yet reviewed
+format-time-string|scripts/nelisp-stdlib-prelude.el|_args|not yet reviewed
+goto-char|lisp/nelisp-stdlib-misc.el|_p|not yet reviewed
+hash-table-test|scripts/nelisp-stdlib-prelude.el|_table|not yet reviewed
+help-add-fundoc-usage|scripts/nelisp-stdlib-prelude.el|_arglist|not yet reviewed
+help-split-fundoc|scripts/nelisp-stdlib-prelude.el|_def _section|not yet reviewed
+ignore|scripts/nelisp-stdlib-prelude.el|_arguments|not yet reviewed
+insert-file-contents|lisp/nelisp-stdlib-misc.el|_path|not yet reviewed
+insert-file-contents|scripts/nelisp-stdlib-prelude.el|_args|not yet reviewed
+insert|lisp/nelisp-stdlib-misc.el|_args|not yet reviewed
+intern-soft|lisp/nelisp-stdlib-misc.el|_obarray|OBARRAY ignored: one global intern table, no first-class obarray object (Doc 163)
+intern-soft|scripts/nelisp-stdlib-prelude.el|_obarray|OBARRAY ignored: one global intern table, no first-class obarray object (Doc 163)
+json-serialize|scripts/nelisp-stdlib-prelude.el|_keys|not yet reviewed
+kill-process|scripts/nelisp-stdlib-prelude.el|_current-group|not yet reviewed
+load|lisp/nelisp-stdlib-misc.el|_must-suffix _nomessage _nosuffix|not yet reviewed
+locate-library|lisp/nelisp-stdlib-misc.el|_interactive-call _nosuffix _path|not yet reviewed
+lwarn|scripts/nelisp-stdlib-prelude.el|_args|not yet reviewed
+make-string|lisp/nelisp-stdlib-plist-str.el|_multibyte|not yet reviewed
+max-char|scripts/nelisp-stdlib-prelude.el|_unicode|not yet reviewed
+prin1|scripts/nelisp-stdlib-prelude.el|_stream|not yet reviewed
+princ|scripts/nelisp-stdlib-prelude.el|_stream|STREAM ignored: output always goes to stdout, there are no buffers or markers to print into
+replace-regexp-in-string|scripts/nelisp-stdlib-prelude.el|_fixedcase _literal _start _subexp|not yet reviewed
+run-at-time|scripts/nelisp-stdlib-prelude.el|_repeat _time|TIME and REPEAT ignored: the event loop runs the function once, immediately
+set-buffer-multibyte|lisp/nelisp-stdlib-misc.el|_arg|not yet reviewed
+set-buffer-multibyte|scripts/nelisp-stdlib-prelude.el|_flag|not yet reviewed
+set-file-modes|lisp/nelisp-stdlib-misc.el|_flag|not yet reviewed
+set-file-modes|scripts/nelisp-stdlib-prelude.el|_flag|not yet reviewed
+setenv|scripts/nelisp-stdlib-prelude.el|_substitute|not yet reviewed
+split-string|lisp/nelisp-stdlib-plist-str.el|_omit-nulls _trim|not yet reviewed
+split-string|scripts/nelisp-stdlib-prelude.el|_trim|not yet reviewed
+string-trim-left|lisp/nelisp-stdlib-plist-str.el|_regexp|not yet reviewed
+string-trim-right|lisp/nelisp-stdlib-plist-str.el|_regexp|not yet reviewed
+string-trim|lisp/nelisp-stdlib-plist-str.el|_trim-left _trim-right|not yet reviewed
+terpri|scripts/nelisp-stdlib-prelude.el|_stream|STREAM ignored, same reason as princ
+write-region|lisp/nelisp-stdlib-misc.el|_lockname _mustbenew _visit|not yet reviewed
+write-region|scripts/nelisp-stdlib-prelude.el|_lockname _mustbenew _visit|not yet reviewed
