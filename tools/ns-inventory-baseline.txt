@@ -126,7 +126,12 @@
 # each requirement and a handler matches on that name, so a single generic
 # "bad type" check would be no better than none.  Byte-identical copies, so
 # this is the benign same-definition kind.
-ns-collision 167
+# 167 -> 169 on 2026-08-20: `file-truename', `buffer-file-name',
+# `make-bool-vector' and `log' were absent from the standalone and are now
+# in both the prelude and the lisp/ mirror that already named them, plus the
+# `nelisp--check-string' helper following `file-truename' across.  All
+# byte-identical, so this is the benign same-definition kind.
+ns-collision 169
 # 97 -> 96 on 2026-08-19: `string-equal' no longer differs between the two
 # files -- the prelude's now signals for a non-string instead of falling
 # through to `equal', and the lisp copy was brought with it.  Ratcheted down

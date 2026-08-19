@@ -641,6 +641,21 @@
        (condition-case e (mod :key 2) (error e)) (mod -7 2)
        (condition-case e (% "a" 2) (error e)) (% -7 2)
        (condition-case e (round "a") (error e)) (round 2.5))
+
+ ;; `process-status' is the lenient one -- Emacs accepts a buffer or a
+ ;; process NAME, so "not a process object" is nil there, not an error.
+ ;; `process-put' next to it signals.  Two contracts, not one.
+ (list (condition-case e (seq-elt 3 0) (error e)) (seq-elt '(1 2 3) 1)
+       (process-status "x")
+       (condition-case e (mapcar #'identity 3) (error e)) (mapcar #'1+ '(1 2))
+       (condition-case e (regexp-opt "s") (error e)) (regexp-opt '("ab" "ac"))
+       (condition-case e (file-truename 1) (error e))
+       (condition-case e (buffer-file-name "a") (error e)) (buffer-file-name)
+       (condition-case e (make-bool-vector [1] t) (error e))
+       (condition-case e (log "a") (error e))
+       (< (abs (- (log 2.718281828459045) 1.0)) 1e-12)
+       (< (abs (- (log 8 2) 3.0)) 1e-12)
+       (condition-case e (generate-new-buffer ["a"]) (error e)))
 )
 
 ;;; nelisp-shadow-differential-cases.el ends here

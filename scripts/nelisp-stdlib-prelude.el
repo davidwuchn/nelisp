@@ -120,6 +120,42 @@
 ;; ignored (recorded in tools/partial-accepted.txt).
 (unless (fboundp 'obarrayp)
   (defun obarrayp (_x) nil))
+;; Absent, so a caller got `void-function' -- which reads as "the runtime
+;; cannot do this" rather than "nobody wrote it yet".  There are no buffers
+;; or byte-compiler here, so these answer nil and signal on a wrong type,
+;; which is the honest half of what Emacs does (recorded in
+;; tools/partial-accepted.txt).
+(unless (fboundp 'file-truename)
+  (defun file-truename (path)
+    (nelisp--check-string path)
+    (expand-file-name path)))
+(unless (fboundp 'buffer-file-name)
+  (defun buffer-file-name (&optional buffer)
+    (when buffer (signal 'wrong-type-argument (list 'bufferp buffer)))
+    nil))
+(unless (fboundp 'make-bool-vector)
+  (defun make-bool-vector (length init)
+    (unless (and (integerp length) (>= length 0))
+      (signal 'wrong-type-argument (list 'wholenump length)))
+    (make-vector length (and init t))))
+(unless (fboundp 'log)
+  (defun log (x &optional base)
+    (nelisp--check-number x)
+    (when base (nelisp--check-number base))
+    ;; No libm here; this is the natural log by the atanh series with a
+    ;; power-of-two range reduction.  Accurate to about 1e-15, which is
+    ;; short of correctly-rounded and is why it is not claimed to be.
+    (if (<= x 0) (signal 'arith-error (list x))
+      (let ((n 0) (y (float x)))
+        (while (>= y 2.0) (setq y (/ y 2.0)) (setq n (1+ n)))
+        (while (< y 1.0) (setq y (* y 2.0)) (setq n (1- n)))
+        (let* ((z (/ (- y 1.0) (+ y 1.0))) (z2 (* z z)) (term z) (sum z) (k 1))
+          (while (< k 40)
+            (setq term (* term z2))
+            (setq sum (+ sum (/ term (+ (* 2.0 k) 1.0))))
+            (setq k (1+ k)))
+          (let ((ln (+ (* 2.0 sum) (* n 0.6931471805599453))))
+            (if base (/ ln (log base)) ln)))))))
 (unless (fboundp 'locate-file)
   (defun locate-file (filename path &optional suffixes _predicate)
     "Find FILENAME in PATH, trying each of SUFFIXES; nil when not found."
@@ -1001,7 +1037,9 @@ Result keeps the trailing slash."
 (unless (fboundp 'seq-length)
   (defun seq-length (seq) (length seq)))
 (unless (fboundp 'seq-elt)
-  (defun seq-elt (seq n) (if (listp seq) (nth n seq) (aref seq n))))
+  (defun seq-elt (seq n)
+    (unless (sequencep seq) (signal 'wrong-type-argument (list 'sequencep seq)))
+    (if (listp seq) (nth n seq) (aref seq n))))
 (unless (fboundp 'seq-contains-p)
   (defun seq-contains-p (seq elt &optional testfn)
     (let ((l (nelisp-seq--to-list seq)) (found nil))
@@ -2224,6 +2262,7 @@ FRESH buffer (the old `(t seq)' arm returned the same object, so a following
   "Apply FN to each element of SEQ (list, vector, or string); collect results.
 Doc 22 A6: arrays are iterated by index via `aref'/`length' (cons-cell
 walking only works for lists)."
+  (unless (sequencep seq) (signal 'wrong-type-argument (list 'sequencep seq)))
   (if (or (vectorp seq) (stringp seq))
       (let ((n (length seq)) (i 0) (acc nil))
         (while (< i n)
@@ -3572,6 +3611,10 @@ bodies (= Stage 4 follow-up).  Indent / edebug specs come back when
 
   (defun regexp-opt (strings &optional paren)
     "Return a regexp matching any string in STRINGS, as Emacs builds it."
+    ;; Emacs names `list-or-vector-p' here, not `listp': STRINGS may be
+    ;; either, and a caller handed a string gets a predicate that says so.
+    (unless (or (listp strings) (vectorp strings))
+      (signal 'wrong-type-argument (list 'list-or-vector-p strings)))
     (let* ((open (cond ((stringp paren) paren) (paren "\\(")))
            (re (if strings
                    (regexp-opt-group
@@ -4835,6 +4878,7 @@ Rust-min migration (= moved out of build-tool/src/eval/special_forms.rs)."
 (unless (fboundp 'generate-new-buffer)
   (defun generate-new-buffer (name)
     (nelisp--check-string name)
+    (nelisp--check-string name)
     (vector 'buffer name "" t)))
 (unless (fboundp 'buffer-live-p)
   (defun buffer-live-p (buffer)
@@ -4921,13 +4965,21 @@ Rust-min migration (= moved out of build-tool/src/eval/special_forms.rs)."
      (t 'exit))))
 (unless (fboundp 'process-status)
   (defun process-status (process)
+    ;; NO type check: Emacs's `process-status' answers nil for anything that
+    ;; is not a process, because it also accepts a buffer or a process NAME.
+    ;; Adding one "for consistency" with `process-put' would be consistent
+    ;; and wrong -- the two have different contracts.
     (cond
      ((and (fboundp 'nelisp-process-object-p)
            (nelisp-process-object-p process))
       (nelisp--process-status-symbol (nelisp-process-status process)))
      ((and (vectorp process) (eq (aref process 0) 'process))
       (aref process 2))
-     (t (signal 'wrong-type-argument (list 'processp process))))))
+     ;; Emacs answers NIL for anything else -- it accepts a buffer or a
+     ;; process NAME too, so "not a process object" is not an error here.
+     ;; Signalling made a caller probing whether a process was live get an
+     ;; error instead of "no".
+     (t nil))))
 (unless (fboundp 'process-exit-status)
   (defun process-exit-status (process)
     (cond

@@ -25,3 +25,5 @@ ns-gate|scripts/nelisp-stdlib-prelude.el|s/^(defun round (x \&optional div)/(def
 # nothing).  Both read as a broken gate when the gate was fine.
 parity-coverage|test/nelisp-shadow-differential-cases.el|s/generate-new-buffer/ignore-me-not-a-name/g|a covered name stops being mentioned
 prelude-toplevel-check|scripts/nelisp-stdlib-prelude.el|s/^(defun string-empty-p (s) (string-equal s ""))$/(defun string-empty-p (s) (string-equal s ""))\n  (nelisp--check-string s)/|a check lands outside a one-line defun
+# The sed expression cannot use `|' -- it is this file's field separator.
+prelude-toplevel-check|scripts/nelisp-stdlib-prelude.el|/^  (defun seq-length (seq) (length seq)))$/a\    (unless (sequencep seq) (signal (quote wrong-type-argument) (list (quote sequencep) seq)))|a check lands outside a one-line defun INSIDE an unless wrapper

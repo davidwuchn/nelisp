@@ -365,13 +365,8 @@ streams fall back to stdout."
 ;; is digits.  Nothing else: "a~b.txt" and "foo.txt.~1~x" are left alone.
 
 (defun file-truename (path)
-  "Return PATH after symlink resolution and absolutification.
-Falls back to `expand-file-name' result when the path doesn't exist
-or canonicalize fails — same as the prior Rust impl which used
-`std::fs::canonicalize(p).unwrap_or(p)'."
-  (let* ((full (expand-file-name path))
-         (canon (nelisp--syscall-canonicalize full)))
-    (or canon full)))
+    (nelisp--check-string path)
+    (expand-file-name path))
 
 ;; Rust-min batch 7c (2026-05-07, Doc 50 stage 2): `directory-files'
 ;; migrated from Rust to elisp on top of the new readdir syscall

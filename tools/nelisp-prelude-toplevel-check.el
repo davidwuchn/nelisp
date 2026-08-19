@@ -37,6 +37,28 @@
     nelisp--error-register)
   "Heads that make sense as a top-level form here.")
 
+(defun nelisp-prelude-toplevel--offenders (form)
+  "Heads in FORM that do not belong where they are.
+
+Top level is checked, and so is the BODY of a top-level
+`(unless (fboundp ...) ...)' -- which is where most of this file lives, and
+where the same mistake lands one level down.  A check appended to a
+one-line defun inside such a wrapper is a sibling of the defun, not part of
+it, and runs while the prelude loads: `(unless (fboundp 'seq-elt) (defun
+seq-elt ...) (unless (sequencep seq) ...))' fails with `void-variable: seq'
+during boot.  The top-level-only version of this check passed that file."
+  (cond
+   ((not (consp form)) nil)
+   ((not (symbolp (car form))) nil)
+   ((memq (car form) '(unless when))
+    ;; The guard itself is the second element; the rest is the body.
+    (let ((out nil))
+      (dolist (sub (cdr (cdr form)))
+        (setq out (append out (nelisp-prelude-toplevel--offenders sub))))
+      out))
+   ((memq (car form) nelisp-prelude-toplevel--allowed) nil)
+   (t (list (car form)))))
+
 (defvar nelisp-prelude-toplevel--eofs 0
   "How many files ended cleanly; reported so a zero cannot pass unnoticed.")
 
@@ -60,10 +82,8 @@
               (condition-case err
                   (let ((form (read (current-buffer))))
                     (setq forms (1+ forms))
-                    (when (and (consp form)
-                               (symbolp (car form))
-                               (not (memq (car form) nelisp-prelude-toplevel--allowed)))
-                      (push (list file (line-number-at-pos start) (car form)) bad)))
+                    (dolist (bad-head (nelisp-prelude-toplevel--offenders form))
+                      (push (list file (line-number-at-pos start) bad-head) bad)))
                 ;; `end-of-file' is how the reader says "that was the last
                 ;; form"; it is the loop's exit, not a fallback.  Named so
                 ;; `make fallback-inventory' can tell the two apart.

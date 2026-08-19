@@ -833,11 +833,9 @@ Non-letter chars pass through unchanged."
 ;; void-function so callers fail fast instead of silently no-op.
 
 (defun make-bool-vector (length init)
-  "Return a vector of LENGTH bool entries initialised to (and INIT t).
-Implementation note: bool-vector is a regular vector here; see the
-file commentary for migration history.  Pre-converts INIT to a
-proper t/nil so that downstream `bool-vector-p' checks pass."
-  (make-vector length (and init t)))
+    (unless (and (integerp length) (>= length 0))
+      (signal 'wrong-type-argument (list 'wholenump length)))
+    (make-vector length (and init t)))
 
 (defun bool-vector (&rest args)
   "Variadic constructor: each ARG is coerced to t/nil and stored in a
