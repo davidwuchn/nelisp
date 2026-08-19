@@ -4267,17 +4267,43 @@ needs escaping because the reader consumes it as an escape prefix."
     out))
 
 (defun nelisp--rd-numeric-token-p (tok)
-  (let ((n (length tok)) (i 0) (seen-digit nil) (ok t))
+  "Return non-nil when TOK is integer or float syntax, as a host reads it.
+This used to accept any arrangement of digits, dots, `e'/`E' and signs
+with at least one digit, which is not what a number looks like: `7.1.4'
+passed and `string-to-number' then answered 7, while the native lexer
+called the same token a float and its parser gave up on it.  Measured
+against `read-from-string' on a host, 2026-08-19 -- 7.1.4, 1e2e3, 1e2.3,
+12e, 1+, 1-, 0x10 and ... are all symbols there; 1.2e3, 1e+2, .5, 1.5e-3
+are numbers; `1.' is the integer 1."
+  (let ((n (length tok)) (i 0) (seen-digit nil) (dots 0) (es 0)
+        (exp-digits 0) (in-exp nil) (prev-e nil) (ok t))
     (when (and (> n 0) (let ((c (aref tok 0))) (or (= c 43) (= c 45))))
       (setq i 1))
     (when (= i n) (setq ok nil))
     (while (and ok (< i n))
       (let ((c (aref tok i)))
-        (cond ((and (>= c 48) (<= c 57)) (setq seen-digit t))
-              ((or (= c 46) (= c 101) (= c 69) (= c 43) (= c 45)) nil)
-              (t (setq ok nil))))
+        (cond
+         ((and (>= c 48) (<= c 57))
+          (setq seen-digit t prev-e nil)
+          (when in-exp (setq exp-digits (1+ exp-digits))))
+         ;; One dot, and not inside the exponent.
+         ((= c 46)
+          (setq prev-e nil dots (1+ dots))
+          (when (or (> dots 1) in-exp) (setq ok nil)))
+         ;; One exponent marker, and only after a digit.
+         ((or (= c 101) (= c 69))
+          (setq es (1+ es))
+          (if (or (> es 1) (not seen-digit))
+              (setq ok nil)
+            (setq in-exp t prev-e t)))
+         ;; A sign is only legal at the start (handled above) or right
+         ;; after the exponent marker; `1+' and `1-' are symbols.
+         ((or (= c 43) (= c 45))
+          (unless prev-e (setq ok nil))
+          (setq prev-e nil))
+         (t (setq ok nil))))
       (setq i (1+ i)))
-    (and ok seen-digit)))
+    (and ok seen-digit (or (not in-exp) (> exp-digits 0)))))
 
 (defun nelisp--rd-unescape (body)
   (let ((out "") (i 0) (n (length body)))

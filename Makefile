@@ -6,7 +6,7 @@
         standalone-tarball standalone-tarball-verify \
         verify-elisp-fixtures \
         standalone-eval standalone-eval-clean standalone-eval-test standalone-eval-j \
-        standalone-reader standalone-reader-test standalone-reader-load-smoke standalone-reader-checked standalone-reader-fmt-smoke standalone-reader-prelude-equal-reload-smoke standalone-reader-declare-strip-smoke standalone-reader-nested-backquote-macro-smoke standalone-reader-derived-mode-shape-smoke standalone-reader-pcase-quote-literal-smoke standalone-reader-catch-throw-tag-smoke standalone-reader-cond-let-shape-smoke standalone-reader-ffi-smoke standalone-reader-tls-smoke standalone-reader-process-smoke standalone-reader-realrt-smoke standalone-reader-repl-smoke standalone-reader-prelude-test standalone-reader-intern-soft-smoke standalone-reader-intern-soft-loop-smoke standalone-selfhost-test standalone-selfhost-mt-test standalone-parallel-compile-test standalone-chunk-growth-test \
+        standalone-reader standalone-reader-test standalone-reader-load-smoke standalone-reader-checked standalone-reader-fmt-smoke standalone-reader-prelude-equal-reload-smoke standalone-reader-declare-strip-smoke standalone-reader-nested-backquote-macro-smoke standalone-reader-derived-mode-shape-smoke standalone-reader-pcase-quote-literal-smoke standalone-reader-catch-throw-tag-smoke standalone-reader-cond-let-shape-smoke standalone-reader-ffi-smoke standalone-reader-tls-smoke standalone-reader-process-smoke standalone-reader-realrt-smoke standalone-reader-repl-smoke standalone-reader-prelude-test standalone-reader-intern-soft-smoke standalone-reader-intern-soft-loop-smoke standalone-reader-number-token-smoke standalone-selfhost-test standalone-selfhost-mt-test standalone-parallel-compile-test standalone-chunk-growth-test \
         standalone-reader-mod-float-smoke standalone-reader-match-data-smoke standalone-reader-current-time-smoke standalone-reader-require-provide-smoke \
         alloc-check-collect \
         nelisp-performance-gate nelisp-nelix-command-gate nelisp-native-artifact-gate nelisp-nelix-native-hot-gate \
@@ -618,6 +618,30 @@ standalone-reader-intern-soft-smoke: standalone-reader
 	  echo "[standalone-reader-intern-soft-smoke] PASS: -> $$out"; \
 	else \
 	  echo "[standalone-reader-intern-soft-smoke] FAIL: -> $$out (expected (nil nelisp-doc163-fresh-a nil nil))"; \
+	  exit 1; \
+	fi
+
+# Reader number-token classification, against a table of what host Emacs
+# answers.  A token starting with a digit is a number only when it matches
+# integer or float syntax exactly; `7.1.4' is a symbol there.
+#
+# Measured 2026-08-19: the native lexer counted WHETHER a dot appeared, not
+# how many, so `7.1.4' lexed as a float, the parser gave up on it, and
+# `nelisp--read-all-from-string-native' returned the forms it already had --
+# indistinguishable from end of input.  `src/nelisp-cc-arm64.el' stopped
+# loading at its `:phase '7.1.4', `load' returned t, the file's `(provide ...)'
+# never ran, and the native compiler was reported unavailable.  The stdlib
+# prelude decides the same question separately and was wrong differently:
+# it called the token a number and `string-to-number' answered 7.  The smoke
+# checks both readers, because there are two of them.
+.PHONY: standalone-reader-number-token-smoke
+standalone-reader-number-token-smoke: standalone-reader
+	@out="$$(ulimit -v 4194304; timeout 30 ./target/nelisp --load scripts/standalone-number-token-smoke.el)"; \
+	echo "$$out"; \
+	if echo "$$out" | grep -q 'NUMBER-TOKEN-SMOKE cases=16 mismatches=0'; then \
+	  echo "[standalone-reader-number-token-smoke] PASS"; \
+	else \
+	  echo "[standalone-reader-number-token-smoke] FAIL"; \
 	  exit 1; \
 	fi
 

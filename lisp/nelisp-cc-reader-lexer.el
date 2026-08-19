@@ -234,6 +234,9 @@
            ;; No digits seen -> bare sign / dot / sign-only-with-non-digit
            ;; -> Sym.  Without this, `(+ x y)' lexes as Int "+".
            ((= (logand class 8) 0) 23)
+           ;; Last byte was `e'/`E' (bit 4 still set) -> an exponent marker
+           ;; with no exponent after it.  `12e' is a symbol on a host.
+           ((= (logand class 16) 16) 23)
            ;; Has dot OR exponent -> Float.
            ((> (logand class 3) 0) 21)
            ;; Otherwise -> Int.
@@ -245,17 +248,34 @@
          ((= (nelisp_reader_is_digit (str-byte-at str-ptr i)) 1)
           (nelisp_reader_classify_step str-ptr (+ i 1) end
                                        (logior (logand class 15) 8)))
-         ;; `.': set dot (bit 0), clear last-was-e.
+         ;; `.': set dot (bit 0), clear last-was-e.  A SECOND dot, or a dot
+         ;; after an exponent, matches neither integer nor float syntax, so
+         ;; the token is a symbol -- `(read "7.1.4")' answers the symbol
+         ;; 7.1.4 on a host, consuming all five characters.  Without this the
+         ;; token lexed as a float, the parser errored on it, and the caller
+         ;; read that as end of input: `src/nelisp-cc-arm64.el' stopped
+         ;; loading at its `:phase '7.1.4' and `load' still returned t.
          ((= (str-byte-at str-ptr i) 46)
-          (nelisp_reader_classify_step str-ptr (+ i 1) end
-                                       (logior (logand class 15) 1)))
-         ;; `e' / `E': set has-e (bit 1) AND last-was-e (bit 4).
+          (if (> (logand class 3) 0)
+              (nelisp_reader_classify_step str-ptr (+ i 1) end
+                                           (logior (logand class 15) 5))
+            (nelisp_reader_classify_step str-ptr (+ i 1) end
+                                         (logior (logand class 15) 1))))
+         ;; `e' / `E': set has-e (bit 1) AND last-was-e (bit 4).  A SECOND
+         ;; exponent marker is not number syntax -- `1e2e3' is a symbol on a
+         ;; host -- so it forces sym (bit 2) the way a second dot does.
          ((= (str-byte-at str-ptr i) 101)
-          (nelisp_reader_classify_step str-ptr (+ i 1) end
-                                       (logior class 18)))
+          (if (= (logand class 2) 2)
+              (nelisp_reader_classify_step str-ptr (+ i 1) end
+                                           (logior class 22))
+            (nelisp_reader_classify_step str-ptr (+ i 1) end
+                                         (logior class 18))))
          ((= (str-byte-at str-ptr i) 69)
-          (nelisp_reader_classify_step str-ptr (+ i 1) end
-                                       (logior class 18)))
+          (if (= (logand class 2) 2)
+              (nelisp_reader_classify_step str-ptr (+ i 1) end
+                                           (logior class 22))
+            (nelisp_reader_classify_step str-ptr (+ i 1) end
+                                         (logior class 18))))
          ;; `+'/`-': sign after digit (bit 3 set) AND not just-after-e
          ;; (bit 4 clear) forces sym (`1+' / `1-' lex as symbols, not
          ;; `Int(1)' + dropped sign).  Otherwise (start, after e/E)
