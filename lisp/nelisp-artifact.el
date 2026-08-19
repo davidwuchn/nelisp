@@ -3462,6 +3462,7 @@ implementation."
      "\n"
      "static const void *neln_slot_registry[64];\n"
      "static size_t neln_slot_registry_len = 0;\n"
+     "static int neln_slot_registry_overflowed = 0;\n"
      "\n"
      "static void neln_fail(const char *msg) {\n"
      "  fprintf(stderr, \"neln native harness: %s\\n\", msg);\n"
@@ -3513,6 +3514,8 @@ implementation."
      "static void neln_register_slot_soft(const void *ptr) {\n"
      "  if (neln_slot_registry_len < (sizeof(neln_slot_registry) / sizeof(neln_slot_registry[0]))) {\n"
      "    neln_slot_registry[neln_slot_registry_len++] = ptr;\n"
+     "  } else {\n"
+     "    neln_slot_registry_overflowed = 1;\n"
      "  }\n"
      "}\n"
      "\n"
@@ -3529,6 +3532,7 @@ implementation."
      "static void neln_reset_slots(void) {\n"
      "  size_t i;\n"
      "  neln_slot_registry_len = 0;\n"
+     "  neln_slot_registry_overflowed = 0;\n"
      "  neln_write_nil(&neln_out);\n"
      "  neln_write_nil(&neln_mirror);\n"
      "  neln_write_nil(&neln_frames);\n"
@@ -3827,6 +3831,19 @@ implementation."
      "    default:\n"
      "      neln_fail(\"unsupported Sexp result tag\");\n"
      "    }\n"
+     "  }\n"
+     ;; An unregistered pointer means one of two things and they are not the
+     ;; same fact.  If the registry never filled, the callee returned a plain
+     ;; integer and printing it is right.  If it DID fill, this is a Sexp the
+     ;; harness stopped tracking, and printing its address is a wrong answer
+     ;; wearing the shape of a right one -- measured 2026-08-19, that is what
+     ;; `native-exec-general-deep-tail-recursion-smoke\' has been reporting.
+     ;; The registry holds 64 slots, ~46 of them free after the boundary and
+     ;; callback slots, and the compiled code registers one per allocation:
+     ;; a loop that boxes a value each iteration outruns it in tens of
+     ;; iterations, not thousands.  Say which one it is.
+     "  if (neln_slot_registry_overflowed) {\n"
+     "    neln_fail(\"slot registry overflowed: a result Sexp could not be decoded. The harness tracks one slot per allocation and holds 64; a loop that allocates per iteration outruns it\");\n"
      "  }\n"
      "  printf(\"%ld\\n\", (long)((int64_t)(intptr_t)ret));\n"
      "  return 0;\n"
