@@ -3592,23 +3592,42 @@ argument (reachability + in-arena bounds checks).")
                                    (seq (mut-str-make-empty ms 16)
                                         (m5_concat_walk ms args)
                                         (mut-str-finalize ms out) 0)))
+    ;; An out-of-range FROM/TO was clamped by the byte walk and came back as a
+    ;; shorter slice: (substring "abc" 0 9) answered "abc" and
+    ;; (substring "abc" 2 1) answered "".  Emacs signals both, and a caller
+    ;; slicing with a computed index had no way to learn the index was wrong.
     ((:lit "substring")        . (let* ((ms (alloc-bytes 32 8))
                                         (s (wf_arg_ptr args 0))
                                         (nb (str-len s))
                                         (clen (nl_str_charlen s))
-                                        (from (ptr-read-u64 (wf_arg_ptr args 1) 8))
+                                        (from-box (wf_arg_ptr args 1))
+                                        (from (ptr-read-u64 from-box 8))
                                         (rest (nl_cons_cdr_ptr (nl_cons_cdr_ptr args)))
-                                        (to (if (= (ptr-read-u64 rest 0) 7)
+                                        (has-to (if (= (ptr-read-u64 rest 0) 7)
+                                                    (if (= (ptr-read-u64 (wf_arg_ptr args 2) 0) 0) 0 1)
+                                                  0))
+                                        (nilbox (alloc-bytes 32 8))
+                                        (to-box (if (= (ptr-read-u64 rest 0) 7)
+                                                    (wf_arg_ptr args 2)
+                                                  nilbox))
+                                        (to (if (= has-to 1)
                                                 (ptr-read-u64 (wf_arg_ptr args 2) 8)
                                               clen))
                                         (cf (if (< from 0) (+ clen from) from))
                                         (ct (if (< to 0) (+ clen to) to)))
-                                   (seq (mut-str-make-empty ms 16)
-                                        ;; CF/CT are CHAR indices -> byte offsets
-                                        (m5_push_str_bytes ms s
-                                          (nl_u8_cidx_byte s 0 nb 0 cf)
-                                          (nl_u8_cidx_byte s 0 nb 0 ct))
-                                        (mut-str-finalize ms out) 0)))
+                                   (seq
+                                    (wf_write_nil nilbox)
+                                    (if (if (< cf 0) 1
+                                          (if (> cf clen) 1
+                                            (if (< ct 0) 1
+                                              (if (> ct clen) 1 (if (> cf ct) 1 0)))))
+                                       (bf_args_out_of_range3 s from-box to-box)
+                                     (seq (mut-str-make-empty ms 16)
+                                          ;; CF/CT are CHAR indices -> byte offsets
+                                          (m5_push_str_bytes ms s
+                                            (nl_u8_cidx_byte s 0 nb 0 cf)
+                                            (nl_u8_cidx_byte s 0 nb 0 ct))
+                                          (mut-str-finalize ms out) 0)))))
     ((:lit "format")           . (let* ((ms (alloc-bytes 32 8))
                                         (fmt (wf_arg_ptr args 0)))
                                    (seq (mut-str-make-empty ms 32)
@@ -6734,13 +6753,29 @@ unresolved at link time."
             (if (= tag 4) (str-len p)
               (if (= tag 7) (m5_list_len p 0)
                 0))))))
+    ;; `concat' takes SEQUENCES, and a list or vector of characters is one:
+    ;; Emacs answers "ab" for (concat '(97 98)) and for (concat [97 98]).
+    ;; `m5_emit_value' fell through to prin1 for both tags, so those answered
+    ;; "(97 98)" and "[97 98]" -- a string, so no error, just the wrong text.
+    (defun m5_concat_chars_list (ms cur)
+      (if (= (ptr-read-u64 cur 0) 7)
+          (seq (m5_push_char ms (ptr-read-u64 (nl_cons_car_ptr cur) 8))
+               (m5_concat_chars_list ms (nl_cons_cdr_ptr cur)))
+        1))
+    (defun m5_concat_chars_vec (ms v i n)
+      (if (>= i n) 1
+        (seq (m5_push_char ms (ptr-read-u64 (vector-ref-ptr v i) 8))
+             (m5_concat_chars_vec ms v (+ i 1) n))))
+    (defun m5_concat_one (ms carp)
+      (let* ((tg (ptr-read-u64 carp 0)))
+        (if (= tg 0) 1
+          (if (= tg 7) (m5_concat_chars_list ms carp)
+            (if (= tg 8) (m5_concat_chars_vec ms carp 0 (vector-len carp))
+              (m5_emit_value ms carp))))))
     (defun m5_concat_walk (ms cur)
       (if (= (ptr-read-u64 cur 0) 7)
-          (let* ((carp (nl_cons_car_ptr cur)))
-            (seq (if (= (ptr-read-u64 carp 0) 0)
-                     1
-                   (m5_emit_value ms carp))
-                 (m5_concat_walk ms (nl_cons_cdr_ptr cur))))
+          (seq (m5_concat_one ms (nl_cons_car_ptr cur))
+               (m5_concat_walk ms (nl_cons_cdr_ptr cur)))
         1))
     (defun m5_fmt_argptr (argp)
       (nl_cons_car_ptr argp))
@@ -7191,17 +7226,34 @@ unresolved at link time."
          (ptr-write-u64 268435472 0 1)
          (atomic-fetch-add 268435544 1)
          1)))
+    ;; Emacs's `error' FORMATS: (error "msg %d" 1) raises (error "msg 1"), a
+    ;; one-element data list holding the finished text.  This raised
+    ;; (error "msg %d" 1) instead -- format string and arguments still
+    ;; separate -- so a handler doing (cadr e), which is the normal way to
+    ;; read an error's message, got the template with its %d intact.  Every
+    ;; caller had to know to re-apply `format', and none of them did.
+    ;;
+    ;; The message is built with the same `m5_fmt_loop' the `format' builtin
+    ;; uses, so the two cannot render a directive differently.  A non-string
+    ;; first argument keeps the old whole-list behaviour rather than reading
+    ;; its bytes as a format string.
     (defun bf_error (args out)
-      (let* ((ebuf (alloc-bytes 8 1)))
+      (let* ((ebuf (alloc-bytes 8 1))
+             (fmt (nl_cons_car_ptr args))
+             (tg (ptr-read-u64 fmt 0)))
         (seq
          (ptr-write-u64 ebuf 0 491496043109)              ; "error" packed LE
          (nl_alloc_symbol ebuf 5 268435480)               ; TAG slot <- Symbol "error"
-         ;; VAL slot <- (FORMAT ARG...), the whole argument list.  This took
-         ;; `(nl_cons_cdr_ptr args)' -- everything AFTER the message -- so
-         ;; `(error "msg")' raised a bare `(error)' with no data at all and
-         ;; `(error "fmt %s" x)' raised `(error x)'.  Every diagnostic this
-         ;; runtime raised arrived with its own message deleted.
-         (bf_sig_copy32 268435512 args)
+         (if (if (= tg 5) 1 (if (= tg 6) 1 0))
+             (let* ((ms (alloc-bytes 32 8))
+                    (msg (alloc-bytes 32 8))
+                    (nil-slot (alloc-bytes 32 8)))
+               (seq (mut-str-make-empty ms 32)
+                    (m5_fmt_loop ms fmt 0 (str-len fmt) (nl_cons_cdr_ptr args))
+                    (mut-str-finalize ms msg)
+                    (wf_write_nil nil-slot)
+                    (nelisp_cons_construct msg nil-slot 268435512)))
+           (bf_sig_copy32 268435512 args))
          (ptr-write-u64 268435472 0 1)                    ; raise flag
          (atomic-fetch-add 268435544 1)
          1)))
@@ -7328,6 +7380,26 @@ unresolved at link time."
          (wf_write_nil nil-slot)
          (nelisp_cons_construct offender nil-slot data-tail)
          (nelisp_cons_construct expected data-tail 268435512)
+         (ptr-write-u64 268435472 0 1)
+         (atomic-fetch-add 268435544 1)
+         1)))
+    ;; `substring' names THREE things in its error data -- the sequence, FROM
+    ;; and TO -- where `aref' names two, and TO is reported as it was passed
+    ;; (nil when omitted), not as the length it defaults to.
+    (defun bf_args_out_of_range3 (arr a b)
+      (let* ((wbuf (alloc-bytes 24 1))
+             (nil-slot (alloc-bytes 32 8))
+             (t3 (alloc-bytes 32 8))
+             (t2 (alloc-bytes 32 8)))
+        (seq
+         (ptr-write-u64 wbuf 0 8391735721675158113)   ; "args-out"
+         (ptr-write-u64 (+ wbuf 8) 0 7453001576360603437) ; "-of-rang"
+         (ptr-write-u64 (+ wbuf 16) 0 101)            ; "e"
+         (nl_alloc_symbol wbuf 17 268435480)
+         (wf_write_nil nil-slot)
+         (nelisp_cons_construct b nil-slot t3)
+         (nelisp_cons_construct a t3 t2)
+         (nelisp_cons_construct arr t2 268435512)
          (ptr-write-u64 268435472 0 1)
          (atomic-fetch-add 268435544 1)
          1)))

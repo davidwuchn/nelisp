@@ -202,6 +202,19 @@
    (t
     (cons (list 'equal value-form (list 'quote pat)) nil))))
 
+(defun nelisp-pcase--distribute-or (cases)
+  "Split every clause whose pattern is a top-level `or' into one per arm."
+  (let ((out nil))
+    (dolist (c cases)
+      (let ((pat (car c)))
+        (if (and (consp pat) (eq (car pat) 'or) (cdr pat))
+            (dolist (arm (cdr pat))
+              (setq out (cons (cons arm (cdr c)) out)))
+          (setq out (cons c out)))))
+    (let ((rev nil))
+      (while out (setq rev (cons (car out) rev)) (setq out (cdr out)))
+      rev)))
+
 (defmacro pcase (expr &rest cases)
   "Dispatch EXPR through CASES.
 See `nelisp-pcase--test' for supported pattern shapes.
@@ -209,6 +222,17 @@ See `nelisp-pcase--test' for supported pattern shapes.
 Rust-min migration (= moved out of build-tool/src/eval/special_forms.rs)."
   (let ((value-sym (make-symbol "--pcase-value--"))
         (cond-clauses nil))
+    ;; A top-level `or' is distributed over the clause list first:
+    ;;   ((or P1 P2) BODY)  ->  (P1 BODY) (P2 BODY)
+    ;; `nelisp-pcase--or' builds ONE test for all the arms and drops their
+    ;; bindings, because the (TEST . BINDINGS) protocol has no way to say
+    ;; "these bindings only if THAT arm matched" -- so (pcase 5 ((or (and
+    ;; (pred integerp) n) n) n)) reached its body with `n' unbound.  Giving
+    ;; each arm its own clause is what makes the binding belong to the arm
+    ;; that matched, and it costs a copy of the body.  An `or' nested inside
+    ;; another pattern still goes through the binding-less builder; that case
+    ;; fails loudly with `void-variable' rather than answering wrongly.
+    (setq cases (nelisp-pcase--distribute-or cases))
     (dolist (case cases)
       (let* ((pat (car case))
              (body (cdr case))

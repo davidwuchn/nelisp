@@ -386,6 +386,44 @@
  (list (length= (list 1 2) 2) (length< (list 1 2) 3) (length> (list 1 2) 1)
        (file-name-concat "a" "b") (string-distance "ab" "ac")
        (let ((case-fold-search t)) (char-equal ?a ?A)))
+
+ ;; --- 2026-08-19, second parity sweep ---
+ (list (condition-case e (error "msg %d" 1) (error e))
+       (condition-case e (error "n=%s" 'x) (error (error-message-string e))))
+ (list (concat '(97 98)) (concat [97 98]) (concat "a" '(98) [99]) (concat))
+ (list (condition-case e (substring "abc" 0 9) (error e))
+       (condition-case e (substring "abc" 9) (error e))
+       (condition-case e (substring "abc" 2 1) (error e))
+       (substring "abc" -2) (substring "abc" 1 nil) (substring "abc" 3)
+       (substring "abc" 1 -1) (substring "あいう" 1 2)
+       (condition-case e (substring [1 2 3] 0 9) (error e)))
+ ;; Case mapping over the ranges the prelude claims: ASCII, Latin-1, Latin
+ ;; Extended-A, Greek, Cyrillic.  Outside them a character passes through,
+ ;; which is a stated limit -- the CJK case is here to pin that, not to
+ ;; claim coverage.
+ (list (upcase "aé") (downcase "AÉ") (upcase "αβγ") (downcase "ΑΒΓ")
+       (upcase "абв") (downcase "АБВ") (upcase "āăą") (downcase "ĀĂĄ")
+       (upcase "ß") (upcase ?ß) (upcase "あい") (capitalize "éa bÉ")
+       (upcase-initials "héllo wORLD"))
+ (list (string-to-number "1.5") (string-to-number "ff" 16)
+       (string-to-number "12abc") (string-to-number "") (string-to-number "-1.5e3")
+       (string-to-number "  12") (string-to-number "101" 2) (string-to-number "1e3")
+       (string-to-number ".5") (string-to-number "-.5") (string-to-number "+3")
+       (string-to-number "1.") (string-to-number "-2.") (string-to-number "0x10"))
+ (list (pcase 5 ((or (and (pred integerp) n) n) n))
+       (pcase 3 ((or 1 2 n) n))
+       (pcase "s" ((or (pred integerp) (pred stringp)) 'ok)))
+ (list (key-description (kbd "C-x")) (key-description (kbd "C-x C-f"))
+       (key-description (kbd "M-x")) (key-description (kbd "SPC"))
+       (key-description (kbd "a b")))
+
+ ;; `sxhash' values are explicitly unspecified by Emacs, so what is compared
+ ;; is the contract -- `equal' objects hash equal, and the answer is an
+ ;; integer -- not the numbers.
+ (list (= (sxhash-equal (list 1 2)) (sxhash-equal (list 1 2)))
+       (= (sxhash-equal "ab") (sxhash-equal "ab"))
+       (= (sxhash-equal (vector 1 "a")) (sxhash-equal (vector 1 "a")))
+       (integerp (sxhash 5)) (integerp (sxhash-eq 'a)) (integerp (sxhash-eql 1.5)))
 )
 
 ;;; nelisp-shadow-differential-cases.el ends here

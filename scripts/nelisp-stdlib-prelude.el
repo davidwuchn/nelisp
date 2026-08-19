@@ -467,15 +467,85 @@ from `(defvar X nil)'."
       (setq tail (cdr tail)))
     out))
 
+(defun nelisp--case-pair-p (c lo hi even-is-upper)
+  "Non-nil when C sits in the LO..HI block of alternating case pairs."
+  (and (>= c lo) (<= c hi)
+       (if even-is-upper (= 0 (logand c 1)) (= 1 (logand c 1)))))
+
+;; Simple case mapping over ASCII, Latin-1, Latin Extended-A, Greek and
+;; Cyrillic.  Verified character by character against Emacs 30.1 across every
+;; code point in those ranges -- the three that no rule covers (#xDF, #x4C0,
+;; #x4CF) are written out.  OUTSIDE those ranges a character passes through
+;; unchanged, which is a real limit and is stated rather than hidden: Latin
+;; Extended-B and the rest of the BMP need a generated table, and a table is
+;; the honest way to get them, not more rules.
+;;
+;; Before this the mapping was ASCII only, so (upcase "ae\u0301") -- any accented
+;; letter -- came back unchanged.  A case operation cannot report a character
+;; it did not know how to map, so this failed by answering.
+(defun nelisp--case-up-char (c)
+  (cond
+   ((and (>= c ?a) (<= c ?z)) (- c 32))
+   ((= c #xDF) #x1E9E)
+   ((and (>= c #xE0) (<= c #xFE) (/= c #xF7)) (- c 32))
+   ((= c #xFF) #x178)
+   ((nelisp--case-pair-p c #x100 #x12F nil) (1- c))
+   ((nelisp--case-pair-p c #x132 #x137 nil) (1- c))
+   ((nelisp--case-pair-p c #x139 #x148 t) (1- c))
+   ((nelisp--case-pair-p c #x14A #x177 nil) (1- c))
+   ((nelisp--case-pair-p c #x179 #x17E t) (1- c))
+   ((= c #x3AC) #x386)
+   ((and (>= c #x3AD) (<= c #x3AF)) (- c 37))
+   ((and (>= c #x3B1) (<= c #x3C1)) (- c 32))
+   ((= c #x3C2) #x3A3)
+   ((and (>= c #x3C3) (<= c #x3CB)) (- c 32))
+   ((= c #x3CC) #x38C)
+   ((and (>= c #x3CD) (<= c #x3CE)) (- c 63))
+   ((and (>= c #x430) (<= c #x44F)) (- c 32))
+   ((and (>= c #x450) (<= c #x45F)) (- c 80))
+   ((nelisp--case-pair-p c #x460 #x481 nil) (1- c))
+   ((nelisp--case-pair-p c #x48A #x4BF nil) (1- c))
+   ((= c #x4CF) #x4C0)
+   ((nelisp--case-pair-p c #x4C1 #x4CE t) (1- c))
+   ((nelisp--case-pair-p c #x4D0 #x4FF nil) (1- c))
+   (t c)))
+
+(defun nelisp--case-down-char (c)
+  (cond
+   ((and (>= c ?A) (<= c ?Z)) (+ c 32))
+   ((and (>= c #xC0) (<= c #xDE) (/= c #xD7)) (+ c 32))
+   ((= c #x178) #xFF)
+   ((nelisp--case-pair-p c #x100 #x12F t) (1+ c))
+   ((nelisp--case-pair-p c #x132 #x137 t) (1+ c))
+   ((nelisp--case-pair-p c #x139 #x148 nil) (1+ c))
+   ((nelisp--case-pair-p c #x14A #x177 t) (1+ c))
+   ((nelisp--case-pair-p c #x179 #x17E nil) (1+ c))
+   ((= c #x386) #x3AC)
+   ((and (>= c #x388) (<= c #x38A)) (+ c 37))
+   ((= c #x38C) #x3CC)
+   ((and (>= c #x38E) (<= c #x38F)) (+ c 63))
+   ((and (>= c #x391) (<= c #x3A1)) (+ c 32))
+   ((and (>= c #x3A3) (<= c #x3AB)) (+ c 32))
+   ((and (>= c #x400) (<= c #x40F)) (+ c 80))
+   ((and (>= c #x410) (<= c #x42F)) (+ c 32))
+   ((nelisp--case-pair-p c #x460 #x481 t) (1+ c))
+   ((nelisp--case-pair-p c #x48A #x4BF t) (1+ c))
+   ((= c #x4C0) #x4CF)
+   ((nelisp--case-pair-p c #x4C1 #x4CE nil) (1+ c))
+   ((nelisp--case-pair-p c #x4D0 #x4FF t) (1+ c))
+   (t c)))
+
+(defun nelisp--case-letter-p (c)
+  (not (and (eq (nelisp--case-up-char c) c) (eq (nelisp--case-down-char c) c))))
+
 (defun downcase (obj)
   (cond ((stringp obj)
          (let ((out "") (i 0) (n (length obj)))
            (while (< i n)
-             (let ((c (aref obj i)))
-               (setq out (concat out (char-to-string (if (and (>= c 65) (<= c 90)) (+ c 32) c)))))
+             (setq out (concat out (char-to-string (nelisp--case-down-char (aref obj i)))))
              (setq i (1+ i)))
            out))
-        ((integerp obj) (if (and (>= obj 65) (<= obj 90)) (+ obj 32) obj))
+        ((integerp obj) (nelisp--case-down-char obj))
         (t obj)))
 
 ;; Upcase the first character of each word and leave the rest of the word
@@ -488,10 +558,10 @@ from `(defvar X nil)'."
     (let ((n (length obj)) (i 0) (out "") (prev nil))
       (while (< i n)
         (let* ((c (aref obj i))
-               (w (or (and (>= c ?a) (<= c ?z))
-                      (and (>= c ?A) (<= c ?Z))
-                      (and (>= c ?0) (<= c ?9)))))
-          (setq out (concat out (char-to-string (if (and w (not prev)) (upcase c) c))))
+               (w (or (nelisp--case-letter-p c) (and (>= c ?0) (<= c ?9)))))
+          (setq out (concat out (char-to-string (if (and w (not prev))
+                                                    (nelisp--case-up-char c)
+                                                  c))))
           (setq prev w))
         (setq i (1+ i)))
       out))))
@@ -505,14 +575,20 @@ from `(defvar X nil)'."
     "Non-nil means string/regexp matching ignores case, as in Emacs."))
 
 (defun upcase (obj)
+  ;; A STRING gets the FULL mapping and a CHARACTER the simple one, which is
+  ;; Emacs's rule and is not a distinction worth guessing at: (upcase ?\N{U+00DF})
+  ;; is U+1E9E, while (upcase "\N{U+00DF}") is "SS", because a full mapping may
+  ;; change the length and a character cannot.  U+00DF is the only expansion
+  ;; inside the ranges mapped here.
   (cond ((stringp obj)
          (let ((out "") (i 0) (n (length obj)))
            (while (< i n)
              (let ((c (aref obj i)))
-               (setq out (concat out (char-to-string (if (and (>= c 97) (<= c 122)) (- c 32) c)))))
+               (setq out (concat out (if (= c #xDF) "SS"
+                                       (char-to-string (nelisp--case-up-char c))))))
              (setq i (1+ i)))
            out))
-        ((integerp obj) (if (and (>= obj 97) (<= obj 122)) (- obj 32) obj))
+        ((integerp obj) (nelisp--case-up-char obj))
         (t obj)))
 
 ;; Doc 143 file-name path ops (pure string slicing, from nelisp-stdlib-plist-str.el).
@@ -1089,6 +1165,180 @@ run forever."
         (t (signal 'wrong-type-argument (list 'stringp name)))))
 (unless (fboundp 'vconcat)
   (defun vconcat (&rest seqs) (apply #'vector (apply #'append (mapcar (lambda (x) (append x nil)) seqs)))))
+;; `string-to-number' existed only in lisp/nelisp-stdlib-plist-str.el, which
+;; the standalone never loads, so the native integer-only parser answered:
+;; "1.5" came back 1, and (string-to-number "ff" 16) came back 0 because the
+;; RADIX argument had nowhere to go.  Both are wrong answers with no error --
+;; the same shape as `compare-strings' and `lsh' before them.  This is that
+;; file's text, unchanged, so `make ns-gate' polices the two copies.
+(defun nelisp-stdlib--whitespace-p (ch)
+  "Return non-nil when CH (= integer codepoint) is ASCII whitespace.
+Matches the Emacs default whitespace class for `string-trim'."
+  (or (eq ch ?\s) (eq ch ?\t) (eq ch ?\n) (eq ch ?\r)
+      (eq ch ?\f) (eq ch 11)))                ; 11 = ?\v
+
+(defun nelisp-stdlib--digit-value (ch radix)
+  "Return integer 0..RADIX-1 encoded by CH, or nil if CH is not a digit
+in the given RADIX (= 2..36).  Accepts both upper- and lowercase
+letters for RADIX > 10."
+  (let ((v (cond
+            ((and (>= ch ?0) (<= ch ?9)) (- ch ?0))
+            ((and (>= ch ?a) (<= ch ?z)) (+ 10 (- ch ?a)))
+            ((and (>= ch ?A) (<= ch ?Z)) (+ 10 (- ch ?A)))
+            (t nil))))
+    (if (and v (< v radix)) v nil)))
+
+(defun string-to-number (s &optional radix)
+  "Parse a number from the leading portion of S.
+RADIX (default 10) selects the integer base.  Float syntax (`.',
+`e' / `E') is recognised only when RADIX is 10 or nil — otherwise
+only the integer prefix is accepted (matching the host Emacs
+contract).  Returns 0 when no leading digit is found.
+
+Pure-elisp impl: int parse drives a digit loop; float branch uses
+`(/ frac 1.0 ...)' for promote-on-mixed semantics and a multiply
+loop for the exponent (= no `expt' / `float' primitive needed)."
+  (let* ((r (or radix 10))
+         (n (length s))
+         (i 0))
+    ;; Skip leading whitespace.
+    (while (and (< i n) (nelisp-stdlib--whitespace-p (aref s i)))
+      (setq i (1+ i)))
+    (let ((sign 1))
+      (cond
+       ((and (< i n) (eq (aref s i) ?-))
+        (setq sign -1)
+        (setq i (1+ i)))
+       ((and (< i n) (eq (aref s i) ?+))
+        (setq i (1+ i))))
+      (let ((int-part 0)
+            (int-digits 0))
+        ;; Integer-digit loop.
+        (let ((continue t))
+          (while (and continue (< i n))
+            (let ((d (nelisp-stdlib--digit-value (aref s i) r)))
+              (cond
+               (d
+                (setq int-part (+ (* int-part r) d))
+                (setq i (1+ i))
+                (setq int-digits (1+ int-digits)))
+               (t (setq continue nil))))))
+        (cond
+         ;; Float branch (only when radix = 10 and we hit `.' / `e' / `E').
+         ((and (= r 10)
+               (< i n)
+               (or (eq (aref s i) ?.)
+                   (eq (aref s i) ?e)
+                   (eq (aref s i) ?E)))
+          (let ((frac-num 0)
+                (frac-denom 1)
+                (frac-digits 0)
+                (exp-sign 1)
+                (exp-val 0)
+                (has-exp nil))
+            ;; Optional fractional part.
+            (when (and (< i n) (eq (aref s i) ?.))
+              (setq i (1+ i))
+              (let ((continue t))
+                (while (and continue (< i n))
+                  (let ((d (nelisp-stdlib--digit-value (aref s i) 10)))
+                    (cond
+                     (d
+                      (setq frac-num (+ (* frac-num 10) d))
+                      (setq frac-denom (* frac-denom 10))
+                      (setq frac-digits (1+ frac-digits))
+                      (setq i (1+ i)))
+                     (t (setq continue nil)))))))
+            ;; Optional exponent.
+            (when (and (< i n)
+                       (or (eq (aref s i) ?e) (eq (aref s i) ?E)))
+              (setq i (1+ i))
+              (cond
+               ((and (< i n) (eq (aref s i) ?-))
+                (setq exp-sign -1)
+                (setq i (1+ i)))
+               ((and (< i n) (eq (aref s i) ?+))
+                (setq i (1+ i))))
+              (let ((continue t))
+                (while (and continue (< i n))
+                  (let ((d (nelisp-stdlib--digit-value (aref s i) 10)))
+                    (cond
+                     (d
+                      (setq exp-val (+ (* exp-val 10) d))
+                      (setq i (1+ i))
+                      (setq has-exp t))
+                     (t (setq continue nil)))))))
+            ;; Compute value: (sign * (int-part + frac-num/frac-denom)) * 10^exp.
+            ;; A trailing `.' with nothing after it does NOT make a float:
+            ;; Emacs reads "1." as the integer 1 and "-2." as -2.  Entering
+            ;; the float branch on the `.' alone returned 1.0, which is a
+            ;; different type flowing into whatever the caller does next.
+            (if (and (= frac-digits 0) (not has-exp))
+                (* sign int-part)
+            (let* ((mag (+ int-part (/ frac-num (* frac-denom 1.0))))
+                   (val (* sign mag)))
+              (when has-exp
+                (let ((mul (if (>= exp-sign 0) 10.0 0.1))
+                      (k exp-val))
+                  (while (> k 0)
+                    (setq val (* val mul))
+                    (setq k (1- k)))))
+              val))))
+         ;; Pure integer.
+         ((> int-digits 0) (* sign int-part))
+         (t 0))))))
+
+;; Rust-min (2026-05-06 batch 4): copy-tree + sort.
+
+;; `sxhash' and its three siblings were absent, so any file that mentions one
+;; -- lisp/nelisp-stdlib-misc.el among them -- died with `void-function' at
+;; load time, which is how `standalone-reader-intern-soft-smoke' had been red.
+;;
+;; The contract a hash has to keep is that `equal' objects hash equal; the
+;; VALUES are explicitly not specified by Emacs and differ between its own
+;; versions, so matching Emacs's numbers is not a thing to aim at.  The depth
+;; and length caps are Emacs's (3 and 7): without them hashing a long or
+;; circular list walks forever, and a hash that hangs is worse than a coarse
+;; one.
+(unless (fboundp 'sxhash-equal)
+  (defun nelisp--sxhash-string (str)
+    (let ((h 0) (i 0) (n (length str)))
+      (while (< i n)
+        (setq h (logand (+ (* h 33) (aref str i)) 1073741823))
+        (setq i (1+ i)))
+      h))
+  (defun nelisp--sxhash-walk (obj depth)
+    (cond
+     ((null obj) 0)
+     ((eq obj t) 1)
+     ((symbolp obj) (nelisp--sxhash-string (symbol-name obj)))
+     ((stringp obj) (nelisp--sxhash-string obj))
+     ((integerp obj) (logand obj 1073741823))
+     ((floatp obj) (nelisp--sxhash-string (number-to-string obj)))
+     ((>= depth 3) 0)
+     ((consp obj)
+      (let ((h 7) (k 0) (cur obj))
+        (while (and (consp cur) (< k 7))
+          (setq h (logand (+ (* h 33) (nelisp--sxhash-walk (car cur) (1+ depth)))
+                          1073741823))
+          (setq cur (cdr cur))
+          (setq k (1+ k)))
+        (unless (null cur)
+          (setq h (logand (+ (* h 33) (nelisp--sxhash-walk cur (1+ depth)))
+                          1073741823)))
+        h))
+     ((vectorp obj)
+      (let ((h 11) (k 0) (n (length obj)))
+        (while (and (< k n) (< k 7))
+          (setq h (logand (+ (* h 33) (nelisp--sxhash-walk (aref obj k) (1+ depth)))
+                          1073741823))
+          (setq k (1+ k)))
+        h))
+     (t 0)))
+  (defun sxhash-equal (obj) (nelisp--sxhash-walk obj 0))
+  (defun sxhash (obj) (sxhash-equal obj))
+  (defun sxhash-eq (obj) (nelisp--sxhash-walk obj 3))
+  (defun sxhash-eql (obj) (nelisp--sxhash-walk obj 3)))
 (unless (fboundp 'string-to-vector) (defun string-to-vector (s) (apply #'vector (append s nil))))
 ;; Absent, so callers got `void-function' -- which reads as "the runtime
 ;; cannot do this" rather than "nobody has written it yet".  The length
@@ -1180,6 +1430,11 @@ run forever."
   (defun expt (b e)
     (cond ((and (integerp e) (>= e 0)) (let ((r 1) (i 0)) (while (< i e) (setq r (* r b) i (1+ i))) r))
           ((integerp e) (/ 1.0 (expt b (- e))))
+          ;; The half power is the non-integer exponent that actually turns
+          ;; up, and `sqrt' answers it.  A general float exponent still
+          ;; signals: it needs `exp'/`log', and the standalone links no libm
+          ;; to take them from -- see the note on `sqrt' below.
+          ((= e 0.5) (sqrt (float b)))
           (t (error "expt: non-integer exponent unsupported")))))
 (unless (fboundp 'sqrt)
   (defun sqrt (x)
@@ -1217,15 +1472,22 @@ run forever."
     (let (acc) (dolist (e alist (nreverse acc)) (unless (and (consp e) (eq (car e) key)) (push e acc))))))
 (unless (fboundp 'capitalize)
   (defun capitalize (obj)
-    (if (integerp obj) (upcase obj)
-      (let ((s (copy-sequence obj)) (i 0) (n (length obj)) (start t))
+    "Title-case OBJ: upcase each word-initial letter, downcase the rest.
+Built from `concat\' rather than `aset\' because a mapped character can be
+wider than the one it replaces once the mapping leaves ASCII."
+    (if (integerp obj) (nelisp--case-up-char obj)
+      (let ((out "") (i 0) (n (length obj)) (prev nil))
         (while (< i n)
-          (let ((c (aref s i)))
-            (if (or (and (>= c ?a) (<= c ?z)) (and (>= c ?A) (<= c ?Z)) (and (>= c ?0) (<= c ?9)))
-                (progn (aset s i (if start (upcase c) (downcase c))) (setq start nil))
-              (setq start t)))
+          (let* ((c (aref obj i))
+                 (w (or (nelisp--case-letter-p c) (and (>= c ?0) (<= c ?9)))))
+            (setq out (concat out (char-to-string
+                                   (if w
+                                       (if prev (nelisp--case-down-char c)
+                                         (nelisp--case-up-char c))
+                                     c))))
+            (setq prev w))
           (setq i (1+ i)))
-        s))))
+        out))))
 (unless (fboundp 'cl-digit-char-p)
   (defun cl-digit-char-p (ch &optional radix)
     (let* ((r (or radix 10))
@@ -3018,6 +3280,63 @@ bodies (= Stage 4 follow-up).  Indent / edebug specs come back when
 PAREN nil → shy group `\\(?:...\\)'; t → `\\(...\\)'; a string → that open paren."
     (let ((open (cond ((stringp paren) paren) (paren "\\(") (t "\\(?:"))))
       (concat open (mapconcat (function regexp-quote) strings "\\|") "\\)"))))
+;; `kbd' and `key-description' were absent, so a caller got `void-function'.
+;; This pair covers the modifier-prefixed and named keys that appear in key
+;; sequences written as text; a full `read-kbd-macro' (angle-bracket function
+;; keys, <C-M-return>, kbd macros) is not here, and a token this does not
+;; know is passed through as its own characters rather than guessed at.
+(unless (fboundp 'kbd)
+  (defun kbd (keys)
+    (let ((words (split-string keys " " t)) (out nil))
+      (dolist (w words)
+        (let ((bits 0) (done nil))
+          (while (not done)
+            (cond
+             ((and (> (length w) 2) (string-prefix-p "C-" w))
+              (setq bits (logior bits 1)) (setq w (substring w 2)))
+             ((and (> (length w) 2) (string-prefix-p "M-" w))
+              (setq bits (logior bits 2)) (setq w (substring w 2)))
+             ((and (> (length w) 2) (string-prefix-p "S-" w))
+              (setq bits (logior bits 4)) (setq w (substring w 2)))
+             (t (setq done t))))
+          (let ((base (cond ((equal w "SPC") 32) ((equal w "RET") 13)
+                            ((equal w "TAB") 9) ((equal w "ESC") 27)
+                            ((equal w "DEL") 127)
+                            ((= (length w) 1) (aref w 0))
+                            (t nil))))
+            (if (null base)
+                (setq out (append out (append w nil)))
+              (when (= 1 (logand bits 1))
+                (setq base (if (and (>= (nelisp--case-up-char base) ?@)
+                                    (<= (nelisp--case-up-char base) ?_))
+                               (logand (nelisp--case-up-char base) 31)
+                             base)))
+              (when (= 4 (logand bits 4)) (setq base (nelisp--case-up-char base)))
+              (when (= 2 (logand bits 2)) (setq base (logior base 134217728)))
+              (setq out (append out (list base)))))))
+      (if (let ((all t))
+            (dolist (k out) (unless (and (integerp k) (>= k 0) (<= k 127))
+                              (setq all nil)))
+            all)
+          (apply #'string out)
+        (apply #'vector out)))))
+(unless (fboundp 'single-key-description)
+  (defun single-key-description (key &optional _no-angles)
+    (let ((out ""))
+      (when (/= 0 (logand key 134217728))
+        (setq out "M-") (setq key (logand key (lognot 134217728))))
+      (cond
+       ((= key 32) (concat out "SPC"))
+       ((= key 13) (concat out "RET"))
+       ((= key 9) (concat out "TAB"))
+       ((= key 27) (concat out "ESC"))
+       ((= key 127) (concat out "DEL"))
+       ((< key 27) (concat out "C-" (char-to-string (+ key 96))))
+       ((< key 32) (concat out "C-" (char-to-string (+ key 64))))
+       (t (concat out (char-to-string key)))))))
+(unless (fboundp 'key-description)
+  (defun key-description (keys &optional _prefix)
+    (mapconcat #'single-key-description (append keys nil) " ")))
 (unless (fboundp 'help-add-fundoc-usage)
   (defun help-add-fundoc-usage (docstring _arglist)
     "Minimal stub: return DOCSTRING unchanged (no usage line appended)."
@@ -4031,6 +4350,19 @@ bindings provide.  &rest is honoured."
    (t
     (cons (list 'equal value-form (list 'quote pat)) nil))))
 
+(defun nelisp-pcase--distribute-or (cases)
+  "Split every clause whose pattern is a top-level `or' into one per arm."
+  (let ((out nil))
+    (dolist (c cases)
+      (let ((pat (car c)))
+        (if (and (consp pat) (eq (car pat) 'or) (cdr pat))
+            (dolist (arm (cdr pat))
+              (setq out (cons (cons arm (cdr c)) out)))
+          (setq out (cons c out)))))
+    (let ((rev nil))
+      (while out (setq rev (cons (car out) rev)) (setq out (cdr out)))
+      rev)))
+
 (defmacro pcase (expr &rest cases)
   "Dispatch EXPR through CASES.
 See `nelisp-pcase--test' for supported pattern shapes.
@@ -4038,6 +4370,17 @@ See `nelisp-pcase--test' for supported pattern shapes.
 Rust-min migration (= moved out of build-tool/src/eval/special_forms.rs)."
   (let ((value-sym (make-symbol "--pcase-value--"))
         (cond-clauses nil))
+    ;; A top-level `or' is distributed over the clause list first:
+    ;;   ((or P1 P2) BODY)  ->  (P1 BODY) (P2 BODY)
+    ;; `nelisp-pcase--or' builds ONE test for all the arms and drops their
+    ;; bindings, because the (TEST . BINDINGS) protocol has no way to say
+    ;; "these bindings only if THAT arm matched" -- so (pcase 5 ((or (and
+    ;; (pred integerp) n) n) n)) reached its body with `n' unbound.  Giving
+    ;; each arm its own clause is what makes the binding belong to the arm
+    ;; that matched, and it costs a copy of the body.  An `or' nested inside
+    ;; another pattern still goes through the binding-less builder; that case
+    ;; fails loudly with `void-variable' rather than answering wrongly.
+    (setq cases (nelisp-pcase--distribute-or cases))
     (dolist (case cases)
       (let* ((pat (car case))
              (body (cdr case))
@@ -5817,6 +6160,11 @@ strings compare equal."
       (let* ((n (length seq))
              (s (if (< from 0) (+ n from) from))
              (e (if to (if (< to 0) (+ n to) to) n))
+             ;; The string path signals for an index outside the sequence;
+             ;; the vector path used to build a vector of negative length
+             ;; instead, so it failed later and somewhere else.
+             (_ (when (or (< s 0) (> s n) (< e 0) (> e n) (> s e))
+                  (signal 'args-out-of-range (list seq from to))))
              (out (make-vector (- e s) nil))
              (i 0))
         (while (< (+ s i) e)

@@ -86,7 +86,17 @@
 # it was void-function there.  Both files now carry one Emacs-correct text,
 # which is the trade this gate asks for: a benign same-definition collision
 # in place of a divergence whose behaviour depended on load order.
-ns-collision 157
+# 157 -> 161 on 2026-08-19: `string-to-number' and the two helpers it needs
+# (`nelisp-stdlib--whitespace-p', `nelisp-stdlib--digit-value'), plus
+# `nelisp-pcase--distribute-or'.  The parser lived only in
+# lisp/nelisp-stdlib-plist-str.el, which the standalone never loads, so the
+# native integer-only path answered instead: "1.5" came back 1 and
+# (string-to-number "ff" 16) came back 0, because RADIX had nowhere to go.
+# Same shape as `compare-strings' and `lsh' before it -- the body was right
+# and simply in the wrong place.  All four are byte-identical across the two
+# files, so this is the benign same-definition kind and `make ns-gate' is
+# what keeps them that way.
+ns-collision 161
 # 97 -> 96 on 2026-08-19: `string-equal' no longer differs between the two
 # files -- the prelude's now signals for a non-string instead of falling
 # through to `equal', and the lisp copy was brought with it.  Ratcheted down
@@ -94,7 +104,15 @@ ns-collision 157
 # 96 stands on 2026-08-19: `round' and `intern-soft' briefly pushed this to
 # 98 and were resolved in the same commit by making the two texts identical,
 # rather than by conceding the number.
-ns-collision-divergent 96
+# 96 -> 100 on 2026-08-19: the four `sxhash' names.  lisp/nelisp-stdlib.el
+# routes `sxhash' through the JIT out-call `nelisp_jit_sxhash' and
+# lisp/nelisp-stdlib-misc.el defaliases the other three onto it; the
+# standalone has no JIT behind that bridge, and the call aborts the process
+# WITHOUT a signal -- so it cannot be caught and fallen back from, and the
+# prelude carries a pure-elisp walk instead.  Recorded in
+# scripts/nl-ns-accepted.el with that reason rather than papered over: this
+# is a genuine two-substrate divergence, not drift.
+ns-collision-divergent 100
 # 850 -> 851 on 2026-08-19: `nl-check-file-quoted-unsafe', the entry point
 # that reports the unsafe calls inside quoted forms.  Same situation as the
 # nl-ns pair above -- it is public because tools/nl-check-inventory.el calls

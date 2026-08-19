@@ -927,6 +927,7 @@ loop for the exponent (= no `expt' / `float' primitive needed)."
                    (eq (aref s i) ?E)))
           (let ((frac-num 0)
                 (frac-denom 1)
+                (frac-digits 0)
                 (exp-sign 1)
                 (exp-val 0)
                 (has-exp nil))
@@ -940,6 +941,7 @@ loop for the exponent (= no `expt' / `float' primitive needed)."
                      (d
                       (setq frac-num (+ (* frac-num 10) d))
                       (setq frac-denom (* frac-denom 10))
+                      (setq frac-digits (1+ frac-digits))
                       (setq i (1+ i)))
                      (t (setq continue nil)))))))
             ;; Optional exponent.
@@ -962,6 +964,12 @@ loop for the exponent (= no `expt' / `float' primitive needed)."
                       (setq has-exp t))
                      (t (setq continue nil)))))))
             ;; Compute value: (sign * (int-part + frac-num/frac-denom)) * 10^exp.
+            ;; A trailing `.' with nothing after it does NOT make a float:
+            ;; Emacs reads "1." as the integer 1 and "-2." as -2.  Entering
+            ;; the float branch on the `.' alone returned 1.0, which is a
+            ;; different type flowing into whatever the caller does next.
+            (if (and (= frac-digits 0) (not has-exp))
+                (* sign int-part)
             (let* ((mag (+ int-part (/ frac-num (* frac-denom 1.0))))
                    (val (* sign mag)))
               (when has-exp
@@ -970,7 +978,7 @@ loop for the exponent (= no `expt' / `float' primitive needed)."
                   (while (> k 0)
                     (setq val (* val mul))
                     (setq k (1- k)))))
-              val)))
+              val))))
          ;; Pure integer.
          ((> int-digits 0) (* sign int-part))
          (t 0))))))
