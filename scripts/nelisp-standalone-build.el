@@ -7344,15 +7344,23 @@ unresolved at link time."
                   ;; chunk-growth refactor the chunk-0 bump caps at the 256 MiB
                   ;; first chunk and never reaches the 512 MiB trigger, so the
                   ;; tracing GC never fired and the arena grew unbounded.
-                  (if (< (ptr-read-u64 268436184 0)
-                         (ptr-read-u64 268435560 0))
-                      0
-                    (let* ((live (nl_gc_collect_form_boundary env result out pool src cursor bsym))
-                           (bump (ptr-read-u64 268436184 0))
-                           (lo (+ (* live 3) 1048576))
-                           (hi (+ bump 16777216)))
-                      (ptr-write-u64 268435560 0
-                                     (if (< lo hi) hi lo))))))
+                  ;; A form that signalled used to be stepped over: `rc' was
+                  ;; bound here and never read, so `load' ran the rest of the
+                  ;; file and reported success.  A library whose host requires
+                  ;; had all failed still came back loaded, `featurep' t, its
+                  ;; functions half-defined.  `bf_load' already tests this loop
+                  ;; for 2: the receiving end was written and nothing sent it.
+                  (if (= rc 0)
+                      (if (< (ptr-read-u64 268436184 0)
+                             (ptr-read-u64 268435560 0))
+                          0
+                        (let* ((live (nl_gc_collect_form_boundary env result out pool src cursor bsym))
+                               (bump (ptr-read-u64 268436184 0))
+                               (lo (+ (* live 3) 1048576))
+                               (hi (+ bump 16777216)))
+                          (ptr-write-u64 268435560 0
+                                         (if (< lo hi) hi lo))))
+                    (setq more 2))))
              (setq more 0)))))
       more)
     (defun bf_eval_source_string_loop (src cursor result pool env out bsym more)
