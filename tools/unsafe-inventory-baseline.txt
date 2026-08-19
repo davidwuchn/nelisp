@@ -67,4 +67,11 @@
 # quoted forms containing a `defun' drops 11 of those but loses 78 real
 # ones in the build script.  Neither is clean, which is the argument for
 # reporting the number rather than pretending a heuristic settles it.
-unsafe-call 531
+# 531 -> 538 on 2026-08-19: `nl_os_getcwd', the getcwd(2) wrapper that lets
+# `default-directory' be bound to the real working directory.  It was
+# unbound before, so every relative name resolved against nothing --
+# `(expand-file-name "a")' answered "/a".  Raw syscall and raw buffer are
+# the whole content of the function: it asks the kernel for a path and
+# copies bytes.  $PWD was available and deliberately not used; being right
+# only sometimes is the worst thing a path source can be.
+unsafe-call 538

@@ -211,6 +211,19 @@
  (proper-list-p (list 1 2))
  (proper-list-p nil)
  (proper-list-p 5)
+ ;; `default-directory' is bound to the real working directory now.  It was
+ ;; unbound, so a relative name resolved against nothing and
+ ;; (expand-file-name "a") answered "/a".  The value itself cannot be a case
+ ;; here -- it depends on where the test runs -- so these check the shape
+ ;; and the relationship, which do not.
+ ;; Only the two properties that hold in BOTH: Emacs keeps this variable in
+ ;; abbreviated form, so it starts with ~ there and / here, and
+ ;; (expand-file-name "a") therefore does not equal (concat
+ ;; default-directory "a") in Emacs.  That the value tracks the real cwd is
+ ;; checked directly instead, from four different directories, since it
+ ;; cannot be a fixed case in a file.
+ (and (boundp 'default-directory) (stringp default-directory))
+ (eq (aref default-directory (1- (length default-directory))) ?/)
  ;; maphash reaches every entry
  (let ((h (make-hash-table :test 'equal)) (n 0))
    (puthash "b" 2 h) (puthash "a" 1 h) (puthash "c" 3 h)

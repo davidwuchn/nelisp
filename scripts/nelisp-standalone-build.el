@@ -765,8 +765,9 @@ Four u32 loads cost one more instruction and stay in fixnum range."
     (push (logior (aref s 16) (ash (aref s 17) 8)) words)
     (nreverse words)))
 
-(defun nelisp-standalone--reader-posix-env-forms ()
+(defun nelisp-standalone--reader-posix-env-forms (&optional getcwd-nr)
   "Entry-stack environment walker + boot alloc-check probe for Linux.
+GETCWD-NR is the target's getcwd(2) number (x86_64 79, aarch64 17).
 
 Doc 170 Stage 2 shipped the checked allocator with its verifier armed
 only by the boot environment probe, and that probe existed only on
@@ -797,7 +798,8 @@ identity -- it reconstructs argv through sysctl KERN_PROCARGS2 -- so
 `sp' there is not the vector this walk assumes, and guessing is how a
 walker reads whatever happens to be on the stack."
   (pcase-let ((`(,w0 ,w1 ,w2 ,w3 ,w4)
-               (nelisp-standalone--alloc-check-env-name-byte-words)))
+               (nelisp-standalone--alloc-check-env-name-byte-words))
+              (getcwd-nr (or getcwd-nr 79)))
     `(;; Offset of the first `=' in the NUL-terminated entry at PTR, or
       ;; -1 when the entry ends without one.
       (defun nl_posix_env_find_eq (ptr i)
@@ -863,7 +865,26 @@ walker reads whatever happens to be on the stack."
         (if (= sp 0)
             (wf_write_nil out)
           (nl_posix_environ_walk
-           sp (+ (logand (ptr-read-u64 sp 0) 4294967295) 2) out))))))
+           sp (+ (logand (ptr-read-u64 sp 0) 4294967295) 2) out)))
+      ;; getcwd(2), so `default-directory' can be what it is everywhere else
+      ;; -- a real path ending in a slash.  It was UNBOUND before, which
+      ;; made `(expand-file-name "a")' answer "/a": a relative name resolved
+      ;; to the filesystem root.  $PWD was available and is not used: it is
+      ;; the shell's idea of where you are, it survives a chdir the process
+      ;; made itself, and being wrong only sometimes is the worst kind of
+      ;; wrong for a path.  Measured 2026-08-19.
+      (defun nl_os_getcwd (out)
+        (let* ((buf (alloc-bytes 4096 1))
+               (rc (syscall-direct ,getcwd-nr buf 4096 0 0 0 0)))
+          (if (> rc 1)
+              ;; rc counts the NUL.  Overwrite it with the trailing slash,
+              ;; unless the path already ends in one -- which it does only
+              ;; for "/" itself, where appending would give "//".
+              (if (= (ptr-read-u8 buf (- rc 2)) 47)
+                  (nl_alloc_str buf (- rc 1) out)
+                (seq (ptr-write-u8 buf (- rc 1) 47)
+                     (nl_alloc_str buf rc out)))
+            (wf_write_nil out)))))))
 
 (defun nelisp-standalone--target-uses-dynamic-arena-base-p (&optional target)
   "Return non-nil when TARGET stores chunk 0's runtime base in `nl_arena_base'."
@@ -14206,6 +14227,7 @@ boundary (Doc 151 Phase B):
               (nl_alloc_check_env_probe block off eqpos end)
               (nl_win_environ_walk block (+ end 1) rest)
               (nelisp_cons_construct pair rest result-slot)))))
+       (defun nl_os_getcwd (out) (wf_write_nil out))
        (defun nl_os_environ_init (_sp result-slot)
          (let* ((block (extern-call GetEnvironmentStringsW)))
            (seq
@@ -14220,6 +14242,7 @@ boundary (Doc 151 Phase B):
        ;; sysctl KERN_PROCARGS2, so SP is not the entry-stack vector the
        ;; Linux walk reads (see `nelisp-standalone--reader-posix-env-forms').
        (defun nl_os_environ_init (_sp result-slot) (wf_write_nil result-slot))
+       (defun nl_os_getcwd (out) (wf_write_nil out))
        (defun nl_darwin_skip_to_nul (ptr off)
          (if (= (ptr-read-u8 ptr off) 0)
              off
@@ -14323,7 +14346,7 @@ boundary (Doc 151 Phase B):
      ;; absent — use openat(56, AT_FDCWD=-100)/dup3(24)/pipe2(59)/clone(220,
      ;; flags=SIGCHLD)/ppoll(73).  Entry stack already has the Linux
      ;; argc/argv shape, so argv init is the identity, same as x86_64.
-     `(,@(nelisp-standalone--reader-posix-env-forms)
+     `(,@(nelisp-standalone--reader-posix-env-forms 17)
        (defun nl_os_argv_init (sp) sp)
        (defun nl_os_open_read (path)
          (syscall-direct 56 -100 path 0 0 0 0))
@@ -15303,6 +15326,9 @@ correctly."
             (environ_list (alloc-bytes 32 8))
             (environ_sym_buf (alloc-bytes ,(* 8 (length (nelisp-standalone--name-words "nelisp--environment"))) 1))
             (environ_sym (alloc-bytes 32 8))
+            (dd_sym_buf (alloc-bytes ,(* 8 (length (nelisp-standalone--name-words "default-directory"))) 1))
+            (dd_sym (alloc-bytes 32 8))
+            (dd_value (alloc-bytes 32 8))
             (prompt_p (if (= (nl_cstr_eq_no_prompt arg2) 1)
                           0
                         (if (= (nl_cstr_eq_no_prompt arg3) 1) 0 1)))
@@ -15348,6 +15374,8 @@ correctly."
         (nl_alloc_symbol argv_sym_buf ,(length (encode-coding-string "nelisp-standalone-argv" 'utf-8 t)) argv_sym)
         ,@(nelisp-standalone--byte-write-forms 'environ_sym_buf "nelisp--environment")
         (nl_alloc_symbol environ_sym_buf ,(length (encode-coding-string "nelisp--environment" 'utf-8 t)) environ_sym)
+        ,@(nelisp-standalone--byte-write-forms 'dd_sym_buf "default-directory")
+        (nl_alloc_symbol dd_sym_buf ,(length (encode-coding-string "default-directory" 'utf-8 t)) dd_sym)
         (nl_sexp_clone_into globals (+ ctx 0))
         (nl_sexp_clone_into frames (+ ctx 32))
         (nl_sexp_clone_into unbound (+ ctx 64))
@@ -15375,6 +15403,11 @@ correctly."
         ;; per-target-real/per-target-identity idiom as `nl_os_argv_init' above.
         (nl_os_environ_init sp0 environ_list)
         (nl_env_set_value ctx environ_sym environ_list)
+        ;; `default-directory' was never bound, so every relative name
+        ;; resolved against nothing: `(expand-file-name "a")' answered "/a".
+        ;; getcwd(2) answers it here, with the trailing slash Emacs keeps.
+        (nl_os_getcwd dd_value)
+        (nl_env_set_value ctx dd_sym dd_value)
         ;; rec_max 100000.  RE-MEASURED 2026-08-16: the real ceiling on the 1 GiB
 ;; mmap'd native stack is ~136k rec levels, not the ~404k this comment used to
 ;; claim -- a self-recursive elisp function survives depth 65000 and SIGSEGVs by
