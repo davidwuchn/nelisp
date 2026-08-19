@@ -841,20 +841,9 @@ Non-letter chars pass through unchanged."
     "Bool vectors are plain vectors of t/nil in this runtime (Doc 22)."
     (apply #'vector (mapcar (lambda (x) (and x t)) args)))
 
-(defun bool-vector-p (object)
-  "Return non-nil when OBJECT is a vector all of whose elements are
-t or nil (= bool-vector contract).  An empty vector counts as a
-bool-vector."
-  (and (vectorp object)
-       (let ((i 0)
-             (n (length object))
-             (ok t))
-         (while (and ok (< i n))
-           (let ((v (aref object i)))
-             (unless (or (eq v t) (null v))
-               (setq ok nil)))
-           (setq i (1+ i)))
-         ok)))
+(defun bool-vector-p (_x)
+    "Always nil: bool vectors are plain vectors here (Doc 22)."
+    nil)
 
 ;; Rust-min (2026-05-06 batch 5a): string-to-number — pure-elisp parse
 ;; (= no new Rust primitives required, since NeLisp's mixed-mode

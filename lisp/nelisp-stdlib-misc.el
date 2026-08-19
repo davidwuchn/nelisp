@@ -447,50 +447,10 @@ regular file (per `nelisp--syscall-stat'), or nil if none match."
       (setq cur (cdr cur)))
     hit))
 
-(defun locate-library (name &optional _nosuffix _path _interactive-call)
-  "Search `load-path' for a file named NAME, returning its absolute
-path or nil.  Tries NAME as-given first, then NAME with `.elc' appended
-(Wave A21 NeLisp `.elc' is preferred for compiled-defun fast-path),
-then NAME with `.el' appended (unless NAME already ends in `.el' /
-`.elc').  Optional NOSUFFIX / PATH / INTERACTIVE-CALL args are
-accepted for host-Emacs compatibility but ignored — the load-path
-override + interactive message machinery aren't wired."
-  (let* ((n (length name))
-         (has-elc (and (> n 4)
-                       (eq (aref name (- n 4)) ?.)
-                       (eq (aref name (- n 3)) ?e)
-                       (eq (aref name (- n 2)) ?l)
-                       (eq (aref name (- n 1)) ?c)))
-         (has-el (and (not has-elc)
-                      (> n 3)
-                      (eq (aref name (- n 3)) ?.)
-                      (eq (aref name (- n 2)) ?e)
-                      (eq (aref name (- n 1)) ?l)))
-         ;; Suffix probe order: `.elc' is tried before `.el' so a
-         ;; freshly-emitted `.elc' wins, matching Emacs's
-         ;; `load-suffixes' precedence.  When NAME explicitly ends
-         ;; in `.elc', only the bare name is probed (caller decided).
-         (suffixes (cond
-                    (has-elc (list ""))
-                    (has-el (list "c" ""))           ; FOO.el → FOO.elc, FOO.el
-                    (t (list ".elc" ".el" "")))))
-    (cond
-     ;; Absolute path: probe directly, skip load-path walk.
-     ((and (> n 0) (eq (aref name 0) ?/))
-      (nelisp--locate-probe name suffixes))
-     ;; Relative: try `default-directory' first, then walk `load-path'.
-     (t
-      (let ((roots (cons (and (boundp 'default-directory) default-directory)
-                         (and (boundp 'load-path) load-path)))
-            (hit nil))
-        (while (and roots (null hit))
-          (let ((root (car roots)))
-            (when (and (stringp root) (> (length root) 0))
-              (setq hit (nelisp--locate-probe
-                         (expand-file-name name root)
-                         suffixes))))
-          (setq roots (cdr roots)))
-        hit)))))
+(defun locate-library (library &optional _nosuffix _path _interactive-call)
+    "Find LIBRARY on `load-path', trying .el; nil when not found."
+    (nelisp--check-string library)
+    (locate-file library load-path '(".el" "")))
 
 ;; Rust-min batch 7f (2026-05-07, Doc 50 stage 2): `load' migrated
 ;; from Rust to elisp on top of two new I/O / reader primitives:
@@ -750,7 +710,9 @@ or signals otherwise.  Replaces the deleted Rust `bi_require'."
 ;; Buffer ops collapsed = NeLisp standalone has no buffer Sexp,
 ;; all I/O is string-based.  Stubs are no-op / nil.
 (unless (fboundp 'set-buffer-multibyte)
-  (defun set-buffer-multibyte (_arg) "NeLisp stub: no-op (= no buffer)." nil))
+  (defun set-buffer-multibyte (flag)
+    "Answer FLAG, as Emacs does; there is no buffer to change here."
+    flag))
 (unless (fboundp 'buffer-string)
   (defun buffer-string () "NeLisp stub: returns empty (= no buffer)." ""))
 (unless (fboundp 'current-buffer)
@@ -841,8 +803,8 @@ for the full contract."
   (defun set-file-modes (filename mode &optional _flag)
     "Apply MODE to FILENAME via chmod(2) when a syscall primitive exists.
 No-ops on substrates without `nelisp--syscall-path-int' (the historic stub)."
-    (nelisp--check-string filename)
     (unless (integerp mode) (signal 'wrong-type-argument (list 'fixnump mode)))
+    (nelisp--check-string filename)
     (when (fboundp 'nelisp--syscall-path-int)
       (let ((rc (nelisp--syscall-path-int 90 filename mode)))   ; chmod
         (unless (= rc 0)

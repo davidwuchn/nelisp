@@ -169,6 +169,19 @@
 ;; and `(path-separator)' answers ":".
 (unless (fboundp 'path-separator)
   (defun path-separator () path-separator))
+(unless (fboundp 'bool-vector-p)
+  (defun bool-vector-p (_x)
+    "Always nil: bool vectors are plain vectors here (Doc 22)."
+    nil))
+(unless (fboundp 'point-min)
+  (defun point-min () 1))
+(unless (fboundp 'point-max)
+  (defun point-max () 1))
+(unless (fboundp 'locate-library)
+  (defun locate-library (library &optional _nosuffix _path _interactive-call)
+    "Find LIBRARY on `load-path', trying .el; nil when not found."
+    (nelisp--check-string library)
+    (locate-file library load-path '(".el" ""))))
 (unless (fboundp 'locate-file)
   (defun locate-file (filename path &optional suffixes _predicate)
     "Find FILENAME in PATH, trying each of SUFFIXES; nil when not found."
@@ -1671,7 +1684,10 @@ wider than the one it replaces once the mapping leaves ASCII."
                     ((and (>= ch ?a) (<= ch ?z)) (+ 10 (- ch ?a)))
                     ((and (>= ch ?A) (<= ch ?Z)) (+ 10 (- ch ?A))) (t nil))))
       (if (and v (< v r)) v nil))))
-(unless (fboundp 'char-uppercase-p) (defun char-uppercase-p (ch) (and (>= ch ?A) (<= ch ?Z))))
+(unless (fboundp 'char-uppercase-p)
+  (defun char-uppercase-p (ch)
+    (nelisp--check-character ch)
+    (and (>= ch ?A) (<= ch ?Z))))
 (unless (fboundp 'string-lessp)
   (defun string-lessp (a b)
     ;; `string-lessp' takes a string OR a symbol, like `string=' -- checking
@@ -1693,7 +1709,9 @@ wider than the one it replaces once the mapping leaves ASCII."
   (defun string-greaterp (a b) (string-lessp b a)))
 (unless (fboundp 'string-version-lessp)
   (defun string-version-lessp (a b)
-    (string-lessp (nelisp--check-string a) (nelisp--check-string b))))
+    ;; Takes a string OR a symbol, like `string-lessp' -- `nelisp--check-string'
+    ;; is too narrow and rejected the nil that Emacs compares as "nil".
+    (string-lessp a b)))
 ;; Doc 160 breadth round 3: control / binding macros.
 ;; `interactive' is a command-declaration marker.  When a command is called
 ;; non-interactively (the only mode on the headless standalone), Emacs skips
@@ -1823,6 +1841,9 @@ reseeds from its characters; nil -> a full LCG value."
       c)))
 (unless (fboundp 'seq-position)
   (defun seq-position (seq elt &optional testfn)
+    ;; `sequencep', not `listp': the fuzz case that suggested `listp' had a
+    ;; DOTTED pair, which is a cons and passes `listp' -- the name Emacs
+    ;; reports there comes from a later walk, not from this check.
     (unless (sequencep seq) (signal 'wrong-type-argument (list 'sequencep seq)))
     (let ((l (nelisp-seq--to-list seq)) (i 0) (found nil) (idx nil))
       (while (and l (not found))
@@ -1967,6 +1988,9 @@ reseeds from its characters; nil -> a full LCG value."
     ;; with `length' made it signal `sequencep' instead.
     (if (not (consp list)) list
       (let ((len (safe-length list)) (m (or n 1)))
+        ;; A negative N asks for more than the whole list, and Emacs answers
+        ;; the whole list -- but for a NON-list it answers the object, which
+        ;; is why the consp test comes first.
         (nthcdr (if (> len m) (- len m) 0) list)))))
 (unless (fboundp 'butlast)
   (defun butlast (list &optional n)
@@ -3723,9 +3747,12 @@ bodies (= Stage 4 follow-up).  Indent / edebug specs come back when
             ")")))
 (unless (fboundp 'help-split-fundoc)
   (defun help-split-fundoc (docstring _def &optional _section)
-    "Minimal stub: no embedded usage line, so return (nil . DOCSTRING)."
+    "Return nil: nothing here embeds a usage line in a docstring.
+Emacs answers nil when there is none, NOT (nil . DOCSTRING) -- callers test
+the result and take the whole docstring themselves when it is nil, so the
+cons made them use nil as the usage line."
     (when docstring (nelisp--check-string docstring))
-    (if (stringp docstring) (cons nil docstring) nil)))
+    nil))
 
 ;; cl-macs / macroexp helpers that cl-generic.el (and other gv/cl users) need at
 ;; macro-expansion time.  All fboundp-gated.  Together with the `setf' get/gethash/
@@ -4842,7 +4869,9 @@ Rust-min migration (= moved out of build-tool/src/eval/special_forms.rs)."
 (unless (fboundp 'bufferp)
   (defun bufferp (_obj) nil))
 (unless (fboundp 'set-buffer-multibyte)
-  (defun set-buffer-multibyte (_flag) nil))
+  (defun set-buffer-multibyte (flag)
+    "Answer FLAG, as Emacs does; there is no buffer to change here."
+    flag))
 (unless (fboundp 'multibyte-string-p)
   (defun multibyte-string-p (obj) (stringp obj)))
 (unless (fboundp 'unibyte-string-p)
@@ -5122,8 +5151,8 @@ Rust-min migration (= moved out of build-tool/src/eval/special_forms.rs)."
   (defun set-file-modes (filename mode &optional _flag)
     "Apply MODE to FILENAME via chmod(2) when a syscall primitive exists.
 No-ops on substrates without `nelisp--syscall-path-int' (the historic stub)."
-    (nelisp--check-string filename)
     (unless (integerp mode) (signal 'wrong-type-argument (list 'fixnump mode)))
+    (nelisp--check-string filename)
     (when (fboundp 'nelisp--syscall-path-int)
       (let ((rc (nelisp--syscall-path-int 90 filename mode)))   ; chmod
         (unless (= rc 0)
@@ -5202,7 +5231,9 @@ No-ops on substrates without `nelisp--syscall-path-int' (the historic stub)."
               (get parent 'error-conditions))))
       (put name 'error-conditions (cons name conditions))
       (put name 'error-message message)
-      name)))
+      ;; Emacs answers what its LAST `put' returned, which is MESSAGE --
+      ;; measured, not reasoned from the name.
+      message)))
 ;; Seed the root `error' condition so derived errors inherit it.
 (unless (get 'error 'error-conditions)
   (put 'error 'error-conditions (list 'error))
@@ -6784,6 +6815,12 @@ buffer = best-effort insert; nil/t/other = native stdout."
    (t (nelisp--native-princ str))))
 
 (defun princ (object &optional stream)
+  ;; A STREAM that is not a function is `invalid-function' in Emacs -- this
+  ;; ignored it and printed to stdout, so output went somewhere the caller
+  ;; did not ask for and nothing said so.
+  (when (and stream (not (functionp stream)))
+    (signal (if (symbolp stream) 'void-function 'invalid-function)
+            (list stream)))
   "Print OBJECT with no quoting to STREAM or `standard-output' (Doc 22 A9)."
   (let ((s (or stream standard-output)))
     (if (or (null s) (eq s t))
@@ -6793,6 +6830,12 @@ buffer = best-effort insert; nil/t/other = native stdout."
   object)
 
 (defun prin1 (object &optional stream)
+  ;; A STREAM that is not a function is `invalid-function' in Emacs -- this
+  ;; ignored it and printed to stdout, so output went somewhere the caller
+  ;; did not ask for and nothing said so.
+  (when (and stream (not (functionp stream)))
+    (signal (if (symbolp stream) 'void-function 'invalid-function)
+            (list stream)))
   "Print OBJECT in read syntax to STREAM or `standard-output' (Doc 22 A9)."
   (let ((s (or stream standard-output)))
     (if (or (null s) (eq s t))
@@ -6810,6 +6853,11 @@ buffer = best-effort insert; nil/t/other = native stdout."
 
 (unless (fboundp 'print)
   (defun print (object &optional stream)
+    (when (and stream (not (functionp stream)))
+      ;; A SYMBOL stream is looked up as a function first, so it reports
+      ;; `void-function'; anything else is `invalid-function'.
+      (signal (if (symbolp stream) 'void-function 'invalid-function)
+              (list stream)))
     "Output OBJECT in read syntax, surrounded by newlines (Doc 22 A9)."
     (terpri stream)
     (prin1 object stream)
@@ -6818,6 +6866,11 @@ buffer = best-effort insert; nil/t/other = native stdout."
 
 (unless (fboundp 'write-char)
   (defun write-char (character &optional stream)
+    (when (and stream (not (functionp stream)))
+      ;; A SYMBOL stream is looked up as a function first, so it reports
+      ;; `void-function'; anything else is `invalid-function'.
+      (signal (if (symbolp stream) 'void-function 'invalid-function)
+              (list stream)))
     "Output CHARACTER to STREAM or `standard-output' (Doc 22 A9)."
     (let ((s (or stream standard-output)))
       (if (or (null s) (eq s t))

@@ -48,8 +48,6 @@ prin1|scripts/nelisp-stdlib-prelude.el|_stream|not yet reviewed
 princ|scripts/nelisp-stdlib-prelude.el|_stream|STREAM ignored: output always goes to stdout, there are no buffers or markers to print into
 replace-regexp-in-string|scripts/nelisp-stdlib-prelude.el|_fixedcase _literal _start _subexp|not yet reviewed
 run-at-time|scripts/nelisp-stdlib-prelude.el|_repeat _time|TIME and REPEAT ignored: the event loop runs the function once, immediately
-set-buffer-multibyte|lisp/nelisp-stdlib-misc.el|_arg|not yet reviewed
-set-buffer-multibyte|scripts/nelisp-stdlib-prelude.el|_flag|not yet reviewed
 set-file-modes|lisp/nelisp-stdlib-misc.el|_flag|not yet reviewed
 set-file-modes|scripts/nelisp-stdlib-prelude.el|_flag|not yet reviewed
 setenv|scripts/nelisp-stdlib-prelude.el|_substitute|not yet reviewed
@@ -66,3 +64,6 @@ terpri|scripts/nelisp-stdlib-prelude.el|_ensure|ENSURE ignored: output always go
 terpri|scripts/nelisp-stdlib-prelude.el|_ensure _stream|the same, for the second definition of this name
 prin1-to-string|scripts/nelisp-stdlib-prelude.el|_overrides|OVERRIDES ignored: per-call print settings (print-length, print-level, ...) are read from the dynamic variables, not from this alist
 prin1-to-string|lisp/nelisp-stdlib-prn.el|_overrides|OVERRIDES ignored; byte-identical to the prelude copy
+locate-library|scripts/nelisp-stdlib-prelude.el|_interactive-call _nosuffix _path|NOSUFFIX/PATH/INTERACTIVE-CALL ignored: the search is always load-path with .el and no suffix
+bool-vector-p|scripts/nelisp-stdlib-prelude.el|_x|always nil: bool vectors are plain vectors here, so nothing can be one
+bool-vector-p|lisp/nelisp-stdlib-plist-str.el|_x|always nil; byte-identical to the prelude copy

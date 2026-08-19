@@ -3704,7 +3704,8 @@ argument (reachability + in-arena bounds checks).")
     ;; shorter slice: (substring "abc" 0 9) answered "abc" and
     ;; (substring "abc" 2 1) answered "".  Emacs signals both, and a caller
     ;; slicing with a computed index had no way to learn the index was wrong.
-    ((:lit "substring")        . (let* ((ms (alloc-bytes 32 8))
+    ((:lit "substring")        . (if (= (ptr-read-u64 (wf_arg_ptr args 1) 0) 2)
+                            (let* ((ms (alloc-bytes 32 8))
                                         (s (wf_arg_ptr args 0))
                                         (nb (str-len s))
                                         (clen (nl_str_charlen s))
@@ -3735,7 +3736,8 @@ argument (reachability + in-arena bounds checks).")
                                           (m5_push_str_bytes ms s
                                             (nl_u8_cidx_byte s 0 nb 0 cf)
                                             (nl_u8_cidx_byte s 0 nb 0 ct))
-                                          (mut-str-finalize ms out) 0)))))
+                                          (mut-str-finalize ms out) 0))))
+                          (bf_wrong_type_integerp (wf_arg_ptr args 1))))
     ((:lit "format")           . (let* ((ms (alloc-bytes 32 8))
                                         (fmt (wf_arg_ptr args 0)))
                                    (seq (mut-str-make-empty ms 32)
@@ -7311,7 +7313,18 @@ unresolved at link time."
     ;; `args-out-of-range' there and this still does not -- `bf_aref' has
     ;; always answered nil, and making both signal is a separate change with
     ;; its own callers to check.
+    ;; Emacs checks the SEQUENCE first and the index second, so
+    ;; (elt 0 '(1 2)) names `sequencep' even though the index is also wrong.
+    ;; Checking the index first named `fixnump' and sent the reader to the
+    ;; wrong argument.
     (defun bf_elt (args out)
+      (let* ((seqp (wf_arg_ptr args 0)) (tg (ptr-read-u64 seqp 0)))
+        (if (if (= tg 0) 1 (if (= tg 7) 1 (if (= tg 8) 1 (if (= tg 12) 1 (if (= tg 5) 1 (if (= tg 6) 1 0))))))
+            (if (= (ptr-read-u64 (wf_arg_ptr args 1) 0) 2)
+                (bf_elt_checked args out)
+              (bf_wrong_type_fixnump (wf_arg_ptr args 1)))
+          (bf_wrong_type_sequencep seqp))))
+    (defun bf_elt_checked (args out)
       (let* ((seqp (wf_arg_ptr args 0))
              (tg (ptr-read-u64 seqp 0)))
         (if (= tg 7)
@@ -7556,6 +7569,8 @@ unresolved at link time."
          1)))
     ;; Each of these names a DIFFERENT predicate, and a handler matches on the
     ;; name -- so one generic "bad type" signal would be no better than none.
+    (defun bf_wrong_type_fixnump (offender)
+      (bf_wrong_type_named offender 31645548523579750 0 0 7))
     (defun bf_wrong_type_integerp (offender)
       (bf_wrong_type_named offender 8102650174351109737 0 0 8))
     (defun bf_wrong_type_int_or_marker (offender)
@@ -8478,7 +8493,9 @@ Wave-2 (C) appends bf_ash (shl/sar compose) + bf_str_lt (byte-lexicographic).")
                                      (wf_write_t out) (wf_write_nil out))
                                (bf_wrong_type_number_or_marker p)))))
     ((:lit "set")      . (bf_set args env out))
-    ((:lit "symbol-value") . (bf_symbol_value args env out))
+    ((:lit "symbol-value") . (if (= (ptr-read-u64 (wf_arg_ptr args 0) 0) 4)
+                            (bf_symbol_value args env out)
+                          (bf_wrong_type_symbolp (wf_arg_ptr args 0))))
     ((:lit "fboundp")  . (bf_fboundp args env out))
     ((:lit "boundp")   . (bf_boundp args env out))
     ((:lit "featurep") . (bf_featurep args env out))
@@ -8520,7 +8537,9 @@ Wave-2 (C) appends bf_ash (shl/sar compose) + bf_str_lt (byte-lexicographic).")
     ;; needed here (unlike `intern', whose `bf_intern' returns a non-zero
     ;; slot pointer).  Backs the elisp `intern-soft' (lisp/nelisp-stdlib-misc.el).
     ((:lit "nelisp--intern-lookup") . (bf_intern_soft (wf_arg_ptr args 0) out))
-    ((:lit "unibyte-string") . (bf_unibyte_string args out))
+    ((:lit "unibyte-string") . (if (= (bf_first_non_integer args) 0)
+                            (bf_unibyte_string args out)
+                          (bf_wrong_type_integerp (bf_first_non_integer args))))
     ;; --- vector ops ---
     ((:lit "make-vector") . (bf_make_vector args out))
     ((:lit "vector")      . (bf_vector args out))

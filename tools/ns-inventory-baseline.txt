@@ -136,7 +136,10 @@
 # standalone does not load that package, so the variable was void there.
 # Byte-identical, benign same-definition.  171 also covers `bool-vector',
 # which the standalone did not have.
-ns-collision 171
+# 171 -> 175 on 2026-08-20: `bool-vector-p', `point-min', `point-max' and
+# `locate-library', absent from the standalone and now in both the prelude
+# and the lisp/ mirror that already named them.  Byte-identical copies.
+ns-collision 176
 # 97 -> 96 on 2026-08-19: `string-equal' no longer differs between the two
 # files -- the prelude's now signals for a non-string instead of falling
 # through to `equal', and the lisp copy was brought with it.  Ratcheted down
@@ -152,7 +155,10 @@ ns-collision 171
 # prelude carries a pure-elisp walk instead.  Recorded in
 # scripts/nl-ns-accepted.el with that reason rather than papered over: this
 # is a genuine two-substrate divergence, not drift.
-ns-collision-divergent 100
+# 100 -> 99 on 2026-08-20: `set-buffer-multibyte' stopped differing -- both
+# copies answer FLAG now instead of one of them ignoring it.  Ratcheted down
+# rather than left, since the gate offered.
+ns-collision-divergent 99
 # 850 -> 851 on 2026-08-19: `nl-check-file-quoted-unsafe', the entry point
 # that reports the unsafe calls inside quoted forms.  Same situation as the
 # nl-ns pair above -- it is public because tools/nl-check-inventory.el calls

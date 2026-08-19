@@ -685,6 +685,27 @@
        (memql 2 '(1 2 3)) (memql 9 '(1 2))
        (condition-case e (memql 1 "s") (error e))
        (path-separator) path-separator)
+
+ ;; Index arguments name `fixnump'/`integerp'; a STREAM that is not a
+ ;; function is an error rather than being ignored -- output was going
+ ;; somewhere the caller did not ask for and nothing said so.
+ (list (condition-case e (elt "abc" '(1 2)) (error e)) (elt "abc" 1)
+       (condition-case e (substring "abc" t) (error e)) (substring "abc" 1)
+       (condition-case e (unibyte-string nil) (error e)) (unibyte-string 97 98)
+       (condition-case e (symbol-value 2) (error e))
+       (condition-case e (set-file-modes '(1 2) '(1)) (error e))
+       (help-split-fundoc "abc" 'foo) (help-split-fundoc nil 'foo)
+       (bool-vector-p :key) (point-min) (locate-library "zz-no-such-lib-zz")
+       (condition-case e (seq-position '(1 . 2) 48) (error e)) (seq-position '(1 2 3) 2)
+       (condition-case e (char-uppercase-p "a") (error e))
+       (char-uppercase-p ?A) (char-uppercase-p ?a)
+       (string-version-lessp nil "x") (string-version-lessp "a1" "a2")
+       (set-buffer-multibyte "abc") (set-buffer-multibyte nil)
+       (define-error 'zz-par-err "msg")
+       (condition-case e (princ 97 "s") (error e))
+       (condition-case e (prin1 1.5 -7) (error e))
+       (condition-case e (print 32 0) (error e))
+       (condition-case e (write-char 65 :key) (error e)))
 )
 
 ;;; nelisp-shadow-differential-cases.el ends here
