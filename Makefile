@@ -356,6 +356,7 @@ bootstrap-contract:
 # were exactly that.  The ratchet is on `shared-shadowing'; the full table is
 # generated into docs/emacs-compat-table.txt so it can be grepped without
 # running anything.
+.PHONY: emacs-parity
 .PHONY: emacs-compat
 emacs-compat:
 	$(EMACS) --batch -Q -l tools/nelisp-emacs-compat.el
@@ -622,6 +623,43 @@ standalone-reader-elt-smoke: $(if $(wildcard target/nelisp target/nelisp.exe),,s
 # ways and requires the same answers.  See the case file's commentary for
 # the three defects of this shape found by hand on 2026-08-19.
 .PHONY: standalone-reader-shadow-smoke
+# The shadow smoke compares the standalone against ITSELF (native builtins vs
+# the prelude's redefinitions).  That cannot see a case where both halves are
+# wrong the same way -- which is most of what an Emacs-compatibility runtime
+# gets wrong.  This target compares the same file against STOCK EMACS, printer
+# to printer, and requires the two to be byte-identical.
+#
+# Both sides print through `format "%S"' deliberately.  Reading the
+# standalone's own value echo instead compares Emacs's printer against a
+# DIFFERENT NeLisp printer (the native `nelisp--repr'), and the two differ on
+# backslash escaping inside a nested string -- an hour went into that mirage
+# on 2026-08-19.
+emacs-parity: $(if $(wildcard target/nelisp target/nelisp.exe),,standalone-reader)
+	@mkdir -p target
+	@printf '%s\n' '(princ (format "%S" (progn' > target/emacs-parity.el
+	@cat test/nelisp-shadow-differential-cases.el >> target/emacs-parity.el
+	@printf '%s\n' ')))' >> target/emacs-parity.el
+	@bin=./target/nelisp; \
+	case "$(NELISP_STANDALONE_TARGET)$$NELISP_STANDALONE_TARGET" in \
+	  windows*) bin=./target/nelisp.exe;; \
+	esac; \
+	$(EMACS) --batch -Q -l target/emacs-parity.el > target/emacs-parity-emacs.txt 2>/dev/null; \
+	$$bin --load target/emacs-parity.el > target/emacs-parity-nelisp.txt 2>/dev/null; \
+	if [ ! -s target/emacs-parity-emacs.txt ]; then \
+	  echo "[emacs-parity] FAIL: Emacs produced no output -- the cases file did not evaluate"; exit 1; \
+	fi; \
+	n=$$(wc -c < target/emacs-parity-emacs.txt); \
+	head -c $$n target/emacs-parity-nelisp.txt > target/emacs-parity-nelisp-head.txt; \
+	if cmp -s target/emacs-parity-emacs.txt target/emacs-parity-nelisp-head.txt; then \
+	  echo "[emacs-parity] PASS: $$n bytes identical to stock Emacs"; \
+	else \
+	  echo "[emacs-parity] FAIL: the standalone answers differently from stock Emacs"; \
+	  fold -w100 target/emacs-parity-emacs.txt > target/emacs-parity-e.f; \
+	  fold -w100 target/emacs-parity-nelisp-head.txt > target/emacs-parity-n.f; \
+	  diff target/emacs-parity-e.f target/emacs-parity-n.f | head -40; \
+	  exit 1; \
+	fi
+
 standalone-reader-shadow-smoke: $(if $(wildcard target/nelisp target/nelisp.exe),,standalone-reader)
 	@mkdir -p target
 	@cp test/nelisp-shadow-differential-cases.el target/shadow-native.el

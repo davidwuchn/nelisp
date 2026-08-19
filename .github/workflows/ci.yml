@@ -127,6 +127,15 @@ jobs:
         shell: bash
         run: make standalone-reader-shadow-smoke
 
+      # The shadow smoke compares the standalone against itself; this one
+      # compares it against the stock Emacs already installed on the runner,
+      # which is the only check here that can see both halves being wrong the
+      # same way.
+      - name: "Emacs parity (differential vs stock Emacs; Linux x86_64)"
+        if: runner.os == 'Linux'
+        shell: bash
+        run: make emacs-parity
+
       # Placed before the ERT suite so a pre-existing test failure does
       # not skip the Mach-O toolchain-acceptance signal.
       - name: Mach-O acceptance (NeLisp-emitted arm64 exec + MH_OBJECT vs codesign/clang/ld64; macOS)
