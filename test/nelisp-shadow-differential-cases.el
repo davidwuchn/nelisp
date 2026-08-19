@@ -325,6 +325,20 @@
  (type-of (car (read-from-string (prin1-to-string (intern "12")))))
  (equal (car (read-from-string (prin1-to-string "a\"b"))) "a\"b")
  (equal (car (read-from-string (prin1-to-string '(1 "a" b)))) '(1 "a" b))
+ ;; An index outside a sequence used to answer nil, which is
+ ;; indistinguishable from a slot that genuinely holds nil -- so reading
+ ;; past the end was a silent wrong answer and a handler written for
+ ;; `args-out-of-range' never fired.  `intern' took a symbol and returned
+ ;; it, because the name buffer of a Symbol reads just like a Str's.
+ (condition-case e (aref [1 2 3] 5) (error e))
+ (condition-case e (aref [1 2 3] -1) (error e))
+ (condition-case e (aref "abc" 5) (error e))
+ (condition-case e (elt "abc" 5) (error e))
+ (condition-case e (elt [1 2 3] 5) (error e))
+ (aref [1 2 3] 1)
+ (aref "abc" 1)
+ (condition-case e (intern 'foo) (error e))
+ (intern "nl-diff-interned")
  ;; maphash reaches every entry
  (let ((h (make-hash-table :test 'equal)) (n 0))
    (puthash "b" 2 h) (puthash "a" 1 h) (puthash "c" 3 h)

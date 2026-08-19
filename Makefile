@@ -592,7 +592,7 @@ standalone-reader-elt-smoke: $(if $(wildcard target/nelisp target/nelisp.exe),,s
 	  windows*) bin=./target/nelisp.exe;; \
 	esac; \
 	fail=0; \
-	for expr in '(elt nil 0)' '(elt nil 5)' '(elt nil -1)' '(elt (list) 0)' '(elt [] 0)'; do \
+	for expr in '(elt nil 0)' '(elt nil 5)' '(elt nil -1)' '(elt (list) 0)'; do \
 	  out="$$($$bin --eval "$$expr" 2>&1)"; rc=$$?; \
 	  if [ "$$rc" -ne 0 ]; then \
 	    echo "[elt-smoke] FAIL $$expr exited $$rc (139 = SIGSEGV)"; fail=1; \
@@ -602,7 +602,9 @@ standalone-reader-elt-smoke: $(if $(wildcard target/nelisp target/nelisp.exe),,s
 	    echo "[elt-smoke] ok   $$expr -> nil"; \
 	  fi; \
 	done; \
-	for pair in '(elt (list 1 2 3) 1)|2' '(elt [10 20 30] 2)|30' '(elt "abc" 1)|98' '(elt "あい" 0)|12354' '(elt (list 1 2) 5)|nil'; do \
+	for pair in '(elt (list 1 2 3) 1)|2' '(elt [10 20 30] 2)|30' '(elt "abc" 1)|98' '(elt "あい" 0)|12354' '(elt (list 1 2) 5)|nil' \
+	  '(condition-case e (elt [] 0) (args-out-of-range (quote signalled)))|signalled' \
+	  '(condition-case e (elt [1 2 3] 5) (args-out-of-range (quote signalled)))|signalled'; do \
 	  expr="$${pair%%|*}"; want="$${pair##*|}"; \
 	  out="$$($$bin --eval "$$expr" 2>&1)"; rc=$$?; \
 	  if [ "$$rc" -ne 0 ] || [ "$$out" != "$$want" ]; then \

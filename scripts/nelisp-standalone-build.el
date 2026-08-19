@@ -6954,13 +6954,18 @@ unresolved at link time."
              (mut-str-finalize ms out)
              0)))
     ;; aref ARR IDX: vector -> copy slot[idx]; string -> int byte at idx.
+    ;; Out-of-range now signals `(args-out-of-range ARRAY INDEX)' as Emacs
+    ;; does.  It used to answer nil, which is indistinguishable from a slot
+    ;; that genuinely holds nil -- so reading past the end of a vector was a
+    ;; silent wrong answer, and a handler written for `args-out-of-range'
+    ;; never fired.  A negative index is the same error there.
     (defun bf_aref (args out)
       (let* ((arr (wf_arg_ptr args 0))
              (idx (ptr-read-u64 (wf_arg_ptr args 1) 8))
              (tg (ptr-read-u64 arr 0)))
         (if (= tg 8)
             (if (if (< idx 0) 1 (if (< idx (vector-len arr)) 0 1))
-                (seq (wf_write_nil out) 0)
+                (bf_args_out_of_range arr (wf_arg_ptr args 1))
               (seq (wf_copy32 out (vector-ref-ptr arr idx)) 0))
           ;; Doc 22 A14: Record(12).  The stock else-arm fell through to
           ;; `str-byte-at', dereferencing the record Sexp's offset-16 word as a
@@ -6979,10 +6984,11 @@ unresolved at link time."
             ;; the char index, decoding UTF-8 (tags 5 Str and 6 MutStr).
             (if (if (= tg 5) 1 (if (= tg 6) 1 0))
                 (if (if (< idx 0) 1 (if (< idx (nl_str_charlen arr)) 0 1))
-                    (seq (wf_write_nil out) 0)
+                    (bf_args_out_of_range arr (wf_arg_ptr args 1))
                   (wf_write_int out
                     (nl_u8_decode arr (nl_u8_cidx_byte arr 0 (str-len arr) 0 idx))))
-              (seq (wf_write_nil out) 0))))))
+              ;; Not an array at all: Emacs signals `arrayp' here.
+              (bf_wrong_type_arrayp arr))))))
     ;; Generated Emacs char-table literals are read as vectors shaped like:
     ;;   #^[EXTRA0 EXTRA1 EXTRA2 #^^[1 MIN ...]]
     ;; and sub-char-tables are vectors shaped like:
@@ -7109,9 +7115,15 @@ unresolved at link time."
              (tg (ptr-read-u64 seqp 0)))
         (if (= tg 7)
             (bf_elt_list_walk seqp (ptr-read-u64 (wf_arg_ptr args 1) 8) out)
-          (if (if (= tg 8) (bf_ct_top_p seqp) 0)
-              (bf_ct_top_lookup seqp (ptr-read-u64 (wf_arg_ptr args 1) 8) out)
-            (bf_aref args out)))))
+          ;; Nil is the EMPTY LIST, so it answers nil for any index -- it
+          ;; must not reach `bf_aref', which signals `arrayp' for a
+          ;; non-array since the range checks went in.  `standalone-reader-
+          ;; elt-smoke' caught exactly that regression.
+          (if (= tg 0)
+              (seq (wf_write_nil out) 0)
+            (if (if (= tg 8) (bf_ct_top_p seqp) 0)
+                (bf_ct_top_lookup seqp (ptr-read-u64 (wf_arg_ptr args 1) 8) out)
+              (bf_aref args out))))))
     ;; aset ARR IDX VAL: vector slot set (string aset not supported -> 0).
     ;; Writes VAL (possibly a box) into a PRE-EXISTING vector -> persistent
     ;; escape -> bump the mutation epoch (NO-ESCAPE gate).
@@ -7250,6 +7262,64 @@ unresolved at link time."
          (wf_write_nil nil-slot)
          (nelisp_cons_construct offender nil-slot data-tail)
          (nelisp_cons_construct expected data-tail 268435512)
+         (ptr-write-u64 268435472 0 1)
+         (atomic-fetch-add 268435544 1)
+         1)))
+    ;; (args-out-of-range ARRAY INDEX), the error Emacs raises for an index
+    ;; outside a sequence.  `bf_aref' answered nil instead, so a read past
+    ;; the end was indistinguishable from a slot that genuinely held nil,
+    ;; and a `condition-case' on `args-out-of-range' never fired.
+    (defun bf_wrong_type_stringp (offender)
+      (let* ((wbuf (alloc-bytes 24 1))
+             (cbuf (alloc-bytes 8 1))
+             (expected (alloc-bytes 32 8))
+             (nil-slot (alloc-bytes 32 8))
+             (data-tail (alloc-bytes 32 8)))
+        (seq
+         (ptr-write-u64 wbuf 0 8751669898145395319)
+         (ptr-write-u64 (+ wbuf 8) 0 7887324063363589488)
+         (ptr-write-u64 (+ wbuf 16) 0 7630437)
+         (nl_alloc_symbol wbuf 19 268435480)
+         (ptr-write-u64 cbuf 0 31638921304765555)  ; "stringp"
+         (nl_alloc_symbol cbuf 7 expected)
+         (wf_write_nil nil-slot)
+         (nelisp_cons_construct offender nil-slot data-tail)
+         (nelisp_cons_construct expected data-tail 268435512)
+         (ptr-write-u64 268435472 0 1)
+         (atomic-fetch-add 268435544 1)
+         1)))
+    (defun bf_wrong_type_arrayp (offender)
+      (let* ((wbuf (alloc-bytes 24 1))
+             (cbuf (alloc-bytes 8 1))
+             (expected (alloc-bytes 32 8))
+             (nil-slot (alloc-bytes 32 8))
+             (data-tail (alloc-bytes 32 8)))
+        (seq
+         (ptr-write-u64 wbuf 0 8751669898145395319)
+         (ptr-write-u64 (+ wbuf 8) 0 7887324063363589488)
+         (ptr-write-u64 (+ wbuf 16) 0 7630437)
+         (nl_alloc_symbol wbuf 19 268435480)
+         (ptr-write-u64 cbuf 0 123666628244065)
+         (nl_alloc_symbol cbuf 6 expected)
+         (wf_write_nil nil-slot)
+         (nelisp_cons_construct offender nil-slot data-tail)
+         (nelisp_cons_construct expected data-tail 268435512)
+         (ptr-write-u64 268435472 0 1)
+         (atomic-fetch-add 268435544 1)
+         1)))
+    (defun bf_args_out_of_range (arr idx-box)
+      (let* ((wbuf (alloc-bytes 24 1))
+             (sym (alloc-bytes 32 8))
+             (nil-slot (alloc-bytes 32 8))
+             (tail (alloc-bytes 32 8)))
+        (seq
+         (ptr-write-u64 wbuf 0 8391735721675158113)  ; "args-out"
+         (ptr-write-u64 (+ wbuf 8) 0 7453001576360603437) ; "-of-rang"
+         (ptr-write-u64 (+ wbuf 16) 0 101)           ; "e"
+         (nl_alloc_symbol wbuf 17 268435480)
+         (wf_write_nil nil-slot)
+         (nelisp_cons_construct idx-box nil-slot tail)
+         (nelisp_cons_construct arr tail 268435512)
          (ptr-write-u64 268435472 0 1)
          (atomic-fetch-add 268435544 1)
          1)))
@@ -8022,7 +8092,15 @@ Wave-2 (C) appends bf_ash (shl/sar compose) + bf_str_lt (byte-lexicographic).")
     ((:lit "symbol-name") . (let* ((s (wf_arg_ptr args 0)))
                               (seq (nl_alloc_str (ptr-read-u64 s 16) (ptr-read-u64 s 24) out) 0)))
     ;; intern / make-symbol: take a Str (tag 5/6), build a Symbol (tag 4).
-    ((:lit "intern")      . (seq (bf_intern (wf_arg_ptr args 0) out) 0))
+    ;; `intern' takes a STRING.  A symbol argument used to pass through --
+    ;; `(intern 'foo)' answered foo -- because `bf_str_ptr' reads a Symbol's
+    ;; name buffer just as happily as a Str's.  Emacs signals, and a caller
+    ;; that interned something already interned was almost certainly working
+    ;; from a wrong assumption about what it held.
+    ((:lit "intern")      . (let* ((a (wf_arg_ptr args 0)) (tg (ptr-read-u64 a 0)))
+                              (if (if (= tg 5) 1 (if (= tg 6) 1 0))
+                                  (seq (bf_intern a out) 0)
+                                (bf_wrong_type_stringp a))))
     ((:lit "make-symbol") . (seq (bf_make_symbol (wf_arg_ptr args 0) out) 0))
     ;; nelisp--intern-lookup: probe-only counterpart of `intern' (Doc 163
     ;; Phase C).  `bf_intern_soft' already returns 0 on both the hit and
