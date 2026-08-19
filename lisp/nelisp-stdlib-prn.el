@@ -238,10 +238,8 @@ via `nelisp--prn-to-string' under ESCAPE."
    ((recordp obj) (nelisp--prn-record obj escape))
    (t (format "#<unprintable %S>" obj))))
 
-(defun prin1-to-string (object)
-  "Return a string containing the printed representation of OBJECT.
-Strings, symbols and characters are escaped so the result reads back."
-  (nelisp--prn-to-string object t))
+(defun prin1-to-string (object &optional noescape _overrides)
+    (nelisp--prn-to-string object (not noescape)))
 
 (defun terpri (&optional stream)
   "Output a newline to STREAM or `standard-output' (Doc 22 A9)."

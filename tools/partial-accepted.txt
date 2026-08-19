@@ -58,8 +58,11 @@ split-string|scripts/nelisp-stdlib-prelude.el|_trim|not yet reviewed
 string-trim-left|lisp/nelisp-stdlib-plist-str.el|_regexp|not yet reviewed
 string-trim-right|lisp/nelisp-stdlib-plist-str.el|_regexp|not yet reviewed
 string-trim|lisp/nelisp-stdlib-plist-str.el|_trim-left _trim-right|not yet reviewed
-terpri|scripts/nelisp-stdlib-prelude.el|_stream|STREAM ignored, same reason as princ
 write-region|lisp/nelisp-stdlib-misc.el|_lockname _mustbenew _visit|not yet reviewed
 write-region|scripts/nelisp-stdlib-prelude.el|_lockname _mustbenew _visit|not yet reviewed
 base64-decode-string|scripts/nelisp-stdlib-prelude.el|_base64url _ignore-invalid|accepted so a 3-argument call raises the type error Emacs raises rather than an arity error; the URL alphabet and invalid-char tolerance are not implemented
 locate-file|scripts/nelisp-stdlib-prelude.el|_predicate|PREDICATE ignored: the search is file-exists-p only, so a caller asking for executable-only or readable-only gets any existing file
+terpri|scripts/nelisp-stdlib-prelude.el|_ensure|ENSURE ignored: output always goes to stdout and a newline is always written, so "only if not at column 0" cannot be honoured without a column to read
+terpri|scripts/nelisp-stdlib-prelude.el|_ensure _stream|the same, for the second definition of this name
+prin1-to-string|scripts/nelisp-stdlib-prelude.el|_overrides|OVERRIDES ignored: per-call print settings (print-length, print-level, ...) are read from the dynamic variables, not from this alist
+prin1-to-string|lisp/nelisp-stdlib-prn.el|_overrides|OVERRIDES ignored; byte-identical to the prelude copy

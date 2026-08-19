@@ -7703,11 +7703,30 @@ unresolved at link time."
                     (bf_wrong_type_sequencep p)))))))))
     ;; fboundp/boundp: look up in the env mirror.  env+0 = mirror, env+64 = unbound.
     ;; nelisp_env_lookup_function(mirror, unbound, sym, out_slot) returns 0 if found.
+    ;; A name that has only a VARIABLE binding still has a function-cell
+    ;; entry in the mirror, holding the `nelisp--unbound-marker' sentinel --
+    ;; so this answered t for `(fboundp 'some-defconst)' where Emacs answers
+    ;; nil.  Anything that probes before calling, which is most defensive
+    ;; elisp, then called something that was never a function.  A nil cell
+    ;; (how `fmakunbound' unbinds) is not a function either.
+    (defun bf_fboundp_cell_p (tmp)
+      (let* ((tg (ptr-read-u64 tmp 0)))
+        (if (= tg 0) 0
+          ;; `nl_sp_eq_lit' compares at most two words; the sentinel's name is
+          ;; 22 bytes, so match on length plus the first two words -- no other
+          ;; 22-byte symbol in this runtime starts "nelisp--unbound-".
+          (if (= tg 4)
+              (if (= (ptr-read-u64 tmp 24) 22)
+                  (if (= (ptr-read-u64 (ptr-read-u64 tmp 16) 0) 3255381746650998126)
+                      (if (= (ptr-read-u64 (+ (ptr-read-u64 tmp 16) 8) 0) 3270860680036773493) 0 1)
+                    1)
+                1)
+            1))))
     (defun bf_fboundp (args env out)
       (let* ((sym (wf_arg_ptr args 0)) (tmp (alloc-bytes 32 8)) (mirror (+ env 0)) (unbound (+ env 64)))
         (if (= (ptr-read-u64 sym 0) 4)
             (if (= (nelisp_env_lookup_function mirror unbound sym tmp) 0)
-                (if (= (ptr-read-u64 tmp 0) 0) (wf_write_nil out) (wf_write_t out))
+                (if (= (bf_fboundp_cell_p tmp) 0) (wf_write_nil out) (wf_write_t out))
               (wf_write_nil out))
           (bf_wrong_type_symbolp sym))))
     (defun bf_boundp (args env out)

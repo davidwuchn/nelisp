@@ -669,6 +669,22 @@
        path-separator
        (remove ?a "abc") (remove 2 [1 2 3]) (remove 2 '(1 2 3)) (remove 9 '(1 2))
        (help-add-fundoc-usage "Doc." '(a b)) (help-add-fundoc-usage nil '(x)))
+
+ ;; `fboundp' answered t for a name that has only a VARIABLE binding: the
+ ;; mirror keeps a function-cell entry holding an unbound sentinel.  Anything
+ ;; that probes before calling -- most defensive elisp -- then called
+ ;; something that was never a function.
+ (list (progn (defconst zz-par-dual "V") (defun zz-par-dual () "F")
+              (list zz-par-dual (fboundp 'zz-par-dual) (zz-par-dual)))
+       (progn (defconst zz-par-var "V2") (fboundp 'zz-par-var))
+       (condition-case e (funcall nil) (error e))
+       (condition-case e (funcall 'nosuch-zz-fn) (error e))
+       (prin1-to-string nil 7) (prin1-to-string "a\"b") (prin1-to-string "ab" t)
+       (terpri nil nil) (terpri)
+       (condition-case e (memql -1 '(1 2 . 3)) (error e))
+       (memql 2 '(1 2 3)) (memql 9 '(1 2))
+       (condition-case e (memql 1 "s") (error e))
+       (path-separator) path-separator)
 )
 
 ;;; nelisp-shadow-differential-cases.el ends here

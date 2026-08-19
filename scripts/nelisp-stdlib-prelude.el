@@ -165,6 +165,10 @@
 ;; that package, so the variable was void.
 (unless (boundp 'path-separator)
   (defconst path-separator ":"))
+;; Emacs 30 defines `path-separator' as a FUNCTION as well as a variable,
+;; and `(path-separator)' answers ":".
+(unless (fboundp 'path-separator)
+  (defun path-separator () path-separator))
 (unless (fboundp 'locate-file)
   (defun locate-file (filename path &optional suffixes _predicate)
     "Find FILENAME in PATH, trying each of SUFFIXES; nil when not found."
@@ -1888,7 +1892,7 @@ reseeds from its characters; nil -> a full LCG value."
 (defun princ (object &optional _stream)
   (nelisp--write-stdout-bytes (nelisp--prn-to-string object nil))
   object)
-(defun terpri (&optional _stream)
+(defun terpri (&optional _stream _ensure)
   (nelisp--write-stdout-bytes "\n")
   nil)
 
@@ -3495,6 +3499,10 @@ bodies (= Stage 4 follow-up).  Indent / edebug specs come back when
         (unless (eq x elt) (setq acc (cons x acc)))))))
 (unless (fboundp 'memql)
   (defun memql (elt list)
+    (unless (listp list) (signal 'wrong-type-argument (list 'listp list)))
+    (let ((probe list))
+      (while (consp probe) (setq probe (cdr probe)))
+      (unless (null probe) (signal 'wrong-type-argument (list 'listp list))))
     "Return the tail of LIST whose car is `eql' to ELT, or nil."
     (while (and list (not (eql elt (car list)))) (setq list (cdr list)))
     list))
@@ -5575,7 +5583,8 @@ needs escaping because the reader consumes it as an escape prefix."
    (t (format "#<unprintable %S>" obj))))
 
 (unless (fboundp 'prin1-to-string)
-  (defun prin1-to-string (object) (nelisp--prn-to-string object t)))
+  (defun prin1-to-string (object &optional noescape _overrides)
+    (nelisp--prn-to-string object (not noescape))))
 
 ;; --- Doc 143: minimal read-from-string for the reader runtime -------------
 ;; Recursive-descent parser for the core sexp grammar (int/float/symbol/string/
@@ -6791,7 +6800,7 @@ buffer = best-effort insert; nil/t/other = native stdout."
       (nelisp--emit-to-stream (prin1-to-string object) s)))
   object)
 
-(defun terpri (&optional stream)
+(defun terpri (&optional stream _ensure)
   "Output a newline to STREAM or `standard-output' (Doc 22 A9)."
   (let ((s (or stream standard-output)))
     (if (or (null s) (eq s t))
