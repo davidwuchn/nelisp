@@ -1,0 +1,33 @@
+# The files that may touch raw memory (Doc 170 sec 4.3, "Rust の safe core /
+# unsafe kernel と同じ構造").
+#
+# Everything under lisp/ and scripts/ that is NOT matched here must contain
+# no call to a `nl-safe-unsafe-primitives' name at all -- quoted or not.
+# That check has no baseline to raise: raw memory leaving the kernel is the
+# event worth stopping, and it is a yes/no question rather than a number to
+# argue about.
+#
+# This list was derived from the tree rather than declared over it.  Measured
+# 2026-08-19: of the 253 files scanned, exactly 87 contain an unsafe call and
+# 166 contain none, so the safe-core/unsafe-kernel split Doc 170 cites from
+# Rust already existed here -- nobody had written it down, and nothing
+# enforced it.  The patterns below cover all 87 with nothing left over.
+#
+# `lisp/nelisp-cc-*.el' is deliberately a pattern and not 81 filenames: those
+# units ARE the code generators, a new one is a generator by construction,
+# and a list that churns on every rename is a list people stop reading.  The
+# cost is that it grants 194 files what 87 use, which is why the count below
+# is ratcheted -- a new file that starts touching raw memory moves it and has
+# to be acknowledged, even though the pattern already covered the name.
+lisp/nelisp-cc-*.el
+lisp/nelisp-aot-compiler.el
+lisp/nelisp-stdlib-os-int-helpers.el
+scripts/nelisp-standalone-build.el
+scripts/nelisp-flat-arena-probe.el
+scripts/nelisp-macho-acceptance.el
+scripts/nelisp-macos-build.el
+
+# Files inside the kernel that actually contain an unsafe call.  Raise it in
+# the commit that adds one, and say there what the new file does with raw
+# memory.  Lower it whenever the ratchet notice says you can.
+kernel-files 87

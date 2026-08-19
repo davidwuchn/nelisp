@@ -5,7 +5,24 @@
 ;;; Commentary:
 
 ;; Doc 170 section 4.3: "have nl-check report the unsafe surface and
-;; track its growth in CI".  Batch driver: scan every .el under lisp/
+;; track its growth in CI", and the safe-core/unsafe-kernel structure the
+;; same section cites from Rust.
+;;
+;; Two questions, and only one of them is a number.
+;;
+;; ESCAPE (gated, no baseline).  Every file under lisp/ and scripts/ that
+;; tools/unsafe-kernel.txt does not name must contain no unsafe-primitive
+;; call at all, quoted or not.  Raw memory leaving the kernel is the event
+;; worth stopping, it is yes/no, and it dissolves the quoted-form problem:
+;; a generator body and a plain call are the same question once the
+;; question is "does this file belong to the kernel".
+;;
+;; GROWTH (reported).  Inside the kernel the counts are printed, with the
+;; number of kernel files ratcheted against that file.  The call count is
+;; not gated: these files are made of raw memory operations and the count
+;; moves whenever the runtime does, so ratcheting it would mean a baseline
+;; bump in most runtime commits -- friction that teaches people to bump
+;; without reading, which is how a gate stops being read at all.  Batch driver: scan every .el under lisp/
 ;; and scripts/ with `nl-check-file', count `unsafe-call' findings
 ;; (unsafe primitives called outside an `nl-unsafe' block; quoted
 ;; forms -- i.e. the AOT grammar data -- are not scanned by design),
@@ -27,6 +44,39 @@
 
 (defconst nl-check-inventory--baseline-file
   "tools/unsafe-inventory-baseline.txt")
+
+(defconst nl-check-inventory--kernel-file
+  "tools/unsafe-kernel.txt")
+
+(defun nl-check-inventory--kernel ()
+  "Return (PATTERNS . COUNT) from the kernel file, or nil when unreadable.
+PATTERNS are anchored regexps; COUNT is the ratcheted number of kernel
+files that hold an unsafe call, or nil when the file names no count."
+  (when (file-exists-p nl-check-inventory--kernel-file)
+    (with-temp-buffer
+      (insert-file-contents nl-check-inventory--kernel-file)
+      (goto-char (point-min))
+      (let ((patterns nil) (count nil))
+        (while (not (eobp))
+          (let ((line (string-trim (buffer-substring (line-beginning-position)
+                                                     (line-end-position)))))
+            (cond
+             ((or (string-empty-p line) (string-prefix-p "#" line)) nil)
+             ((string-match "\\`kernel-files +\\([0-9]+\\)\\'" line)
+              (setq count (string-to-number (match-string 1 line))))
+             (t (setq patterns
+                      (cons (concat "\\`" (wildcard-to-regexp line))
+                            patterns)))))
+          (forward-line 1))
+        (cons (nreverse patterns) count)))))
+
+(defun nl-check-inventory--kernel-p (path patterns)
+  "Return non-nil when PATH is inside the kernel described by PATTERNS."
+  (let ((rel (file-relative-name path))
+        (hit nil))
+    (dolist (rx patterns)
+      (when (string-match-p rx rel) (setq hit t)))
+    hit))
 
 (defun nl-check-inventory--baseline ()
   "Read the integer baseline, or nil when there is no `unsafe-call\=' line.
@@ -69,11 +119,16 @@ the number."
 
 (defun nl-check-inventory-run ()
   "Scan lisp/ and scripts/, print the inventory, enforce the baseline."
-  (let ((total 0)
-        (scanned 0)
-        (failed nil)
-        (quoted-total 0)
-        (quoted-rows nil))
+  (let* ((kernel (nl-check-inventory--kernel))
+         (kernel-patterns (car kernel))
+         (kernel-baseline (cdr kernel))
+         (kernel-count 0)
+         (escapes nil)
+         (total 0)
+         (scanned 0)
+         (failed nil)
+         (quoted-total 0)
+         (quoted-rows nil))
     (dolist (dir '("lisp" "scripts"))
       (dolist (f (directory-files dir t "\\.el\\'"))
         (setq scanned (+ scanned 1))
@@ -86,13 +141,25 @@ the number."
               (setq total (+ total n))
               (setq quoted-total (+ quoted-total q))
               (when (> q 0)
-                (setq quoted-rows (cons (cons f q) quoted-rows))))
+                (setq quoted-rows (cons (cons f q) quoted-rows)))
+              (when (> (+ n q) 0)
+                (if (nl-check-inventory--kernel-p f kernel-patterns)
+                    (setq kernel-count (+ kernel-count 1))
+                  (setq escapes (cons (list (file-relative-name f) n q)
+                                      escapes)))))
           (error
            (princ (format "READ-FAIL %s: %S\n" f err))
            (setq failed t)))))
     (nl-check-inventory--report-quoted
      (sort quoted-rows (lambda (a b) (> (cdr a) (cdr b))))
      quoted-total)
+    (princ (format "\n  unsafe kernel: %d file(s) hold a call, baseline %s\n"
+                   kernel-count (or kernel-baseline "ABSENT")))
+    (when escapes
+      (princ (format "  OUTSIDE the kernel: %d file(s)\n" (length escapes)))
+      (dolist (e (sort escapes (lambda (a b) (string< (car a) (car b)))))
+        (princ (format "      %-46s call=%-4d quoted=%d\n"
+                       (nth 0 e) (nth 1 e) (nth 2 e)))))
     (let ((baseline (nl-check-inventory--baseline)))
       (princ (format "unsafe-inventory: total=%d baseline=%s\n"
                      total (or baseline "ABSENT")))
@@ -105,6 +172,22 @@ the number."
        (failed
         (princ "unsafe-inventory: FAIL (unreadable file)\n")
         (kill-emacs 1))
+       ((null kernel-patterns)
+        (princ (format "unsafe-inventory: FAIL (no kernel patterns in %s)\n"
+                       nl-check-inventory--kernel-file))
+        (kill-emacs 1))
+       (escapes
+        (princ (format "unsafe-inventory: FAIL (%d file(s) outside the kernel call an unsafe primitive -- move the code into a kernel file, or add the file to %s and say there what it does with raw memory)\n"
+                       (length escapes) nl-check-inventory--kernel-file))
+        (kill-emacs 1))
+       ((null kernel-baseline)
+        (princ (format "unsafe-inventory: FAIL (no kernel-files line in %s)\n"
+                       nl-check-inventory--kernel-file))
+        (kill-emacs 1))
+       ((> kernel-count kernel-baseline)
+        (princ (format "unsafe-inventory: FAIL (%d kernel file(s) hold an unsafe call, baseline %d -- a file the patterns already covered has started touching raw memory; raise the baseline and say there what it does)\n"
+                       kernel-count kernel-baseline))
+        (kill-emacs 1))
        ((null baseline)
         (princ "unsafe-inventory: FAIL (no baseline file)\n")
         (kill-emacs 1))
@@ -112,11 +195,14 @@ the number."
         (princ (format "unsafe-inventory: FAIL (+%d over baseline -- new unsafe-primitive calls outside nl-unsafe; either wrap them or consciously raise the baseline in the same commit)\n"
                        (- total baseline)))
         (kill-emacs 1))
-       ((< total baseline)
-        (princ (format "unsafe-inventory: PASS (ratchet available: total is %d below baseline; consider lowering %s)\n"
-                       (- baseline total)
-                       nl-check-inventory--baseline-file)))
-       (t (princ "unsafe-inventory: PASS\n"))))))
+       (t
+        (when (< kernel-count kernel-baseline)
+          (princ (format "    ratchet available: %d kernel file(s), %d below baseline\n"
+                         kernel-count (- kernel-baseline kernel-count))))
+        (when (< total baseline)
+          (princ (format "    ratchet available: unsafe-call is %d below baseline\n"
+                         (- baseline total))))
+        (princ "unsafe-inventory: PASS\n"))))))
 
 (nl-check-inventory-run)
 
