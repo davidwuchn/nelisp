@@ -183,25 +183,12 @@ call time, so it is safe for FN to mutate TABLE during the walk
 ;; never-interned name both return nil; a name only starts returning its
 ;; symbol once something ELSE actually `intern's it).
 (defun intern-soft (name &optional _obarray)
-  ;; SYMBOL argument: NeLisp has no first-class per-object obarray
-  ;; membership bit -- symbol identity IS name identity here (`eq' on
-  ;; symbols compares names, see `bf_eq2'/`nelisp_eq_symbol'), and every
-  ;; symbol produced by the reader or by `intern' already lives in the one
-  ;; global intern table.  Returning NAME unconditionally is therefore
-  ;; correct for interned symbols but is NOT vendor-accurate for a symbol
-  ;; built by `make-symbol'/`gensym': vendor Emacs would report such an
-  ;; uninterned symbol as absent (nil), whereas this MVP has no way to
-  ;; distinguish "uninterned Symbol Sexp with this name" from "the
-  ;; identically-named interned symbol" and returns NAME either way.  This
-  ;; gap is pre-existing (unrelated to the string-argument hang above),
-  ;; explicit, and out of Doc 163's scope; it is not silently different
-  ;; from what was here before.
-  ;;
-  ;; OBARRAY argument: always ignored.  NeLisp MVP has exactly one global
-  ;; intern table and no first-class obarray object to select among, so a
-  ;; non-nil OBARRAY is not honored -- same pre-existing MVP limitation
-  ;; `intern'/`obarray-make' already have, stated explicitly rather than
-  ;; silently mis-scoping the lookup.
+  "Return the symbol named NAME if it is interned, else nil.
+NeLisp has one global intern table and no first-class obarray object, so a
+non-nil OBARRAY is not honoured.  The probe is `nelisp--intern-lookup\', which
+reports a miss instead of interning -- falling back to `intern\', which never
+answers nil, is what made a `(while (setq x (intern-soft ...)))\' probe loop
+run forever."
   (cond ((symbolp name) name)
         ((stringp name) (nelisp--intern-lookup name))
         (t (signal 'wrong-type-argument (list 'stringp name)))))

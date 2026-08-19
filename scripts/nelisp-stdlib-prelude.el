@@ -64,13 +64,18 @@
 			(cons qname nil)))))
 	     nil)))
 
+;; The expansions carried a trailing nil arm (`when') and wrapped the body
+;; in `progn' (`unless') where Emacs does neither.  The value is the same
+;; either way, but a macro's expansion is compared for byte-identity in this
+;; tree, and anything that walks expanded code -- a compiler pass, a test
+;; that reads `macroexpand-1' -- sees a shape Emacs never produces.
 (defmacro when (cond &rest body)
   "If COND yields non-nil, eval BODY forms sequentially and return last value."
-  (cons 'if (cons cond (cons (cons 'progn body) (cons nil nil)))))
+  (cons 'if (cons cond (cons (cons 'progn body) nil))))
 
 (defmacro unless (cond &rest body)
   "If COND yields nil, eval BODY forms sequentially and return last value."
-  (cons 'if (cons cond (cons nil (cons (cons 'progn body) nil)))))
+  (cons 'if (cons cond (cons nil body))))
 
 (defmacro cond (&rest clauses)
   "Try each clause until one succeeds.\nEach clause is `(TEST BODY...)'.  If TEST evaluates non-nil, BODY is\nevaluated and its last value returned.  When BODY is empty the value\nof TEST itself is returned."
@@ -473,6 +478,32 @@ from `(defvar X nil)'."
         ((integerp obj) (if (and (>= obj 65) (<= obj 90)) (+ obj 32) obj))
         (t obj)))
 
+;; Upcase the first character of each word and leave the rest of the word
+;; as it is -- so "hello wORLD" becomes "Hello WORLD", not "Hello World".
+;; `capitalize' is the one that downcases the tail; conflating them is the
+;; easy mistake here.
+(unless (fboundp 'upcase-initials)
+ (defun upcase-initials (obj)
+  (if (integerp obj) (upcase obj)
+    (let ((n (length obj)) (i 0) (out "") (prev nil))
+      (while (< i n)
+        (let* ((c (aref obj i))
+               (w (or (and (>= c ?a) (<= c ?z))
+                      (and (>= c ?A) (<= c ?Z))
+                      (and (>= c ?0) (<= c ?9)))))
+          (setq out (concat out (char-to-string (if (and w (not prev)) (upcase c) c))))
+          (setq prev w))
+        (setq i (1+ i)))
+      out))))
+
+;; The regexp engine honours this (lisp/nelisp-stdlib-regexp.el); stock Emacs
+;; already binds it, so the guard makes this a declaration for the standalone
+;; only.  t is Emacs's default value, and matching that default is the point:
+;; an unqualified (string-match "A" "a") answers 0 in Emacs.
+(unless (boundp 'case-fold-search)
+  (defvar case-fold-search t
+    "Non-nil means string/regexp matching ignores case, as in Emacs."))
+
 (defun upcase (obj)
   (cond ((stringp obj)
          (let ((out "") (i 0) (n (length obj)))
@@ -694,7 +725,14 @@ from `(defvar X nil)'."
        ((< len1 len2) (- (1+ n)))
        (t (1+ n))))))
 (unless (fboundp 'char-equal)
-  (defun char-equal (a b) (eq a b)))
+  (defun char-equal (a b)
+    ;; `char-equal' folds case when `case-fold-search' is non-nil, which is
+    ;; its whole difference from `eq' on two characters.
+    (or (eq a b)
+        (and (boundp 'case-fold-search) case-fold-search
+             (integerp a) (integerp b)
+             (eq (if (and (>= a ?A) (<= a ?Z)) (+ a 32) a)
+                 (if (and (>= b ?A) (<= b ?Z)) (+ b 32) b))))))
 (unless (fboundp 'string-to-list)
   (defun string-to-list (s)
     (let ((l nil) (i (1- (length s))))
@@ -1006,15 +1044,103 @@ from `(defvar X nil)'."
       blank)))
 (unless (fboundp 'string-split)
   (defun string-split (s &optional sep omit trim) (split-string s sep omit trim)))
+;; REGEXP was accepted and ignored -- the parameter was even named `_re' to
+;; say so -- so (string-trim-left "xxab" "x+") answered "xxab".  A caller
+;; that asked to strip a specific prefix got the default whitespace strip
+;; and no indication.  The whitespace path stays a character loop: it is the
+;; common call, it needs no regexp engine, and keeping it means this fix
+;; cannot regress the callers that pass no REGEXP.
 (unless (fboundp 'string-trim-left)
-  (defun string-trim-left (s &optional _re)
-    (let ((i 0) (n (length s))) (while (and (< i n) (memq (aref s i) '(32 9 10 13))) (setq i (1+ i))) (substring s i))))
+  (defun string-trim-left (s &optional re)
+    (if (null re)
+        (let ((i 0) (n (length s))) (while (and (< i n) (memq (aref s i) '(32 9 10 13))) (setq i (1+ i))) (substring s i))
+      (if (string-match (concat "\\`\\(?:" re "\\)") s) (substring s (match-end 0)) s))))
 (unless (fboundp 'string-trim-right)
-  (defun string-trim-right (s &optional _re)
-    (let ((n (length s))) (while (and (> n 0) (memq (aref s (1- n)) '(32 9 10 13))) (setq n (1- n))) (substring s 0 n))))
+  (defun string-trim-right (s &optional re)
+    (if (null re)
+        (let ((n (length s))) (while (and (> n 0) (memq (aref s (1- n)) '(32 9 10 13))) (setq n (1- n))) (substring s 0 n))
+      (let ((i (string-match (concat "\\(?:" re "\\)\\'") s)))
+        (if i (substring s 0 i) s)))))
+;; `isnan' and `nbutlast' were absent, so a caller got `void-function' --
+;; which reads as "NeLisp cannot do this" rather than "nobody wrote it yet".
+(unless (fboundp 'isnan)
+  (defun isnan (x)
+    (if (floatp x) (/= x x) (signal 'wrong-type-argument (list 'floatp x)))))
+(unless (fboundp 'nbutlast)
+  (defun nbutlast (list &optional n)
+    (let ((m (length list)) (k (or n 1)))
+      (if (>= k m) nil (setcdr (nthcdr (- m k 1) list) nil) list))))
+;; NAME identity is symbol identity in this runtime, so the probe is the
+;; native `nelisp--intern-lookup' (Doc 163 Phase C), which reports a miss
+;; instead of interning.  Falling back to `intern' -- which never answers
+;; nil -- is what made a `(while (setq x (intern-soft ...)))' probe loop
+;; run forever.  This shadows nothing: `intern-soft' was in
+;; lisp/nelisp-stdlib-misc.el and never reached the prelude, so the
+;; standalone had no `intern-soft' at all.
+(defun intern-soft (name &optional _obarray)
+  "Return the symbol named NAME if it is interned, else nil.
+NeLisp has one global intern table and no first-class obarray object, so a
+non-nil OBARRAY is not honoured.  The probe is `nelisp--intern-lookup\', which
+reports a miss instead of interning -- falling back to `intern\', which never
+answers nil, is what made a `(while (setq x (intern-soft ...)))\' probe loop
+run forever."
+  (cond ((symbolp name) name)
+        ((stringp name) (nelisp--intern-lookup name))
+        (t (signal 'wrong-type-argument (list 'stringp name)))))
 (unless (fboundp 'vconcat)
   (defun vconcat (&rest seqs) (apply #'vector (apply #'append (mapcar (lambda (x) (append x nil)) seqs)))))
 (unless (fboundp 'string-to-vector) (defun string-to-vector (s) (apply #'vector (append s nil))))
+;; Absent, so callers got `void-function' -- which reads as "the runtime
+;; cannot do this" rather than "nobody has written it yet".  The length
+;; predicates walk only as far as they must, which is the reason they exist
+;; instead of `(= (length x) n)'.
+(unless (fboundp 'length=)
+  (defun length= (seq n)
+    (if (listp seq)
+        (let ((k 0)) (while (and seq (<= k n)) (setq k (1+ k) seq (cdr seq))) (= k n))
+      (= (length seq) n))))
+(unless (fboundp 'length<)
+  (defun length< (seq n)
+    (if (listp seq)
+        (let ((k 0)) (while (and seq (< k n)) (setq k (1+ k) seq (cdr seq))) (and (null seq) (< k n)))
+      (< (length seq) n))))
+(unless (fboundp 'length>)
+  (defun length> (seq n)
+    (if (listp seq)
+        (let ((k 0)) (while (and seq (<= k n)) (setq k (1+ k) seq (cdr seq))) (> k n))
+      (> (length seq) n))))
+(unless (fboundp 'file-name-concat)
+  (defun file-name-concat (directory &rest components)
+    (let ((out (or directory "")))
+      (dolist (c components)
+        (when (and c (not (equal c "")))
+          (setq out (if (or (equal out "")
+                            (eq (aref out (1- (length out))) ?/))
+                        (concat out c)
+                      (concat out "/" c)))))
+      out)))
+(unless (fboundp 'string-distance)
+  (defun string-distance (a b &optional _bytecompare)
+    ;; Levenshtein, one row at a time: the full matrix is not needed and the
+    ;; row form keeps this linear in space for the long strings callers pass.
+    (let* ((la (length a)) (lb (length b))
+           (prev (make-vector (1+ lb) 0))
+           (cur (make-vector (1+ lb) 0))
+           (i 0))
+      (while (<= i lb) (aset prev i i) (setq i (1+ i)))
+      (setq i 0)
+      (while (< i la)
+        (aset cur 0 (1+ i))
+        (let ((j 0))
+          (while (< j lb)
+            (let ((cost (if (eq (aref a i) (aref b j)) 0 1)))
+              (aset cur (1+ j) (min (1+ (aref cur j))
+                                    (1+ (aref prev (1+ j)))
+                                    (+ cost (aref prev j)))))
+            (setq j (1+ j))))
+        (let ((tmp prev)) (setq prev cur) (setq cur tmp))
+        (setq i (1+ i)))
+      (aref prev lb))))
 ;; Doc 160 breadth round 2: control/binding macros.
 (unless (fboundp 'letrec)
   (defmacro letrec (bindings &rest body)
@@ -1312,8 +1438,27 @@ reseeds from its characters; nil -> a full LCG value."
 (defun prin1 (object &optional _stream)
   (nelisp--write-stdout-bytes (nelisp--prn-to-string object t))
   object)
+;; `format-message' curves the grave accent and apostrophe in the FORMAT
+;; string, which is the whole reason it exists as a separate function; this
+;; was a plain alias for `format', so a message written with `like this'
+;; came out with the ASCII quotes vendor Emacs replaces.  Only the format
+;; string is curved, never the arguments -- that is Emacs's rule, and it is
+;; what keeps a file name or a user string from being rewritten.
+(defun nelisp--curve-quotes (s)
+  (let ((i 0) (n (length s)) (out ""))
+    (while (< i n)
+      (let ((c (aref s i)))
+        ;; Written as code points, not as `?\`' / "\u2018" literals: the
+        ;; escapes this file can rely on are the ones the standalone reader
+        ;; parses, and a character that reads wrong here would corrupt every
+        ;; message rather than fail loudly.
+        (setq out (concat out (cond ((eq c 96) (char-to-string 8216))
+                                    ((eq c 39) (char-to-string 8217))
+                                    (t (char-to-string c))))))
+      (setq i (1+ i)))
+    out))
 (defun format-message (fmt &rest args)
-  (apply #'format (cons fmt args)))
+  (apply #'format (cons (nelisp--curve-quotes fmt) args)))
 ;; CASE-FOLD was accepted and ignored -- the parameter was even named
 ;; `_case-fold' to say so -- so `(assoc-string "ABC" (list "abc") t)'
 ;; answered nil where Emacs answers "abc".  A caller that asked for a
@@ -4305,6 +4450,42 @@ No-ops on substrates without `nelisp--syscall-path-int' (the historic stub)."
 (unless (get 'error 'error-conditions)
   (put 'error 'error-conditions (list 'error))
   (put 'error 'error-message "error"))
+;; `error-message-string' can only name a condition it has a message for, and
+;; only `error' itself had one -- so every builtin condition printed through
+;; the raw-sexp fallback: "(wrong-type-argument listp 5)" where Emacs says
+;; "Wrong type argument: listp, 5".  These are the texts Emacs carries,
+;; verbatim, with the `file-error' members marked so their data is joined the
+;; way Emacs joins it.
+(dolist (row '((wrong-type-argument "Wrong type argument")
+               (args-out-of-range "Args out of range")
+               (void-variable "Symbol's value as variable is void")
+               (void-function "Symbol's function definition is void")
+               (invalid-function "Invalid function")
+               (wrong-number-of-arguments "Wrong number of arguments")
+               (wrong-length-argument "Wrong length argument")
+               (arith-error "Arithmetic error")
+               (range-error "Arithmetic range error")
+               (overflow-error "Arithmetic overflow error")
+               (setting-constant "Attempt to set a constant symbol")
+               (no-catch "No catch for tag")
+               (end-of-file "End of file during parsing")
+               (invalid-regexp "Invalid regexp")
+               (search-failed "Search failed")
+               (circular-list "List contains a loop")
+               (cl-assertion-failed "Assertion failed")
+               (scan-error "Scan error")
+               (quit "Quit")
+               (user-error "")))
+  (put (car row) 'error-message (car (cdr row)))
+  (unless (get (car row) 'error-conditions)
+    (put (car row) 'error-conditions (list (car row) 'error))))
+(dolist (row '((file-error "File error")
+               (file-missing "File is missing")
+               (file-already-exists "File already exists")
+               (permission-denied "Cannot access file or directory")))
+  (put (car row) 'error-message (car (cdr row)))
+  (unless (get (car row) 'error-conditions)
+    (put (car row) 'error-conditions (list (car row) 'file-error 'error))))
 (defmacro cl-loop (&rest clauses) (nelisp-cl-macros--loop-build clauses))
 
 ;; --- Doc 143: wire the elisp Sexp printer into the reader runtime ---------
@@ -5256,23 +5437,46 @@ first `getenv' is not overwritten by the value the process started with."
   (defun booleanp (x)
     (or (eq x t) (eq x nil))))
 (unless (fboundp 'error-message-string)
+  ;; Emacs's rule, followed rather than approximated:
+  ;;   * `error' and `user-error' take their message from the first datum;
+  ;;   * anything else takes it from the condition's `error-message', which
+  ;;     is curved (Emacs runs the property text through its quoting, so
+  ;;     "Symbol's" prints as "Symbol’s" -- but a message that came from
+  ;;     the DATA is never rewritten, which is why the curving is applied
+  ;;     only on the property branch);
+  ;;   * a `file-error' promotes its first datum to the message;
+  ;;   * remaining data are joined ": " then ", ", printed with `prin1'
+  ;;     except under `file-error' / `end-of-file' / `user-error', which
+  ;;     `princ' them.
   (defun error-message-string (error-descriptor)
-    (cond
-     ((stringp error-descriptor) error-descriptor)
-     ;; `(error FORMAT ARG...)' reaches a handler with FORMAT and ARGs still
-     ;; separate, so apply `format' here -- otherwise the message shows its
-     ;; own "%s" instead of the value that explains the failure.
-     ((and (consp error-descriptor)
-           (eq (car error-descriptor) 'error)
-           (stringp (cadr error-descriptor)))
-      (if (cddr error-descriptor)
-          (apply (function format) (cdr error-descriptor))
-        (cadr error-descriptor)))
-     ;; Every other condition keeps its symbol AND all of its data.  Returning
-     ;; `(cadr ...)' alone reported a failed `compile-runtime-image' as a bare
-     ;; path, with nothing to say which of its errors had fired.
-     ((consp error-descriptor) (format "%S" error-descriptor))
-     (t (format "%S" error-descriptor)))))
+    (if (not (consp error-descriptor))
+        (if (stringp error-descriptor) error-descriptor
+          (format "%S" error-descriptor))
+      (let* ((errname (car error-descriptor))
+             (from-data (or (eq errname 'error) (eq errname 'user-error)))
+             (file-error (and (not from-data)
+                              (memq 'file-error (get errname 'error-conditions))))
+             (body (if from-data (cdr error-descriptor) error-descriptor))
+             (errmsg (if from-data (car body)
+                       (nelisp--curve-quotes (or (get errname 'error-message) ""))))
+             (tail (cdr body))
+             (plain (or file-error (eq errname 'end-of-file)
+                        (eq errname 'user-error))))
+        (when (and file-error tail)
+          (setq errmsg (car tail))
+          (setq tail (cdr tail)))
+        (let ((out (cond ((stringp errmsg) errmsg)
+                         ((null errmsg) "peculiar error")
+                         (t (format "%S" errmsg))))
+              (sep ": "))
+          (while tail
+            (setq out (concat out sep
+                              (if (and plain (stringp (car tail)))
+                                  (car tail)
+                                (format "%S" (car tail)))))
+            (setq sep ", ")
+            (setq tail (cdr tail)))
+          out)))))
 (unless (fboundp 'format-time-string)
   (defun format-time-string (&rest _args)
     "1970-01-01"))
@@ -5507,6 +5711,21 @@ first `getenv' is not overwritten by the value the process started with."
    ((null div) (nelisp--native-floor x))
    ((and (integerp x) (integerp div)) (nelisp--int-floor-div x div))
    (t (nelisp--native-floor (/ x div)))))
+
+;; `round' was missing entirely, next to `floor'/`ceiling'/`truncate'.
+;; Emacs rounds halves to EVEN, not away from zero: (round 0.5)=0 and
+;; (round 1.5)=2, and (round 7 2)=4 while (round -7 2)=-4.  Rounding the
+;; obvious way would be wrong on exactly the inputs a test picks.
+(defun round (x &optional div)
+  "Return X (1-arg) or X/DIV (2-arg) rounded to the nearest integer.
+A half is rounded to the even neighbour, as in Emacs."
+  (let ((v (if div (/ (float x) (float div)) x)))
+    (if (integerp v) v
+      (let* ((f (floor v)) (d (- v f)))
+        (cond ((< d 0.5) f)
+              ((> d 0.5) (1+ f))
+              ((= 0 (% f 2)) f)
+              (t (1+ f)))))))
 
 (defun ceiling (x &optional div)
   "Return the smallest integer >= X (1-arg) or >= X/DIV (2-arg)."

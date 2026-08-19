@@ -170,10 +170,21 @@
    ((and (null div) (integerp x)) x)
    (t (nelisp--f64-trunc 'ceiling x (or div 1)))))
 
+;; `nelisp--f64-trunc' routes `round' to libm round(), which rounds a half
+;; AWAY FROM ZERO -- so this answered 1 for (round 0.5) and 3 for (round 2.5)
+;; where Emacs answers 0 and 2.  Emacs rounds halves to the EVEN neighbour,
+;; and this is the same text the standalone prelude carries, so the two
+;; substrates cannot drift apart again without `ns-gate' saying so.
 (defun round (x &optional div)
-  (cond
-   ((and (null div) (integerp x)) x)
-   (t (nelisp--f64-trunc 'round x (or div 1)))))
+  "Return X (1-arg) or X/DIV (2-arg) rounded to the nearest integer.
+A half is rounded to the even neighbour, as in Emacs."
+  (let ((v (if div (/ (float x) (float div)) x)))
+    (if (integerp v) v
+      (let* ((f (floor v)) (d (- v f)))
+        (cond ((< d 0.5) f)
+              ((> d 0.5) (1+ f))
+              ((= 0 (% f 2)) f)
+              (t (1+ f)))))))
 
 ;; Rust-min batch 6q (2026-05-06): `atom' / `arrayp' / `sequencep'
 ;; migrated from Rust to elisp.  Each was a 1-line `bi_predicate'

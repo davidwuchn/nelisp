@@ -7307,6 +7307,30 @@ unresolved at link time."
          (ptr-write-u64 268435472 0 1)
          (atomic-fetch-add 268435544 1)
          1)))
+    ;; `zerop' is (= N 0), and `=' names `number-or-marker-p' when its
+    ;; argument is not a number -- not `numberp'.  Same shape as
+    ;; `bf_wrong_type_listp'; the 18-byte predicate name needs three writes.
+    (defun bf_wrong_type_number_or_marker (offender)
+      (let* ((wbuf (alloc-bytes 24 1))
+             (cbuf (alloc-bytes 24 1))
+             (expected (alloc-bytes 32 8))
+             (nil-slot (alloc-bytes 32 8))
+             (data-tail (alloc-bytes 32 8)))
+        (seq
+         (ptr-write-u64 wbuf 0 8751669898145395319)
+         (ptr-write-u64 (+ wbuf 8) 0 7887324063363589488)
+         (ptr-write-u64 (+ wbuf 16) 0 7630437)
+         (nl_alloc_symbol wbuf 19 268435480)
+         (ptr-write-u64 cbuf 0 8011185091930584430)   ; "number-o"
+         (ptr-write-u64 (+ cbuf 8) 0 8243112831976549746) ; "r-marker"
+         (ptr-write-u64 (+ cbuf 16) 0 28717)          ; "-p"
+         (nl_alloc_symbol cbuf 18 expected)
+         (wf_write_nil nil-slot)
+         (nelisp_cons_construct offender nil-slot data-tail)
+         (nelisp_cons_construct expected data-tail 268435512)
+         (ptr-write-u64 268435472 0 1)
+         (atomic-fetch-add 268435544 1)
+         1)))
     (defun bf_args_out_of_range (arr idx-box)
       (let* ((wbuf (alloc-bytes 24 1))
              (sym (alloc-bytes 32 8))
@@ -7650,8 +7674,18 @@ unresolved at link time."
     ;; the global, not 9.  Route through `nelisp_env_lookup_value' (frame stack
     ;; first, then mirror) with the same env layout the eval machinery uses:
     ;; mirror @ env+0, frame-stack @ env+32.  rc is the void-variable sentinel.
+    ;; The lookup's rc used to be returned as-is.  A non-zero rc is the
+    ;; unbound sentinel, and the driver reads a non-zero rc with no signal
+    ;; stashed as "form aborted without signal" -- it killed the process,
+    ;; and `condition-case' could not see it, so (symbol-value 'unbound)
+    ;; was not catchable at all.  A direct variable reference has always
+    ;; signalled `void-variable' properly, through `nl_ei_var_done'; this
+    ;; is the same two lines, so the two ways of reading a variable now
+    ;; fail the same way.
     (defun bf_symbol_value (args env out)
-      (nelisp_env_lookup_value (+ env 0) (+ env 32) (wf_arg_ptr args 0) out))
+      (let* ((sym (wf_arg_ptr args 0))
+             (rc (nelisp_env_lookup_value (+ env 0) (+ env 32) sym out)))
+        (if (= rc 0) 0 (nl_stash_void_variable env sym))))
     ;; load FILE &optional ... -> t.  Minimal standalone-reader command surface:
     ;; read FILE into a Sexp::Str, parse each top-level form with the same pure
     ;; reader, and evaluate it in the caller's ENV.  This intentionally mirrors
@@ -7943,12 +7977,19 @@ unresolved at link time."
     ;; nil-safe car/cdr.  The stock arms call nl_cons_car_ptr/cdr_ptr which
     ;; return 0 for a non-cons, then wf_copy32 derefs address 0 -> SIGSEGV.
     ;; Real elisp: (car nil)=(cdr nil)=nil.  Guard on tag==7.
+    ;; nil answers nil -- it is the empty list.  Anything else that is not a
+    ;; cons is a type error, `(wrong-type-argument listp X)', and answering
+    ;; nil for it made (car 5) indistinguishable from (car '(nil)): a caller
+    ;; walking a structure that was not the shape it expected got nil at
+    ;; every step and no indication of where the shape broke.
     (defun bf_car (args out)
-      (let* ((a (wf_arg_ptr args 0)))
-        (if (= (ptr-read-u64 a 0) 7) (wf_copy32 out (nl_cons_car_ptr a)) (wf_write_nil out))))
+      (let* ((a (wf_arg_ptr args 0)) (tg (ptr-read-u64 a 0)))
+        (if (= tg 7) (wf_copy32 out (nl_cons_car_ptr a))
+          (if (= tg 0) (wf_write_nil out) (bf_wrong_type_listp a)))))
     (defun bf_cdr (args out)
-      (let* ((a (wf_arg_ptr args 0)))
-        (if (= (ptr-read-u64 a 0) 7) (wf_copy32 out (nl_cons_cdr_ptr a)) (wf_write_nil out))))
+      (let* ((a (wf_arg_ptr args 0)) (tg (ptr-read-u64 a 0)))
+        (if (= tg 7) (wf_copy32 out (nl_cons_cdr_ptr a))
+          (if (= tg 0) (wf_write_nil out) (bf_wrong_type_listp a)))))
     ;; --- Wave-2 (C) bitwise + shift + string-lessp ---
     ;; ash N C: arithmetic shift.  C>=0 -> logical-left (shl); C<0 -> signed
     ;; arithmetic-right (sar) by -C.  (shl/sar are the Doc 100 §100.D shift OPs;
@@ -8075,10 +8116,16 @@ Wave-2 (C) appends bf_ash (shl/sar compose) + bf_str_lt (byte-lexicographic).")
     ((:lit "vectorp")  . (if (= (ptr-read-u64 (wf_arg_ptr args 0) 0) 8) (wf_write_t out) (wf_write_nil out)))
     ((:lit "listp")    . (let* ((tg (ptr-read-u64 (wf_arg_ptr args 0) 0)))
                            (if (= tg 7) (wf_write_t out) (if (= tg 0) (wf_write_t out) (wf_write_nil out)))))
-    ((:lit "zerop")    . (let* ((p (wf_arg_ptr args 0)))
-                           (if (= (ptr-read-u64 p 0) 2)
+    ;; The float arm was missing, so (zerop 0.0) answered nil -- and a
+    ;; non-number answered nil too, instead of signalling.  Masking the sign
+    ;; bit is what makes -0.0 zero as well, which is what `=' reports.
+    ((:lit "zerop")    . (let* ((p (wf_arg_ptr args 0)) (tg (ptr-read-u64 p 0)))
+                           (if (= tg 2)
                                (if (= (ptr-read-u64 p 8) 0) (wf_write_t out) (wf_write_nil out))
-                             (wf_write_nil out))))
+                             (if (= tg 3)
+                                 (if (= (logand (ptr-read-u64 p 8) 9223372036854775807) 0)
+                                     (wf_write_t out) (wf_write_nil out))
+                               (bf_wrong_type_number_or_marker p)))))
     ((:lit "set")      . (bf_set args env out))
     ((:lit "symbol-value") . (bf_symbol_value args env out))
     ((:lit "fboundp")  . (bf_fboundp args env out))
@@ -11943,8 +11990,12 @@ and the `string-match' family aliases over it."
             "     (unwind-protect (progn ,@body)\n"
             "       (setq nlre--last-caps nlre--smd-saved))))\n"
             "(defun split-string (s &optional sep omit trim) (nlre-split-string s sep omit))\n"
+            ;; LIT/SUBEXP/START were accepted and dropped on the floor, so a
+            ;; caller asking for a literal replacement got backreference
+            ;; expansion and a caller passing SUBEXP had the whole match
+            ;; replaced.  The engine takes all three now.
             "(defun replace-regexp-in-string (re rep s &optional fc lit subexp start)\n"
-            "  (nlre-replace-regexp-in-string re rep s))\n"
+            "  (nlre-replace-regexp-in-string re rep s lit subexp start))\n"
             ;; fix/small-primitives-parity: `current-time' derived from the
             ;; already-working `float-time' (a plain IEEE double of epoch
             ;; seconds).  Minimal polyfill: decomposes into the host Emacs

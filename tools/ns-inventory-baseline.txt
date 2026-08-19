@@ -77,11 +77,23 @@
 # printer gained `print-length'/`print-level' support and a symbol escaper
 # that looks at the whole name, and lisp/nelisp-stdlib-prn.el carries the
 # same bodies so the two do not drift.  Same-definition, so benign.
-ns-collision 156
+# 156 -> 157 on 2026-08-19: `round' and `intern-soft', which moved OUT of
+# ns-collision-divergent (98 -> 96) rather than being new duplicates.
+# `round' did not exist in the standalone at all, and the lisp/ copy routed
+# it through libm round(), which rounds a half AWAY FROM ZERO -- so it
+# answered 1 for (round 0.5) where Emacs answers 0.  `intern-soft' existed
+# only in lisp/nelisp-stdlib-misc.el, which the standalone does not load, so
+# it was void-function there.  Both files now carry one Emacs-correct text,
+# which is the trade this gate asks for: a benign same-definition collision
+# in place of a divergence whose behaviour depended on load order.
+ns-collision 157
 # 97 -> 96 on 2026-08-19: `string-equal' no longer differs between the two
 # files -- the prelude's now signals for a non-string instead of falling
 # through to `equal', and the lisp copy was brought with it.  Ratcheted down
 # rather than left, since the gate offered.
+# 96 stands on 2026-08-19: `round' and `intern-soft' briefly pushed this to
+# 98 and were resolved in the same commit by making the two texts identical,
+# rather than by conceding the number.
 ns-collision-divergent 96
 # 850 -> 851 on 2026-08-19: `nl-check-file-quoted-unsafe', the entry point
 # that reports the unsafe calls inside quoted forms.  Same situation as the
