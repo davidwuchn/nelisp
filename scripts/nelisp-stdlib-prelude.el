@@ -4489,16 +4489,44 @@ needs escaping because the reader consumes it as an escape prefix."
       (= c 96) (= c 44) (= c 59) (= c 34) (= c 32) (= c 9)
       (= c 10) (= c 13) (= c 11) (= c 12)))
 
+;; Per-character escaping is not enough: a symbol whose whole NAME would
+;; read back as a NUMBER, or as the dot of a dotted pair, needs a leading
+;; backslash so the reader sees a symbol.  Emacs prints (intern "12") as
+;; \\12 and (intern ".") as \\., and the empty name as ## -- this printed
+;; 12, . and the empty string, none of which read back as what was printed.
+;; A print-then-read round trip silently changed the type.
+(defun nelisp--prn-symbol-needs-leading-escape-p (s)
+  (let ((n (length s)))
+    (cond
+     ((= n 0) nil)                      ; handled by the ## case
+     ((string= s ".") t)
+     (t
+      ;; Would the reader take this whole name for a number?
+      (let ((i 0) (seen-digit nil) (ok t))
+        (while (and ok (< i n))
+          (let ((c (aref s i)))
+            (cond
+             ((and (>= c ?0) (<= c ?9)) (setq seen-digit t))
+             ((and (= i 0) (or (eq c ?-) (eq c ?+))) nil)
+             ((or (eq c ?.) (eq c ?e) (eq c ?E)) nil)
+             (t (setq ok nil))))
+          (setq i (1+ i)))
+        (and ok seen-digit))))))
+
 (defun nelisp--prn-symbol-escaped (s)
   "Return S with reader atom terminators escaped for readable printing."
-  (let ((chunks (cons nil nil)) (i 0) (n (length s)))
-    (while (< i n)
-      (let ((c (aref s i)))
-        (when (nelisp--prn-symbol-char-needs-escape-p c)
-          (nelisp--prn-chunks-add chunks "\\"))
-        (nelisp--prn-chunks-add chunks (char-to-string c)))
-      (setq i (1+ i)))
-    (nelisp--prn-chunks-string chunks)))
+  (if (= (length s) 0)
+      "##"
+    (let ((chunks (cons nil nil)) (i 0) (n (length s)))
+      (when (nelisp--prn-symbol-needs-leading-escape-p s)
+        (nelisp--prn-chunks-add chunks "\\"))
+      (while (< i n)
+        (let ((c (aref s i)))
+          (when (nelisp--prn-symbol-char-needs-escape-p c)
+            (nelisp--prn-chunks-add chunks "\\"))
+          (nelisp--prn-chunks-add chunks (char-to-string c)))
+        (setq i (1+ i)))
+      (nelisp--prn-chunks-string chunks))))
 
 (defun nelisp--prn-float (x)
   (let ((s (number-to-string x)))
@@ -4532,14 +4560,31 @@ needs escaping because the reader consumes it as an escape prefix."
       (when prefix
         (concat prefix (nelisp--prn-to-string arg escape))))))
 
+;; `print-length' and `print-level' existed nowhere, so both were ignored:
+;; a long list printed in full and a deep one printed to the bottom.  That
+;; is not only a formatting difference -- they are the only bound on output
+;; size, and without them a circular structure prints until something gives
+;; out.  Emacs answers "(1 2 ...)" and "(1 (2 ...))".
+(defvar print-length nil)
+(defvar print-level nil)
+;; Depth is threaded rather than special-bound: `nelisp--prn-to-string' is
+;; the recursion point and it is called from four places, so passing it is
+;; less surprising than a dynamic counter someone has to remember to rebind.
+(defvar nelisp--prn-depth 0)
+
 (defun nelisp--prn-list-body (lst escape)
-  (let ((chunks (cons nil nil)) (cur lst) (first t))
-    (while (consp cur)
+  (let ((chunks (cons nil nil)) (cur lst) (first t) (count 0))
+    (while (and (consp cur)
+                (if print-length (< count print-length) t))
       (unless first (nelisp--prn-chunks-add chunks " "))
       (nelisp--prn-chunks-add chunks
                               (nelisp--prn-to-string (car cur) escape))
       (setq first nil)
+      (setq count (1+ count))
       (setq cur (cdr cur)))
+    (when (and (consp cur) print-length)
+      (nelisp--prn-chunks-add chunks " ...")
+      (setq cur nil))
     (unless (null cur)
       (nelisp--prn-chunks-add chunks " . ")
       (nelisp--prn-chunks-add chunks (nelisp--prn-to-string cur escape)))
@@ -4548,12 +4593,15 @@ needs escaping because the reader consumes it as an escape prefix."
 (defun nelisp--prn-vector (vec escape)
   (let ((n (length vec)) (chunks (cons nil nil)))
     (nelisp--prn-chunks-add chunks "[")
-    (let ((i 0))
-      (while (< i n)
+    (let ((i 0) (lim (if print-length (if (< print-length n) print-length n) n)))
+      (while (< i lim)
         (when (> i 0) (nelisp--prn-chunks-add chunks " "))
         (nelisp--prn-chunks-add chunks
                                 (nelisp--prn-to-string (aref vec i) escape))
-        (setq i (1+ i))))
+        (setq i (1+ i)))
+      (when (< lim n)
+        (when (> lim 0) (nelisp--prn-chunks-add chunks " "))
+        (nelisp--prn-chunks-add chunks "...")))
     (nelisp--prn-chunks-add chunks "]")
     (nelisp--prn-chunks-string chunks)))
 
@@ -4584,8 +4632,15 @@ needs escaping because the reader consumes it as an escape prefix."
    ((stringp obj)
     (if escape (concat "\"" (nelisp--prn-string-escaped obj) "\"") obj))
    ((consp obj)
-    (or (nelisp--prn-reader-macro-abbrev obj escape)
-        (concat "(" (nelisp--prn-list-body obj escape) ")")))
+    (if (and print-level (>= nelisp--prn-depth print-level))
+        "..."
+      (let ((nelisp--prn-depth (1+ nelisp--prn-depth)))
+        (or (nelisp--prn-reader-macro-abbrev obj escape)
+            (concat "(" (nelisp--prn-list-body obj escape) ")")))))
+   ;; `print-level' bounds LIST nesting only -- Emacs prints
+   ;; [1 [2 [3 [4]]]] in full at print-level 2, and only the list arm above
+   ;; counts depth.  Measured rather than assumed; the first cut guarded
+   ;; both and truncated vectors Emacs does not.
    ((vectorp obj) (nelisp--prn-vector obj escape))
    ((recordp obj) (nelisp--prn-record obj escape))
    (t (format "#<unprintable %S>" obj))))

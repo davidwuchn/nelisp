@@ -42,7 +42,7 @@
 # add-to-list a C subr, where before it became an elisp shim.
 # nelisp--cli-batch-ensure-host, which loads that file, already gated its own
 # fallback stub this way.
-shared-shadowing 247
+shared-shadowing 248
 
 # 2026-08-19, reviewing the 245 rather than counting them.  The table now
 # carries the defining file, which is half of what makes a class actionable:
@@ -108,4 +108,12 @@ shared-shadowing 247
 #
 # Unconditional, like the prelude's others: that file is the standalone's
 # stdlib and has no host definition to defer to.
+
+# 247 -> 248 on 2026-08-19: `print-length' and `print-level' are now defined
+# -- they did not exist, so the printer ignored both and a long or deep
+# structure printed in full, with nothing bounding the output at all.  Both
+# are Emacs's own variable names, which is the point: code that binds them
+# expects them to be read.
+#
+# One net rather than two: `nelisp--prn-depth' is nelisp-only.
 

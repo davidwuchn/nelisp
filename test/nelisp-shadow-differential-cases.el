@@ -25,6 +25,19 @@
 ;; symbol.  Each was found by hand, late, a long way from where it was
 ;; introduced.  A differential is how a machine finds the next one.
 ;;
+;; When comparing this file's value against stock Emacs by hand, wrap it so
+;; NeLisp prints through `format "%S"' as Emacs does:
+;;
+;;   (princ (format "%S\n" (progn <this file>)))
+;;
+;; Reading the runtime's own value echo instead compares Emacs's printer
+;; against a DIFFERENT NeLisp printer -- the native `nelisp--repr' -- and
+;; that one does not escape a backslash inside a nested string, so
+;; (prin1-to-string (intern "12")) shows as "\\12" from one and "\\\\12"
+;; from the other while the value is byte-identical.  An hour went into
+;; that mirage on 2026-08-19.  The echo gap is a real divergence and is its
+;; own item; it is just not what these cases are about.
+;;
 ;; Add a case when a prelude definition starts covering more ground, and
 ;; keep every expression answerable by BOTH implementations -- an expression
 ;; only the prelude can evaluate proves nothing about agreement.
@@ -286,6 +299,32 @@
  (alist-get 'a '((a . 1)))
  (alist-get "a" '(("a" . 1)) nil nil #'equal)
  (alist-get 'z '((a . 1)) 'dflt)
+ ;; The printer.  `print-length' and `print-level' did not exist, so both
+ ;; were ignored -- and they are the only bound on output size, so a
+ ;; circular structure printed until something gave out.  Symbol escaping
+ ;; was per-character only, so a symbol whose whole NAME reads as a number,
+ ;; or as the dot of a dotted pair, printed as that: (intern "12") printed
+ ;; 12, which reads back as the integer.  A print-then-read round trip
+ ;; silently changed the type, which is what the round-trip cases below are
+ ;; really testing.
+ (let ((print-length 2)) (prin1-to-string '(1 2 3 4)))
+ (let ((print-length 2)) (prin1-to-string [1 2 3 4]))
+ (let ((print-length 2)) (prin1-to-string '((1 2 3) (4 5 6) (7 8 9))))
+ (let ((print-length nil)) (prin1-to-string '(1 2 3)))
+ (let ((print-level 2)) (prin1-to-string '(1 (2 (3 (4))))))
+ ;; print-level bounds LIST nesting only; a vector prints in full
+ (let ((print-level 2)) (prin1-to-string [1 [2 [3 [4]]]]))
+ (prin1-to-string (intern "12"))
+ (prin1-to-string (intern "."))
+ (prin1-to-string (intern ""))
+ (prin1-to-string (intern "a b"))
+ (prin1-to-string 'abc)
+ (let ((s (intern "12"))) (eq (car (read-from-string (prin1-to-string s))) s))
+ (let ((s (intern "."))) (eq (car (read-from-string (prin1-to-string s))) s))
+ (let ((s (intern "a b"))) (eq (car (read-from-string (prin1-to-string s))) s))
+ (type-of (car (read-from-string (prin1-to-string (intern "12")))))
+ (equal (car (read-from-string (prin1-to-string "a\"b"))) "a\"b")
+ (equal (car (read-from-string (prin1-to-string '(1 "a" b)))) '(1 "a" b))
  ;; maphash reaches every entry
  (let ((h (make-hash-table :test 'equal)) (n 0))
    (puthash "b" 2 h) (puthash "a" 1 h) (puthash "c" 3 h)

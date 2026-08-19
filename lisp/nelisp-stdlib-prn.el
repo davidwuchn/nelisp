@@ -70,16 +70,18 @@ needs escaping because the reader consumes it as an escape prefix."
 
 (defun nelisp--prn-symbol-escaped (s)
   "Return S with reader atom terminators escaped for readable printing."
-  (let ((chunks (cons nil nil))
-        (i 0)
-        (n (length s)))
-    (while (< i n)
-      (let ((c (aref s i)))
-        (when (nelisp--prn-symbol-char-needs-escape-p c)
-          (nelisp--prn-chunks-add chunks "\\"))
-        (nelisp--prn-chunks-add chunks (char-to-string c)))
-      (setq i (1+ i)))
-    (nelisp--prn-chunks-string chunks)))
+  (if (= (length s) 0)
+      "##"
+    (let ((chunks (cons nil nil)) (i 0) (n (length s)))
+      (when (nelisp--prn-symbol-needs-leading-escape-p s)
+        (nelisp--prn-chunks-add chunks "\\"))
+      (while (< i n)
+        (let ((c (aref s i)))
+          (when (nelisp--prn-symbol-char-needs-escape-p c)
+            (nelisp--prn-chunks-add chunks "\\"))
+          (nelisp--prn-chunks-add chunks (char-to-string c)))
+        (setq i (1+ i)))
+      (nelisp--prn-chunks-string chunks))))
 
 (defun nelisp--prn-float (x)
   "Return a compact, round-trip-safe string for float X.
@@ -131,36 +133,35 @@ via `nelisp--prn-to-string' under ESCAPE."
         (concat prefix (nelisp--prn-to-string arg escape))))))
 
 (defun nelisp--prn-list-body (lst escape)
-  "Print the body of LST (= cons cell) without enclosing parens.
-Handles proper / dotted lists.  Element separator is a single space;
-a non-nil non-cons tail prints as ` . TAIL'."
-  (let ((chunks (cons nil nil))
-        (cur lst)
-        (first t))
-    (while (consp cur)
-      (unless first
-        (nelisp--prn-chunks-add chunks " "))
+  (let ((chunks (cons nil nil)) (cur lst) (first t) (count 0))
+    (while (and (consp cur)
+                (if print-length (< count print-length) t))
+      (unless first (nelisp--prn-chunks-add chunks " "))
       (nelisp--prn-chunks-add chunks
                               (nelisp--prn-to-string (car cur) escape))
       (setq first nil)
+      (setq count (1+ count))
       (setq cur (cdr cur)))
+    (when (and (consp cur) print-length)
+      (nelisp--prn-chunks-add chunks " ...")
+      (setq cur nil))
     (unless (null cur)
       (nelisp--prn-chunks-add chunks " . ")
       (nelisp--prn-chunks-add chunks (nelisp--prn-to-string cur escape)))
     (nelisp--prn-chunks-string chunks)))
 
 (defun nelisp--prn-vector (vec escape)
-  "Print VEC as `[E0 E1 ...]'."
-  (let ((n (length vec))
-        (chunks (cons nil nil)))
+  (let ((n (length vec)) (chunks (cons nil nil)))
     (nelisp--prn-chunks-add chunks "[")
-    (let ((i 0))
-      (while (< i n)
-        (when (> i 0)
-          (nelisp--prn-chunks-add chunks " "))
+    (let ((i 0) (lim (if print-length (if (< print-length n) print-length n) n)))
+      (while (< i lim)
+        (when (> i 0) (nelisp--prn-chunks-add chunks " "))
         (nelisp--prn-chunks-add chunks
                                 (nelisp--prn-to-string (aref vec i) escape))
-        (setq i (1+ i))))
+        (setq i (1+ i)))
+      (when (< lim n)
+        (when (> lim 0) (nelisp--prn-chunks-add chunks " "))
+        (nelisp--prn-chunks-add chunks "...")))
     (nelisp--prn-chunks-add chunks "]")
     (nelisp--prn-chunks-string chunks)))
 
@@ -180,11 +181,31 @@ a non-nil non-cons tail prints as ` . TAIL'."
     (nelisp--prn-chunks-add chunks ")")
     (nelisp--prn-chunks-string chunks)))
 
+;; Kept in step with scripts/nelisp-stdlib-prelude.el, the copy the
+;; standalone runs; `make ns-gate' reports any drift.
+(defvar print-length nil)
+(defvar print-level nil)
+(defvar nelisp--prn-depth 0)
+
+(defun nelisp--prn-symbol-needs-leading-escape-p (s)
+  (let ((n (length s)))
+    (cond
+     ((= n 0) nil)                      ; handled by the ## case
+     ((string= s ".") t)
+     (t
+      ;; Would the reader take this whole name for a number?
+      (let ((i 0) (seen-digit nil) (ok t))
+        (while (and ok (< i n))
+          (let ((c (aref s i)))
+            (cond
+             ((and (>= c ?0) (<= c ?9)) (setq seen-digit t))
+             ((and (= i 0) (or (eq c ?-) (eq c ?+))) nil)
+             ((or (eq c ?.) (eq c ?e) (eq c ?E)) nil)
+             (t (setq ok nil))))
+          (setq i (1+ i)))
+        (and ok seen-digit))))))
+
 (defun nelisp--prn-to-string (obj escape)
-  "Convert OBJ to its printed representation.
-ESCAPE = t  → readable form (= prin1).
-ESCAPE = nil → non-readable form (= princ): strings without quotes /
-escaping; everything else identical."
   (cond
    ((null obj) "nil")
    ((eq obj t) "t")
@@ -195,21 +216,20 @@ escaping; everything else identical."
         (nelisp--prn-symbol-escaped (symbol-name obj))
       (symbol-name obj)))
    ((stringp obj)
-    (if escape
-        (concat "\"" (nelisp--prn-string-escaped obj) "\"")
-      obj))
+    (if escape (concat "\"" (nelisp--prn-string-escaped obj) "\"") obj))
    ((consp obj)
-    (or (nelisp--prn-reader-macro-abbrev obj escape)
-        (concat "(" (nelisp--prn-list-body obj escape) ")")))
+    (if (and print-level (>= nelisp--prn-depth print-level))
+        "..."
+      (let ((nelisp--prn-depth (1+ nelisp--prn-depth)))
+        (or (nelisp--prn-reader-macro-abbrev obj escape)
+            (concat "(" (nelisp--prn-list-body obj escape) ")")))))
+   ;; `print-level' bounds LIST nesting only -- Emacs prints
+   ;; [1 [2 [3 [4]]]] in full at print-level 2, and only the list arm above
+   ;; counts depth.  Measured rather than assumed; the first cut guarded
+   ;; both and truncated vectors Emacs does not.
    ((vectorp obj) (nelisp--prn-vector obj escape))
    ((recordp obj) (nelisp--prn-record obj escape))
    (t (format "#<unprintable %S>" obj))))
-
-;; ---- user-visible functions ----
-
-;; Override the function-cell installed by `install_builtins' (= the
-;; `bi_prin1_to_string' Rust dispatcher).  Stage 7.1.4 also removes
-;; the Rust arm so this elisp defun is the sole implementation.
 
 (defun prin1-to-string (object)
   "Return a string containing the printed representation of OBJECT.

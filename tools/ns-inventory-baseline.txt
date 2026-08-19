@@ -72,7 +72,12 @@
 # negative value fills with the sign bit there and with zeros here.  Both
 # files now carry the real definition, byte-identical, so this is the benign
 # same-definition kind.
-ns-collision 152
+# 152 -> 156 on 2026-08-19: `print-length', `print-level',
+# `nelisp--prn-depth' and `nelisp--prn-symbol-needs-leading-escape-p'.  The
+# printer gained `print-length'/`print-level' support and a symbol escaper
+# that looks at the whole name, and lisp/nelisp-stdlib-prn.el carries the
+# same bodies so the two do not drift.  Same-definition, so benign.
+ns-collision 156
 # 97 -> 96 on 2026-08-19: `string-equal' no longer differs between the two
 # files -- the prelude's now signals for a non-string instead of falling
 # through to `equal', and the lisp copy was brought with it.  Ratcheted down
@@ -83,6 +88,10 @@ ns-collision-divergent 96
 # nl-ns pair above -- it is public because tools/nl-check-inventory.el calls
 # it across the boundary, and naming it `nl-check--' would move the finding
 # into ns-private-escape rather than remove it.
-ns-prefix-violation 851
+# 851 -> 853 on 2026-08-19: the same four names, counted again under the
+# prefix rule -- `print-length' and `print-level' are Emacs's names and
+# cannot carry a `nelisp--' prefix, and the two helpers do carry it but are
+# not the feature name itself, which is what this check asks for.
+ns-prefix-violation 853
 ns-private-escape 611
 ns-unreadable 0
