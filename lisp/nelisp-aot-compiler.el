@@ -90,7 +90,23 @@
 ;;; Code:
 
 (require 'cl-lib)
-(require 'macroexp)
+;; Optional, same reading as the `subr-x' requires made optional in
+;; cd64c0bd7: this file is loaded by the standalone runtime, which has no
+;; Emacs underneath it to load `macroexp' from.  It does not need one -- this
+;; file uses no `macroexp-' name at all (grep, 2026-08-19), only bare
+;; `macroexpand', which is core, and the comments at "AOT parses a DSL, not
+;; host elisp" say `macroexpand-all' is deliberately not used.  A hard require
+;; asks for a file the code never reads from.
+;;
+;; It cost native compilation on this runtime and did it invisibly.  Before
+;; `load' was taught to stop on a signal (0d51f48b4), this require signalled
+;; and the load stepped over it, so the rest of the file defined
+;; `nelisp-aot-compile-to-object' and native compilation worked.  Once the
+;; signal stopped the load, `nelisp-artifact--ensure-native-compiler' answered
+;; nil and every hot defun was reported `:native nil :reason "native compiler
+;; unavailable"'.  Correcting `load' did not break anything; it revealed a
+;; dependency that had never been satisfied.
+(require 'macroexp nil t)
 (require 'nelisp-asm-arm64)
 (require 'nelisp-asm-x86_64)
 (require 'nelisp-cc-runtime)
