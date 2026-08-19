@@ -524,6 +524,30 @@
        (condition-case e (nthcdr "" '(1)) (error e))
        (condition-case e (nth "" '(1)) (error e))
        (nthcdr 1 '(1 2 3)) (nth 1 '(1 2 3)) (nthcdr -1 '(1 2)))
+
+ ;; `symbolp' checks.  `get' and `boundp' answered nil, which is also the
+ ;; answer for a symbol that simply has no such property or binding, and
+ ;; `fmakunbound'/`defalias'/`fset' answered their argument.
+ (list (condition-case e (fmakunbound "ABC") (error e))
+       (condition-case e (get -7 'k) (error e))
+       (condition-case e (put 1 'k 'v) (error e))
+       (condition-case e (set "s" 1) (error e))
+       (condition-case e (boundp 1) (error e))
+       (condition-case e (defalias 100 'car) (error e))
+       (condition-case e (fset 100 'car) (error e))
+       (condition-case e (format 65) (error e))
+       (condition-case e (file-name-directory 0) (error e))
+       (condition-case e (string-trim-right nil) (error e))
+       (condition-case e (string-trim-left nil) (error e)))
+ (list (progn (put 'zzq 'k 'v) (get 'zzq 'k)) (get 'zzq-none 'k) (boundp 'features)
+       (progn (set 'zzv 7) (symbol-value 'zzv)) (format "%s-%d" "a" 3)
+       (file-name-directory "/a/b") (file-name-directory "b")
+       (string-trim-right "ab  ") (string-trim-left "  ab")
+       ;; `fmakunbound' unbinds by fsetting nil, and a nil function cell is
+       ;; NOT fbound -- reporting t made it look like it had done nothing.
+       (progn (defun zzf () 1) (fmakunbound 'zzf) (fboundp 'zzf))
+       (let ((s 'zz-alias-a)) (defalias s 'car) (list (fboundp 'zz-alias-a) (fboundp 's)))
+       (progn (defalias 'zz-alias-d (lambda (x) (* x 3))) (zz-alias-d 5)))
 )
 
 ;;; nelisp-shadow-differential-cases.el ends here

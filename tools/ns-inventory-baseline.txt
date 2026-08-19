@@ -110,7 +110,12 @@
 # lisp/nelisp-stdlib-misc.el each carry copies of the functions that use it;
 # byte-identical, so this is the benign same-definition kind and `make
 # ns-gate' is what keeps it that way.
-ns-collision 163
+# 163 -> 164 on 2026-08-20: `nelisp--check-symbol', the symbol counterpart of
+# `nelisp--check-string'.  `get' and `boundp' answered nil for a non-symbol,
+# which is also the answer for a symbol that has no such property or binding,
+# and `fmakunbound'/`defalias'/`fset' answered their argument.  Byte-identical
+# where it is duplicated, so this is the benign same-definition kind.
+ns-collision 164
 # 97 -> 96 on 2026-08-19: `string-equal' no longer differs between the two
 # files -- the prelude's now signals for a non-string instead of falling
 # through to `equal', and the lisp copy was brought with it.  Ratcheted down

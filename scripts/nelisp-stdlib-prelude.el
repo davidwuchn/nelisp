@@ -69,6 +69,38 @@
 ;; either way, but a macro's expansion is compared for byte-identity in this
 ;; tree, and anything that walks expanded code -- a compiler pass, a test
 ;; that reads `macroexpand-1' -- sees a shape Emacs never produces.
+;; Argument-type checks used throughout this file.  They live HERE, before
+;; the first caller, because the prelude calls its own functions while it
+;; loads -- defining them further down made `file-name-directory' hit
+;; void-function during boot.
+(unless (fboundp 'nelisp--check-symbol)
+  (defun nelisp--check-symbol (x)
+    (unless (symbolp x) (signal 'wrong-type-argument (list 'symbolp x)))
+    x))
+;; Byte-identical to the prelude copy so `make ns-gate' polices the two.
+(unless (fboundp 'nelisp--check-string)
+  (defun nelisp--check-string (x)
+    (unless (stringp x) (signal 'wrong-type-argument (list 'stringp x)))
+    x))
+;; Byte-identical to the lisp/nelisp-stdlib.el copy, so `make ns-gate'
+;; polices the two rather than letting them drift.  It was void in the
+;; standalone, so (sequencep 0) was `void-function' where Emacs answers nil.
+(unless (fboundp 'sequencep)
+  (defun sequencep (x)
+    "Return t if X is a sequence (= nil, cons, string, or vector)."
+    (or (null x) (consp x) (stringp x) (vectorp x))))
+(unless (fboundp 'string-search)
+  (defun string-search (needle haystack &optional start)
+    (nelisp--check-string needle)
+    (nelisp--check-string haystack)
+    (let ((nl (length needle)) (hl (length haystack)) (i (or start 0)) (found nil))
+      (if (= nl 0) i
+        (while (and (not found) (<= (+ i nl) hl))
+          (if (string= needle (substring haystack i (+ i nl)))
+              (setq found i)
+            (setq i (1+ i))))
+        found))))
+
 (defmacro when (cond &rest body)
   "If COND yields non-nil, eval BODY forms sequentially and return last value."
   (cons 'if (cons cond (cons (cons 'progn body) nil))))
@@ -594,9 +626,19 @@ from `(defvar X nil)'."
 
 ;; Doc 143 file-name path ops (pure string slicing, from nelisp-stdlib-plist-str.el).
 (defun file-name-directory (path)
-  (let ((idx -1) (i 0) (n (length path)))
-    (while (< i n) (when (eq (aref path i) ?/) (setq idx i)) (setq i (1+ i)))
-    (if (< idx 0) nil (substring path 0 (1+ idx)))))
+  "Return the directory part of PATH, or nil if PATH has no slash.
+Result keeps the trailing slash."
+  (nelisp--check-string path)
+  (let ((idx -1)
+        (i 0)
+        (n (length path)))
+    (while (< i n)
+      (when (eq (aref path i) ?/)
+        (setq idx i))
+      (setq i (1+ i)))
+    (if (< idx 0)
+        nil
+      (substring path 0 (1+ idx)))))
 (defun file-name-nondirectory (path)
   (let ((idx -1) (i 0) (n (length path)))
     (while (< i n) (when (eq (aref path i) ?/) (setq idx i)) (setq i (1+ i)))
@@ -1133,11 +1175,13 @@ from `(defvar X nil)'."
 ;; cannot regress the callers that pass no REGEXP.
 (unless (fboundp 'string-trim-left)
   (defun string-trim-left (s &optional re)
+    (nelisp--check-string s)
     (if (null re)
         (let ((i 0) (n (length s))) (while (and (< i n) (memq (aref s i) '(32 9 10 13))) (setq i (1+ i))) (substring s i))
       (if (string-match (concat "\\`\\(?:" re "\\)") s) (substring s (match-end 0)) s))))
 (unless (fboundp 'string-trim-right)
   (defun string-trim-right (s &optional re)
+    (nelisp--check-string s)
     (if (null re)
         (let ((n (length s))) (while (and (> n 0) (memq (aref s (1- n)) '(32 9 10 13))) (setq n (1- n))) (substring s 0 n))
       (let ((i (string-match (concat "\\(?:" re "\\)\\'") s)))
@@ -4571,19 +4615,23 @@ Rust-min migration (= moved out of build-tool/src/eval/special_forms.rs)."
     (nelisp--env-globals-get-value sym)))
 (unless (fboundp 'boundp)
   (defun boundp (sym)
+    (nelisp--check-symbol sym)
     (nelisp--env-globals-is-bound sym)))
 (unless (fboundp 'set)
   (defun set (sym val)
+    (nelisp--check-symbol sym)
     (nelisp--env-globals-set-value sym val)
     val))
 (unless (fboundp 'defalias)
   (defun defalias (sym def &rest _)
+    (nelisp--check-symbol sym)
     (if (and (symbolp def) (not (fboundp def)))
         (eval (list 'defun sym '(&rest args)
                     (list 'apply (list 'quote def) 'args)))
       (fset sym def))
     sym))
-(unless (fboundp 'fmakunbound) (defun fmakunbound (sym) (fset sym nil) sym))
+(unless (fboundp 'fmakunbound)
+  (defun fmakunbound (sym) (nelisp--check-symbol sym) (fset sym nil) sym))
 (unless (fboundp 'functionp) (defun functionp (x) (or (and (consp x) (eq (car x) 'lambda)) (and (symbolp x) (fboundp x)))))
 (unless (fboundp 'recordp) (defun recordp (x) nil))
 (unless (fboundp 'nlistp) (defun nlistp (x) (not (listp x))))
@@ -4926,9 +4974,12 @@ No-ops on substrates without `nelisp--syscall-path-int' (the historic stub)."
 (unless (fboundp 'setplist)
   (defun setplist (sym plist) (puthash sym plist nelisp-stdlib--symbol-plists) plist))
 (unless (fboundp 'get)
-  (defun get (sym prop) (plist-get (gethash sym nelisp-stdlib--symbol-plists) prop)))
+  (defun get (sym prop)
+    (nelisp--check-symbol sym)
+    (plist-get (gethash sym nelisp-stdlib--symbol-plists) prop)))
 (unless (fboundp 'put)
   (defun put (sym prop val)
+    (nelisp--check-symbol sym)
     (puthash sym
              (plist-put (gethash sym nelisp-stdlib--symbol-plists) prop val)
              nelisp-stdlib--symbol-plists)
@@ -5003,30 +5054,6 @@ No-ops on substrates without `nelisp--syscall-path-int' (the historic stub)."
 ;; thing they touch is `length' and `length' checks the weaker predicate.  A
 ;; handler written for the condition Emacs documents does not fire, which is
 ;; worse than the wrong message: the caller's recovery path never runs.
-;; Byte-identical to the prelude copy so `make ns-gate' polices the two.
-(unless (fboundp 'nelisp--check-string)
-  (defun nelisp--check-string (x)
-    (unless (stringp x) (signal 'wrong-type-argument (list 'stringp x)))
-    x))
-;; Byte-identical to the lisp/nelisp-stdlib.el copy, so `make ns-gate'
-;; polices the two rather than letting them drift.  It was void in the
-;; standalone, so (sequencep 0) was `void-function' where Emacs answers nil.
-(unless (fboundp 'sequencep)
-  (defun sequencep (x)
-    "Return t if X is a sequence (= nil, cons, string, or vector)."
-    (or (null x) (consp x) (stringp x) (vectorp x))))
-(unless (fboundp 'string-search)
-  (defun string-search (needle haystack &optional start)
-    (nelisp--check-string needle)
-    (nelisp--check-string haystack)
-    (let ((nl (length needle)) (hl (length haystack)) (i (or start 0)) (found nil))
-      (if (= nl 0) i
-        (while (and (not found) (<= (+ i nl) hl))
-          (if (string= needle (substring haystack i (+ i nl)))
-              (setq found i)
-            (setq i (1+ i))))
-        found))))
-
 ;; Record primitives backing cl-defstruct.  Representation = a plain
 ;; vector `[TAG slot0 slot1 ...]': index 0 is the type tag, slots are
 ;; 1-based in the vector but 0-based / tag-excluded through the
@@ -6391,6 +6418,7 @@ Width, left-justify (-), zero-pad (0), sign (+/space) and string precision
 `nelisp--ffmt-f' (Doc 159 §3); %S uses `prin1-to-string' and the remaining
 conversions are delegated to native `format', which lacks only the field-width
 layer."
+  (nelisp--check-string template)
   (let ((n (length template)) (i 0) (out "") (argp args))
     (while (< i n)
       (let ((ch (aref template i)))

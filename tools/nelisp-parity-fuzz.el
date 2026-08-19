@@ -450,6 +450,15 @@ ended up slower than the search that produced the case."
               (setq n (1+ n))
               (when (> (length line) 92) (princ (concat line "\n")) (setq line "   ")))
             (unless (string= line "   ") (princ (concat line "\n")))))
+        ;; NELISP_FUZZ_RAW dumps every disagreement unshrunk.  Shrinking costs
+        ;; two subprocesses per candidate and answers "what is the smallest
+        ;; call that still differs"; when the question is instead "what is
+        ;; the SHAPE of what is left", the raw list answers it for free.
+        (when (getenv "NELISP_FUZZ_RAW")
+          (princ "\n  every disagreement, unshrunk:\n")
+          (dolist (r bad)
+            (princ (format "    %s\n      emacs   %s\n      nelisp  %s\n"
+                           (nelisp-parity-fuzz--key (nth 0 r)) (nth 1 r) (nth 2 r)))))
         ;; One shrunk representative per NAME: twenty reports of the same
         ;; defect read as twenty defects, and the first thing anybody does
         ;; with them is group by name anyway.

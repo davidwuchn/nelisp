@@ -7515,6 +7515,25 @@ unresolved at link time."
     ;; `zerop' is (= N 0), and `=' names `number-or-marker-p' when its
     ;; argument is not a number -- not `numberp'.  Same shape as
     ;; `bf_wrong_type_listp'; the 18-byte predicate name needs three writes.
+    (defun bf_wrong_type_symbolp (offender)
+      (let* ((wbuf (alloc-bytes 24 1))
+             (cbuf (alloc-bytes 8 1))
+             (expected (alloc-bytes 32 8))
+             (nil-slot (alloc-bytes 32 8))
+             (data-tail (alloc-bytes 32 8)))
+        (seq
+         (ptr-write-u64 wbuf 0 8751669898145395319)
+         (ptr-write-u64 (+ wbuf 8) 0 7887324063363589488)
+         (ptr-write-u64 (+ wbuf 16) 0 7630437)
+         (nl_alloc_symbol wbuf 19 268435480)
+         (ptr-write-u64 cbuf 0 31644423040104819) ; "symbolp"
+         (nl_alloc_symbol cbuf 7 expected)
+         (wf_write_nil nil-slot)
+         (nelisp_cons_construct offender nil-slot data-tail)
+         (nelisp_cons_construct expected data-tail 268435512)
+         (ptr-write-u64 268435472 0 1)
+         (atomic-fetch-add 268435544 1)
+         1)))
     (defun bf_wrong_type_number_or_marker (offender)
       (let* ((wbuf (alloc-bytes 24 1))
              (cbuf (alloc-bytes 24 1))
@@ -7632,12 +7651,17 @@ unresolved at link time."
     ;; nelisp_env_lookup_function(mirror, unbound, sym, out_slot) returns 0 if found.
     (defun bf_fboundp (args env out)
       (let* ((sym (wf_arg_ptr args 0)) (tmp (alloc-bytes 32 8)) (mirror (+ env 0)) (unbound (+ env 64)))
-        (if (= (nelisp_env_lookup_function mirror unbound sym tmp) 0)
-            (wf_write_t out) (wf_write_nil out))))
+        (if (= (ptr-read-u64 sym 0) 4)
+            (if (= (nelisp_env_lookup_function mirror unbound sym tmp) 0)
+                (if (= (ptr-read-u64 tmp 0) 0) (wf_write_nil out) (wf_write_t out))
+              (wf_write_nil out))
+          (bf_wrong_type_symbolp sym))))
     (defun bf_boundp (args env out)
       (let* ((sym (wf_arg_ptr args 0)) (mirror (+ env 0)))
-        (if (= (nelisp_mirror_is_bound mirror sym) 1)
-            (wf_write_t out) (wf_write_nil out))))
+        (if (= (ptr-read-u64 sym 0) 4)
+            (if (= (nelisp_mirror_is_bound mirror sym) 1)
+                (wf_write_t out) (wf_write_nil out))
+          (bf_wrong_type_symbolp sym))))
     ;; The reader keeps provided features in the evaluator's global mirror.
     ;; That makes the list visible to the collector and gives `features' the
     ;; ordinary Lisp-variable semantics expected by code that inspects it.
@@ -7916,10 +7940,12 @@ unresolved at link time."
     (defun bf_set (args env out)
       (let* ((sym (wf_arg_ptr args 0))
              (val (wf_arg_ptr args 1)))
-        (seq
-         (nl_env_set_value env sym val)
-         (wf_copy32 out val)
-         0)))
+        (if (= (ptr-read-u64 sym 0) 4)
+            (seq
+             (nl_env_set_value env sym val)
+             (wf_copy32 out val)
+             0)
+          (bf_wrong_type_symbolp sym))))
     ;; Doc 22 A8: `symbol-value' must see a dynamic `let' binding, like a direct
     ;; variable reference does.  The prelude fallback read only the global mirror
     ;; (nelisp--env-globals-get-value), so (let ((x 9)) (symbol-value 'x)) saw
@@ -16480,6 +16506,14 @@ This swaps `nl_bf_bind_rest' for the rc/lifetime-safe version and makes
      (let* ((sym_ptr (nl_apply_list_nth args_list_ptr 0))
             (def_ptr (nl_apply_list_nth args_list_ptr 1)))
        (if (= sym_ptr 0) (nl_apply_stash_wta env args_list_ptr)
+         ;; `fset' names `symbolp' for a non-symbol, and `defalias' is
+         ;; synthesised into `fset', so both were assigning under a key that
+         ;; is not a symbol and answering the definition.  Checking here
+         ;; covers both -- and this is the copy that ships: the lisp/ source
+         ;; of `nl_apply_do_fset' is REPLACED by this defconst at build time,
+         ;; so an edit there would have been discarded (the same shape as the
+         ;; sf-cc patch).
+         (if (= (ptr-read-u64 sym_ptr 0) 4)
          (if (= def_ptr 0) (nl_apply_stash_wta env args_list_ptr)
            (let* ((mirror_ptr (+ env 0)) (unbound_ptr (+ env 64))
                   (def_tag (ptr-read-u64 def_ptr 0)))
@@ -16503,7 +16537,8 @@ This swaps `nl_bf_bind_rest' for the rc/lifetime-safe version and makes
                    ;; the same flagless-abort class `nl_apply_do_funcall'/
                    ;; `nl_apply_do_apply' had.  Stash `void-function' naming the
                    ;; unresolved target instead.
-                   (nl_cons_stash_void_function env def_ptr)))))))))
+                   (nl_cons_stash_void_function env def_ptr))))))
+           (nl_apply_stash_wrong_symbolp env sym_ptr)))))
   "Rc-correct, `not'-free replacement for the shipped nl_apply_do_fset.")
 
 ;; `(symbol-function SYM)' (FINDINGS.md recommendation 1(a), same class as

@@ -485,9 +485,16 @@ Width, left-justify (-), zero-pad (0), sign (+/space) and string precision
 ;; Rust-min (2026-05-06): file-name-* — pure path string slicing.
 ;; Migrated from build-tool/src/eval/builtins.rs `bi_file_name_*'.
 
+;; Byte-identical to the prelude copy so `make ns-gate' polices the two.
+(unless (fboundp 'nelisp--check-string)
+  (defun nelisp--check-string (x)
+    (unless (stringp x) (signal 'wrong-type-argument (list 'stringp x)))
+    x))
+
 (defun file-name-directory (path)
   "Return the directory part of PATH, or nil if PATH has no slash.
 Result keeps the trailing slash."
+  (nelisp--check-string path)
   (let ((idx -1)
         (i 0)
         (n (length path)))
