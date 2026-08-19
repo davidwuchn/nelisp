@@ -787,6 +787,21 @@
        ;; disagree about which error comes first for reasons that have
        ;; nothing to do with the file.
        )
+
+ ;; The `f' rounding family requires a FLOAT: (ffloor 65) signals while
+ ;; (floor 65) is 65.  Accepting any number, which an earlier pass did,
+ ;; is the loose reading of a strict contract.
+ (list (condition-case e (ffloor 65) (error e)) (ffloor 1.7)
+       (condition-case e (fceiling 65) (error e))
+       (condition-case e (fround 65) (error e))
+       (condition-case e (ftruncate 65) (error e))
+       (condition-case e (number-to-string 'x) (error e)) (number-to-string 42)
+       (condition-case e (hash-table-test 2) (error e))
+       (hash-table-test (make-hash-table :test 'equal))
+       (condition-case e (remq ["a"] 'foo) (error e)) (remq 2 '(1 2 3))
+       (condition-case e (featurep "a" '(1 2 . 3)) (error e))
+       (featurep 'zz-no-feature)
+       (condition-case e (logxor "x") (error e)) (logxor 12 10))
 )
 
 ;;; nelisp-shadow-differential-cases.el ends here

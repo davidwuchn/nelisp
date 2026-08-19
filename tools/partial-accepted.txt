@@ -30,7 +30,6 @@ executable-find|scripts/nelisp-stdlib-prelude.el|_remote|not yet reviewed
 file-attributes|scripts/nelisp-stdlib-prelude.el|_id-format|not yet reviewed
 format-time-string|scripts/nelisp-stdlib-prelude.el|_args|not yet reviewed
 goto-char|lisp/nelisp-stdlib-misc.el|_p|not yet reviewed
-hash-table-test|scripts/nelisp-stdlib-prelude.el|_table|not yet reviewed
 help-split-fundoc|scripts/nelisp-stdlib-prelude.el|_def _section|not yet reviewed
 ignore|scripts/nelisp-stdlib-prelude.el|_arguments|not yet reviewed
 insert-file-contents|lisp/nelisp-stdlib-misc.el|_path|not yet reviewed

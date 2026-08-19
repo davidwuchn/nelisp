@@ -1691,10 +1691,24 @@ TYPE flowing into whatever the caller does next."
       (cond ((stringp seq) (apply #'string kept))
             ((vectorp seq) (apply #'vector kept))
             (t kept)))))
-(unless (fboundp 'ffloor) (defun ffloor (x) (float (floor x))))
-(unless (fboundp 'fceiling) (defun fceiling (x) (float (ceiling (nelisp--check-float-arg x)))))
-(unless (fboundp 'ftruncate) (defun ftruncate (x) (float (truncate (nelisp--check-float-arg x)))))
-(unless (fboundp 'fround) (defun fround (x) (float (floor (+ (nelisp--check-float-arg x) 0.5)))))
+(unless (fboundp 'ffloor)
+  (defun ffloor (x)
+    ;; A FLOAT, not any number: (ffloor 65) signals in Emacs while
+    ;; (floor 65) is 65.  The `f' family is the strict one.
+    (unless (floatp x) (signal 'wrong-type-argument (list 'floatp x)))
+    (float (floor x))))
+(unless (fboundp 'fceiling)
+  (defun fceiling (x)
+    (unless (floatp x) (signal 'wrong-type-argument (list 'floatp x)))
+    (float (ceiling x))))
+(unless (fboundp 'ftruncate)
+  (defun ftruncate (x)
+    (unless (floatp x) (signal 'wrong-type-argument (list 'floatp x)))
+    (float (truncate x))))
+(unless (fboundp 'fround)
+  (defun fround (x)
+    (unless (floatp x) (signal 'wrong-type-argument (list 'floatp x)))
+    (float (floor (+ x 0.5)))))
 (unless (fboundp 'cl-floor) (defun cl-floor (x &optional y) (let* ((d (or y 1)) (q (floor x d))) (list q (- x (* q d))))))
 (unless (fboundp 'cl-ceiling) (defun cl-ceiling (x &optional y) (let* ((d (or y 1)) (q (ceiling x d))) (list q (- x (* q d))))))
 (unless (fboundp 'cl-truncate) (defun cl-truncate (x &optional y) (let* ((d (or y 1)) (q (truncate x d))) (list q (- x (* q d))))))
@@ -3645,6 +3659,8 @@ bodies (= Stage 4 follow-up).  Indent / edebug specs come back when
 (unless (fboundp 'remq)
   (defun remq (elt list)
     "Return a copy of LIST with all `eq' occurrences of ELT removed."
+  (unless (listp list) (signal 'wrong-type-argument (list 'listp list)))
+    (unless (listp list) (signal 'wrong-type-argument (list 'listp list)))
     (let ((acc nil))
       (dolist (x list (nreverse acc))
         (unless (eq x elt) (setq acc (cons x acc)))))))
@@ -5524,7 +5540,12 @@ Doc 156: was `(apply #\\='vector ...)', but the reader now exposes a native
 ;; needs no test argument; the marker (car) MUST stay the integer 0 that
 ;; `hash-table-p' keys off, so the requested `:test' cannot be stashed there.
 (unless (fboundp 'hash-table-test)
-  (defun hash-table-test (_table) 'equal))
+  (defun hash-table-test (table)
+    ;; Answering `equal' for a non-table hid the type error AND the fact
+    ;; that the requested test is not recorded (see partial-accepted).
+    (unless (hash-table-p table)
+      (signal 'wrong-type-argument (list 'hash-table-p table)))
+    'equal))
 (unless (fboundp 'copy-hash-table)
   (defun copy-hash-table (table)
     (unless (hash-table-p table)

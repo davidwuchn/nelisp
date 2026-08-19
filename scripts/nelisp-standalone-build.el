@@ -3661,13 +3661,18 @@ argument (reachability + in-arena bounds checks).")
                                     (nl_u8_decode (wf_arg_ptr args 0) 0)))
                           (bf_wrong_type_stringp (wf_arg_ptr args 0))))
     ((:lit "string-to-number") . (wf_write_int out (m5_s2n (wf_arg_ptr args 0))))
-    ((:lit "number-to-string") . (let* ((ms (alloc-bytes 32 8))
+    ((:lit "number-to-string") . (if (if (= (ptr-read-u64 (wf_arg_ptr args 0) 0) 2) 1 (if (= (ptr-read-u64 (wf_arg_ptr args 0) 0) 3) 1 0))
+                            (let* ((ms (alloc-bytes 32 8))
                                         (arg (wf_arg_ptr args 0)))
                                    (seq (mut-str-make-empty ms 16)
                                         (if (= (ptr-read-u64 arg 0) 3)
                                             (m5_push_float ms arg)
                                           (m5_push_dec ms (ptr-read-u64 arg 8)))
-                                        (mut-str-finalize ms out) 0)))
+                                        (mut-str-finalize ms out) 0))
+                          ;; `numberp', not `number-or-marker-p': this
+                          ;; converts a number, it does not do arithmetic
+                          ;; on one, and Emacs names the narrower predicate.
+                          (bf_wrong_type_numberp (wf_arg_ptr args 0))))
     ;; (nelisp--fmt-float FLOAT CONV-CODE PREC) -> string (Doc 159 §4):
     ;; precision-aware %f/%e/%g body for `format'.  FLOAT is a Float Sexp.
     ((:lit "nelisp--fmt-float") . (let* ((ms (alloc-bytes 32 8))
@@ -7578,6 +7583,8 @@ unresolved at link time."
          1)))
     ;; Each of these names a DIFFERENT predicate, and a handler matches on the
     ;; name -- so one generic "bad type" signal would be no better than none.
+    (defun bf_wrong_type_numberp (offender)
+      (bf_wrong_type_named offender 31650977160197486 0 0 7))
     (defun bf_wrong_type_fixnump (offender)
       (bf_wrong_type_named offender 31645548523579750 0 0 7))
     (defun bf_wrong_type_integerp (offender)
@@ -8525,7 +8532,9 @@ Wave-2 (C) appends bf_ash (shl/sar compose) + bf_str_lt (byte-lexicographic).")
                           (bf_wrong_type_symbolp (wf_arg_ptr args 0))))
     ((:lit "fboundp")  . (bf_fboundp args env out))
     ((:lit "boundp")   . (bf_boundp args env out))
-    ((:lit "featurep") . (bf_featurep args env out))
+    ((:lit "featurep") . (if (= (ptr-read-u64 (wf_arg_ptr args 0) 0) 4)
+                            (bf_featurep args env out)
+                          (bf_wrong_type_symbolp (wf_arg_ptr args 0))))
     ((:lit "provide")  . (bf_provide args env out))
     ((:lit "require")  . (bf_require args env out))
     ;; --- symbol ops ---
@@ -8647,7 +8656,9 @@ Wave-2 (C) appends bf_ash (shl/sar compose) + bf_str_lt (byte-lexicographic).")
     ((:lit "logior")  . (if (= (bf_first_non_integer args) 0)
                             (wf_write_int out (wf_logior_fold args 0))
                           (bf_int_arg_error args)))
-    ((:lit "logxor")  . (wf_write_int out (wf_logxor_fold args 0)))
+    ((:lit "logxor")  . (if (= (bf_first_non_integer args) 0)
+                            (wf_write_int out (wf_logxor_fold args 0))
+                          (bf_int_arg_error args)))
     ;; lognot X = -X-1 (two's complement bitwise NOT).
     ((:lit "lognot")  . (wf_write_int out (- (- 0 (wf_argval args 0)) 1)))
     ;; --- Wave-2 (C) string<: byte-lexicographic less-than ---
