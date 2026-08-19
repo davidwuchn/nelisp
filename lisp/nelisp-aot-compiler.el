@@ -3172,6 +3172,43 @@ is structurally not a tail position (Doc 171 sec 6)."
           (setq hit t))))
     hit))
 
+(defun nelisp-aot-compiler--tco-refs-p (form symbol)
+  "Return non-nil when FORM mentions SYMBOL outside a quoted constant.
+Deliberately an over-approximation: a `let\=' inside an argument could
+shadow a parameter, and this counts that as a reference anyway.  Being
+wrong in this direction costs one temporary; being wrong in the other
+loses the value a back-edge was about to read."
+  (cond
+   ((eq form symbol) t)
+   ((not (consp form)) nil)
+   ((memq (car form) '(quote function)) nil)
+   (t (let ((tail form) (hit nil))
+        (while (and (consp tail) (not hit))
+          (setq hit (nelisp-aot-compiler--tco-refs-p (car tail) symbol))
+          (setq tail (cdr tail)))
+        (or hit (and tail (nelisp-aot-compiler--tco-refs-p tail symbol)))))))
+
+(defun nelisp-aot-compiler--tco-temp-needed (params args)
+  "Return the list of PARAMS positions that must go through a temporary.
+Position K needs one exactly when some argument to its right still has
+to read parameter K: assigning it in place would hand that argument the
+next iteration\='s value instead of this one\='s.  An argument reading its
+OWN parameter is fine -- it is evaluated before the assignment lands.
+
+Arguments stay in source order either way.  Reordering them would let
+more positions go direct, and `p-notemp\=' measured 1.068x doing exactly
+that, but Elisp evaluates arguments left to right and a back-edge is
+allowed to call something with a side effect."
+  (let ((needed nil) (ps params) (k 0))
+    (while ps
+      (let ((param (car ps)) (rest (nthcdr (1+ k) args)) (hit nil))
+        (dolist (later rest)
+          (when (nelisp-aot-compiler--tco-refs-p later param)
+            (setq hit t)))
+        (setq needed (cons hit needed)))
+      (setq ps (cdr ps) k (1+ k)))
+    (nreverse needed)))
+
 (defun nelisp-aot-compiler--tco-rewrite-call (call params required cont temps)
   "Rewrite the tail self-call CALL into a loop back-edge form.
 PARAMS is the marker-free parameter list, REQUIRED the required-arg
@@ -3190,20 +3227,31 @@ frame per iteration."
                (<= (length args) (length params)))
       ;; Pad omitted &optional positions with raw 0, matching the
       ;; direct-call pad convention of the call-lowering arm.
-      (let ((full (append args (make-list (- (length params)
-                                             (length args))
-                                          0)))
-            (pairs nil))
-        (let ((ts temps) (as full))
-          (while ts
-            (push (car ts) pairs)
-            (push (car as) pairs)
-            (setq ts (cdr ts) as (cdr as))))
-        (let ((ps params) (ts temps))
+      (let* ((full (append args (make-list (- (length params)
+                                              (length args))
+                                           0)))
+             (needed (nelisp-aot-compiler--tco-temp-needed params full))
+             (pairs nil))
+        ;; Evaluate every argument, in source order, into the parameter
+        ;; itself where that is safe and into its temporary where it is
+        ;; not.  Doc 171 sec 11.1 route 2: the chain was 2n+1 assignments
+        ;; per iteration whether or not the temporaries were load-bearing,
+        ;; and for the G4 sum only one of the two is.  Measured on the
+        ;; native lane in a two-function module -- the same shape as the
+        ;; bench, so code layout is held constant -- at 20 repeats:
+        ;; 5 assignments 0.832/0.942/0.947/0.953 against 4 assignments
+        ;; 0.981/0.992/1.017/1.175.
+        (let ((ps params) (ts temps) (as full) (ns needed))
           (while ps
-            (push (car ps) pairs)
-            (push (car ts) pairs)
-            (setq ps (cdr ps) ts (cdr ts))))
+            (push (if (car ns) (car ts) (car ps)) pairs)
+            (push (car as) pairs)
+            (setq ps (cdr ps) ts (cdr ts) as (cdr as) ns (cdr ns))))
+        (let ((ps params) (ts temps) (ns needed))
+          (while ps
+            (when (car ns)
+              (push (car ps) pairs)
+              (push (car ts) pairs))
+            (setq ps (cdr ps) ts (cdr ts) ns (cdr ns))))
         (push cont pairs)
         (push 1 pairs)
         `(seq (setq ,@(nreverse pairs)) 0)))))
