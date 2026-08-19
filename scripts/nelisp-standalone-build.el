@@ -3534,16 +3534,34 @@ argument (reachability + in-arena bounds checks).")
                         (let* ((sc (alloc-bytes 32 8)))
                           (seq (wf_fprod args (wf_int_fbits 1 sc) sc) (wf_copy32 out sc)))
                       (wf_write_int out (wf_prod args 1))))))
-    ((:u8 "/") . (let* ((f (wf_any_float args)))
+    ;; One argument is the RECIPROCAL, not the number itself: (/ 7) is 0 and
+    ;; (/ 2.0) is 0.5.  Reading a second argument that was not there walked
+    ;; off the end of the argument list and segfaulted -- an abort no
+    ;; `condition-case' could catch, from a one-argument call Emacs answers.
+    ((:u8 "/") . (let* ((f (wf_any_float args))
+                        (rest (nl_cons_cdr_ptr args)))
                     (if (= f 2)
                         (bf_wrong_type_number_or_marker (wf_first_non_number args))
-                      (if (= f 1)
-                        (let* ((sc (alloc-bytes 32 8)))
-                          (seq (wf_fdiv2 args sc) (wf_copy32 out sc)))
-                      (wf_write_int out (/ (wf_argval args 0) (wf_argval args 1)))))))
+                      (if (= (ptr-read-u64 rest 0) 7)
+                          (if (= f 1)
+                              (let* ((sc (alloc-bytes 32 8)))
+                                (seq (wf_fdivtail rest (wf_elem_fbits (nl_cons_car_ptr args) sc) sc)
+                                     (wf_copy32 out sc)))
+                            (if (= (wf_zero_divisor rest) 1)
+                                (bf_arith_error)
+                              (wf_write_int out (wf_quot rest (wf_argval args 0)))))
+                        (if (= f 1)
+                            (let* ((sc (alloc-bytes 32 8)))
+                              (seq (wf_fdivtail args (wf_int_fbits 1 sc) sc)
+                                   (wf_copy32 out sc)))
+                          (if (= (wf_argval args 0) 0)
+                              (bf_arith_error)
+                            (wf_write_int out (/ 1 (wf_argval args 0)))))))))
     ((:u8 "mod") . (let* ((bad (wf_first_non_number args)))
                     (if (= bad 0)
-                        (wf_write_int out (mod (wf_argval args 0) (wf_argval args 1)))
+                        (if (= (wf_argval args 1) 0)
+                            (bf_arith_error)
+                          (wf_write_int out (mod (wf_argval args 0) (wf_argval args 1))))
                       (bf_wrong_type_number_or_marker bad))))
     ;; `%' = C-style integer remainder (sign of dividend): x - y*trunc(x/y).
     ;; Dialect `/' is truncating i64 division, so this matches Emacs `%'.
@@ -3553,7 +3571,9 @@ argument (reachability + in-arena bounds checks).")
     ((:u8 "%") . (let* ((bad (bf_first_non_integer args)))
                     (if (= bad 0)
                         (let* ((a (wf_argval args 0)) (b (wf_argval args 1)))
-                      (wf_write_int out (- a (* b (/ a b)))))
+                          (if (= b 0)
+                              (bf_arith_error)
+                            (wf_write_int out (- a (* b (/ a b))))))
                       (bf_wrong_type_int_or_marker bad))))
     ;; `/=' = 2-arg numeric not-equal (int/float via wf_num_eq).
     ((:u8 "/=") . (let* ((r (wf_chain_eq args)))
@@ -3622,22 +3642,51 @@ argument (reachability + in-arena bounds checks).")
     ;; answering nil -- which is also the answer for "not a member".
     ((:lit "memq")   . (let* ((l (wf_arg_ptr args 1)) (tg (ptr-read-u64 l 0)))
                          (if (if (= tg 0) 1 (if (= tg 7) 1 0))
-                             (wf_memq args out)
+                             (seq (wf_memq args out)
+                                  (if (= (ptr-read-u64 out 0) 0)
+                                      (if (= (bf_proper_list_raw l) 0)
+                                          (bf_wrong_type_listp l)
+                                        0)
+                                    0))
                            (bf_wrong_type_listp l))))
     ((:lit "member") . (if (if (= (ptr-read-u64 (wf_arg_ptr args 1) 0) 0) 1 (if (= (ptr-read-u64 (wf_arg_ptr args 1) 0) 7) 1 0))
-                            (wf_member args out)
+                            (seq (wf_member args out)
+                                 (if (= (ptr-read-u64 out 0) 0)
+                                     (if (= (bf_proper_list_raw (wf_arg_ptr args 1)) 0)
+                                         (bf_wrong_type_listp (wf_arg_ptr args 1))
+                                       0)
+                                   0))
                           (bf_wrong_type_listp (wf_arg_ptr args 1))))
     ((:lit "assq")   . (if (if (= (ptr-read-u64 (wf_arg_ptr args 1) 0) 0) 1 (if (= (ptr-read-u64 (wf_arg_ptr args 1) 0) 7) 1 0))
-                            (wf_assq args out)
+                            (seq (wf_assq args out)
+                                 (if (= (ptr-read-u64 out 0) 0)
+                                     (if (= (bf_proper_list_raw (wf_arg_ptr args 1)) 0)
+                                         (bf_wrong_type_listp (wf_arg_ptr args 1))
+                                       0)
+                                   0))
                           (bf_wrong_type_listp (wf_arg_ptr args 1))))
     ((:lit "assoc")  . (if (if (= (ptr-read-u64 (wf_arg_ptr args 1) 0) 0) 1 (if (= (ptr-read-u64 (wf_arg_ptr args 1) 0) 7) 1 0))
-                            (wf_assoc args out)
+                            (seq (wf_assoc args out)
+                                 (if (= (ptr-read-u64 out 0) 0)
+                                     (if (= (bf_proper_list_raw (wf_arg_ptr args 1)) 0)
+                                         (bf_wrong_type_listp (wf_arg_ptr args 1))
+                                       0)
+                                   0))
                           (bf_wrong_type_listp (wf_arg_ptr args 1))))
     ((:lit "rassoc") . (if (if (= (ptr-read-u64 (wf_arg_ptr args 1) 0) 0) 1 (if (= (ptr-read-u64 (wf_arg_ptr args 1) 0) 7) 1 0))
-                            (wf_rassoc args out)
+                            (seq (wf_rassoc args out)
+                                 (if (= (ptr-read-u64 out 0) 0)
+                                     (if (= (bf_proper_list_raw (wf_arg_ptr args 1)) 0)
+                                         (bf_wrong_type_listp (wf_arg_ptr args 1))
+                                       0)
+                                   0))
                           (bf_wrong_type_listp (wf_arg_ptr args 1))))
     ;; --- M4 hash tables (cons-alist v1) ---
+    ;; The raw constructor, under a private name so the prelude can wrap it
+    ;; with Emacs's argument-list validation and still reach the native
+    ;; representation.  `make-hash-table' itself is the prelude's defun.
     ((:lit "make-hash-table")  . (nl_ht_make out))
+    ((:lit "nelisp--hash-table-make-raw") . (nl_ht_make out))
     ((:lit "puthash")          . (seq (wf_dirty) (nl_ht_put args out)))
     ((:lit "gethash")          . (if (= (bf_hash_table_p_raw (wf_arg_ptr args 1)) 1)
                             (nl_ht_get args out)
@@ -3697,7 +3746,9 @@ argument (reachability + in-arena bounds checks).")
                                         (nl_u8_encode ms (ptr-read-u64 (wf_arg_ptr args 0) 8))
                                         (mut-str-finalize ms out) 0))
                           (bf_wrong_type_characterp (wf_arg_ptr args 0))))
-    ((:lit "make-string")      . (if (if (= (ptr-read-u64 (wf_arg_ptr args 1) 0) 2)
+    ((:lit "make-string")      . (if (if (= (ptr-read-u64 (wf_arg_ptr args 0) 0) 2)
+                                        (if (< (ptr-read-u64 (wf_arg_ptr args 0) 8) 0) 0 1) 0)
+                              (if (if (= (ptr-read-u64 (wf_arg_ptr args 1) 0) 2)
                                    (if (< (ptr-read-u64 (wf_arg_ptr args 1) 8) 0) 0 1) 0)
                               (let* ((ms (alloc-bytes 32 8)))
                                    (seq (mut-str-make-empty ms 16)
@@ -3705,19 +3756,27 @@ argument (reachability + in-arena bounds checks).")
                                         (nl_u8_repeat ms (ptr-read-u64 (wf_arg_ptr args 0) 8)
                                                       (ptr-read-u64 (wf_arg_ptr args 1) 8))
                                         (mut-str-finalize ms out) 0))
-                            (bf_wrong_type_characterp (wf_arg_ptr args 1))))
+                            (bf_wrong_type_characterp (wf_arg_ptr args 1)))
+                          (bf_wrong_type_named (wf_arg_ptr args 0) 7887331704299284599 112 0 9)))
     ((:lit "concat")           . (let* ((bad (m5_concat_first_bad args)))
                                    (if (= bad 0)
-                                       (let* ((ms (alloc-bytes 32 8)))
-                                         (seq (mut-str-make-empty ms 16)
-                                              (m5_concat_walk ms args)
-                                              (mut-str-finalize ms out) 0))
+                                       (let* ((bt (m5_concat_bad_tail args)))
+                                         (if (= bt 0)
+                                             (let* ((ms (alloc-bytes 32 8)))
+                                               (seq (mut-str-make-empty ms 16)
+                                                    (m5_concat_walk ms args)
+                                                    (mut-str-finalize ms out) 0))
+                                           (bf_wrong_type_listp bt)))
                                      (bf_wrong_type_sequencep bad))))
     ;; An out-of-range FROM/TO was clamped by the byte walk and came back as a
     ;; shorter slice: (substring "abc" 0 9) answered "abc" and
     ;; (substring "abc" 2 1) answered "".  Emacs signals both, and a caller
     ;; slicing with a computed index had no way to learn the index was wrong.
-    ((:lit "substring")        . (if (= (ptr-read-u64 (wf_arg_ptr args 1) 0) 2)
+    ;; (substring '(1) 32 'foo) named the INDEX as out of range.  Emacs looks
+    ;; at the sequence first: a list is not an array, whatever the indices say.
+    ((:lit "substring")        . (if (= (bf_arrayp_raw (wf_arg_ptr args 0)) 0)
+                            (bf_wrong_type_named (wf_arg_ptr args 0) 123666628244065 0 0 6)
+                          (if (= (ptr-read-u64 (wf_arg_ptr args 1) 0) 2)
                             (let* ((ms (alloc-bytes 32 8))
                                         (s (wf_arg_ptr args 0))
                                         (nb (str-len s))
@@ -3750,7 +3809,7 @@ argument (reachability + in-arena bounds checks).")
                                             (nl_u8_cidx_byte s 0 nb 0 cf)
                                             (nl_u8_cidx_byte s 0 nb 0 ct))
                                           (mut-str-finalize ms out) 0))))
-                          (bf_wrong_type_integerp (wf_arg_ptr args 1))))
+                          (bf_wrong_type_integerp (wf_arg_ptr args 1)))))
     ((:lit "format")           . (let* ((ms (alloc-bytes 32 8))
                                         (fmt (wf_arg_ptr args 0)))
                                    (seq (mut-str-make-empty ms 32)
@@ -5368,6 +5427,28 @@ unresolved at link time."
       (if (= (ptr-read-u64 list_ptr 0) 7)
           (let* ((car_ptr (nl_cons_car_ptr list_ptr)) (v (ptr-read-u64 car_ptr 8)))
             (wf_prod (nl_cons_cdr_ptr list_ptr) (* acc v))) acc))
+    ;; `/' folds over EVERY divisor: (/ 100 5 2) is 10, and reading only the
+    ;; first two arguments answered 20 -- a wrong number, silently.  Integer
+    ;; division by zero traps in hardware, so the divisors are scanned for a
+    ;; zero before any of them is used.
+    (defun wf_quot (list_ptr acc)
+      (if (= (ptr-read-u64 list_ptr 0) 7)
+          (wf_quot (nl_cons_cdr_ptr list_ptr)
+                   (/ acc (ptr-read-u64 (nl_cons_car_ptr list_ptr) 8)))
+        acc))
+    (defun wf_zero_divisor (list_ptr)
+      (if (= (ptr-read-u64 list_ptr 0) 7)
+          (if (= (ptr-read-u64 (nl_cons_car_ptr list_ptr) 8) 0)
+              1
+            (wf_zero_divisor (nl_cons_cdr_ptr list_ptr)))
+        0))
+    (defun wf_fdivtail (list_ptr acc_bits scratch)
+      (if (= (ptr-read-u64 list_ptr 0) 7)
+          (let* ((vb (wf_elem_fbits (nl_cons_car_ptr list_ptr) scratch)))
+            (let* ((result-bits (f64-bits (f64-div (bits-to-f64 acc_bits) (bits-to-f64 vb)))))
+              (seq (sexp-write-float scratch (bits-to-f64 result-bits))
+                   (wf_fdivtail (nl_cons_cdr_ptr list_ptr) (ptr-read-u64 scratch 8) scratch))))
+        acc_bits))
     (defun wf_subtail (list_ptr acc)
       (if (= (ptr-read-u64 list_ptr 0) 7)
           (let* ((car_ptr (nl_cons_car_ptr list_ptr)) (v (ptr-read-u64 car_ptr 8)))
@@ -6952,6 +7033,26 @@ unresolved at link time."
                 (m5_concat_first_bad (nl_cons_cdr_ptr cur))
               a))
         0))
+    ;; A cons argument to `concat' is a list of characters, and running off
+    ;; the end of an improper one is an error naming the TAIL: Emacs answers
+    ;; (wrong-type-argument listp 2) for (concat "x" '(1 . 2)).  Silently
+    ;; stopping at the tail produced a SHORTER STRING with no complaint, and
+    ;; `string-trim-left'/`-right' build their regexp with `concat', so the
+    ;; missing check showed up there as a trim that quietly did nothing.
+    (defun m5_improper_tail (p)
+      (if (= (ptr-read-u64 p 0) 7)
+          (m5_improper_tail (nl_cons_cdr_ptr p))
+        (if (= (ptr-read-u64 p 0) 0) 0 p)))
+    (defun m5_concat_bad_tail (cur)
+      (if (= (ptr-read-u64 cur 0) 7)
+          (let* ((a (nl_cons_car_ptr cur)))
+            (if (= (ptr-read-u64 a 0) 7)
+                (let* ((t0 (m5_improper_tail a)))
+                  (if (= t0 0)
+                      (m5_concat_bad_tail (nl_cons_cdr_ptr cur))
+                    t0))
+              (m5_concat_bad_tail (nl_cons_cdr_ptr cur))))
+        0))
     (defun m5_concat_one (ms carp)
       (let* ((tg (ptr-read-u64 carp 0)))
         (if (= tg 0) 1
@@ -7340,7 +7441,9 @@ unresolved at link time."
         (if (if (= tg 0) 1 (if (= tg 7) 1 (if (= tg 8) 1 (if (= tg 12) 1 (if (= tg 5) 1 (if (= tg 6) 1 0))))))
             (if (= (ptr-read-u64 (wf_arg_ptr args 1) 0) 2)
                 (bf_elt_checked args out)
-              (bf_wrong_type_fixnump (wf_arg_ptr args 1)))
+              (if (if (= tg 0) 1 (if (= tg 7) 1 0))
+                  (bf_wrong_type_integerp (wf_arg_ptr args 1))
+                (bf_wrong_type_fixnump (wf_arg_ptr args 1))))
           (bf_wrong_type_sequencep seqp))))
     (defun bf_elt_checked (args out)
       (let* ((seqp (wf_arg_ptr args 0))
@@ -7587,6 +7690,19 @@ unresolved at link time."
          1)))
     ;; Each of these names a DIFFERENT predicate, and a handler matches on the
     ;; name -- so one generic "bad type" signal would be no better than none.
+    ;; (/ 1 0) and (% 1 0) trapped in hardware -- SIGFPE, no signal stash, so
+    ;; no handler could see it.  Emacs signals `arith-error' with no data.
+    (defun bf_arith_error ()
+      (let* ((sbuf (alloc-bytes 24 1)))
+        (seq
+         (ptr-write-u64 sbuf 0 8243044619624477281)
+         (ptr-write-u64 (+ sbuf 8) 0 7499634)
+         (ptr-write-u64 (+ sbuf 16) 0 0)
+         (nl_alloc_symbol sbuf 11 268435480)
+         (wf_write_nil 268435512)
+         (ptr-write-u64 268435472 0 1)
+         (atomic-fetch-add 268435544 1)
+         1)))
     (defun bf_wrong_type_numberp (offender)
       (bf_wrong_type_named offender 31650977160197486 0 0 7))
     (defun bf_wrong_type_fixnump (offender)
@@ -7614,14 +7730,20 @@ unresolved at link time."
     ;; Reasoning from "which check fails first" gives the wrong predicate
     ;; for argument one; only running it says so.  An earlier version of
     ;; this helper called ITSELF on that branch and looped.
+    ;; Compared by POSITION, not by pointer identity: `nl_cons_car_ptr' does
+    ;; not hand back the same address twice for every element, so
+    ;; (logand nil 0.0) took the second-argument branch and named
+    ;; `number-or-marker-p' where Emacs names `integer-or-marker-p'.
+    ;; (logand "x" 1) happened to work, which is why one measurement was
+    ;; not enough to see this.
     (defun bf_int_arg_error (args)
-      (let* ((bad (bf_first_non_integer args)))
-        (if (= bad (nl_cons_car_ptr args))
-            (bf_wrong_type_int_or_marker bad)
-          (let* ((nn (wf_first_non_number args)))
+      (if (= (ptr-read-u64 (nl_cons_car_ptr args) 0) 2)
+          (let* ((bad (bf_first_non_integer args))
+                 (nn (wf_first_non_number args)))
             (if (= nn 0)
                 (bf_wrong_type_int_or_marker bad)
-              (bf_wrong_type_number_or_marker nn))))))
+              (bf_wrong_type_number_or_marker nn)))
+        (bf_wrong_type_int_or_marker (nl_cons_car_ptr args))))
     (defun bf_wrong_type_symbolp (offender)
       (let* ((wbuf (alloc-bytes 24 1))
              (cbuf (alloc-bytes 8 1))
@@ -7672,6 +7794,28 @@ unresolved at link time."
       (if (= (ptr-read-u64 h 0) 7)
           (if (= (ptr-read-u64 (nl_cons_car_ptr h) 0) 2) 1 0)
         0))
+    ;; `string<' accepts a string OR a symbol (nil and t included, they carry
+    ;; their own tags).  A vector is neither, and comparing one read whatever
+    ;; sat at offset 8 as if it were text: (string< t ["a"]) answered t, so an
+    ;; ordering built on it was silently wrong rather than an error.
+    (defun bf_strsym_raw (p)
+      (let* ((tg (ptr-read-u64 p 0)))
+        (if (= tg 5) 1 (if (= tg 6) 1 (if (= tg 4) 1
+          (if (= tg 0) 1 (if (= tg 1) 1 0)))))))
+    ;; A list search that runs off the end of an IMPROPER list is an error in
+    ;; Emacs, naming the WHOLE list: (memq 9 '(1 2 . 3)) signals, it does not
+    ;; answer nil.  Answering nil said "not present" about a list that could
+    ;; not be searched.
+    (defun bf_proper_list_raw (p)
+      (if (= (ptr-read-u64 p 0) 0)
+          1
+        (if (= (ptr-read-u64 p 0) 7)
+            (bf_proper_list_raw (nl_cons_cdr_ptr p))
+          0)))
+    ;; String (5), MutStr (6), Vector (8): what `arrayp' accepts here.
+    (defun bf_arrayp_raw (p)
+      (let* ((tg (ptr-read-u64 p 0)))
+        (if (= tg 5) 1 (if (= tg 6) 1 (if (= tg 8) 1 0)))))
     (defun bf_wrong_type_hash_table (offender)
       (let* ((wbuf (alloc-bytes 24 1))
              (cbuf (alloc-bytes 16 1))
@@ -8531,8 +8675,10 @@ Wave-2 (C) appends bf_ash (shl/sar compose) + bf_str_lt (byte-lexicographic).")
                                      (wf_write_t out) (wf_write_nil out))
                                (bf_wrong_type_number_or_marker p)))))
     ((:lit "set")      . (bf_set args env out))
-    ((:lit "symbol-value") . (if (= (ptr-read-u64 (wf_arg_ptr args 0) 0) 4)
-                            (bf_symbol_value args env out)
+    ((:lit "symbol-value") . (if (if (= (ptr-read-u64 (wf_arg_ptr args 0) 0) 4) 1
+                                   (if (= (ptr-read-u64 (wf_arg_ptr args 0) 0) 0) 2
+                                     (if (= (ptr-read-u64 (wf_arg_ptr args 0) 0) 1) 2 0)))
+                            (if (= (ptr-read-u64 (wf_arg_ptr args 0) 0) 4) (bf_symbol_value args env out) (seq (wf_copy32 out (wf_arg_ptr args 0)) 0))
                           (bf_wrong_type_symbolp (wf_arg_ptr args 0))))
     ((:lit "fboundp")  . (bf_fboundp args env out))
     ((:lit "boundp")   . (bf_boundp args env out))
@@ -8654,7 +8800,9 @@ Wave-2 (C) appends bf_ash (shl/sar compose) + bf_str_lt (byte-lexicographic).")
                                               (ptr-read-u64 buf 8))))))
     ;; --- Wave-2 (C) bitwise / shift (2-arg forms; n-ary folds in prelude) ---
     ((:lit "ash")     . (if (= (ptr-read-u64 (wf_arg_ptr args 0) 0) 2)
-                            (wf_write_int out (bf_ash (wf_argval args 0) (wf_argval args 1)))
+                            (if (= (ptr-read-u64 (wf_arg_ptr args 1) 0) 2)
+                                (wf_write_int out (bf_ash (wf_argval args 0) (wf_argval args 1)))
+                              (bf_wrong_type_integerp (wf_arg_ptr args 1)))
                           (bf_wrong_type_integerp (wf_arg_ptr args 0))))
     ((:lit "logand")  . (if (= (bf_first_non_integer args) 0)
                             (wf_write_int out (wf_logand_fold args (- 0 1)))
@@ -8666,10 +8814,16 @@ Wave-2 (C) appends bf_ash (shl/sar compose) + bf_str_lt (byte-lexicographic).")
                             (wf_write_int out (wf_logxor_fold args 0))
                           (bf_int_arg_error args)))
     ;; lognot X = -X-1 (two's complement bitwise NOT).
-    ((:lit "lognot")  . (wf_write_int out (- (- 0 (wf_argval args 0)) 1)))
+    ((:lit "lognot")  . (if (= (ptr-read-u64 (wf_arg_ptr args 0) 0) 2)
+                            (wf_write_int out (- (- 0 (wf_argval args 0)) 1))
+                          (bf_wrong_type_integerp (wf_arg_ptr args 0))))
     ;; --- Wave-2 (C) string<: byte-lexicographic less-than ---
-    ((:lit "string<") . (if (= (bf_str_lt (wf_arg_ptr args 0) (wf_arg_ptr args 1)) 1)
-                            (wf_write_t out) (wf_write_nil out)))
+    ((:lit "string<") . (if (= (bf_strsym_raw (wf_arg_ptr args 0)) 0)
+                            (bf_wrong_type_stringp (wf_arg_ptr args 0))
+                          (if (= (bf_strsym_raw (wf_arg_ptr args 1)) 0)
+                              (bf_wrong_type_stringp (wf_arg_ptr args 1))
+                            (if (= (bf_str_lt (wf_arg_ptr args 0) (wf_arg_ptr args 1)) 1)
+                                (wf_write_t out) (wf_write_nil out)))))
     ;; --- §S4 low-level thread / atomic / memory primitives (interpreter
     ;; dispatch).  These let INTERPRETED driver code spawn clone(2) threads,
     ;; do SeqCst atomics, raw memory access, and arena allocation — the
@@ -12254,6 +12408,7 @@ value (matches the binary's M8 read+eval-loop driver)."
     "nelisp--env-globals-op"
     ;; M4 hash tables
     "make-hash-table" "puthash" "gethash" "remhash" "hash-table-count" "maphash"
+    "nelisp--hash-table-make-raw"
     ;; List search hot paths
     "memq" "member" "assq" "assoc" "rassoc"
     ;; M5 strings + format
@@ -12390,10 +12545,14 @@ and the `string-match' family aliases over it."
                        nelisp-standalone--repo-root))
     (goto-char (point-max))
     (insert "\n(defun string-match (re s &optional start)\n"
+            "  (when start (unless (integerp start)\n"
+            "    (signal 'wrong-type-argument (list 'fixnump start))))\n"
             "  (if (and (stringp re) (stringp s))\n"
             "      (nlre-string-match re s start)\n"
             "    (signal 'wrong-type-argument (list 'stringp (if (stringp re) s re)))))\n"
             "(defun string-match-p (re s &optional start)\n"
+            "  (when start (unless (integerp start)\n"
+            "    (signal 'wrong-type-argument (list 'fixnump start))))\n"
             "  (if (and (stringp re) (stringp s))\n"
             "      (nlre-string-match re s start)\n"
             "    (signal 'wrong-type-argument (list 'stringp (if (stringp re) s re)))))\n"
@@ -12445,7 +12604,7 @@ and the `string-match' family aliases over it."
             ;; expansion and a caller passing SUBEXP had the whole match
             ;; replaced.  The engine takes all three now.
             "(defun replace-regexp-in-string (re rep s &optional fc lit subexp start)\n"
-            "  (nlre-replace-regexp-in-string re rep s lit subexp start))\n"
+            "  (nelisp--rris re rep s fc lit subexp start))\n"
             ;; fix/small-primitives-parity: `current-time' derived from the
             ;; already-working `float-time' (a plain IEEE double of epoch
             ;; seconds).  Minimal polyfill: decomposes into the host Emacs
@@ -13122,11 +13281,15 @@ runtime cache does not replay source file loads on every command invocation."
     "lisp/nelisp-stdlib-regexp.el" inline)
    "(unless (fboundp 'string-match)\n"
    "  (defun string-match (re s &optional start)\n"
+   "    (when start (unless (integerp start)\n"
+   "      (signal 'wrong-type-argument (list 'fixnump start))))\n"
    "    (if (and (stringp re) (stringp s))\n"
    "        (nlre-string-match re s start)\n"
    "      (signal 'wrong-type-argument (list 'stringp (if (stringp re) s re))))))\n"
    "(unless (fboundp 'string-match-p)\n"
    "  (defun string-match-p (re s &optional start)\n"
+   "    (when start (unless (integerp start)\n"
+   "      (signal 'wrong-type-argument (list 'fixnump start))))\n"
    "    (if (and (stringp re) (stringp s))\n"
    "        (nlre-string-match re s start)\n"
    "      (signal 'wrong-type-argument (list 'stringp (if (stringp re) s re))))))\n"
@@ -13719,11 +13882,15 @@ artifact before wiring that artifact into the marker command path."
       "lisp/nelisp-stdlib-regexp.el" t)
      "(unless (fboundp 'string-match)\n"
      "  (defun string-match (re s &optional start)\n"
+     "    (when start (unless (integerp start)\n"
+     "      (signal 'wrong-type-argument (list 'fixnump start))))\n"
      "    (if (and (stringp re) (stringp s))\n"
      "        (nlre-string-match re s start)\n"
      "      (signal 'wrong-type-argument (list 'stringp (if (stringp re) s re))))))\n"
      "(unless (fboundp 'string-match-p)\n"
      "  (defun string-match-p (re s &optional start)\n"
+     "    (when start (unless (integerp start)\n"
+     "      (signal 'wrong-type-argument (list 'fixnump start))))\n"
      "    (if (and (stringp re) (stringp s))\n"
      "        (nlre-string-match re s start)\n"
      "      (signal 'wrong-type-argument (list 'stringp (if (stringp re) s re))))))\n"
@@ -16689,15 +16856,22 @@ This swaps `nl_bf_bind_rest' for the rc/lifetime-safe version and makes
                         (nelisp_mirror_set_function_or_insert mirror_ptr sym_ptr scratch_slot 0)
                         (nl_sexp_clone_into def_ptr out)
                         0))
-                   ;; FINDINGS.md recommendation 1(a): resolve_rc != 0 here only
-                   ;; when DEF_PTR is a Symbol whose `nelisp_env_lookup_function'
-                   ;; lookup missed (the non-symbol arm above always forces 0) --
-                   ;; i.e. `(fset 'alias 'undefined-target)'.  The shipped/M3
-                   ;; handler returned this bare rc with nothing in the M6 stash,
-                   ;; the same flagless-abort class `nl_apply_do_funcall'/
-                   ;; `nl_apply_do_apply' had.  Stash `void-function' naming the
-                   ;; unresolved target instead.
-                   (nl_cons_stash_void_function env def_ptr))))))
+                   ;; RESOLVE_RC != 0 here only when DEF_PTR is a Symbol whose
+                   ;; `nelisp_env_lookup_function' lookup missed (the non-symbol
+                   ;; arm above always forces 0) -- i.e. `(fset 'alias 'target)'
+                   ;; where TARGET is not defined YET.  Emacs stores the symbol
+                   ;; and resolves it at call time, so this is not an error at
+                   ;; all: (fset 'zz 'later) then (defun later ...) then (zz)
+                   ;; works there, and signalling here made `defalias' fail on
+                   ;; every forward reference.  Store the symbol; the call-time
+                   ;; arm in `nl_apply_function' follows it.
+                   (let* ((sym_scratch (alloc-bytes 32 8)))
+                     (seq
+                      (nl_sexp_clone_into def_ptr resolved_slot)
+                      (nl_apply_build_fn_scratch unbound_ptr resolved_slot sym_scratch)
+                      (nelisp_mirror_set_function_or_insert mirror_ptr sym_ptr sym_scratch 0)
+                      (nl_sexp_clone_into def_ptr out)
+                      0)))))))
            (nl_apply_stash_wrong_symbolp env sym_ptr)))))
   "Rc-correct, `not'-free replacement for the shipped nl_apply_do_fset.")
 

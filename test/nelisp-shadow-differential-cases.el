@@ -864,6 +864,91 @@
        (condition-case e (seq-concatenate "x") (error e))
        (condition-case e (string-trim-left '(1 2 3) '(1 . 2)) (error e))
        (condition-case e (string-trim-right 7 2) (error e)))
+
+ ;; Arithmetic that walked off the end of its own argument list.  (/ 7) is
+ ;; the RECIPROCAL, and reading a second argument that was not there
+ ;; segfaulted -- an abort no `condition-case' could see, from a call Emacs
+ ;; answers.  `/' also folds over EVERY divisor, and integer division by
+ ;; zero traps in hardware unless it is checked first.
+ (list (/ 7) (/ 2.0) (/ 100 5 2) (/ 100.0 5 2) (/ 1.0 0)
+       (condition-case e (/ 1 0) (error e))
+       (condition-case e (% 1 0) (error e))
+       (condition-case e (mod 1 0) (error e))
+       (symbol-value nil) (symbol-value t)
+       (condition-case e (lognot "x") (error e))
+       (condition-case e (logand nil 0.0) (error e))
+       (condition-case e (logand 1 nil) (error e))
+       (condition-case e (logand "x" 1) (error e))
+       (condition-case e (ash 97 0.0) (error e)))
+
+ ;; Predicate selection measured one function at a time: `sequencep' for a
+ ;; non-sequence, `listp' for the tail an improper list stops on, and
+ ;; `integerp' vs `fixnump' by what the sequence turned out to be.
+ (list (condition-case e (string< t ["a"]) (error e))
+       (condition-case e (string< 1 "a") (error e))
+       (string< 'abc "abd") (string> "b" "a")
+       (condition-case e (seq-elt "ab" t) (error e))
+       (condition-case e (seq-elt '("a") 1.5) (error e))
+       (condition-case e (seq-elt '(1 2 . 3) 5) (error e))
+       (condition-case e (seq-count 'identity '(1 2 . 3)) (error e))
+       (condition-case e (seq-map 'identity '(1 . 2)) (error e))
+       (condition-case e (seq-map 'identity 1) (error e))
+       (condition-case e (elt '(1 2) 1.5) (error e))
+       (condition-case e (elt [1 2] 1.5) (error e))
+       (condition-case e (memq 9 '(1 2 . 3)) (error e))
+       (condition-case e (assoc "" '(1 . 2)) (error e))
+       (condition-case e (nth 7 '(1 . 2)) (error e))
+       (condition-case e (nthcdr 5 '(1 2 . 3)) (error e))
+       (nthcdr 1 '(1 . 2)) (nthcdr 3 '(1 2 3 . 4)))
+
+ ;; `seq-take'/`seq-drop' preserve the sequence type, check N before SEQ,
+ ;; and carry the arity of the generic they are.
+ (list (seq-take "abcd" 2) (seq-take [1 2 3] 2) (seq-take '(1 2 3) 2)
+       (seq-take "a" -1) (seq-drop "abcd" 2) (seq-drop [1 2 3] 1)
+       (seq-drop "abc" -1) (seq-subseq "abcd" 1 3) (seq-subseq [1 2 3] 1)
+       (condition-case e (seq-take 12354 '(1 2 3)) (error e))
+       (condition-case e (seq-take 12354 5) (error e))
+       (condition-case e (seq-take "ab" 1.5) (error e))
+       (condition-case e (seq-take 48) (error e))
+       (condition-case e (seq-drop 12354) (error e))
+       (condition-case e (seq-reverse 'foo -7) (error e))
+       (condition-case e (seq-subseq 5 1) (error e)))
+
+ ;; The rest of one afternoon's measurements: each of these answered
+ ;; something plausible before.
+ (list (condition-case e (make-hash-table nil '(1 2 . 3)) (error e))
+       (condition-case e (make-hash-table :bogus 1) (error e))
+       (condition-case e (make-hash-table :size) (error e))
+       (condition-case e (make-hash-table :test 'nosuch) (error e))
+       (condition-case e (defalias :key 'no-such-target-fn) (error e))
+       (condition-case e (write-char '(1 2 . 3) t) (error e))
+       (condition-case e (substring '(1) 32 'foo) (error e))
+       (condition-case e (string-match-p "x" "a" 1.5) (error e))
+       (condition-case e (macroexpand-all '(1 2 . 3) 32) (error e))
+       (macroexpand-all 48 -1.5)
+       (condition-case e (make-string "x" 65) (error e))
+       (condition-case e (make-string 2 "x") (error e))
+       (condition-case e (set t '(1)) (error e))
+       (condition-case e (set :k 1) (error e))
+       (max-char 97) (max-char) (frame-height) (frame-width)
+       (multibyte-string-p "abc") (multibyte-string-p "\303\251")
+       (condition-case e (concat "x" '(1 . 2)) (error e))
+       (condition-case e (string-trim-left "abc" '(1 . 2)) (error e))
+       (plist-member '(1 2 3) 97) (plist-member '(1 2 3) 3)
+       (condition-case e (plist-member '(1 2 . 3) 97) (error e))
+       (condition-case e (plist-member '(1 . 2) 97) (error e))
+       (condition-case e (file-attribute-size '(1 . 2)) (error e))
+       (condition-case e (byte-compile-file 7 "x") (error e))
+       (condition-case e (byte-compile-file 'foo) (error e))
+       (condition-case e (string-replace "" "a" "b") (error e))
+       (sqrt 4) (sqrt 0)
+       (funcall (apply-partially '+ 1 2) 3)
+       (replace-regexp-in-string "a" "b" "xax")
+       (replace-regexp-in-string nil "b" "")
+       (replace-regexp-in-string "\\([a-z]\\)" "<\\1>" "ab")
+       (replace-regexp-in-string "b" "\\&\\&" "abc")
+       (replace-regexp-in-string "b" "z" "abc" nil t)
+       (condition-case e (replace-regexp-in-string 0 t "ab") (error e)))
 )
 
 ;;; nelisp-shadow-differential-cases.el ends here

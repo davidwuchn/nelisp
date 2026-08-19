@@ -42,7 +42,15 @@
 # add-to-list a C subr, where before it became an elisp shim.
 # nelisp--cli-batch-ensure-host, which loads that file, already gated its own
 # fallback stub this way.
-shared-shadowing 248
+# 248 -> 249 on 2026-08-20: `make-hash-table' is now an unconditional
+# `defun' in scripts/nelisp-stdlib-prelude.el, ON PURPOSE.  The name is a
+# native builtin in the standalone, so `(unless (fboundp ...))' never fires
+# for it and the argument-list validation Emacs performs -- unknown keyword,
+# odd length, bad :test/:size/:weakness -- had nowhere to live.  The
+# shadowing defun does the checks and calls the raw constructor underneath.
+# This is the one shape where shadowing is the fix rather than the bug: the
+# gate's usual advice (wrap it in fboundp) would restore the silence.
+shared-shadowing 249
 
 # 2026-08-19, reviewing the 245 rather than counting them.  The table now
 # carries the defining file, which is half of what makes a class actionable:

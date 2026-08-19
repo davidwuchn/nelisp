@@ -169,7 +169,16 @@ ns-collision 178
 # 100 -> 99 on 2026-08-20: `set-buffer-multibyte' stopped differing -- both
 # copies answer FLAG now instead of one of them ignoring it.  Ratcheted down
 # rather than left, since the gate offered.
-ns-collision-divergent 99
+# 99 -> 107 on 2026-08-20: eight prelude copies were repaired against
+# measured Emacs behaviour while their lisp/ mirrors were left alone --
+# byte-compile-file, make-hash-table, mapconcat, multibyte-string-p, nthcdr,
+# plist-member, string-as-multibyte, string-to-number.  Each is a
+# two-substrate divergence with its own note in scripts/nl-ns-accepted.el
+# (the standalone has a raw hash-table constructor and no byte compiler; the
+# check helpers the repairs use are prelude-only).  Raised rather than
+# synced, because syncing would move code that the hosted modules cannot
+# call into files that do not load the prelude.
+ns-collision-divergent 107
 # 850 -> 851 on 2026-08-19: `nl-check-file-quoted-unsafe', the entry point
 # that reports the unsafe calls inside quoted forms.  Same situation as the
 # nl-ns pair above -- it is public because tools/nl-check-inventory.el calls
