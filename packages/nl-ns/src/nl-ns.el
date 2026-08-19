@@ -1253,20 +1253,46 @@ reordering of the scan and changes only when the finding itself does."
 
 (defun nl-ns-load-accepted (path)
   "Read the accepted-divergence file at PATH.
-Return a plist with `:generated-at', `:reason' and `:keys' (a hash
-table of key -> t).  A missing file yields an empty set rather than an
-error: a tree that has not adopted the ratchet still reports normally."
+Return a plist with `:generated-at\=', `:reason\=', `:keys\=' (a hash table of
+key -> t) and `:notes\=' (an alist of key -> reason string).  A missing file
+yields an empty set rather than an error: a tree that has not adopted the
+ratchet still reports normally.  A file with no `:notes\=' loads as before --
+per-entry notes are additive.
+
+Why per-entry notes exist.  The file-level `:reason\=' says one thing about
+every entry, and on 2026-08-19 that one thing was \"package-local fallbacks
+are fboundp-gated on purpose\" -- true of a fallback that DEFERS correctly,
+and the justification under which two fallbacks that answered WRONGLY sat
+unnoticed (`nelisp-sys-access\=' ignored its mode argument while every caller
+passed 1).  A blanket reason cannot distinguish those two, so it stops being
+a reason and becomes a place to put things."
   (let ((keys (make-hash-table :test 'equal))
         (generated nil)
-        (reason nil))
+        (reason nil)
+        (notes nil))
     (when (and (stringp path) (file-readable-p path))
       (let ((entry (car (nl-ns-read-file path))))
         (when (consp entry)
           (setq generated (plist-get entry :generated-at))
           (setq reason (plist-get entry :reason))
+          (setq notes (plist-get entry :notes))
           (dolist (key (plist-get entry :keys))
             (puthash key t keys)))))
-    (list :generated-at generated :reason reason :keys keys)))
+    (list :generated-at generated :reason reason :keys keys :notes notes)))
+
+(defun nl-ns-accepted-note (accepted key)
+  "Return the per-entry note recorded for KEY in ACCEPTED, or nil."
+  (cdr (assoc key (plist-get accepted :notes))))
+
+(defun nl-ns-unnoted-accepted (accepted)
+  "Return the accepted keys that carry no per-entry note, sorted.
+An acceptance without a reason is a decision nobody wrote down."
+  (let ((notes (plist-get accepted :notes))
+        (out nil))
+    (maphash (lambda (key _v)
+               (unless (assoc key notes) (setq out (cons key out))))
+             (plist-get accepted :keys))
+    (sort out #'string<)))
 
 (defun nl-ns-unaccepted (findings accepted)
   "Return the FINDINGS whose key is absent from ACCEPTED.
@@ -1293,20 +1319,39 @@ stops describing the tree."
              (plist-get accepted :keys))
     (sort out #'string<)))
 
-(defun nl-ns-write-accepted (findings path &optional generated-at reason)
+(defun nl-ns-write-accepted (findings path &optional generated-at reason notes)
   "Write FINDINGS as the accepted-divergence set at PATH.
-GENERATED-AT and REASON are recorded verbatim so the file says when it
-was taken and why its contents are considered settled."
-  (let ((keys nil))
+GENERATED-AT and REASON are recorded verbatim so the file says when it was
+taken and why its contents are considered settled.
+
+NOTES is an alist of key -> reason carried over from the file being
+replaced.  Only notes whose key is still present survive; a note for a
+divergence that has since been resolved goes with its key.  Regenerating
+without passing NOTES silently discards every per-entry reason anyone
+wrote, which is why the caller reads the old file first --
+`nelisp-pkg-manifest-render\=' preserves author-written keys the same way and
+for the same reason."
+  (let ((keys nil)
+        (kept nil))
     (dolist (finding findings)
       (setq keys (cons (nl-ns-finding-key finding) keys)))
     (setq keys (sort keys #'string<))
+    (dolist (key keys)
+      (let ((note (cdr (assoc key notes))))
+        (when note (setq kept (cons (cons key note) kept)))))
+    (setq kept (nreverse kept))
     (with-temp-buffer
       (insert ";; nl-ns accepted divergences -- generated, review before commit.\n")
       (insert ";; Regenerate with the make target that produced it; do not\n")
       (insert ";; hand-add keys to silence a finding.\n")
+      (insert ";;\n")
+      (insert ";; :notes is an alist of key -> why THIS entry is accepted, and it\n")
+      (insert ";; survives regeneration.  The file-level :reason cannot tell a\n")
+      (insert ";; fallback that defers correctly from one that answers wrongly;\n")
+      (insert ";; two of the latter sat under it until 2026-08-19.\n")
       (prin1 (list :generated-at generated-at
                    :reason reason
+                   :notes kept
                    :keys keys)
              (current-buffer))
       (insert "\n")

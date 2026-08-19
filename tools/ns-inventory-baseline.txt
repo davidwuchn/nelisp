@@ -28,8 +28,31 @@
 # ns-inventory now runs in CI beside unsafe-inventory.  A drift of 85
 # findings should not have been able to accumulate unnoticed, and from
 # here it cannot.
+#
+# 848 -> 850 on 2026-08-19.  `nl-ns-accepted-note' and
+# `nl-ns-unnoted-accepted' are two new public entry points in
+# packages/nl-ns/src/nl-ns.el, added so the accepted-divergence file can
+# carry a per-entry reason.  All 25 of that file's public functions are
+# counted here, the 23 that predate today included: the check wants
+# `nl-ns--' for every name that is not the feature name itself, so what
+# it measures in practice is public API surface, which is most of what
+# the 848 is.
+#
+# Renaming them was measured rather than assumed, and does not remove the
+# finding -- it moves it:
+#
+#   nl-ns-  (as committed)   prefix-violation 25   private-escape 0
+#   nl-ns--                  prefix-violation 23   private-escape 1
+#
+# because scripts/nl-ns-gate.el calls one of them across the boundary.
+# That trades two findings in the kind this file is tightening (853 ->
+# 848) for one in the kind it concedes (611, growing).  The two names
+# also belong to a family -- load-accepted, write-accepted,
+# stale-accepted, unaccepted -- that is public single-dash throughout,
+# and splitting the family's naming to move a number is the wrong way
+# round.
 ns-collision 148
 ns-collision-divergent 97
-ns-prefix-violation 848
+ns-prefix-violation 850
 ns-private-escape 611
 ns-unreadable 0
