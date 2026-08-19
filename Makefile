@@ -341,6 +341,29 @@ bootstrap-contract:
 # about whether anything had been compiled natively.  This gate does not
 # judge whether a fall is acceptable -- that is not mechanical -- it
 # keeps the count from growing quietly.
+# Which names would work on a stock Emacs.  Every name this tree defines is
+# classified: `nelisp-only' (Emacs does not have it -- code using it does not
+# run there), `shared-deferring' (both have it and this tree defers via
+# `(unless (fboundp ...))'), or `shared-shadowing' (both have it and this
+# tree defines it unconditionally, so its definition lands on top).
+#
+# The host answer is not a maintained list: the tool runs under `emacs -Q'
+# and READS the sources rather than loading them, so `fboundp' in that same
+# process IS stock Emacs's answer.
+#
+# Added 2026-08-19 because nobody -- developer or AI -- could tell which
+# definition was in effect at a call site, and three defects fixed that day
+# were exactly that.  The ratchet is on `shared-shadowing'; the full table is
+# generated into docs/emacs-compat-table.txt so it can be grepped without
+# running anything.
+.PHONY: emacs-compat
+emacs-compat:
+	$(EMACS) --batch -Q -l tools/nelisp-emacs-compat.el
+
+.PHONY: emacs-compat-table
+emacs-compat-table:
+	NELISP_EMACS_COMPAT_WRITE=1 $(EMACS) --batch -Q -l tools/nelisp-emacs-compat.el
+
 .PHONY: fallback-inventory
 fallback-inventory:
 	$(EMACS) --batch -Q -l tools/nelisp-fallback-inventory.el

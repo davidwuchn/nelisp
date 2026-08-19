@@ -1,0 +1,36 @@
+# How many names this tree is allowed to define UNCONDITIONALLY on top of a
+# name stock Emacs already has (tools/nelisp-emacs-compat.el).
+# One "shared-shadowing COUNT" line.  `make emacs-compat' fails when the
+# count is above it.  Lower it whenever the gate says you can; raise it only
+# in the commit that adds the definition, and say here why that name cannot
+# defer to the host.
+#
+# Why this class and not the others.  A `nelisp-only' name is honest: it does
+# not exist on Emacs and code using it plainly does not run there.  A
+# `shared-deferring' one is compatible by construction -- it is wrapped in
+# `(unless (fboundp ...))', so on a host the host's definition wins.
+# `shared-shadowing' is the one nobody can see: the name exists in both, and
+# THIS tree's definition lands on top, so loading the file changes that
+# Emacs, and inside the runtime it changes which implementation the next
+# caller gets.
+#
+# Measured 2026-08-19, the day this gate was added.  Three defects fixed that
+# same day were this exact shape, and each cost hours because the effective
+# definition was invisible at the call site:
+#
+#   `provide' / `featurep' fset unconditionally over working native builtins
+#   while `require' stayed native, so the three stopped agreeing about the
+#   same feature list and `require' raised file-missing for a file it had
+#   just loaded and watched run its own `(provide ...)'.
+#
+#   a `string-match-p' that recognised five literal regexps and answered
+#   every other one with a substring search FOR THE REGEXP TEXT.
+#
+#   an `error-message-string' that returned `(cadr ...)' and dropped the
+#   error symbol with it.
+#
+# 250 is today's truth, not a target.  The list is in
+# docs/emacs-compat-table.txt; the ones worth moving first are the ones a
+# host would also define -- arithmetic and core special forms are in here.
+
+shared-shadowing 250
