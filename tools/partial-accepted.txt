@@ -19,7 +19,6 @@ bufferp|scripts/nelisp-stdlib-prelude.el|_obj|not yet reviewed
 byte-code-function-p|scripts/nelisp-stdlib-prelude.el|_object|not yet reviewed
 characterp|scripts/nelisp-stdlib-prelude.el|_ignore|not yet reviewed
 copy-tree|scripts/nelisp-stdlib-prelude.el|_vecp|not yet reviewed
-decode-char|scripts/nelisp-stdlib-prelude.el|_charset|not yet reviewed
 decode-coding-string|lisp/nelisp-stdlib-misc.el|_nocopy|not yet reviewed
 decode-coding-string|scripts/nelisp-stdlib-prelude.el|_nocopy|not yet reviewed
 delete-directory|scripts/nelisp-stdlib-prelude.el|_trash|not yet reviewed
@@ -47,7 +46,6 @@ max-char|scripts/nelisp-stdlib-prelude.el|_unicode|not yet reviewed
 prin1|scripts/nelisp-stdlib-prelude.el|_stream|not yet reviewed
 princ|scripts/nelisp-stdlib-prelude.el|_stream|STREAM ignored: output always goes to stdout, there are no buffers or markers to print into
 replace-regexp-in-string|scripts/nelisp-stdlib-prelude.el|_fixedcase _literal _start _subexp|not yet reviewed
-run-at-time|scripts/nelisp-stdlib-prelude.el|_repeat _time|TIME and REPEAT ignored: the event loop runs the function once, immediately
 set-file-modes|lisp/nelisp-stdlib-misc.el|_flag|not yet reviewed
 set-file-modes|scripts/nelisp-stdlib-prelude.el|_flag|not yet reviewed
 setenv|scripts/nelisp-stdlib-prelude.el|_substitute|not yet reviewed
@@ -68,5 +66,6 @@ locate-library|scripts/nelisp-stdlib-prelude.el|_interactive-call _nosuffix _pat
 bool-vector-p|scripts/nelisp-stdlib-prelude.el|_x|always nil: bool vectors are plain vectors here, so nothing can be one
 bool-vector-p|lisp/nelisp-stdlib-plist-str.el|_x|always nil; byte-identical to the prelude copy
 generate-new-buffer|scripts/nelisp-stdlib-prelude.el|_inhibit-buffer-hooks|there are no buffer hooks here, so nothing can be inhibited
-file-truename|scripts/nelisp-stdlib-prelude.el|_counter _prev-dirs|symlink-loop detection is not implemented: the answer is `expand-file-name', so a symlink cycle is neither followed nor reported
-file-truename|lisp/nelisp-stdlib-misc.el|_counter _prev-dirs|the same; byte-identical to the prelude copy
+file-truename|scripts/nelisp-stdlib-prelude.el|_prev-dirs|PREV-DIRS ignored: symlink-loop detection is not implemented, so a cycle is neither followed nor reported
+file-truename|lisp/nelisp-stdlib-misc.el|_prev-dirs|the same; byte-identical to the prelude copy
+run-at-time|scripts/nelisp-stdlib-prelude.el|_repeat|REPEAT ignored: the function runs once, immediately, so a repeating timer never repeats

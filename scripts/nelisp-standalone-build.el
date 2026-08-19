@@ -12410,7 +12410,11 @@ and the `string-match' family aliases over it."
             ;; nil " +") kept the spaces.  Emacs trims each piece with TRIM
             ;; as a regexp anchored at both ends, and drops a piece that
             ;; becomes empty when OMIT-NULLS is set.
+            ;; Emacs checks SEPARATORS before STRING, so a call with both
+            ;; wrong names the separator.
             "(defun split-string (s &optional sep omit trim)\n"
+            "  (when sep (unless (stringp sep) (signal 'wrong-type-argument (list 'stringp sep))))\n"
+            "  (unless (stringp s) (signal 'wrong-type-argument (list 'stringp s)))\n"
             "  (let ((parts (nlre-split-string s sep omit)))\n"
             "    (if (null trim) parts\n"
             "      (let ((out nil))\n"

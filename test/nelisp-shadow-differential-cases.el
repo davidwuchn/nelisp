@@ -768,6 +768,25 @@
        (functionp t) (functionp nil) (functionp 'car)
        (condition-case e (mapc #'identity 0) (error e)) (mapc #'identity '(1 2))
        (condition-case e (string-pad nil '(1 . 2)) (error e)))
+
+ ;; `string-version-lessp' is NOT `string-lessp': digit runs compare as
+ ;; NUMBERS, and the character order is `.' `~' 0-9 A-Z a-z then everything
+ ;; else -- so an alphanumeric sorts below a control character.  Derived by
+ ;; sorting 1..127 with Emacs and reading the order off; delegating to
+ ;; `string-lessp' was wrong for every pair this function exists for.
+ (list (string-version-lessp nil "\t x") (string-version-lessp "a2" "a10")
+       (string-version-lessp "a10" "a2") (string-version-lessp "a1b2" "a1b10")
+       (string-version-lessp "n" "\t") (string-version-lessp "A" "a")
+       (condition-case e (split-string 'x 1 "") (error e)) (split-string "a,b" ",")
+       (condition-case e (file-truename "a" "b" nil) (error e))
+       (condition-case e (run-at-time "ABC" [] []) (error e))
+       (condition-case e (decode-char "x" t) (error e))
+       (condition-case e (make-symbolic-link "a" '("b") -7) (error e))
+       ;; `insert-file-contents-literally' is NOT compared: in `emacs -Q'
+       ;; it reaches `buffer-read-only' before the file check, so the two
+       ;; disagree about which error comes first for reasons that have
+       ;; nothing to do with the file.
+       )
 )
 
 ;;; nelisp-shadow-differential-cases.el ends here

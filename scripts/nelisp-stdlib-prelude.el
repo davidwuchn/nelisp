@@ -135,7 +135,7 @@
 ;; which is the honest half of what Emacs does (recorded in
 ;; tools/partial-accepted.txt).
 (unless (fboundp 'file-truename)
-  (defun file-truename (path &optional _counter _prev-dirs)
+  (defun file-truename (path &optional counter _prev-dirs)
     ;; Two predicates, by what the argument is: a SYMBOL (nil included) gets
     ;; `arrayp', anything else `stringp'.  Measured across nil / 1 / a
     ;; symbol / a vector / a float -- guessing one name gets three of the
@@ -143,6 +143,8 @@
     (unless (stringp path)
       (signal 'wrong-type-argument
               (list (if (symbolp path) 'arrayp 'stringp) path)))
+    ;; COUNTER is a symlink-depth list in Emacs, and it names `listp'.
+    (unless (listp counter) (signal 'wrong-type-argument (list 'listp counter)))
     (expand-file-name path)))
 (unless (fboundp 'buffer-file-name)
   (defun buffer-file-name (&optional buffer)
@@ -1765,13 +1767,55 @@ wider than the one it replaces once the mapping leaves ASCII."
 (unless (fboundp 'string-greaterp)
   (defun string-greaterp (a b) (string-lessp b a)))
 (unless (fboundp 'string-version-lessp)
-  (defun string-version-lessp (a b)
-    ;; Takes a string OR a symbol, like `string-lessp'.  A symbol compares by
-    ;; its NAME, so nil is "nil" -- not the empty string.
+  (defun nelisp--version-rank (c)
+  "Collation weight for C in `string-version-lessp'.
+
+NOT the code point.  Derived by sorting 1..127 with Emacs 30.1 and reading
+the order off:
+
+  .  ~  0-9  A-Z  a-z   then everything else in code-point order
+
+So an ALPHANUMERIC sorts below a punctuation or control character --
+(string-version-lessp \"n\" \"\\t\") is t, which plain code-point order gets
+backwards.  That is the case a nil argument lands on, since nil compares as
+its name \"nil\", and it is how this rule was noticed at all."
+  (cond ((= c ?.) 0)
+        ((= c ?~) 1)
+        ((and (>= c ?0) (<= c ?9)) (+ 2 (- c ?0)))
+        ((and (>= c ?A) (<= c ?Z)) (+ 12 (- c ?A)))
+        ((and (>= c ?a) (<= c ?z)) (+ 38 (- c ?a)))
+        (t (+ 64 c))))
+
+(defun string-version-lessp (a b)
+    "Compare A and B, reading runs of digits as NUMBERS.
+Not `string-lessp': (string-version-lessp \"a2\" \"a10\") is t while
+`string-lessp' says nil, because 2 < 10 but \"2\" sorts after \"1\".
+Delegating was wrong for every pair whose digits differ in length, which is
+the only case this function exists for."
     (unless (or (stringp a) (symbolp a)) (signal 'wrong-type-argument (list 'stringp a)))
     (unless (or (stringp b) (symbolp b)) (signal 'wrong-type-argument (list 'stringp b)))
-    (string-lessp (if (stringp a) a (symbol-name a))
-                  (if (stringp b) b (symbol-name b)))))
+    (let* ((x (if (stringp a) a (symbol-name a)))
+           (y (if (stringp b) b (symbol-name b)))
+           (i 0) (j 0) (nx (length x)) (ny (length y))
+           (done nil) (result nil))
+      (while (not done)
+        (cond
+         ((and (>= i nx) (>= j ny)) (setq done t) (setq result nil))
+         ((>= i nx) (setq done t) (setq result t))
+         ((>= j ny) (setq done t) (setq result nil))
+         ((and (>= (aref x i) ?0) (<= (aref x i) ?9)
+               (>= (aref y j) ?0) (<= (aref y j) ?9))
+          (let ((vx 0) (vy 0))
+            (while (and (< i nx) (>= (aref x i) ?0) (<= (aref x i) ?9))
+              (setq vx (+ (* vx 10) (- (aref x i) ?0))) (setq i (1+ i)))
+            (while (and (< j ny) (>= (aref y j) ?0) (<= (aref y j) ?9))
+              (setq vy (+ (* vy 10) (- (aref y j) ?0))) (setq j (1+ j)))
+            (unless (= vx vy) (setq done t) (setq result (< vx vy)))))
+         ((= (aref x i) (aref y j)) (setq i (1+ i)) (setq j (1+ j)))
+         (t (setq done t)
+            (setq result (< (nelisp--version-rank (aref x i))
+                            (nelisp--version-rank (aref y j)))))))
+      result)))
 ;; Doc 160 breadth round 3: control / binding macros.
 ;; `interactive' is a command-declaration marker.  When a command is called
 ;; non-interactively (the only mode on the headless standalone), Emacs skips
@@ -1828,7 +1872,13 @@ reseeds from its characters; nil -> a full LCG value."
 ;; from the callback, which is later processed when the actor loop is run.
 ;; `sit-for' has nothing to redisplay or block on, so it is a no-op returning t.
 (unless (fboundp 'run-at-time)
-  (defun run-at-time (_time _repeat function &rest args)
+  (defun run-at-time (time _repeat function &rest args)
+         ;; TIME is validated before FUNCTION is touched, so a bad time is a
+         ;; time error -- not `invalid-function' about an argument Emacs never
+         ;; reached.
+    (unless (or (null time) (numberp time) (consp time)
+                (and (stringp time) (string-match-p "[0-9]" time)))
+      (signal 'error (list "Invalid time specification")))
     (apply function args)
     (list 'nelisp--sync-timer function)))
 ;; There are no timers in this runtime, so nothing can BE one -- which makes
@@ -1891,7 +1941,7 @@ reseeds from its characters; nil -> a full LCG value."
          (unwind-protect (progn ,@(nreverse sets) ,@body)
            ,@(nreverse restores))))))
 (unless (fboundp 'seq-take)
-  (defun seq-take (seq &optional n) (take n (nelisp-seq--to-list seq))))
+  (defun seq-take (seq n) (take n (nelisp-seq--to-list seq))))
 (unless (fboundp 'seq-drop)
   (defun seq-drop (seq n) (nthcdr n (nelisp-seq--to-list seq))))
 (unless (fboundp 'seq-count)
@@ -2444,8 +2494,12 @@ Doc 22 A6: arrays are iterated by index."
     value))
 
 (defun plist-put (plist key value &optional predicate)
-  ;; Measured: `plist-put' and `plist-member' signal `plistp'; only
-  ;; `plist-get' answers nil.
+  ;; `plist-put' signals `plistp' for a non-list -- EXCEPT that Emacs
+  ;; answers the KEY when the walk cannot start at all.  Measured both ways:
+  ;; (plist-put -1 1 2) signals, (plist-put -1 ["a"] "e") answers ["a"].
+  ;; The difference is whether the key is `eq'-comparable, so this cannot be
+  ;; reproduced by a type check alone and the vector case is left as a
+  ;; documented gap rather than guessed at.
   (nelisp--check-plist plist)
   (let ((cur plist) (tail nil))
     (if predicate
@@ -3604,8 +3658,9 @@ bodies (= Stage 4 follow-up).  Indent / edebug specs come back when
     (while (and list (not (eql elt (car list)))) (setq list (cdr list)))
     list))
 (unless (fboundp 'decode-char)
-  (defun decode-char (_charset code-point)
+  (defun decode-char (charset code-point)
     "Minimal `decode-char': return CODE-POINT unchanged (ucs identity)."
+    (unless (symbolp charset) (signal 'wrong-type-argument (list 'charsetp charset)))
     code-point))
 (unless (fboundp 'car-less-than-car)
   ;; Sort predicate over (KEY . _) cells; rx's `(any "abc")' sorts char
@@ -5068,6 +5123,9 @@ Rust-min migration (= moved out of build-tool/src/eval/special_forms.rs)."
       (list filename (length contents)))))
 (unless (fboundp 'insert-file-contents-literally)
   (defun insert-file-contents-literally (filename &rest args)
+    (nelisp--check-string filename)
+    (unless (file-exists-p filename)
+      (signal 'file-missing (list "Opening input file" "No such file or directory" filename)))
     (apply #'insert-file-contents filename args)))
 (unless (fboundp 'processp)
   (defun processp (process)
@@ -6181,6 +6239,8 @@ first `getenv' is not overwritten by the value the process started with."
     (nreverse parts)))
 (unless (fboundp 'split-string)
   (defun split-string (string &optional separators omit-nulls _trim)
+    (when separators (nelisp--check-string separators))
+    (nelisp--check-string string)
     (nelisp--split-on-char
      string
      (if (and separators (> (length separators) 0))
@@ -6278,6 +6338,8 @@ first `getenv' is not overwritten by the value the process started with."
     nil))
 (unless (fboundp 'make-symbolic-link)
   (defun make-symbolic-link (target linkname &optional ok-if-already-exists)
+    (nelisp--check-string target)
+    (nelisp--check-string linkname)
     (when (and ok-if-already-exists (file-exists-p linkname))
       (nelisp--syscall-path 87 linkname))     ; unlink existing
     (let ((rc (nelisp--syscall-path2 88 target linkname)))
