@@ -132,13 +132,14 @@ via `nelisp--prn-to-string' under ESCAPE."
       (when prefix
         (concat prefix (nelisp--prn-to-string arg escape))))))
 
-(defun nelisp--prn-list-body (lst escape)
+(defun nelisp--prn-list-body (lst escape &optional depth)
+  (setq depth (or depth 0))
   (let ((chunks (cons nil nil)) (cur lst) (first t) (count 0))
     (while (and (consp cur)
                 (if print-length (< count print-length) t))
       (unless first (nelisp--prn-chunks-add chunks " "))
       (nelisp--prn-chunks-add chunks
-                              (nelisp--prn-to-string (car cur) escape))
+                              (nelisp--prn-to-string (car cur) escape depth))
       (setq first nil)
       (setq count (1+ count))
       (setq cur (cdr cur)))
@@ -147,17 +148,18 @@ via `nelisp--prn-to-string' under ESCAPE."
       (setq cur nil))
     (unless (null cur)
       (nelisp--prn-chunks-add chunks " . ")
-      (nelisp--prn-chunks-add chunks (nelisp--prn-to-string cur escape)))
+      (nelisp--prn-chunks-add chunks (nelisp--prn-to-string cur escape depth)))
     (nelisp--prn-chunks-string chunks)))
 
-(defun nelisp--prn-vector (vec escape)
+(defun nelisp--prn-vector (vec escape &optional depth)
+  (setq depth (or depth 0))
   (let ((n (length vec)) (chunks (cons nil nil)))
     (nelisp--prn-chunks-add chunks "[")
     (let ((i 0) (lim (if print-length (if (< print-length n) print-length n) n)))
       (while (< i lim)
         (when (> i 0) (nelisp--prn-chunks-add chunks " "))
         (nelisp--prn-chunks-add chunks
-                                (nelisp--prn-to-string (aref vec i) escape))
+                                (nelisp--prn-to-string (aref vec i) escape depth))
         (setq i (1+ i)))
       (when (< lim n)
         (when (> lim 0) (nelisp--prn-chunks-add chunks " "))
@@ -185,7 +187,6 @@ via `nelisp--prn-to-string' under ESCAPE."
 ;; standalone runs; `make ns-gate' reports any drift.
 (defvar print-length nil)
 (defvar print-level nil)
-(defvar nelisp--prn-depth 0)
 
 (defun nelisp--prn-symbol-needs-leading-escape-p (s)
   (let ((n (length s)))
@@ -205,7 +206,8 @@ via `nelisp--prn-to-string' under ESCAPE."
           (setq i (1+ i)))
         (and ok seen-digit))))))
 
-(defun nelisp--prn-to-string (obj escape)
+(defun nelisp--prn-to-string (obj escape &optional depth)
+  (setq depth (or depth 0))
   (cond
    ((null obj) "nil")
    ((eq obj t) "t")
@@ -218,16 +220,20 @@ via `nelisp--prn-to-string' under ESCAPE."
    ((stringp obj)
     (if escape (concat "\"" (nelisp--prn-string-escaped obj) "\"") obj))
    ((consp obj)
-    (if (and print-level (>= nelisp--prn-depth print-level))
+    ;; Depth is a PARAMETER, not a special variable.  A free
+    ;; `nelisp--prn-depth' worked in the standalone and broke
+    ;; test/nelisp-stdlib-test.el, which evaluates only the `defun' forms of
+    ;; lisp/nelisp-stdlib-prn.el -- so the defvar never ran and the counter
+    ;; was void.  Threading it also means a caller cannot forget to rebind.
+    (if (and print-level (>= depth print-level))
         "..."
-      (let ((nelisp--prn-depth (1+ nelisp--prn-depth)))
-        (or (nelisp--prn-reader-macro-abbrev obj escape)
-            (concat "(" (nelisp--prn-list-body obj escape) ")")))))
+      (or (nelisp--prn-reader-macro-abbrev obj escape)
+          (concat "(" (nelisp--prn-list-body obj escape (1+ depth)) ")"))))
    ;; `print-level' bounds LIST nesting only -- Emacs prints
    ;; [1 [2 [3 [4]]]] in full at print-level 2, and only the list arm above
    ;; counts depth.  Measured rather than assumed; the first cut guarded
    ;; both and truncated vectors Emacs does not.
-   ((vectorp obj) (nelisp--prn-vector obj escape))
+   ((vectorp obj) (nelisp--prn-vector obj escape (1+ depth)))
    ((recordp obj) (nelisp--prn-record obj escape))
    (t (format "#<unprintable %S>" obj))))
 
