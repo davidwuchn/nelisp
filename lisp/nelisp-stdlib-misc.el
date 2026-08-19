@@ -315,24 +315,69 @@ streams fall back to stdout."
 ;; sets `default-directory' at startup so that fallback never fired
 ;; in practice and is dropped here.
 
+;; Kept in step with scripts/nelisp-stdlib-prelude.el, the copy the
+;; standalone runs; `make ns-gate' reports any drift.
+(defun nelisp--path-split (s)
+  ;; Split S on / and drop empty components, so a// collapses like Emacs.
+  (let ((out nil) (cur "") (i 0) (n (length s)))
+    (while (< i n)
+      (if (eq (aref s i) ?/)
+          (progn (when (> (length cur) 0) (setq out (cons cur out)))
+                 (setq cur ""))
+        (setq cur (concat cur (substring s i (1+ i)))))
+      (setq i (1+ i)))
+    (when (> (length cur) 0) (setq out (cons cur out)))
+    (nreverse out)))
+
+;; This used to concatenate and stop -- no `.', no `..', no `~', no
+;; collapsing of doubled slashes, and an empty NAME came back empty.  So
+;; (expand-file-name "a/../b") answered /base/dir/a/../b and
+;; (expand-file-name "~/x") answered ~/x, neither of which is a path
+;; anything else can compare with `equal' against one Emacs produced.  For
+;; a runtime meant to host an editor that is a daily defect: buffer names,
+;; `locate-library' hits and every cache key built from a path are all
+;; affected.  Measured 2026-08-19 against Emacs 30.1.
+
 (defun expand-file-name (path &optional base)
-  "Convert PATH to absolute, anchoring against BASE (or `default-directory').
-Already-absolute paths (starting with `/') are returned unchanged."
-  (cond
-   ;; Empty path: return as-is (= mirrors Rust `Path::new(\"\").to_path_buf()').
-   ((or (null path) (= (length path) 0)) path)
-   ;; Already absolute.
-   ((eq (aref path 0) ?/) path)
-   ;; Relative: join with BASE (or `default-directory').
-   (t
-    (let ((b (or base (and (boundp 'default-directory) default-directory))))
-      (if (and (stringp b) (> (length b) 0))
-          (concat (file-name-as-directory b) path)
-        ;; No base anchor available — return PATH as-is.  Prior Rust
-        ;; tried `current_dir()' as last resort but NeLisp's startup
-        ;; always sets `default-directory' so this branch is unreachable
-        ;; in practice.
-        path)))))
+  (let* ((p (if (null path) "" path))
+         (p (if (and (> (length p) 0) (eq (aref p 0) ?~)
+                     (if (= (length p) 1) 1 (eq (aref p 1) ?/)))
+                (concat (or (getenv "HOME") "~") (substring p 1))
+              p))
+         (absolute (if (= (length p) 0) nil (eq (aref p 0) ?/)))
+         (trailing (if (= (length p) 0) nil
+                     (eq (aref p (- (length p) 1)) ?/)))
+         (anchor
+          (if absolute ""
+            (let ((b (or base
+                         (and (boundp 'default-directory) default-directory)
+                         "/")))
+              (if (if (> (length b) 0) (eq (aref b 0) ?/) nil)
+                  (file-name-as-directory b)
+                (file-name-as-directory (expand-file-name b))))))
+         (full (if absolute p (concat anchor p)))
+         (parts (nelisp--path-split full))
+         (stack nil))
+    (while parts
+      (let ((c (car parts)))
+        (cond
+         ((equal c ".") nil)
+         ((equal c "..") (setq stack (cdr stack)))
+         (t (setq stack (cons c stack)))))
+      (setq parts (cdr parts)))
+    (setq stack (nreverse stack))
+    (let ((res (concat "/" (mapconcat 'identity stack "/"))))
+      (if (if trailing (> (length stack) 0) nil)
+          (concat res "/")
+        res))))
+
+;; Emacs strips backup suffixes before asking about the extension, which
+;; is why (file-name-extension "foo.txt~") is "txt" and not "txt~".  There
+;; was no `file-name-sans-versions' here at all, so a backup name reported
+;; an extension no file ever has -- enough to send a mode lookup or a
+;; suffix comparison down the wrong path.  Two shapes are stripped, both
+;; measured against Emacs 30.1: a trailing ~, and a trailing .~N~ where N
+;; is digits.  Nothing else: "a~b.txt" and "foo.txt.~1~x" are left alone.
 
 (defun file-truename (path)
   "Return PATH after symlink resolution and absolutification.

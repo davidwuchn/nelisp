@@ -51,7 +51,16 @@
 # stale-accepted, unaccepted -- that is public single-dash throughout,
 # and splitting the family's naming to move a number is the wrong way
 # round.
-ns-collision 148
+# 148 -> 149 on 2026-08-19: `nelisp--path-split', the component splitter
+# `expand-file-name' needs.  It is duplicated into lisp/nelisp-stdlib-misc.el
+# beside the `expand-file-name' that calls it, because leaving it only in the
+# prelude made that file reference a private name it does not define -- an
+# ns-private-escape, which is the finding kind this tree is conceding rather
+# than tightening.  A benign same-definition collision in the kind that is
+# tightening is the better of the two, and it matches what the file already
+# does: `expand-file-name' itself is duplicated there on purpose, and both
+# copies now carry a note saying `make ns-gate' polices the drift.
+ns-collision 149
 ns-collision-divergent 97
 # 850 -> 851 on 2026-08-19: `nl-check-file-quoted-unsafe', the entry point
 # that reports the unsafe calls inside quoted forms.  Same situation as the

@@ -141,6 +141,41 @@
  (pcase 5 ((app 1+ 7) 'seven) (_ 'other))
  (pcase 5 ((and n (guard (> n 3))) 'big) (_ 'small))
  (pcase 2 ((and n (guard (> n 3))) 'big) (_ 'small))
+ ;; File paths.  `expand-file-name' used to concatenate and stop: no `.',
+ ;; no `..', no `~', no collapsing of doubled slashes, and an empty name
+ ;; came back empty.  A path it produced could not be compared with `equal'
+ ;; against one Emacs produced, which for a runtime meant to host an editor
+ ;; is a daily defect.
+ ;;
+ ;; BASE is passed explicitly rather than bound with `let': `default-
+ ;; directory' is not a special variable in this runtime, so a `let' around
+ ;; it does not reach `expand-file-name' and the case would measure that
+ ;; instead of what it is about.  (That gap is real and is its own item.)
+ (expand-file-name "a/../b" "/base/dir/")
+ (expand-file-name "/a/../b" "/base/dir/")
+ (expand-file-name "./a" "/base/dir/")
+ (expand-file-name "a" "/base/dir/")
+ (expand-file-name "/x/y" "/base/dir/")
+ (expand-file-name "" "/base/dir/")
+ (expand-file-name "a/" "/base/dir/")
+ (expand-file-name ".." "/base/dir/")
+ (expand-file-name "a/./b" "/base/dir/")
+ (expand-file-name "a//b" "/base/dir/")
+ (expand-file-name "x" "/base/dir")
+ (directory-file-name "a//")
+ (directory-file-name "a/")
+ (directory-file-name "/")
+ (file-name-as-directory "")
+ (file-name-as-directory "a")
+ (file-name-as-directory "a/")
+ (file-name-sans-versions "foo.txt~")
+ (file-name-sans-versions "foo.txt.~1~")
+ (file-name-sans-versions "a~b.txt")
+ (file-name-sans-versions "foo.txt.~1~x")
+ (file-name-extension "foo.txt~")
+ (file-name-extension "foo.txt")
+ (file-name-extension "foo")
+ (file-name-extension "foo.~12~")
  ;; maphash reaches every entry
  (let ((h (make-hash-table :test 'equal)) (n 0))
    (puthash "b" 2 h) (puthash "a" 1 h) (puthash "c" 3 h)

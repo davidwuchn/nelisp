@@ -512,26 +512,31 @@ Result keeps the trailing slash."
 (defun file-name-as-directory (path)
   "Return PATH with a trailing `/' appended if not already present."
   (cond
-   ((= (length path) 0) "/")
+   ((= (length path) 0) "./")
    ((eq (aref path (1- (length path))) ?/) path)
    (t (concat path "/"))))
-
+;; Emacs strips the whole run of trailing slashes, not one of them:
+;; "a//" is "a".  Stripping exactly one left "a/", which still names a
+;; directory and so defeats the point of calling this at all.  A name that
+;; is nothing but slashes keeps one, matching Emacs on "/" and "///".
 (defun directory-file-name (path)
-  "Return PATH with a single trailing `/' stripped (= keeps `/' for root)."
   (let ((n (length path)))
-    (cond
-     ((<= n 1) path)
-     ((eq (aref path (1- n)) ?/) (substring path 0 (1- n)))
-     (t path))))
-
-;; Rust-min batch 7c (2026-05-07, Doc 50 stage 2): `string-lessp' was
-;; never an explicit builtin in NeLisp (= no `bi_string_lessp'); host
-;; emacs has it as a C primitive.  Adding it as a thin elisp wrapper
-;; over `compare-strings' (already migrated 2026-05-06) lets the new
-;; elisp `directory-files' sort case-sensitively without a new
-;; primitive.  Returns t when STR1 is lexicographically less than
-;; STR2 by ASCII codepoint (= same semantic as host emacs's
-;; `string-lessp', sufficient for Latin-1 / ASCII filenames).
+    (while (if (> n 1) (eq (aref path (1- n)) ?/) nil)
+      (setq n (1- n)))
+    (if (= n (length path)) path (substring path 0 n))))
+;; Rust-min batch 7d (2026-05-07, Doc 50 stage 2): `expand-file-name'
+;; and `file-truename' migrated from Rust to elisp.  expand-file-name
+;; is pure path arithmetic + a `default-directory' lookup; it needs
+;; ZERO new primitives (= file-name-as-directory + concat + aref are
+;; all elisp-side).  file-truename adds 1 syscall primitive
+;; (`nelisp--syscall-canonicalize' = std::fs::canonicalize wrapper)
+;; for the symlink-resolve sliver, with elisp fall-back-on-error
+;; matching the prior Rust `unwrap_or(full)' behaviour.
+;;
+;; The Rust impl had a `current_dir()' fallback for the case where
+;; both BASE arg and `default-directory' were nil; NeLisp always
+;; sets `default-directory' at startup so that fallback never fired
+;; in practice and is dropped here.
 (defun string-lessp (str1 str2)
   "Return t if STR1 sorts before STR2 lexicographically by codepoint."
   (let ((r (compare-strings str1 0 nil str2 0 nil)))

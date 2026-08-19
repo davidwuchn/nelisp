@@ -42,7 +42,7 @@
 # add-to-list a C subr, where before it became an elisp shim.
 # nelisp--cli-batch-ensure-host, which loads that file, already gated its own
 # fallback stub this way.
-shared-shadowing 244
+shared-shadowing 245
 
 # 2026-08-19, reviewing the 245 rather than counting them.  The table now
 # carries the defining file, which is half of what makes a class actionable:
@@ -90,4 +90,13 @@ shared-shadowing 244
 # One shadowing net: `function-put' left, `defconst'/`defvar'/`defmacro'
 # stayed but moved to the file that really defines them, which is what makes
 # the FILE column worth having.
+
+# 244 -> 245 on 2026-08-19: `file-name-sans-versions', added to the prelude
+# because `file-name-extension' needs it -- Emacs strips backup suffixes
+# before asking about the extension, which is why (file-name-extension
+# "foo.txt~") is "txt" and not "txt~".  There was no implementation of it
+# here at all, so a backup name reported an extension no file ever has.
+#
+# Unconditional, like the prelude's other 111: that file IS the standalone's
+# stdlib, and there is no host definition for it to defer to.
 
