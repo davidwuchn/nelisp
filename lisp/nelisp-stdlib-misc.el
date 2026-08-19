@@ -692,9 +692,14 @@ or signals otherwise.  Replaces the deleted Rust `bi_require'."
 ;; (string-bytes "あ") = 3), so for 'utf-8 the encode is identity.
 ;; Other codings unsupported (= error if requested).
 (unless (fboundp 'encode-coding-string)
-  (defun encode-coding-string (str coding &optional _nocopy)
-    "NeLisp stub: returns STR as-is (UTF-8 internal repr).
-Only `utf-8' CODING is supported; others signal `error'."
+  (unless (fboundp 'nelisp--check-symbol)
+  (defun nelisp--check-symbol (x)
+    (unless (symbolp x) (signal 'wrong-type-argument (list 'symbolp x)))
+    x))
+
+(defun encode-coding-string (str coding &optional _nocopy)
+    (nelisp--check-string str)
+    (nelisp--check-symbol coding)
     (when (and coding (not (eq coding 'utf-8)))
       (signal 'error
               (list (format "encode-coding-string stub: only utf-8 supported, got %S"
@@ -703,8 +708,8 @@ Only `utf-8' CODING is supported; others signal `error'."
 
 (unless (fboundp 'decode-coding-string)
   (defun decode-coding-string (str coding &optional _nocopy)
-    "NeLisp stub: returns STR as-is (UTF-8 internal repr).
-Only `utf-8' CODING is supported; others signal `error'."
+    (nelisp--check-string str)
+    (nelisp--check-symbol coding)
     (when (and coding (not (eq coding 'utf-8)))
       (signal 'error
               (list (format "decode-coding-string stub: only utf-8 supported, got %S"

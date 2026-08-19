@@ -564,6 +564,22 @@
        (condition-case e (locate-file 7 [] 1) (error e))
        (condition-case e (locate-file nil '("a")) (error e))
        (locate-file "zz-no-such-file" '("/tmp")))
+
+ ;; Index arguments name `integerp', and the stubs for subsystems this
+ ;; runtime does not have (timers, processes, coding systems) reject a
+ ;; wrong-typed argument rather than answering as if they had worked.
+ (list (condition-case e (read-from-string "abc" "x") (error e))
+       (condition-case e (read-from-string "abc" 0 "x") (error e))
+       (read-from-string "(1)") (read-from-string "xx(1)" 2)
+       (condition-case e (memq 1 -1.5) (error e))
+       (memq 2 '(1 2 3)) (memq 9 '(1 2)) (memq 1 nil)
+       (condition-case e (encode-coding-string "a" 12354) (error e))
+       (condition-case e (decode-coding-string "a" 12354) (error e))
+       (encode-coding-string "ab" 'utf-8) (decode-coding-string "ab" 'utf-8)
+       (condition-case e (copy-hash-table "x") (error e))
+       (let ((h (make-hash-table))) (puthash 1 2 h) (gethash 1 (copy-hash-table h)))
+       (condition-case e (cancel-timer "x") (error e))
+       (condition-case e (process-put "x" 'k 1) (error e)))
 )
 
 ;;; nelisp-shadow-differential-cases.el ends here

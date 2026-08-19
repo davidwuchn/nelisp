@@ -2,11 +2,11 @@
 
 (unless (fboundp 'memq)
   (defun memq (elt list)
+    (unless (listp list) (signal 'wrong-type-argument (list 'listp list)))
     (let ((found nil))
       (while (and list (not found))
-        (if (eq elt (car list))
-            (setq found list)
-          (setq list (cdr list))))
+        (if (eq elt (car list)) (setq found list)
+	  (setq list (cdr list))))
       found)))
 
 (unless (fboundp 'member)

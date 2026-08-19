@@ -1642,7 +1642,14 @@ reseeds from its characters; nil -> a full LCG value."
   (defun run-at-time (_time _repeat function &rest args)
     (apply function args)
     (list 'nelisp--sync-timer function)))
-(unless (fboundp 'cancel-timer) (defun cancel-timer (&rest _) nil))
+;; There are no timers in this runtime, so nothing can BE one -- which makes
+;; the type check the only honest thing this can do: accepting a string and
+;; answering nil reads as "cancelled", and it cancelled nothing.
+(unless (fboundp 'timerp) (defun timerp (_x) nil))
+(unless (fboundp 'cancel-timer)
+  (defun cancel-timer (timer)
+    (unless (timerp timer) (signal 'wrong-type-argument (list 'timerp timer)))
+    nil))
 (unless (fboundp 'sit-for) (defun sit-for (&rest _) t))
 (unless (fboundp 'cl-dolist) (defmacro cl-dolist (spec &rest body) `(dolist ,spec ,@body)))
 (unless (fboundp 'cl-dotimes) (defmacro cl-dotimes (spec &rest body) `(dotimes ,spec ,@body)))
@@ -2086,6 +2093,7 @@ FRESH buffer (the old `(t seq)' arm returned the same object, so a following
 
 (unless (fboundp 'memq)
   (defun memq (elt list)
+    (unless (listp list) (signal 'wrong-type-argument (list 'listp list)))
     (let ((found nil))
       (while (and list (not found))
         (if (eq elt (car list)) (setq found list)
@@ -4675,6 +4683,8 @@ Rust-min migration (= moved out of build-tool/src/eval/special_forms.rs)."
 (unless (fboundp 'eql) (defun eql (a b) (if (and (numberp a) (numberp b)) (= a b) (eq a b))))
 (unless (fboundp 'encode-coding-string)
   (defun encode-coding-string (str coding &optional _nocopy)
+    (nelisp--check-string str)
+    (nelisp--check-symbol coding)
     (when (and coding (not (eq coding 'utf-8)))
       (signal 'error
               (list (format "encode-coding-string stub: only utf-8 supported, got %S"
@@ -4682,6 +4692,8 @@ Rust-min migration (= moved out of build-tool/src/eval/special_forms.rs)."
     str))
 (unless (fboundp 'decode-coding-string)
   (defun decode-coding-string (str coding &optional _nocopy)
+    (nelisp--check-string str)
+    (nelisp--check-symbol coding)
     (when (and coding (not (eq coding 'utf-8)))
       (signal 'error
               (list (format "decode-coding-string stub: only utf-8 supported, got %S"
@@ -4817,6 +4829,8 @@ Rust-min migration (= moved out of build-tool/src/eval/special_forms.rs)."
      (t nil))))
 (unless (fboundp 'process-put)
   (defun process-put (process key value)
+    (unless (processp process)
+      (signal 'wrong-type-argument (list 'processp process)))
     (cond
      ((and (vectorp process) (eq (aref process 0) 'process))
       (let ((cell (assq key (aref process 4))))
@@ -5171,6 +5185,8 @@ Doc 156: was `(apply #\\='vector ...)', but the reader now exposes a native
   (defun hash-table-test (_table) 'equal))
 (unless (fboundp 'copy-hash-table)
   (defun copy-hash-table (table)
+    (unless (hash-table-p table)
+      (signal 'wrong-type-argument (list 'hash-table-p table)))
     (let ((new (make-hash-table)))
       (maphash (lambda (k v) (puthash k v new)) table)
       new)))
@@ -5590,6 +5606,8 @@ are numbers; `1.' is the integer 1."
 (unless (fboundp 'read-from-string)
   (defun read-from-string (string &optional start end)
     (nelisp--check-string string)
+    (when start (unless (integerp start) (signal 'wrong-type-argument (list 'integerp start))))
+    (when end (unless (integerp end) (signal 'wrong-type-argument (list 'integerp end))))
     (let* ((base (or start 0))
            (s (if (or start end) (substring string base (or end (length string))) string))
            (r (nelisp--rd-one s 0 (length s))))

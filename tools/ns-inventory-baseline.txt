@@ -115,7 +115,12 @@
 # which is also the answer for a symbol that has no such property or binding,
 # and `fmakunbound'/`defalias'/`fset' answered their argument.  Byte-identical
 # where it is duplicated, so this is the benign same-definition kind.
-ns-collision 164
+# 164 -> 165 on 2026-08-20: `nelisp--check-plist' and the helpers that
+# followed the coding-system stubs into lisp/nelisp-stdlib-misc.el.  Each is
+# byte-identical to its prelude copy -- `make ns-gate' named all three the
+# moment they diverged, which is the whole point of duplicating the text
+# rather than the intent.
+ns-collision 165
 # 97 -> 96 on 2026-08-19: `string-equal' no longer differs between the two
 # files -- the prelude's now signals for a non-string instead of falling
 # through to `equal', and the lisp copy was brought with it.  Ratcheted down

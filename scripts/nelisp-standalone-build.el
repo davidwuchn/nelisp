@@ -3615,7 +3615,12 @@ argument (reachability + in-arena bounds checks).")
     ((:u8 "cons") . (seq (nelisp_cons_construct (wf_arg_ptr args 0) (wf_arg_ptr args 1) out) 0))
     ((:u8 "list") . (seq (wf_copy32 out args) 0))
     ;; --- list search hot paths ---
-    ((:lit "memq")   . (wf_memq args out))
+    ;; `memq' walked with the cons accessors and stopped at a non-list,
+    ;; answering nil -- which is also the answer for "not a member".
+    ((:lit "memq")   . (let* ((l (wf_arg_ptr args 1)) (tg (ptr-read-u64 l 0)))
+                         (if (if (= tg 0) 1 (if (= tg 7) 1 0))
+                             (wf_memq args out)
+                           (bf_wrong_type_listp l))))
     ((:lit "member") . (wf_member args out))
     ((:lit "assq")   . (wf_assq args out))
     ((:lit "assoc")  . (wf_assoc args out))
