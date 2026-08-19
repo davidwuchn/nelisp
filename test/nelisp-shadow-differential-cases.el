@@ -424,6 +424,18 @@
        (= (sxhash-equal "ab") (sxhash-equal "ab"))
        (= (sxhash-equal (vector 1 "a")) (sxhash-equal (vector 1 "a")))
        (integerp (sxhash 5)) (integerp (sxhash-eq 'a)) (integerp (sxhash-eql 1.5)))
+
+ ;; `condition-case' :success -- the clause was inert, so the protected form's
+ ;; value came back instead of the handler's, which is exactly what a
+ ;; `condition-case' with no handler answers.
+ (list (condition-case e 5 (:success (list 'ok e)))
+       (condition-case nil 5 (:success 'ran))
+       (condition-case e 5 (error 'err) (:success (list 'ok e)))
+       (condition-case e 5 (:success (list 'ok e)) (error 'err))
+       (condition-case e (error "x") (error 'err) (:success 'ok))
+       (condition-case e 5 (:success 1 2 (list 'v e)))
+       (condition-case a (condition-case b 7 (:success (* b 2))) (:success (+ a 1)))
+       (let ((e 99)) (list (condition-case e 5 (:success e)) e)))
 )
 
 ;;; nelisp-shadow-differential-cases.el ends here

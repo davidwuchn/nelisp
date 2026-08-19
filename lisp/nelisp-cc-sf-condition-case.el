@@ -142,12 +142,43 @@
           (nl_sf_cc_body s1 env out 0)
         1))
 
-    ;; After nelisp_eval_call_with_err: rc=0 → return 0 (result in *out).
-    ;; rc=1 → *s1 contains err sexp; dispatch to match helper (extern-call FIRST).
+    ;;--- :success ---
+
+    ;; A `:success' clause runs when the protected form did NOT signal, with
+    ;; VAR bound to its value -- Emacs 26's addition.  Nothing here looked for
+    ;; one, so the clause was inert and its body never ran: the value of the
+    ;; protected form came back instead, which is what a `condition-case' with
+    ;; no handler at all answers.  Silent, and indistinguishable from a
+    ;; `:success' body that simply returned its argument.
+    ;;
+    ;; succ-rc=0 = a `:success' clause matched, the frame is pushed and *s1
+    ;; now holds its BODY (overwritten from the value).  succ-rc=1 = no such
+    ;; clause, nothing pushed, *out still holds the value.
+    ;; Arity 6 (even).
+    (defun nl_sf_cc_after_success (succ-rc env out s1 _p5 _p6)
+      (if (= succ-rc 0)
+          (nl_sf_cc_body s1 env out 0)
+        0))
+
+    ;; The value has been cloned from *out into *s1 (clone-rc discarded), so
+    ;; `nl_cc_success_and_bind' takes exactly the slot shape
+    ;; `nl_cc_match_and_bind' does: one in-out slot carrying the value in and
+    ;; the matched body out.
+    ;; Arity 6 (even).
+    (defun nl_sf_cc_try_success (clone-rc clauses-ptr var-ptr env out s1)
+      (nl_sf_cc_after_success
+       (extern-call nl_cc_success_and_bind clauses-ptr s1 var-ptr env)
+       env out s1 0 0))
+
+    ;; After nelisp_eval_call_with_err: rc=0 → look for a `:success' clause
+    ;; (extern-call FIRST is the clone of the value into the scratch slot).
+    ;; rc=1 → *s1 contains err sexp; dispatch to match helper.
     ;; Arity 6 (even).
     (defun nl_sf_cc_after_eval (rc clauses-ptr var-ptr env out s1)
       (if (= rc 0)
-          0
+          (nl_sf_cc_try_success
+           (extern-call nl_sexp_clone_into out s1)
+           clauses-ptr var-ptr env out s1)
         (nl_sf_cc_after_match
          (extern-call nl_cc_match_and_bind clauses-ptr s1 var-ptr env)
          env out s1 0 0)))

@@ -16811,7 +16811,8 @@ genuine general interpreter for the 11 special forms + installed builtins."
                                  "sf-env-set-value-bind-rest-fix.o"
                                  (nelisp-standalone--patch-env-leaves-bind-rest
                                   (symbol-value 'nelisp-cc-evalport-env-leaves-bind--source))
-                                 nelisp-standalone--this-file)))
+                                 (list nelisp-standalone--this-file
+                                       (locate-library "nelisp-cc-evalport-env-leaves-bind")))))
                              ("sf-env-set-value2.o"
                               (nelisp-standalone--reader-extra-unit-epoch
                                entry '(nelisp_env_set_value)))
@@ -16825,7 +16826,15 @@ genuine general interpreter for the 11 special forms + installed builtins."
                    "sf-cc-flagclear.o"
                    (nelisp-standalone--patch-sf-cc
                     (symbol-value 'nelisp-cc-sf-condition-case--source))
-                   nelisp-standalone--this-file)))
+                   ;; CACHE-STALENESS, the case this function's docstring
+                   ;; warns about and this call did not follow: the source is
+                   ;; a defconst in a `require'd library, so the library file
+                   ;; has to be a dependency too.  Without it an edit to
+                   ;; lisp/nelisp-cc-sf-condition-case.el relinked the OLD
+                   ;; object -- the build succeeded, the binary was unchanged,
+                   ;; and the only symptom was that the change had no effect.
+                   (list nelisp-standalone--this-file
+                         (locate-library "nelisp-cc-sf-condition-case")))))
          (capture (nelisp-standalone--cached-unit
                    "reader-capture.o" nelisp-standalone--reader-capture-source
                    nelisp-standalone--this-file))
