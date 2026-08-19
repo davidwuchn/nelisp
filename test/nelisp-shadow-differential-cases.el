@@ -829,6 +829,23 @@
        ;; comes first for a reason that has nothing to do with the file, and
        ;; the file-missing data itself is checked by hand above.
        )
+
+ ;; `upcase'/`downcase'/`capitalize' take a CHARACTER or a string, so a
+ ;; float or a negative is neither -- answering the argument hid that.
+ (list (condition-case e (abs nil) (error e)) (abs -3)
+       (condition-case e (float [1 2 3]) (error e)) (float 3)
+       (condition-case e (frame-width 0.0) (error e))
+       (condition-case e (char-equal 7 "e") (error e)) (char-equal ?a ?a)
+       (condition-case e (assq-delete-all t "ab") (error e))
+       (condition-case e (rassoc ["a"] "x") (error e)) (rassoc 1 '((a . 1)))
+       (condition-case e (assq 32 [1 2 3]) (error e)) (assq 'a '((a . 1)))
+       (condition-case e (process-get nil 1) (error e))
+       (condition-case e (take "ABC" "x") (error e)) (take 2 '(1 2 3))
+       (condition-case e (butlast 97 '(1 2 . 3)) (error e)) (butlast '(1 2 3))
+       (condition-case e (make-temp-file 'foo) (error e))
+       (condition-case e (capitalize -1) (error e))
+       (condition-case e (downcase 1.5) (error e))
+       (condition-case e (upcase 1.5) (error e)))
 )
 
 ;;; nelisp-shadow-differential-cases.el ends here

@@ -39,12 +39,12 @@
 
 (unless (fboundp 'assq)
   (defun assq (key alist)
+    (unless (listp alist) (signal 'wrong-type-argument (list 'listp alist)))
     (let ((found nil))
       (while (and alist (not found))
         (let ((pair (car alist)))
-          (if (and (consp pair) (eq (car pair) key))
-              (setq found pair)
-            (setq alist (cdr alist)))))
+	  (if (and (consp pair) (eq (car pair) key)) (setq found pair)
+	    (setq alist (cdr alist)))))
       found)))
 
 (unless (fboundp 'assoc)

@@ -21,6 +21,13 @@
 ;; the two disagree; which one is right is still a reading job.  A generator
 ;; that answered that would be a second implementation of Emacs.
 ;;
+;; The COUNT is sample-dependent.  Adding or removing a name changes the
+;; length of the list the generator draws from, which shifts the whole
+;; pseudo-random sequence -- so two runs either side of such a change are
+;; different samples, not before-and-after.  Compare rates over a large
+;; budget, or hold the name list fixed; do not read a drop as progress
+;; without checking which of the two moved.
+;;
 ;; Do not run this at the same time as a build.  It executes ./target/nelisp
 ;; continuously, and a concurrent `make standalone-reader' fails with "Text
 ;; file busy" relinking the binary out from under it.  That is not a build

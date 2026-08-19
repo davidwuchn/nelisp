@@ -643,7 +643,9 @@ from `(defvar X nil)'."
   (dolist (a rest) (unless (numberp a)
                      (signal 'wrong-type-argument (list 'number-or-marker-p a))))
   (let ((acc x)) (while rest (if (< (car rest) acc) (setq acc (car rest))) (setq rest (cdr rest))) acc))
-(defun abs (x) (if (< x 0) (- 0 x) x))
+(defun abs (x)
+  (nelisp--check-number x)
+  (if (< x 0) (- 0 x) x))
 
 ;; SEQ may be a list, a vector or a string, as in Emacs.  The vector and
 ;; string forms used to be documented as out of scope, and out of scope
@@ -743,6 +745,9 @@ from `(defvar X nil)'."
   (not (and (eq (nelisp--case-up-char c) c) (eq (nelisp--case-down-char c) c))))
 
 (defun downcase (obj)
+  (unless (or (stringp obj)
+              (and (integerp obj) (>= obj 0) (<= obj 4194303)))
+    (signal 'wrong-type-argument (list 'char-or-string-p obj)))
   (cond ((stringp obj)
          (let ((out "") (i 0) (n (length obj)))
            (while (< i n)
@@ -784,6 +789,9 @@ from `(defvar X nil)'."
   ;; is U+1E9E, while (upcase "\N{U+00DF}") is "SS", because a full mapping may
   ;; change the length and a character cannot.  U+00DF is the only expansion
   ;; inside the ranges mapped here.
+  (unless (or (stringp obj)
+              (and (integerp obj) (>= obj 0) (<= obj 4194303)))
+    (signal 'wrong-type-argument (list 'char-or-string-p obj)))
   (cond ((stringp obj)
          (let ((out "") (i 0) (n (length obj)))
            (while (< i n)
@@ -1020,6 +1028,8 @@ Result keeps the trailing slash."
        (t (1+ n))))))
 (unless (fboundp 'char-equal)
   (defun char-equal (a b)
+    (nelisp--check-character a)
+    (nelisp--check-character b)
     ;; `char-equal' folds case when `case-fold-search' is non-nil, which is
     ;; its whole difference from `eq' on two characters.
     (or (eq a b)
@@ -1060,6 +1070,7 @@ Result keeps the trailing slash."
       (if found (cdr found) default))))
 (unless (fboundp 'take)
   (defun take (n list)
+    (unless (integerp n) (signal 'wrong-type-argument (list 'integerp n)))
     (let ((acc nil) (i 0))
       (while (and (< i n) list)
         (setq acc (cons (car list) acc)) (setq list (cdr list)) (setq i (1+ i)))
@@ -1675,7 +1686,10 @@ loop for the exponent (= no `expt' / `float' primitive needed)."
   (defmacro cl-multiple-value-bind (vars form &rest body)
     `(cl-destructuring-bind ,vars ,form ,@body)))
 ;; Doc 160 breadth round 3: number / set / char / string library gaps.
-(unless (fboundp 'float) (defun float (x) (if (floatp x) x (+ x 0.0))))
+(unless (fboundp 'float)
+  (defun float (x)
+    (nelisp--check-number x)
+    (if (floatp x) x (+ x 0.0))))
 (unless (fboundp 'expt)
   (defun expt (b e)
   (nelisp--check-number b)
@@ -1744,12 +1758,16 @@ TYPE flowing into whatever the caller does next."
 (unless (fboundp 'cl-mapcan) (defun cl-mapcan (fn &rest lists) (apply #'append (apply #'cl-mapcar fn lists))))
 (unless (fboundp 'assq-delete-all)
   (defun assq-delete-all (key alist)
+    (unless (listp alist) (signal 'wrong-type-argument (list 'listp alist)))
     (let (acc) (dolist (e alist (nreverse acc)) (unless (and (consp e) (eq (car e) key)) (push e acc))))))
 (unless (fboundp 'capitalize)
   (defun capitalize (obj)
     "Title-case OBJ: upcase each word-initial letter, downcase the rest.
 Built from `concat\' rather than `aset\' because a mapped character can be
 wider than the one it replaces once the mapping leaves ASCII."
+    (unless (or (stringp obj)
+                (and (integerp obj) (>= obj 0) (<= obj 4194303)))
+      (signal 'wrong-type-argument (list 'char-or-string-p obj)))
     (unless (or (integerp obj) (stringp obj))
       (signal 'wrong-type-argument (list 'char-or-string-p obj)))
     (if (integerp obj) (nelisp--case-up-char obj)
@@ -1868,7 +1886,8 @@ the only case this function exists for."
 ;; conventional 80x24.  (Export the vars, or refine with a TIOCGWINSZ ioctl,
 ;; to track live resizes.)
 (unless (fboundp 'frame-width)
-  (defun frame-width (&rest _)
+  (defun frame-width (&optional frame)
+    (when frame (signal 'wrong-type-argument (list 'framep frame)))
     (let ((c (getenv "COLUMNS")))
       (if (and c (> (length c) 0)) (string-to-number c) 80))))
 (unless (fboundp 'frame-height)
@@ -2131,6 +2150,7 @@ reseeds from its characters; nil -> a full LCG value."
       found)))
 (unless (fboundp 'rassoc)
   (defun rassoc (value alist)
+    (unless (listp alist) (signal 'wrong-type-argument (list 'listp alist)))
     (let ((found nil))
       (while (and alist (not found))
         (if (and (consp (car alist)) (equal (cdr (car alist)) value))
@@ -2150,6 +2170,7 @@ reseeds from its characters; nil -> a full LCG value."
         (nthcdr (if (> len m) (- len m) 0) list)))))
 (unless (fboundp 'butlast)
   (defun butlast (list &optional n)
+    (when n (unless (numberp n) (signal 'wrong-type-argument (list 'number-or-marker-p n))))
     (let* ((len (length list)) (m (or n 1)) (keep (- len m)) (acc nil) (i 0))
       (while (and (< i keep) list)
         (setq acc (cons (car list) acc))
@@ -2422,6 +2443,7 @@ FRESH buffer (the old `(t seq)' arm returned the same object, so a following
 
 (unless (fboundp 'assq)
   (defun assq (key alist)
+    (unless (listp alist) (signal 'wrong-type-argument (list 'listp alist)))
     (let ((found nil))
       (while (and alist (not found))
         (let ((pair (car alist)))
@@ -5189,6 +5211,7 @@ Rust-min migration (= moved out of build-tool/src/eval/special_forms.rs)."
              (nelisp-process-object-p process)))))
 (unless (fboundp 'process-get)
   (defun process-get (process key)
+    (unless (processp process) (signal 'wrong-type-argument (list 'processp process)))
     (cond
      ((and (vectorp process) (> (length process) 0) (eq (aref process 0) 'process))
       (cdr (assq key (aref process 4))))
@@ -6416,6 +6439,7 @@ first `getenv' is not overwritten by the value the process started with."
     (= 0 (nelisp--syscall-path-int 21 filename 1))))  ; access X_OK
 (unless (fboundp 'make-temp-file)
   (defun make-temp-file (prefix &optional dir-flag suffix text)
+    (unless (sequencep prefix) (signal 'wrong-type-argument (list 'sequencep prefix)))
     (let ((path (concat "/tmp/" (make-temp-name prefix) (or suffix ""))))
       (if dir-flag (make-directory path t) (write-region (or text "") nil path))
       path)))
