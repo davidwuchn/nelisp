@@ -43,3 +43,30 @@
 # nelisp--cli-batch-ensure-host, which loads that file, already gated its own
 # fallback stub this way.
 shared-shadowing 245
+
+# 2026-08-19, reviewing the 245 rather than counting them.  The table now
+# carries the defining file, which is half of what makes a class actionable:
+# "does this shadow Emacs" is only useful beside "and where do I look".
+# By file, the shadowings are 111 in scripts/nelisp-stdlib-prelude.el, 34 in
+# lisp/nelisp-stdlib.el, 28 in nelisp-stdlib-misc.el, 22 in
+# nelisp-stdlib-plist-str.el, 10 in nelisp-jit-strategy.el, and a tail.
+#
+# Not all 245 are equally dangerous, and the danger is not the one the class
+# name suggests.  The three defects this class produced on 2026-08-19 did not
+# break a host Emacs -- they broke the STANDALONE, by landing on top of a
+# native builtin that already worked.  Cross-referencing the shadowings
+# against the standalone's own builtin list: 70 of the 245 are names the
+# runtime provides natively, 10 of them in the prelude, which is the set a
+# single run can reach both halves of.
+#
+# `make standalone-reader-shadow-smoke' now evaluates the same expressions
+# with and without the prelude and requires identical answers, so a prelude
+# definition that drifts from the native builtin fails instead of waiting to
+# be found by hand.  Known-answer: a `mod' that truncates instead of flooring
+# takes (mod -7 2) from 1 to -1 and the target fails, printing both sides.
+#
+# That check is deliberately NOT part of this tool.  This one runs in a stock
+# `emacs -Q' that only READS sources, and its answers come from asking that
+# process `fboundp' -- loading the build script to get the builtin list would
+# define names into the very process whose emptiness is the measurement.
+

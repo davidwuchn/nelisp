@@ -119,6 +119,13 @@ jobs:
         if: runner.os == 'Linux'
         shell: bash
         run: make standalone-reader-checked-soak
+      # 70 of the 245 shared-shadowing names are also native builtins, so
+      # loading the prelude swaps the implementation underneath them.  This
+      # requires both implementations to answer the same.
+      - name: "Standalone NeLisp shadow differential (native builtins vs the prelude's redefinitions; Linux x86_64)"
+        if: runner.os == 'Linux'
+        shell: bash
+        run: make standalone-reader-shadow-smoke
 
       # Placed before the ERT suite so a pre-existing test failure does
       # not skip the Mach-O toolchain-acceptance signal.

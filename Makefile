@@ -8,7 +8,7 @@
         standalone-eval standalone-eval-clean standalone-eval-test standalone-eval-j \
         standalone-reader standalone-reader-test standalone-reader-load-smoke standalone-reader-checked standalone-reader-fmt-smoke standalone-reader-prelude-equal-reload-smoke standalone-reader-declare-strip-smoke standalone-reader-nested-backquote-macro-smoke standalone-reader-derived-mode-shape-smoke standalone-reader-pcase-quote-literal-smoke standalone-reader-catch-throw-tag-smoke standalone-reader-cond-let-shape-smoke standalone-reader-ffi-smoke standalone-reader-tls-smoke standalone-reader-process-smoke standalone-reader-realrt-smoke standalone-reader-repl-smoke standalone-reader-prelude-test standalone-reader-intern-soft-smoke standalone-reader-intern-soft-loop-smoke standalone-reader-number-token-smoke standalone-reader-getenv-smoke standalone-selfhost-test standalone-selfhost-mt-test standalone-parallel-compile-test standalone-chunk-growth-test \
         standalone-reader-mod-float-smoke standalone-reader-match-data-smoke standalone-reader-current-time-smoke standalone-reader-require-provide-smoke \
-        alloc-check-collect standalone-reader-checked-soak \
+        alloc-check-collect standalone-reader-checked-soak standalone-reader-shadow-smoke \
         nelisp-performance-gate nelisp-nelix-command-gate nelisp-native-artifact-gate nelisp-nelix-native-hot-gate \
         nelisp-nelix-operational-gate \
         nelisp-runtime-image-cache-gate nelisp-source-command-substrate-gate
@@ -577,6 +577,41 @@ standalone-reader-checked: standalone-reader
 	  echo "[standalone-reader-checked] PASS: $$rep"; \
 	else \
 	  echo "[standalone-reader-checked] FAIL: $$rep"; \
+	  exit 1; \
+	fi
+
+# A name the standalone provides natively AND the prelude redefines
+# unconditionally has two implementations, and which one runs depends on
+# whether the prelude was loaded.  This evaluates the same expressions both
+# ways and requires the same answers.  See the case file's commentary for
+# the three defects of this shape found by hand on 2026-08-19.
+.PHONY: standalone-reader-shadow-smoke
+standalone-reader-shadow-smoke: $(if $(wildcard target/nelisp target/nelisp.exe),,standalone-reader)
+	@mkdir -p target
+	@cp test/nelisp-shadow-differential-cases.el target/shadow-native.el
+	@printf '%s\n' '(load "scripts/nelisp-stdlib-prelude.el")' > target/shadow-prelude.el
+	@cat test/nelisp-shadow-differential-cases.el >> target/shadow-prelude.el
+	@bin=./target/nelisp; \
+	case "$(NELISP_STANDALONE_TARGET)$$NELISP_STANDALONE_TARGET" in \
+	  windows*) bin=./target/nelisp.exe;; \
+	esac; \
+	native="$$($$bin --load target/shadow-native.el 2>&1 | tail -n 1)"; \
+	prelude="$$($$bin --load target/shadow-prelude.el 2>&1 | tail -n 1)"; \
+	case "$$native" in \
+	  "("*) : ;; \
+	  *) echo "[shadow-smoke] FAIL: the native run produced no list -> $$native"; exit 1;; \
+	esac; \
+	case "$$prelude" in \
+	  "("*) : ;; \
+	  *) echo "[shadow-smoke] FAIL: the prelude run produced no list -> $$prelude"; exit 1;; \
+	esac; \
+	if [ "$$native" = "$$prelude" ]; then \
+	  echo "[shadow-smoke] PASS: native and prelude agree"; \
+	  echo "[shadow-smoke]   $$native"; \
+	else \
+	  echo "[shadow-smoke] FAIL: the prelude answers differently from the native builtins"; \
+	  echo "[shadow-smoke]   native  $$native"; \
+	  echo "[shadow-smoke]   prelude $$prelude"; \
 	  exit 1; \
 	fi
 

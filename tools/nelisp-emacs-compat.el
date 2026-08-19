@@ -91,8 +91,9 @@
        (let ((test (car-safe (cdr-safe form))))
          (and (consp test) (memq (car test) '(fboundp boundp))))))
 
-(defun nelisp-emacs-compat--walk (form guarded table)
+(defun nelisp-emacs-compat--walk (form guarded table file)
   "Record every definition in FORM into TABLE, noting whether it is GUARDED.
+FILE is where FORM was read from; TABLE maps NAME to (KIND . FILE).
 
 The spine is walked iteratively and only the cars are recursed into.  A
 `dolist\=' over a form is wrong the moment it meets a dotted pair, and this
@@ -101,18 +102,23 @@ way, a comment I read and then wrote the bug anyway."
   (let ((name (nelisp-emacs-compat--defined-name form)))
     (when name
       ;; One unguarded definition anywhere makes the name shadowing: it is
-      ;; the definition that will land on a host.
-      (puthash name
-               (if (or (eq (gethash name table) 'plain) (not guarded))
-                   'plain
-                 'gated)
-               table)))
+      ;; the definition that will land on a host.  The file recorded is the
+      ;; one that made it so -- for a name defined in several places, the
+      ;; unguarded definition is the one worth looking at.
+      (let* ((prior (gethash name table))
+             (plain-p (or (eq (car-safe prior) 'plain) (not guarded))))
+        (puthash name
+                 (cons (if plain-p 'plain 'gated)
+                       (if (and prior (eq (car-safe prior) 'plain) guarded)
+                           (cdr prior)
+                         file))
+                 table))))
   (when (consp form)
     (let ((inner (or guarded (nelisp-emacs-compat--guard-p form)))
           (tail form))
       (while (consp tail)
         (when (consp (car tail))
-          (nelisp-emacs-compat--walk (car tail) inner table))
+          (nelisp-emacs-compat--walk (car tail) inner table file))
         (setq tail (cdr tail))))))
 
 (defun nelisp-emacs-compat--only-blanks-p (start)
@@ -156,7 +162,7 @@ not be conflated: the file ended, or a form did not.  Same distinction
                             (error "emacs-compat: %s unreadable at %d: %s"
                                    file start (error-message-string err))))))
               (when form
-                (nelisp-emacs-compat--walk form nil table)))))))
+                (nelisp-emacs-compat--walk form nil table file)))))))
     table))
 
 (defun nelisp-emacs-compat--classify (name kind)
@@ -166,12 +172,16 @@ not be conflated: the file ended, or a form did not.  Same distinction
     'nelisp-only))
 
 (defun nelisp-emacs-compat--rows (table)
-  "Return sorted \"CLASS NAME\" rows for TABLE."
+  "Return sorted \"CLASS NAME FILE\" rows for TABLE.
+FILE is where the tree defines the name.  A class without a place to look
+answers half the question: \"does this shadow Emacs\" is only useful next
+to \"and where would I go to see what it does instead\"."
   (let ((rows nil))
     (maphash
-     (lambda (name kind)
-       (push (format "%-16s %s"
-                     (nelisp-emacs-compat--classify name kind) name)
+     (lambda (name entry)
+       (push (format "%-16s %-44s %s"
+                     (nelisp-emacs-compat--classify name (car entry))
+                     name (cdr entry))
              rows))
      table)
     (sort rows #'string<)))
