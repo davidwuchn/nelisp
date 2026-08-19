@@ -344,15 +344,23 @@ from `(defvar X nil)'."
 (defun string= (a b) (string-equal a b))
 
 (defun regexp-quote (s)
+  ;; Emacs escapes exactly these eight: $ * + . ? [ \\ ^ -- the characters
+  ;; that ARE special in its regexp syntax.  This escaped six more, and five
+  ;; of them made things worse rather than merely noisier: in Emacs regexps
+  ;; ( ) { } | are LITERAL, and the constructs are the backslashed forms, so
+  ;; escaping a literal `(' turns it into a group opener.  `(regexp-quote
+  ;; "(a)")' produced "\\(a\\)", which is a capturing group matching "a" --
+  ;; the opposite of quoting.  Same for | becoming alternation and {} becoming
+  ;; a repetition count.  The sixth, ], Emacs leaves alone; \\] is harmless but
+  ;; is not what Emacs returns, so a caller comparing quoted strings misses.
+  ;; Measured 2026-08-19 against Emacs 30.1 over all 128 ASCII codes.
   ;; Build via substring + string concat: the reader's `concat' does not
   ;; accept a char-list argument, so accumulate 1-char substrings instead.
   (let ((out "") (i 0) (n (length s)))
     (while (< i n)
       (let ((ch (aref s i)) (cs (substring s i (1+ i))))
         (when (or (eq ch ?.) (eq ch ?*) (eq ch ?+) (eq ch ??)
-                  (eq ch ?\[) (eq ch ?\]) (eq ch ?^) (eq ch ?$)
-                  (eq ch ?\\) (eq ch ?\() (eq ch ?\))
-                  (eq ch ?\{) (eq ch ?\}) (eq ch ?|))
+                  (eq ch ?\[) (eq ch ?^) (eq ch ?$) (eq ch ?\\))
           (setq out (concat out "\\")))
         (setq out (concat out cs)))
       (setq i (1+ i)))

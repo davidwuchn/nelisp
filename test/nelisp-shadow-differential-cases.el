@@ -66,6 +66,27 @@
  (nl-diff-d)
  (progn (defun nl-diff-e () "doc" (declare (indent 1)) 7) (nl-diff-e))
  (progn (defmacro nl-diff-m () "mac-only") (nl-diff-m))
+ ;; regexp-quote escapes exactly the eight characters Emacs's regexp syntax
+ ;; treats as special.  It used to escape six more, and ( ) { } | are LITERAL
+ ;; in an Emacs regexp -- the constructs are the backslashed forms -- so
+ ;; escaping them built the very syntax the caller asked to be quoted away.
+ ;; The match cases matter more than the strings: they are what the function
+ ;; is for, and a correct-looking escape set is worthless if the engine
+ ;; disagrees.
+ ;; Compared with `equal' rather than returned raw: `prin1' here does not
+ ;; escape a backslash inside a string, so "a\\.b\\*" prints as "a\.b\*"
+ ;; and a printed comparison would fail on the printer rather than on
+ ;; `regexp-quote'.  That printer gap is its own defect; this case is about
+ ;; the escape set, so it tests the value.
+ (equal (regexp-quote "(a)") "(a)")
+ (equal (regexp-quote "a|b") "a|b")
+ (equal (regexp-quote "a{2}") "a{2}")
+ (equal (regexp-quote "a.b*") "a\\.b\\*")
+ (equal (regexp-quote "[x]") "\\[x]")
+ (string-match-p (regexp-quote "(a)") "x(a)y")
+ (string-match-p (regexp-quote "a|b") "za|by")
+ (string-match-p (regexp-quote "a.b") "zaXby")
+ (string-match-p (regexp-quote "a|b") "za")
  ;; maphash reaches every entry
  (let ((h (make-hash-table :test 'equal)) (n 0))
    (puthash "b" 2 h) (puthash "a" 1 h) (puthash "c" 3 h)
