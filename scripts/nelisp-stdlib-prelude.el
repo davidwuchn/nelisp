@@ -3533,9 +3533,36 @@ bindings provide.  &rest is honoured."
         (nelisp-pcase--or rest value-form))
        ((eq head 'cons)
         (nelisp-pcase--cons rest value-form))
-       ((eq head 'backquote)
+       ;; The reader gives a backquote pattern the head `\=`', not
+       ;; `backquote', so testing only for the latter meant NO backquote
+       ;; pattern was ever recognised -- and the fallback below matched
+       ;; everything, so the first backquote clause in any `pcase' won
+       ;; regardless of the value.  There are 47 of them in this tree.
+       ;; The always-match fallback hid it completely; making that fallback
+       ;; signal is what brought it out.
+       ((if (eq head 'backquote) 1 (eq head '\`))
         (nelisp-pcase--backquote (car rest) value-form))
-       (t (cons t nil)))))
+       ((eq head 'app)
+        ;; (app FUN PAT): apply FUN to the value, match PAT on the result.
+        (nelisp-pcase--test (car (cdr rest))
+                            (list 'funcall (list 'function (car rest))
+                                  value-form)))
+       ;; An unrecognised pattern head used to build the test `t', so it
+       ;; matched EVERYTHING: `(pcase 5 ((app 1+ 7) (quote seven))
+       ;; (_ (quote other)))' answered seven where Emacs answers other, and
+       ;; a made-up head matched just as happily.  A dispatch construct
+       ;; quietly taking the wrong branch is about the worst failure a
+       ;; dispatch construct has, and the branch body can do anything.
+       ;;
+       ;; Signalling instead, which is what Emacs does for a head it does
+       ;; not know.  For a head Emacs DOES know and this does not, Emacs
+       ;; would evaluate it and this stops -- a deviation, but a named and
+       ;; loud one that says which pattern is missing, rather than a silent
+       ;; wrong answer.  Measured before changing it: across scripts/,
+       ;; lisp/ and src/ the only pattern heads in use are quote (245),
+       ;; backquote (47) and or (32), all handled, so nothing in the tree
+       ;; relies on the old always-match.
+       (t (error "Unknown %s pattern: %S" head pattern)))))
    (t (cons (list 'equal value-form (list 'quote pattern)) nil))))
 
 (defun nelisp-pcase--and (patterns value-form)
@@ -3550,13 +3577,27 @@ bindings provide.  &rest is honoured."
         (setq tests (cons t1 tests))
         (setq bindings (append bindings b1)))
       (setq cur (cdr cur)))
-    (cons (cons 'and (let ((rev nil))
-                       (while tests
-                         (setq rev (cons (car tests) rev))
-                         (setq tests (cdr tests)))
-                       rev))
-          bindings)))
+    ;; The test is wrapped in the bindings collected so far, because a
+    ;; later sub-pattern may READ an earlier one: `(and n (guard (> n 3)))'
+    ;; binds n and then tests it.  `pcase' puts bindings around the clause
+    ;; BODY only, so without this the guard ran with n unbound and every
+    ;; such clause answered void-variable rather than matching or not.
+    (let ((joined (cons 'and (let ((rev nil))
+                               (while tests
+                                 (setq rev (cons (car tests) rev))
+                                 (setq tests (cdr tests)))
+                               rev))))
+      (cons (if bindings (list 'let bindings joined) joined)
+            bindings))))
 
+;; Bindings inside an `or' arm are dropped, so a clause that relies on one
+;; answers void-variable rather than matching.  Emacs compiles each arm to
+;; its own branch and binds from whichever matched; doing that here means
+;; either re-evaluating the arm tests to pick the branch, or restructuring
+;; the (TEST . BINDINGS) protocol these builders share.  Left alone on
+;; measurement rather than on guess: across scripts/, lisp/ and src/ no
+;; `or' arm binds anything -- all 32 uses are quoted-symbol or literal
+;; alternatives -- so nothing in the tree needs it today.
 (defun nelisp-pcase--or (patterns value-form)
   "Build (TEST . BINDINGS) for an `or' pattern (no bindings)."
   (let ((tests nil)
@@ -3587,14 +3628,23 @@ bindings provide.  &rest is honoured."
 
 (defun nelisp-pcase--backquote (pat value-form)
   "Build (TEST . BINDINGS) for a backquote pattern."
+  ;; The reader spells these `\=,' and `\=,@', not `comma' and `comma-at'.
+  ;; Matching only the long names meant no unquote was ever recognised, so
+  ;; `(,a ,b)' fell through to the literal arm and compared the VALUE
+  ;; against the pattern `((\=, a) (\=, b))' -- which never matches anything.
+  ;; Together with the head being `\=`' rather than `backquote', that made
+  ;; the whole backquote pattern family dead, and the dispatcher's
+  ;; always-match fallback hid it: every backquote clause matched, so the
+  ;; first one in a `pcase' won whatever the value was.  Both spellings are
+  ;; accepted now.
   (cond
-   ((and (consp pat) (eq (car pat) 'comma))
+   ((and (consp pat) (if (eq (car pat) 'comma) 1 (eq (car pat) '\,)))
     (let ((sym (car (cdr pat))))
       (cond
        ((eq sym '_) (cons t nil))
        ((symbolp sym) (cons t (list (list sym value-form))))
        (t (nelisp-pcase--test sym value-form)))))
-   ((and (consp pat) (eq (car pat) 'comma-at))
+   ((and (consp pat) (if (eq (car pat) 'comma-at) 1 (eq (car pat) '\,@)))
     (let ((sym (car (cdr pat))))
       (cons t (list (list sym value-form)))))
    ((consp pat)

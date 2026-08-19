@@ -73,11 +73,15 @@
  ;; The match cases matter more than the strings: they are what the function
  ;; is for, and a correct-looking escape set is worthless if the engine
  ;; disagrees.
- ;; Compared with `equal' rather than returned raw: `prin1' here does not
- ;; escape a backslash inside a string, so "a\\.b\\*" prints as "a\.b\*"
- ;; and a printed comparison would fail on the printer rather than on
- ;; `regexp-quote'.  That printer gap is its own defect; this case is about
- ;; the escape set, so it tests the value.
+ ;; Compared with `equal' rather than returned raw, so the case turns on the
+ ;; escape set rather than on how the result prints.
+ ;;
+ ;; (The comment here used to say `prin1' does not escape a backslash inside
+ ;; a string.  That was wrong, and measuring the bytes says so: both print
+ ;; \"a\\.b\\*\" as 34 97 92 92 46 98 92 92 42 34, identical.  What does
+ ;; differ is the other direction -- this prints \\n and \\t where Emacs
+ ;; emits a raw newline and tab -- and since both read back to the same
+ ;; string, print-then-read is intact.)
  (equal (regexp-quote "(a)") "(a)")
  (equal (regexp-quote "a|b") "a|b")
  (equal (regexp-quote "a{2}") "a{2}")
@@ -115,6 +119,28 @@
  (nconc nil 5)
  (nconc (list 1) nil)
  (nconc)
+ ;; pcase.  The dispatcher used to build the test `t' for any pattern head
+ ;; it did not recognise, so those matched EVERYTHING -- and it recognised
+ ;; `backquote' while the reader spells the head `\=`', and `comma' while the
+ ;; reader spells it `\=,'.  Between them, no backquote pattern was ever
+ ;; matched and every backquote clause won regardless of the value.  There
+ ;; are 47 of them in this tree.
+ (pcase 5 (5 'five) (_ 'other))
+ (pcase 6 (5 'five) (_ 'other))
+ (pcase 5 (n (list 'bound n)))
+ (pcase 'a ('a 'is-a) (_ 'other))
+ (pcase "x" ("x" 'sx) (_ 'other))
+ (pcase '(1 2) (`(,a ,b) (list a b)) (_ 'other))
+ (pcase '(1) (`(,a ,b) (list a b)) (_ 'other))
+ (pcase '(1 2 3) (`(,a . ,rest) (list a rest)) (_ 'other))
+ (pcase 5 ((pred integerp) 'int) (_ 'other))
+ (pcase "s" ((pred integerp) 'int) (_ 'other))
+ ;; `app' applies and matches the result; a guard reads a binding made
+ ;; earlier in the same `and'.
+ (pcase 5 ((app 1+ 6) 'six) (_ 'other))
+ (pcase 5 ((app 1+ 7) 'seven) (_ 'other))
+ (pcase 5 ((and n (guard (> n 3))) 'big) (_ 'small))
+ (pcase 2 ((and n (guard (> n 3))) 'big) (_ 'small))
  ;; maphash reaches every entry
  (let ((h (make-hash-table :test 'equal)) (n 0))
    (puthash "b" 2 h) (puthash "a" 1 h) (puthash "c" 3 h)
