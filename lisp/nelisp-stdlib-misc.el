@@ -627,8 +627,14 @@ or signals otherwise.  Replaces the deleted Rust `bi_require'."
 (defalias 'eql 'equal)
 (unless (fboundp 'lsh)
   (defun lsh (value count)
-    (nelisp--check-integer value)
-    (nelisp--check-integer count)
+    ;; Measured: only a NON-NUMBER in argument one names
+    ;; `number-or-marker-p'.  Everything else -- a float anywhere, or a
+    ;; non-number in argument two -- names `integerp'.
+    ;;   (lsh "a" 1) -> number-or-marker-p    (lsh 48 "a") -> integerp
+    ;;   (lsh 1.5 1) -> integerp              (lsh 1 1.5)  -> integerp
+    (unless (numberp value) (signal 'wrong-type-argument (list 'number-or-marker-p value)))
+    (unless (integerp value) (signal 'wrong-type-argument (list 'integerp value)))
+    (unless (integerp count) (signal 'wrong-type-argument (list 'integerp count)))
     (if (>= count 0)
         (ash value count)
       (if (>= value 0)
@@ -665,7 +671,13 @@ or signals otherwise.  Replaces the deleted Rust `bi_require'."
 (defun encode-coding-string (str coding &optional _nocopy)
     (nelisp--check-string str)
     (nelisp--check-symbol coding)
-    (when (and coding (not (eq coding 'utf-8)))
+    ;; `utf-8' and `latin-1' both answer the string unchanged (every string
+    ;; is already UTF-8 bytes here); an UNKNOWN coding system is a
+    ;; `coding-system-error', the condition Emacs signals.
+    (when (and coding (not (memq coding '(utf-8 latin-1 binary no-conversion
+                                          us-ascii undecided prefer-utf-8))))
+      (signal 'coding-system-error (list coding)))
+    (when nil
       (signal 'error
               (list (format "encode-coding-string stub: only utf-8 supported, got %S"
                             coding))))
@@ -675,7 +687,13 @@ or signals otherwise.  Replaces the deleted Rust `bi_require'."
   (defun decode-coding-string (str coding &optional _nocopy)
     (nelisp--check-string str)
     (nelisp--check-symbol coding)
-    (when (and coding (not (eq coding 'utf-8)))
+    ;; `utf-8' and `latin-1' both answer the string unchanged (every string
+    ;; is already UTF-8 bytes here); an UNKNOWN coding system is a
+    ;; `coding-system-error', the condition Emacs signals.
+    (when (and coding (not (memq coding '(utf-8 latin-1 binary no-conversion
+                                          us-ascii undecided prefer-utf-8))))
+      (signal 'coding-system-error (list coding)))
+    (when nil
       (signal 'error
               (list (format "decode-coding-string stub: only utf-8 supported, got %S"
                             coding))))
@@ -823,5 +841,9 @@ No-ops on substrates without `nelisp--syscall-path-int' (the historic stub)."
 
 ;; nelisp-stdlib-misc.el ends here
 (unless (fboundp 'buffer-substring-no-properties)
-  (defun buffer-substring-no-properties (_start _end)
-    "NeLisp stub: empty string (= no buffer)." ""))
+  (defun buffer-substring-no-properties (start end)
+    (unless (integerp start)
+      (signal 'wrong-type-argument (list 'integer-or-marker-p start)))
+    (unless (integerp end)
+      (signal 'wrong-type-argument (list 'integer-or-marker-p end)))
+    ""))

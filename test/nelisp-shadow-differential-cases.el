@@ -802,6 +802,22 @@
        (condition-case e (featurep "a" '(1 2 . 3)) (error e))
        (featurep 'zz-no-feature)
        (condition-case e (logxor "x") (error e)) (logxor 12 10))
+
+ ;; A STREAM that is not a function is an error for `read' and `terpri' too;
+ ;; an unknown coding system is `coding-system-error', not a generic one.
+ (list (condition-case e (read '((a . 1))) (error e)) (read "(1 2)")
+       ;; `terpri' with ENSURE is NOT a case here: ENSURE means "only if not
+       ;; already at column 0", so whether the STREAM is reached at all
+       ;; depends on what was printed before it.  Emacs answers nil inside
+       ;; this file and `invalid-function' on its own, for that reason.  The
+       ;; one-argument form below is deterministic.
+       (condition-case e (terpri '(1 . 2)) (error e))
+       (condition-case e (run-at-time '(1) 48 :key) (error e))
+       (condition-case e (decode-coding-string "ABC" t "x") (error e))
+       (encode-coding-string "ABC" 'latin-1) (decode-coding-string "ab" 'utf-8)
+       (condition-case e (buffer-substring-no-properties '(1 2 3) "x") (error e))
+       (condition-case e (plist-put -1 ["a" "b"] "e") (error e))
+       (condition-case e (lsh [] 97) (error e)) (condition-case e (lsh 1 1.5) (error e)))
 )
 
 ;;; nelisp-shadow-differential-cases.el ends here

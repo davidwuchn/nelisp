@@ -213,6 +213,15 @@ rounded -- said rather than implied."
       (let ((e 2.718281828459045) (acc 1.0) (i (abs n)))
         (while (> i 0) (setq acc (* acc e)) (setq i (1- i)))
         (if (< n 0) (/ sum acc) (* sum acc))))))
+;; There are no buffers here, so this can only report the type error --
+;; which is the half Emacs reaches first anyway for a bad position.
+(unless (fboundp 'buffer-substring-no-properties)
+  (defun buffer-substring-no-properties (start end)
+    (unless (integerp start)
+      (signal 'wrong-type-argument (list 'integer-or-marker-p start)))
+    (unless (integerp end)
+      (signal 'wrong-type-argument (list 'integer-or-marker-p end)))
+    ""))
 (unless (fboundp 'locate-file)
   (defun locate-file (filename path &optional suffixes _predicate)
     "Find FILENAME in PATH, trying each of SUFFIXES; nil when not found."
@@ -564,8 +573,14 @@ from `(defvar X nil)'."
 ;; every bit-packing routine that shifts a sign-bit-set value wrong.
 (unless (fboundp 'lsh)
   (defun lsh (value count)
-    (nelisp--check-integer value)
-    (nelisp--check-integer count)
+    ;; Measured: only a NON-NUMBER in argument one names
+    ;; `number-or-marker-p'.  Everything else -- a float anywhere, or a
+    ;; non-number in argument two -- names `integerp'.
+    ;;   (lsh "a" 1) -> number-or-marker-p    (lsh 48 "a") -> integerp
+    ;;   (lsh 1.5 1) -> integerp              (lsh 1 1.5)  -> integerp
+    (unless (numberp value) (signal 'wrong-type-argument (list 'number-or-marker-p value)))
+    (unless (integerp value) (signal 'wrong-type-argument (list 'integerp value)))
+    (unless (integerp count) (signal 'wrong-type-argument (list 'integerp count)))
     (if (>= count 0)
         (ash value count)
       (if (>= value 0)
@@ -1890,8 +1905,13 @@ reseeds from its characters; nil -> a full LCG value."
          ;; TIME is validated before FUNCTION is touched, so a bad time is a
          ;; time error -- not `invalid-function' about an argument Emacs never
          ;; reached.
-    (unless (or (null time) (numberp time) (consp time)
-                (and (stringp time) (string-match-p "[0-9]" time)))
+    (unless (or (null time) (numberp time)
+                (and (stringp time) (string-match-p "[0-9]" time))
+                ;; A time VALUE is (HIGH LOW ...) -- at least two integers.
+                ;; A one-element cons is not one, and Emacs says so before
+                ;; it looks at FUNCTION.
+                (and (consp time) (integerp (car time))
+                     (consp (cdr time)) (integerp (car (cdr time)))))
       (signal 'error (list "Invalid time specification")))
     (apply function args)
     (list 'nelisp--sync-timer function)))
@@ -2041,7 +2061,11 @@ reseeds from its characters; nil -> a full LCG value."
 (defun princ (object &optional _stream)
   (nelisp--write-stdout-bytes (nelisp--prn-to-string object nil))
   object)
-(defun terpri (&optional _stream _ensure)
+(defun terpri (&optional stream _ensure)
+  (when (and stream (not (functionp stream)))
+    (signal (if (symbolp stream) 'void-function 'invalid-function) (list stream)))
+  (when (and stream (not (functionp stream)))
+    (signal (if (symbolp stream) 'void-function 'invalid-function) (list stream)))
   (nelisp--write-stdout-bytes "\n")
   nil)
 
@@ -5007,7 +5031,13 @@ Rust-min migration (= moved out of build-tool/src/eval/special_forms.rs)."
   (defun encode-coding-string (str coding &optional _nocopy)
     (nelisp--check-string str)
     (nelisp--check-symbol coding)
-    (when (and coding (not (eq coding 'utf-8)))
+    ;; `utf-8' and `latin-1' both answer the string unchanged (every string
+    ;; is already UTF-8 bytes here); an UNKNOWN coding system is a
+    ;; `coding-system-error', the condition Emacs signals.
+    (when (and coding (not (memq coding '(utf-8 latin-1 binary no-conversion
+                                          us-ascii undecided prefer-utf-8))))
+      (signal 'coding-system-error (list coding)))
+    (when nil
       (signal 'error
               (list (format "encode-coding-string stub: only utf-8 supported, got %S"
                             coding))))
@@ -5016,7 +5046,13 @@ Rust-min migration (= moved out of build-tool/src/eval/special_forms.rs)."
   (defun decode-coding-string (str coding &optional _nocopy)
     (nelisp--check-string str)
     (nelisp--check-symbol coding)
-    (when (and coding (not (eq coding 'utf-8)))
+    ;; `utf-8' and `latin-1' both answer the string unchanged (every string
+    ;; is already UTF-8 bytes here); an UNKNOWN coding system is a
+    ;; `coding-system-error', the condition Emacs signals.
+    (when (and coding (not (memq coding '(utf-8 latin-1 binary no-conversion
+                                          us-ascii undecided prefer-utf-8))))
+      (signal 'coding-system-error (list coding)))
+    (when nil
       (signal 'error
               (list (format "decode-coding-string stub: only utf-8 supported, got %S"
                             coding))))
@@ -5437,7 +5473,9 @@ No-ops on substrates without `nelisp--syscall-path-int' (the historic stub)."
                (cl-assertion-failed "Assertion failed")
                (scan-error "Scan error")
                (quit "Quit")
-               (user-error "")))
+               (user-error "")
+               (coding-system-error "Invalid coding system")
+               (charsetp "Invalid charset")))
   (put (car row) 'error-message (car (cdr row)))
   (unless (get (car row) 'error-conditions)
     (put (car row) 'error-conditions (list (car row) 'error))))
@@ -5986,6 +6024,8 @@ are numbers; `1.' is the integer 1."
 
 (unless (fboundp 'read)
   (defun read (&optional stream)
+    (unless (or (null stream) (stringp stream) (functionp stream))
+      (signal (if (symbolp stream) 'void-function 'invalid-function) (list stream)))
     (if (stringp stream) (car (read-from-string stream))
       (signal 'error (list "read: only string streams supported")))))
 
@@ -7016,10 +7056,10 @@ buffer = best-effort insert; nil/t/other = native stdout."
   ;; A STREAM that is not a function is `invalid-function' in Emacs -- this
   ;; ignored it and printed to stdout, so output went somewhere the caller
   ;; did not ask for and nothing said so.
+  "Print OBJECT with no quoting to STREAM or `standard-output' (Doc 22 A9)."
   (when (and stream (not (functionp stream)))
     (signal (if (symbolp stream) 'void-function 'invalid-function)
             (list stream)))
-  "Print OBJECT with no quoting to STREAM or `standard-output' (Doc 22 A9)."
   (let ((s (or stream standard-output)))
     (if (or (null s) (eq s t))
         (nelisp--native-princ object)
@@ -7031,10 +7071,10 @@ buffer = best-effort insert; nil/t/other = native stdout."
   ;; A STREAM that is not a function is `invalid-function' in Emacs -- this
   ;; ignored it and printed to stdout, so output went somewhere the caller
   ;; did not ask for and nothing said so.
+  "Print OBJECT in read syntax to STREAM or `standard-output' (Doc 22 A9)."
   (when (and stream (not (functionp stream)))
     (signal (if (symbolp stream) 'void-function 'invalid-function)
             (list stream)))
-  "Print OBJECT in read syntax to STREAM or `standard-output' (Doc 22 A9)."
   (let ((s (or stream standard-output)))
     (if (or (null s) (eq s t))
         (nelisp--native-prin1 object)
@@ -7043,6 +7083,10 @@ buffer = best-effort insert; nil/t/other = native stdout."
 
 (defun terpri (&optional stream _ensure)
   "Output a newline to STREAM or `standard-output' (Doc 22 A9)."
+  ;; The LATER definition is the live one -- an earlier copy in this file
+  ;; already had this check and it never ran.
+  (when (and stream (not (functionp stream)) (not (eq stream t)))
+    (signal (if (symbolp stream) 'void-function 'invalid-function) (list stream)))
   (let ((s (or stream standard-output)))
     (if (or (null s) (eq s t))
         (nelisp--native-terpri)
