@@ -1,0 +1,6 @@
+# Parity-corpus coverage floor (tools/nelisp-parity-coverage.el).
+# How many of the shared Emacs/NeLisp names test/nelisp-shadow-differential-cases.el
+# mentions.  Raise it whenever cases are added; it may never go down without a
+# stated reason, so a case cannot be deleted quietly.
+
+covered 100

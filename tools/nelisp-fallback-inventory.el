@@ -79,7 +79,11 @@ can check.")
     ;; Records into a variable that is reported later -- the native
     ;; dispatch report, and the reason the manifest gives for a fallback.
     nelisp-artifact--note-native-dispatch
-    nelisp-artifact--native-compiler-error)
+    nelisp-artifact--native-compiler-error
+    ;; tools/nelisp-parity-fuzz.el: a name whose arity cannot be read
+    ;; generates no call, which silently shrinks the search.  The recorder
+    ;; collects them and the run summary prints how many and which.
+    nelisp-parity-fuzz--note-unreadable-arity)
   "Names whose presence in a handler counts as leaving a trace.
 
 Reviewed 2026-08-19, the first time anything in this inventory was looked

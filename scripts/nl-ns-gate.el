@@ -72,6 +72,13 @@ thousands of lines and nobody would read a diff of it.")
          (accepted (nl-ns-load-accepted nl-ns-gate-accepted-file))
          (new (nl-ns-unaccepted gated accepted))
          (stale (nl-ns-stale-accepted gated accepted)))
+    ;; Machine-readable, before the verdict so it survives every exit path.
+    ;; `checked' counts FINDINGS SEEN, which is the only number that can show
+    ;; the scan happened at all: a gate that reports clean because it looked
+    ;; at nothing reads exactly like a gate that reports clean because the
+    ;; tree is clean.  Three checks were in that state on 2026-08-19.
+    (princ (format "GATE-COUNT checked=%d findings=%d\n"
+                   (length findings) (+ (length new) (length stale))))
     (princ (format "nl-ns gate: %d findings, %d in gated kinds, %d accepted\n"
                    (length findings) (length gated)
                    (hash-table-count (plist-get accepted :keys))))

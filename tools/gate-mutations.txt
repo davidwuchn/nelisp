@@ -1,0 +1,17 @@
+# Known-defect injections (tools/nelisp-gate-mutation.sh).
+#
+# Each row is: GATE | FILE | SED-EXPRESSION | WHAT IT BREAKS
+#
+# The row is applied with `sed -i', the gate is run, and the file is
+# restored.  The gate MUST fail.  A gate that stays green with a real defect
+# in front of it is not a gate, and on 2026-08-19 three of them were in
+# exactly that state while printing PASS.
+#
+# Keep the injections small and obviously wrong.  A subtle one that a gate
+# legitimately does not cover teaches nothing except to delete the row.
+emacs-parity|scripts/nelisp-stdlib-prelude.el|s/^(defun regexp-quote (s)/(defun regexp-quote (s) (setq s (concat s "@"))/|regexp-quote appends a stray character
+ns-gate|scripts/nelisp-stdlib-prelude.el|s/^(defun round (x \&optional div)/(defun round (x \&optional div) (setq x x)/|round diverges from its lisp/ mirror
+# The replacement is GLOBAL on purpose.  The first version changed one
+# occurrence of a name that appears ten times, so the name stayed covered and
+# the gate correctly stayed green -- a weak injection reads as a broken gate.
+parity-coverage|test/nelisp-shadow-differential-cases.el|s/regexp-quote/ignore-me-not-a-name/g|a covered name stops being mentioned

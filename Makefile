@@ -356,6 +356,10 @@ bootstrap-contract:
 # were exactly that.  The ratchet is on `shared-shadowing'; the full table is
 # generated into docs/emacs-compat-table.txt so it can be grepped without
 # running anything.
+.PHONY: gate-mutation
+.PHONY: gate-selfcheck
+.PHONY: parity-coverage
+.PHONY: parity-fuzz
 .PHONY: inner
 .PHONY: emacs-parity
 .PHONY: emacs-compat
@@ -641,6 +645,43 @@ standalone-reader-elt-smoke: $(if $(wildcard target/nelisp target/nelisp.exe),,s
 # build -- it was running the full ERT suite after every one-line change.
 # This target is what to run between edits; run `make test' before the
 # commit, not before each measurement.
+# `emacs-parity' checks a corpus I wrote; this SEARCHES for cases I did not
+# think to write.  It generates calls to the names both runtimes define,
+# from an argument pool weighted toward the shapes that actually broke
+# things (empty sequence, improper list, negative index, index past the end,
+# non-ASCII, wrong type entirely), prints both answers, and shrinks any
+# disagreement to a minimal call.
+#
+# Not wired into CI as a blocking gate: it reports where the two differ, not
+# which one is right, and that is a reading job.  Run it, read it, and turn
+# what it finds into `emacs-parity' cases -- those are the ones that stay.
+#
+#   NELISP_FUZZ_SEED=7 NELISP_FUZZ_CASES=4000 make parity-fuzz
+#   NELISP_FUZZ_ONLY='^string-' make parity-fuzz
+# "buffer ops / text properties / overlays / coding systems are not covered"
+# was an impression until this printed the number: 100 of 424 shared names,
+# 23%.  It counts MENTIONS, not exercise, so it is a floor to push up rather
+# than a score -- `parity-fuzz' is what searches the space.  Two numbers that
+# measure different things beat one that pretends to measure both.
+# Every gate says whether what it looked at was clean.  None of them said
+# whether they looked at anything -- and three were green while seeing
+# nothing on 2026-08-19.  This runs each gate and requires its `checked'
+# count inside a band.
+# `gate-selfcheck' asks whether each gate looked at anything.  This asks the
+# harder question: would it CATCH something.  Each row injects a known
+# defect, requires the gate to go red, and restores the file.
+gate-mutation:
+	@tools/nelisp-gate-mutation.sh
+
+gate-selfcheck:
+	@$(EMACS) --batch -Q -l tools/nelisp-gate-selfcheck.el
+
+parity-coverage:
+	@$(EMACS) --batch -Q -l tools/nelisp-parity-coverage.el
+
+parity-fuzz: $(if $(wildcard target/nelisp target/nelisp.exe),,standalone-reader)
+	@NELISP_REPO_ROOT=$(CURDIR) $(EMACS) --batch -Q -l tools/nelisp-parity-fuzz.el
+
 inner: standalone-reader emacs-parity
 	@$(MAKE) --no-print-directory standalone-reader-shadow-smoke
 	@$(MAKE) --no-print-directory standalone-reader-elt-smoke
@@ -663,6 +704,7 @@ emacs-parity: $(if $(wildcard target/nelisp target/nelisp.exe),,standalone-reade
 	fi; \
 	n=$$(wc -c < target/emacs-parity-emacs.txt); \
 	head -c $$n target/emacs-parity-nelisp.txt > target/emacs-parity-nelisp-head.txt; \
+	echo "GATE-COUNT checked=$$n findings=0"; \
 	if cmp -s target/emacs-parity-emacs.txt target/emacs-parity-nelisp-head.txt; then \
 	  echo "[emacs-parity] PASS: $$n bytes identical to stock Emacs"; \
 	else \
