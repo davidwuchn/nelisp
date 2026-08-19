@@ -42,7 +42,7 @@
 # add-to-list a C subr, where before it became an elisp shim.
 # nelisp--cli-batch-ensure-host, which loads that file, already gated its own
 # fallback stub this way.
-shared-shadowing 245
+shared-shadowing 244
 
 # 2026-08-19, reviewing the 245 rather than counting them.  The table now
 # carries the defining file, which is half of what makes a class actionable:
@@ -69,4 +69,25 @@ shared-shadowing 245
 # `emacs -Q' that only READS sources, and its answers come from asking that
 # process `fboundp' -- loading the build script to get the builtin list would
 # define names into the very process whose emptiness is the measurement.
+
+# 245 -> 244 on 2026-08-19, and 8885 defined names -> 7114.
+#
+# The tool was reading quoted data as code.  A definer's own list of heads,
+# '(defvar defconst defcustom setq setq-default), was walked as a form: its
+# car is `defvar', so its second element read as a name being defined.  That
+# invented 1771 names and attributed `defconst' to src/nelisp-cc-runtime.el,
+# `defvar' to src/nelisp-bytecode.el and `defmacro' to src/nelisp-macro-ns.el,
+# none of which define them -- all three are in the prelude.  `function-put'
+# was listed as defined and is defined nowhere in the tree.
+#
+# Found by the review this tool exists to make possible, which is the joke:
+# it had the defect it was built to detect, and it is the same one nl-check
+# carries by design -- quoted forms are data.  Backquote is still walked, on
+# purpose: this tree assembles runtime code as backquoted templates, so a
+# definition there is a definition somewhere, while a quoted list of head
+# symbols is not a definition anywhere.
+#
+# One shadowing net: `function-put' left, `defconst'/`defvar'/`defmacro'
+# stayed but moved to the file that really defines them, which is what makes
+# the FILE column worth having.
 

@@ -84,6 +84,24 @@
              (symbolp (car-safe (cdr-safe arg))))
         (car-safe (cdr-safe arg)))))))
 
+(defun nelisp-emacs-compat--quoted-p (form)
+  "Non-nil when FORM is quoted data the walker must not read as code.
+
+Found 2026-08-19 by the review this tool exists to make possible, which is
+the joke: the tool had the defect it was built to detect.  A list like
+\='(defvar defconst defcustom setq setq-default) -- a definer\='s own list of
+heads it recognises -- was walked as if it were a form, so its car being
+`defvar\=' made its second element read as a name being defined.  That
+attributed `defconst\=' to src/nelisp-cc-runtime.el, `defvar\=' to
+src/nelisp-bytecode.el and `defmacro\=' to src/nelisp-macro-ns.el, none of
+which define them; all three live in lisp/nelisp-stdlib-eval-special.el.
+
+A name inside a quote is data.  Backquote is left walked on purpose: this
+tree assembles runtime code as backquoted templates, and a definition there
+is a definition somewhere, whereas a quoted list of head symbols is not a
+definition anywhere."
+  (and (consp form) (memq (car form) '(quote function))))
+
 (defun nelisp-emacs-compat--guard-p (form)
   "Non-nil when FORM is an `unless'/`when' whose test is an fboundp/boundp check."
   (and (consp form)
@@ -113,7 +131,7 @@ way, a comment I read and then wrote the bug anyway."
                            (cdr prior)
                          file))
                  table))))
-  (when (consp form)
+  (when (and (consp form) (not (nelisp-emacs-compat--quoted-p form)))
     (let ((inner (or guarded (nelisp-emacs-compat--guard-p form)))
           (tail form))
       (while (consp tail)
