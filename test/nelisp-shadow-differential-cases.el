@@ -48,6 +48,24 @@
  (equal nil nil) (equal '(1 . 2) '(1 . 2))
  ;; natnump
  (natnump 3) (natnump 0) (natnump -1) (natnump "x")
+ ;; A leading string is a docstring only when something follows it.  When it
+ ;; is the whole body it IS the body -- `(defun f () "hello")' answered nil
+ ;; until 2026-08-19, in both the prelude stripper and the native `defun'
+ ;; the evaluator actually dispatches.  All four edges, because getting one
+ ;; right by breaking another is the easy failure here.
+ (progn (defun nl-diff-a () "only") (nl-diff-a))
+ (progn (defun nl-diff-b () "doc" "body") (nl-diff-b))
+ (progn (defun nl-diff-c (x) "doc" x) (nl-diff-c 5))
+ ;; Split rather than wrapped in `progn': a call to an empty-body function
+ ;; does not write its output slot, so inside a `progn' it yields whatever
+ ;; the previous form left there -- `(progn (defun d () (declare ...)) (d))'
+ ;; answers `d' here and nil in Emacs.  Separate list elements get separate
+ ;; slots, so these two are the honest test of the declare-only body; the
+ ;; slot bug is its own defect and does not belong hidden in this one.
+ (defun nl-diff-d () (declare (indent 1)))
+ (nl-diff-d)
+ (progn (defun nl-diff-e () "doc" (declare (indent 1)) 7) (nl-diff-e))
+ (progn (defmacro nl-diff-m () "mac-only") (nl-diff-m))
  ;; maphash reaches every entry
  (let ((h (make-hash-table :test 'equal)) (n 0))
    (puthash "b" 2 h) (puthash "a" 1 h) (puthash "c" 3 h)

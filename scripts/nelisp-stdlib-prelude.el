@@ -20,11 +20,24 @@
 ;;   Assembled by nelisp-standalone-build.el reader-units; lisp/ stays pristine.
 ;; Regenerate with /tmp/make-prelude.el (or re-assemble those sources) -- 48 forms.
 
+;; A leading string is a docstring only when something follows it.  When it
+;; is the whole body it IS the body, and Emacs returns it: (defun f ()
+;; "hello") answers "hello" there and answered nil here, because this
+;; stripped every leading string unconditionally.  Measured 2026-08-19
+;; against Emacs 30.1, which also confirms the other three edges this has
+;; to get right: (defun f () "doc" "body") returns "body", so the first
+;; string still goes; (defun f () (declare (indent 1))) returns nil, so a
+;; `declare' goes even when it is the whole body; and `documentation' of a
+;; string-only function is nil, i.e. the string never became a docstring.
+;;
+;; `defun', `defmacro' and `defsubst' all reach this, so every function
+;; whose body was a bare string literal -- the accessor-returning-a-constant
+;; shape -- silently returned nil.
 (fset 'nelisp--strip-body-declarations
       (lambda (body)
         (let ((cur body))
           (while (and cur
-                      (or (stringp (car cur))
+                      (or (and (stringp (car cur)) (cdr cur))
                           (and (consp (car cur))
                                (eq (car (car cur)) 'declare))))
             (setq cur (cdr cur)))

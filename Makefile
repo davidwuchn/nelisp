@@ -680,8 +680,23 @@ standalone-reader-shadow-smoke: $(if $(wildcard target/nelisp target/nelisp.exe)
 # `--load' and compared live-blocks across them, which cannot fail: a fresh
 # process starts with a fresh heap, so the numbers were identical by
 # construction and the leak blocker was decorative.
+#
+# The leak blocker allows a few blocks of slack, and the number comes from
+# measurement rather than taste.  A strict `>' comparison failed on this
+# workload: run to run the settled census wobbles by a single block out of
+# about 145000, so the gate went red carrying no information -- which is how
+# a gate stops being read.  Eight rounds showed the wobble is not retention:
+# 144839, then 145065 held flat for six more rounds, so the runtime settles
+# and stays settled.
+#
+# The slack sits between the two measured magnitudes.  Observed noise is 1
+# block; the known-answer leak -- 2000 conses held past the collect -- moves
+# it by 4000 per round (149866 154092 158092, measured 2026-08-19).  8 is
+# comfortably above the first and 500x below the second, so the blocker
+# still fires on anything that accumulates and ignores what does not.
 .PHONY: standalone-reader-checked-soak
 STANDALONE_CHECKED_SOAK_ROUNDS ?= 3
+STANDALONE_CHECKED_SOAK_SLACK ?= 8
 standalone-reader-checked-soak: $(if $(wildcard target/nelisp target/nelisp.exe),,standalone-reader)
 	@mkdir -p target
 	@printf '%s\n' \
@@ -739,8 +754,8 @@ standalone-reader-checked-soak: $(if $(wildcard target/nelisp target/nelisp.exe)
 	  echo "[checked-soak] PASS (fewer than 2 rounds: no leak comparison possible)"; \
 	  exit 0; \
 	fi; \
-	if [ "$$last" -gt "$$settled" ]; then \
-	  echo "[checked-soak] FAIL: live blocks grew $$settled -> $$last after the first round (each round ends with garbage-collect, so this is retention rather than garbage)"; \
+	if [ "$$(( last - settled ))" -gt $(STANDALONE_CHECKED_SOAK_SLACK) ]; then \
+	  echo "[checked-soak] FAIL: live blocks grew $$settled -> $$last after the first round, past the $(STANDALONE_CHECKED_SOAK_SLACK)-block slack (each round ends with garbage-collect, so this is retention rather than garbage)"; \
 	  exit 1; \
 	fi; \
 	echo "[checked-soak] PASS"

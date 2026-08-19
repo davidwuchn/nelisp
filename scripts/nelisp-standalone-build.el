@@ -9813,13 +9813,34 @@ from the patched combiner-cons (see `nelisp-standalone--patch-combiner-cons').")
                       eqr))))
               0))
         0))
+    ;; A leading string is a docstring only when something follows it.  When
+    ;; it is the whole body it IS the body: `(defun f () "hello")' answers
+    ;; "hello" in Emacs and answered nil here, because this stripped every
+    ;; leading Str and left `nl_sf_defun' building a closure with an empty
+    ;; body.  Measured 2026-08-19 against Emacs 30.1, which also pins the
+    ;; three neighbouring edges: `(defun f () "doc" "body")' returns "body",
+    ;; so the first of two strings still goes; `(defun f () (declare ...))'
+    ;; returns nil, so a `declare' goes even alone; and `documentation' of a
+    ;; string-only function is nil, i.e. the string never was a docstring.
+    ;;
+    ;; The prelude's `nelisp--strip-body-declarations' had the same bug and
+    ;; is fixed with it, but this is the copy that runs: the evaluator
+    ;; dispatches `defun' here before consulting the symbol's function cell,
+    ;; so the prelude's `defun' macro never sees the form.  Proved rather
+    ;; than assumed -- `(macroexpand '(defun zz () "only"))' already yielded
+    ;; a lambda with the string body, and `(funcall (lambda () "only"))'
+    ;; already answered "only", while `(defun a () "only") (a)' still gave
+    ;; nil and `(symbol-function 'a)' showed `(closure nil nil)'.
     (defun nl_sf_decl_strip_body (body_ptr)
       (if (= (sexp-tag body_ptr) 7)
-          (let* ((head_ptr (nl_cons_car_ptr body_ptr)))
+          (let* ((head_ptr (nl_cons_car_ptr body_ptr))
+                 (rest_ptr (nl_cons_cdr_ptr body_ptr)))
             (if (= (sexp-tag head_ptr) 5)
-                (nl_sf_decl_strip_body (nl_cons_cdr_ptr body_ptr))
+                (if (= (sexp-tag rest_ptr) 7)
+                    (nl_sf_decl_strip_body rest_ptr)
+                  body_ptr)
               (if (= (nl_sf_decl_is_declare_form head_ptr) 1)
-                  (nl_sf_decl_strip_body (nl_cons_cdr_ptr body_ptr))
+                  (nl_sf_decl_strip_body rest_ptr)
                 body_ptr)))
         body_ptr))
     (defun nl_sf_decl_normalize_tail (tail_ptr out)
