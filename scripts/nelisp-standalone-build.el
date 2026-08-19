@@ -3680,7 +3680,8 @@ argument (reachability + in-arena bounds checks).")
                                             (ptr-read-u64 (wf_arg_ptr args 2) 8)
                                             buf sc)
                                          (mut-str-finalize ms out) 0)))
-    ((:lit "char-to-string")   . (if (= (ptr-read-u64 (wf_arg_ptr args 0) 0) 2)
+    ((:lit "char-to-string")   . (if (if (= (ptr-read-u64 (wf_arg_ptr args 0) 0) 2)
+                                   (if (< (ptr-read-u64 (wf_arg_ptr args 0) 8) 0) 0 1) 0)
                             (let* ((ms (alloc-bytes 32 8)))
                                    (seq (mut-str-make-empty ms 4)
                                         ;; Doc 161: UTF-8-encode the codepoint
@@ -3964,50 +3965,55 @@ unresolved at link time."
             (let* ((a (nl_cons_car_ptr args)) (b (nl_cons_car_ptr rest)))
               (if (= (wf_num_pairp a b) 0) 2
                 (if (= (wf_num_lt a b) 1) (wf_chain_lt rest) 0)))
-          (if (= (ptr-read-u64 args 0) 7)
-              (let* ((a (nl_cons_car_ptr args)) (ta (ptr-read-u64 a 0)))
-                (if (if (= ta 2) 1 (if (= ta 3) 1 0)) 1 2))
-            1))))
+          ;; ONE argument: Emacs answers t without checking its type --
+          ;; (> '((a . 1))) is t.  There is no pair to compare, so there is
+          ;; nothing to be wrong about, and checking anyway made a
+          ;; single-argument call signal where Emacs succeeds.
+          1)))
     (defun wf_chain_gt (args)
       (let* ((rest (nl_cons_cdr_ptr args)))
         (if (= (ptr-read-u64 rest 0) 7)
             (let* ((a (nl_cons_car_ptr args)) (b (nl_cons_car_ptr rest)))
               (if (= (wf_num_pairp a b) 0) 2
                 (if (= (wf_num_gt a b) 1) (wf_chain_gt rest) 0)))
-          (if (= (ptr-read-u64 args 0) 7)
-              (let* ((a (nl_cons_car_ptr args)) (ta (ptr-read-u64 a 0)))
-                (if (if (= ta 2) 1 (if (= ta 3) 1 0)) 1 2))
-            1))))
+          ;; ONE argument: Emacs answers t without checking its type --
+          ;; (> '((a . 1))) is t.  There is no pair to compare, so there is
+          ;; nothing to be wrong about, and checking anyway made a
+          ;; single-argument call signal where Emacs succeeds.
+          1)))
     (defun wf_chain_le (args)
       (let* ((rest (nl_cons_cdr_ptr args)))
         (if (= (ptr-read-u64 rest 0) 7)
             (let* ((a (nl_cons_car_ptr args)) (b (nl_cons_car_ptr rest)))
               (if (= (wf_num_pairp a b) 0) 2
                 (if (= (wf_num_le a b) 1) (wf_chain_le rest) 0)))
-          (if (= (ptr-read-u64 args 0) 7)
-              (let* ((a (nl_cons_car_ptr args)) (ta (ptr-read-u64 a 0)))
-                (if (if (= ta 2) 1 (if (= ta 3) 1 0)) 1 2))
-            1))))
+          ;; ONE argument: Emacs answers t without checking its type --
+          ;; (> '((a . 1))) is t.  There is no pair to compare, so there is
+          ;; nothing to be wrong about, and checking anyway made a
+          ;; single-argument call signal where Emacs succeeds.
+          1)))
     (defun wf_chain_ge (args)
       (let* ((rest (nl_cons_cdr_ptr args)))
         (if (= (ptr-read-u64 rest 0) 7)
             (let* ((a (nl_cons_car_ptr args)) (b (nl_cons_car_ptr rest)))
               (if (= (wf_num_pairp a b) 0) 2
                 (if (= (wf_num_ge a b) 1) (wf_chain_ge rest) 0)))
-          (if (= (ptr-read-u64 args 0) 7)
-              (let* ((a (nl_cons_car_ptr args)) (ta (ptr-read-u64 a 0)))
-                (if (if (= ta 2) 1 (if (= ta 3) 1 0)) 1 2))
-            1))))
+          ;; ONE argument: Emacs answers t without checking its type --
+          ;; (> '((a . 1))) is t.  There is no pair to compare, so there is
+          ;; nothing to be wrong about, and checking anyway made a
+          ;; single-argument call signal where Emacs succeeds.
+          1)))
     (defun wf_chain_eq (args)
       (let* ((rest (nl_cons_cdr_ptr args)))
         (if (= (ptr-read-u64 rest 0) 7)
             (let* ((a (nl_cons_car_ptr args)) (b (nl_cons_car_ptr rest)))
               (if (= (wf_num_pairp a b) 0) 2
                 (if (= (wf_num_eq a b) 1) (wf_chain_eq rest) 0)))
-          (if (= (ptr-read-u64 args 0) 7)
-              (let* ((a (nl_cons_car_ptr args)) (ta (ptr-read-u64 a 0)))
-                (if (if (= ta 2) 1 (if (= ta 3) 1 0)) 1 2))
-            1))))
+          ;; ONE argument: Emacs answers t without checking its type --
+          ;; (> '((a . 1))) is t.  There is no pair to compare, so there is
+          ;; nothing to be wrong about, and checking anyway made a
+          ;; single-argument call signal where Emacs succeeds.
+          1)))
     (defun wf_copy32 (dst src)
       (seq (ptr-write-u64 dst 0 (ptr-read-u64 src 0)) (ptr-write-u64 dst 8 (ptr-read-u64 src 8))
            (ptr-write-u64 dst 16 (ptr-read-u64 src 16)) (ptr-write-u64 dst 24 (ptr-read-u64 src 24)) 0))
@@ -7584,6 +7590,24 @@ unresolved at link time."
                 (bf_first_non_integer (nl_cons_cdr_ptr args))
               a))
         0))
+    ;; Measured on Emacs 30.1, and POSITION-dependent rather than
+    ;; type-dependent: the FIRST argument names `integer-or-marker-p'
+    ;; whatever is wrong with it, and a later one names
+    ;; `number-or-marker-p' unless it is a number that is not an integer.
+    ;;   (logand "x" 1)  -> integer-or-marker-p "x"
+    ;;   (logior 1 "s")  -> number-or-marker-p  "s"
+    ;;   (logior 1 1.5)  -> integer-or-marker-p 1.5
+    ;; Reasoning from "which check fails first" gives the wrong predicate
+    ;; for argument one; only running it says so.  An earlier version of
+    ;; this helper called ITSELF on that branch and looped.
+    (defun bf_int_arg_error (args)
+      (let* ((bad (bf_first_non_integer args)))
+        (if (= bad (nl_cons_car_ptr args))
+            (bf_wrong_type_int_or_marker bad)
+          (let* ((nn (wf_first_non_number args)))
+            (if (= nn 0)
+                (bf_wrong_type_int_or_marker bad)
+              (bf_wrong_type_number_or_marker nn))))))
     (defun bf_wrong_type_symbolp (offender)
       (let* ((wbuf (alloc-bytes 24 1))
              (cbuf (alloc-bytes 8 1))
@@ -8616,10 +8640,10 @@ Wave-2 (C) appends bf_ash (shl/sar compose) + bf_str_lt (byte-lexicographic).")
                           (bf_wrong_type_integerp (wf_arg_ptr args 0))))
     ((:lit "logand")  . (if (= (bf_first_non_integer args) 0)
                             (wf_write_int out (wf_logand_fold args (- 0 1)))
-                          (bf_wrong_type_int_or_marker (bf_first_non_integer args))))
+                          (bf_int_arg_error args)))
     ((:lit "logior")  . (if (= (bf_first_non_integer args) 0)
                             (wf_write_int out (wf_logior_fold args 0))
-                          (bf_wrong_type_int_or_marker (bf_first_non_integer args))))
+                          (bf_int_arg_error args)))
     ((:lit "logxor")  . (wf_write_int out (wf_logxor_fold args 0)))
     ;; lognot X = -X-1 (two's complement bitwise NOT).
     ((:lit "lognot")  . (wf_write_int out (- (- 0 (wf_argval args 0)) 1)))

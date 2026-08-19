@@ -328,10 +328,17 @@ leading `(declare ...)' forms are treated as declarations."
 ;;     signals `arith-error' on a zero divisor, also matching host
 ;;     Emacs).
 (defun mod (a b)
+  ;; Types before arithmetic: (mod :key 0) is a TYPE error in Emacs, not an
+  ;; arithmetic one -- checking the divisor first reported "Arithmetic
+  ;; error" for a call whose problem was the dividend.
+  (unless (numberp a) (signal 'wrong-type-argument (list 'number-or-marker-p a)))
+  (unless (numberp b) (signal 'wrong-type-argument (list 'number-or-marker-p b)))
   (if (or (floatp a) (floatp b))
       (- a (* b (floor (/ a b))))
     (progn
-      (when (= b 0) (error "Arithmetic error"))
+      ;; Emacs signals the CONDITION `arith-error', not a generic `error'
+      ;; whose message happens to say so -- a handler keys on the condition.
+      (when (= b 0) (signal 'arith-error nil))
       (let* ((n (if (< b 0) (- b) b))
              (r (- a (* n (/ a n)))))
         (when (< r 0) (setq r (+ r n)))

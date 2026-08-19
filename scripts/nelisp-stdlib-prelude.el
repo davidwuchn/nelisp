@@ -120,6 +120,15 @@
 ;; ignored (recorded in tools/partial-accepted.txt).
 (unless (fboundp 'obarrayp)
   (defun obarrayp (_x) nil))
+;; `intern' takes an OBARRAY it cannot honour -- one global table here --
+;; but Emacs type-checks the argument, and accepting anything hid the fact
+;; that it is ignored (recorded in tools/partial-accepted.txt).
+(unless (fboundp 'nelisp--native-intern)
+  (defalias 'nelisp--native-intern (symbol-function 'intern))
+  (defun intern (name &optional obarray)
+    (when (and obarray (not (obarrayp obarray)))
+      (signal 'wrong-type-argument (list 'obarrayp obarray)))
+    (nelisp--native-intern name)))
 ;; Absent, so a caller got `void-function' -- which reads as "the runtime
 ;; cannot do this" rather than "nobody wrote it yet".  There are no buffers
 ;; or byte-compiler here, so these answer nil and signal on a wrong type,
@@ -188,10 +197,11 @@
     (nelisp--check-string filename)
     (let ((dirs path) (hit nil))
       (while (and dirs (not hit))
-        (let ((dir (car dirs)))
+        (let ((dir (and (stringp (car dirs)) (car dirs))))
           (dolist (suf (or suffixes '("")))
-            (let ((cand (concat (file-name-as-directory (or dir ".")) filename suf)))
-              (when (and (not hit) (file-exists-p cand)) (setq hit cand)))))
+            (let ((cand (and (stringp suf)
+                             (concat (file-name-as-directory (or dir ".")) filename suf))))
+              (when (and cand (not hit) (file-exists-p cand)) (setq hit cand)))))
         (setq dirs (cdr dirs)))
       hit)))
 (unless (fboundp 'sequencep)
@@ -579,8 +589,20 @@ from `(defvar X nil)'."
 
 ;; Doc 143 arithmetic (helper-free, via >/</- which are reader primitives).
 (defun max (x &rest rest)
+  ;; Name the FIRST bad argument.  The fold reported whichever one it was
+  ;; holding when the comparison failed, which for (min '(1 2) '(1)) is the
+  ;; second -- so the reader was pointed at the wrong one.
+  (unless (numberp x) (signal 'wrong-type-argument (list 'number-or-marker-p x)))
+  (dolist (a rest) (unless (numberp a)
+                     (signal 'wrong-type-argument (list 'number-or-marker-p a))))
   (let ((acc x)) (while rest (if (> (car rest) acc) (setq acc (car rest))) (setq rest (cdr rest))) acc))
 (defun min (x &rest rest)
+  ;; Name the FIRST bad argument.  The fold reported whichever one it was
+  ;; holding when the comparison failed, which for (min '(1 2) '(1)) is the
+  ;; second -- so the reader was pointed at the wrong one.
+  (unless (numberp x) (signal 'wrong-type-argument (list 'number-or-marker-p x)))
+  (dolist (a rest) (unless (numberp a)
+                     (signal 'wrong-type-argument (list 'number-or-marker-p a))))
   (let ((acc x)) (while rest (if (< (car rest) acc) (setq acc (car rest))) (setq rest (cdr rest))) acc))
 (defun abs (x) (if (< x 0) (- 0 x) x))
 
@@ -1290,6 +1312,9 @@ Result keeps the trailing slash."
     (string-match-p "\\`[ \t\n\r]*\\'" s)))
 (unless (fboundp 'string-split)
   (defun string-split (s &optional sep omit trim)
+    ;; Emacs checks SEPARATORS before STRING, so a call with both wrong
+    ;; names the separator.
+    (when sep (nelisp--check-string sep))
     (nelisp--check-string s)
     (split-string s sep omit trim)))
 ;; REGEXP was accepted and ignored -- the parameter was even named `_re' to
@@ -1709,9 +1734,10 @@ wider than the one it replaces once the mapping leaves ASCII."
   (defun string-greaterp (a b) (string-lessp b a)))
 (unless (fboundp 'string-version-lessp)
   (defun string-version-lessp (a b)
-    ;; Takes a string OR a symbol, like `string-lessp' -- `nelisp--check-string'
-    ;; is too narrow and rejected the nil that Emacs compares as "nil".
-    (string-lessp a b)))
+    ;; Takes a string OR a symbol, like `string-lessp'.  A symbol compares by
+    ;; its NAME, so nil is "nil" -- not the empty string.
+    (string-lessp (if (stringp a) a (symbol-name a))
+                  (if (stringp b) b (symbol-name b)))))
 ;; Doc 160 breadth round 3: control / binding macros.
 ;; `interactive' is a command-declaration marker.  When a command is called
 ;; non-interactively (the only mode on the headless standalone), Emacs skips
@@ -1953,6 +1979,7 @@ reseeds from its characters; nil -> a full LCG value."
 ;; Folding is `downcase', so it reaches as far as `downcase' does: ASCII
 ;; today, which is where this was failing anyway.
 (defun assoc-string (key alist &optional case-fold)
+  (unless (listp alist) (setq alist nil))
   (let* ((k0 (if (symbolp key) (symbol-name key) key))
          (k (if case-fold (downcase k0) k0))
          (found nil))
@@ -1986,7 +2013,7 @@ reseeds from its characters; nil -> a full LCG value."
     ;; Emacs answers the object itself for a non-list -- (last t) is t --
     ;; because it walks with `cdr' rather than measuring first.  Measuring
     ;; with `length' made it signal `sequencep' instead.
-    (if (not (consp list)) list
+    (if (not (consp list)) (if (and n (< n 0)) nil list)
       (let ((len (safe-length list)) (m (or n 1)))
         ;; A negative N asks for more than the whole list, and Emacs answers
         ;; the whole list -- but for a NON-list it answers the object, which
@@ -2373,6 +2400,10 @@ Doc 22 A6: arrays are iterated by index."
     value))
 
 (defun plist-put (plist key value &optional predicate)
+  ;; Measured: `plist-put' and `plist-member' signal `plistp'; only
+  ;; `plist-get' answers nil.  An earlier reading of one fuzz case had this
+  ;; backwards -- the case passed a VECTOR key, and the vector was what the
+  ;; answer came from, not the leniency.
   (nelisp--check-plist plist)
   (let ((cur plist) (tail nil))
     (if predicate
@@ -3667,8 +3698,14 @@ bodies (= Stage 4 follow-up).  Indent / edebug specs come back when
     "Return a regexp matching any string in STRINGS, as Emacs builds it."
     ;; Emacs names `list-or-vector-p' here, not `listp': STRINGS may be
     ;; either, and a caller handed a string gets a predicate that says so.
+    ;; Two predicates, by what the argument IS: a string is a sequence but
+    ;; not a list or vector, so it names `list-or-vector-p'; anything that
+    ;; is not a sequence at all names `sequencep'.  Measured -- one name for
+    ;; both would be wrong half the time.
     (unless (or (listp strings) (vectorp strings))
-      (signal 'wrong-type-argument (list 'list-or-vector-p strings)))
+      (signal 'wrong-type-argument
+              (list (if (sequencep strings) 'list-or-vector-p 'sequencep)
+                    strings)))
     (let* ((open (cond ((stringp paren) paren) (paren "\\(")))
            (re (if strings
                    (regexp-opt-group
@@ -4951,10 +4988,11 @@ Rust-min migration (= moved out of build-tool/src/eval/special_forms.rs)."
          (eq (aref buffer 0) 'buffer)
          (aref buffer 3))))
 (unless (fboundp 'kill-buffer)
-  (defun kill-buffer (buffer)
+  (defun kill-buffer (&optional buffer)
+    "Answer t, as Emacs does; BUFFER is optional there too."
     (when (and (vectorp buffer) (eq (aref buffer 0) 'buffer))
       (aset buffer 3 nil))
-    nil))
+    t))
 (unless (fboundp 'with-current-buffer)
   (defmacro with-current-buffer (buffer &rest body)
     `(let ((nelisp--current-buffer ,buffer))
@@ -6583,10 +6621,17 @@ A half is rounded to the even neighbour, as in Emacs."
 ;;     signals `arith-error' on a zero divisor, also matching host
 ;;     Emacs).
 (defun mod (a b)
+  ;; Types before arithmetic: (mod :key 0) is a TYPE error in Emacs, not an
+  ;; arithmetic one -- checking the divisor first reported "Arithmetic
+  ;; error" for a call whose problem was the dividend.
+  (unless (numberp a) (signal 'wrong-type-argument (list 'number-or-marker-p a)))
+  (unless (numberp b) (signal 'wrong-type-argument (list 'number-or-marker-p b)))
   (if (or (floatp a) (floatp b))
       (- a (* b (floor (/ a b))))
     (progn
-      (when (= b 0) (error "Arithmetic error"))
+      ;; Emacs signals the CONDITION `arith-error', not a generic `error'
+      ;; whose message happens to say so -- a handler keys on the condition.
+      (when (= b 0) (signal 'arith-error nil))
       (let* ((n (if (< b 0) (- b) b))
              (r (- a (* n (/ a n)))))
         (when (< r 0) (setq r (+ r n)))

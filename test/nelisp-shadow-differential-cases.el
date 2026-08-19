@@ -706,6 +706,26 @@
        (condition-case e (prin1 1.5 -7) (error e))
        (condition-case e (print 32 0) (error e))
        (condition-case e (write-char 65 :key) (error e)))
+
+ ;; The bitwise predicate is POSITION-dependent, not type-dependent:
+ ;; (logand "x" 1) names `integer-or-marker-p' and (logior 1 "s") names
+ ;; `number-or-marker-p'.  Reasoning from "which check fails first" gets
+ ;; argument one wrong; only running it says so.
+ (list (> '((a . 1))) (condition-case e (min '(1 2) '(1)) (error e))
+       (last ["a"] -1) (condition-case e (plist-put -1 ["a"] "e") (error e))
+       (kill-buffer) (assoc-string 0 0.0 65)
+       (string-version-lessp nil "x")
+       (condition-case e (string-split '(1 . 2) -1 :key) (error e))
+       (condition-case e (regexp-opt 32) (error e))
+       (condition-case e (mod :key 0) (error e))
+       (condition-case e (mod 5 0) (error e)) (mod -7 2)
+       (condition-case e (logior 12354 '("a")) (error e))
+       (condition-case e (logand "x" 1) (error e))
+       (condition-case e (logior 1 1.5) (error e))
+       (condition-case e (% "a" 2) (error e))
+       (locate-file "" '(1 2 3) "x")
+       (condition-case e (char-to-string -1) (error e)) (char-to-string 97)
+       (condition-case e (intern "x" 1) (error e)))
 )
 
 ;;; nelisp-shadow-differential-cases.el ends here
