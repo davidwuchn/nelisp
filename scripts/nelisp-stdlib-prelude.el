@@ -197,6 +197,20 @@
     "Find LIBRARY on `load-path', trying .el; nil when not found."
     (nelisp--check-string library)
     (locate-file library load-path '(".el" ""))))
+(unless (fboundp 'exp)
+  (defun exp (x)
+    "e raised to X, by the Taylor series with an integer-part reduction.
+No libm here, so this is accurate to about 1e-15 rather than correctly
+rounded -- said rather than implied."
+    (nelisp--check-number x)
+    (let* ((n (truncate x)) (f (- x n)) (term 1.0) (sum 1.0) (k 1))
+      (while (< k 30)
+        (setq term (/ (* term f) (float k)))
+        (setq sum (+ sum term))
+        (setq k (1+ k)))
+      (let ((e 2.718281828459045) (acc 1.0) (i (abs n)))
+        (while (> i 0) (setq acc (* acc e)) (setq i (1- i)))
+        (if (< n 0) (/ sum acc) (* sum acc))))))
 (unless (fboundp 'locate-file)
   (defun locate-file (filename path &optional suffixes _predicate)
     "Find FILENAME in PATH, trying each of SUFFIXES; nil when not found."
@@ -548,6 +562,8 @@ from `(defvar X nil)'."
 ;; every bit-packing routine that shifts a sign-bit-set value wrong.
 (unless (fboundp 'lsh)
   (defun lsh (value count)
+    (nelisp--check-integer value)
+    (nelisp--check-integer count)
     (if (>= count 0)
         (ash value count)
       (if (>= value 0)
@@ -1184,8 +1200,10 @@ Result keeps the trailing slash."
   (defun ntake (n list) (take n list)))
 (unless (fboundp 'string-pad)
   (defun string-pad (s len &optional padding start)
-    (nelisp--check-string s)
+    ;; Emacs checks LENGTH before STRING, so a call with both wrong names
+    ;; the length.
     (nelisp--check-natnum len)
+    (nelisp--check-string s)
     (let ((pad (or padding 32)) (n (length s)))
       (if (>= n len) s
         (if start (concat (make-string (- len n) pad) s)
@@ -2064,6 +2082,8 @@ reseeds from its characters; nil -> a full LCG value."
 ;; A negative LENGTH answered nil, silently.  Emacs signals: asking for a
 ;; list of minus one thing is a caller bug, not an empty list.
 (defun make-list (length object)
+  (unless (and (integerp length) (>= length 0))
+    (signal 'wrong-type-argument (list 'wholenump length)))
   (if (or (not (integerp length)) (< length 0))
       (signal 'wrong-type-argument (list 'natnump length))
     (let ((acc nil))
@@ -2378,6 +2398,7 @@ walking only works for lists)."
 (defun mapc (fn seq)
   "Apply FN to each element of SEQ for side effect; return SEQ.
 Doc 22 A6: arrays are iterated by index."
+  (unless (sequencep seq) (signal 'wrong-type-argument (list 'sequencep seq)))
   (if (or (vectorp seq) (stringp seq))
       (let ((n (length seq)) (i 0))
         (while (< i n) (funcall fn (aref seq i)) (setq i (1+ i)))
@@ -4902,7 +4923,12 @@ Rust-min migration (= moved out of build-tool/src/eval/special_forms.rs)."
     sym))
 (unless (fboundp 'fmakunbound)
   (defun fmakunbound (sym) (nelisp--check-symbol sym) (fset sym nil) sym))
-(unless (fboundp 'functionp) (defun functionp (x) (or (and (consp x) (eq (car x) 'lambda)) (and (symbolp x) (fboundp x)))))
+(unless (fboundp 'functionp)
+  (defun functionp (x)
+    ;; nil and t are symbols but can never be fbound, and `fboundp' signals
+    ;; for a non-symbol now -- so ask about the shape before asking it.
+    (or (and (consp x) (eq (car x) 'lambda))
+        (and (symbolp x) (not (memq x '(nil t))) (fboundp x)))))
 (unless (fboundp 'recordp) (defun recordp (x) nil))
 (unless (fboundp 'nlistp) (defun nlistp (x) (not (listp x))))
 (unless (fboundp 'eql) (defun eql (a b) (if (and (numberp a) (numberp b)) (= a b) (eq a b))))
@@ -5011,7 +5037,7 @@ Rust-min migration (= moved out of build-tool/src/eval/special_forms.rs)."
 (unless (fboundp 'kill-buffer)
   (defun kill-buffer (&optional buffer)
     "Answer t, as Emacs does; BUFFER is optional there too."
-    (when (and (vectorp buffer) (eq (aref buffer 0) 'buffer))
+    (when (and (vectorp buffer) (> (length buffer) 0) (eq (aref buffer 0) 'buffer))
       (aset buffer 3 nil))
     t))
 (unless (fboundp 'with-current-buffer)
@@ -5045,13 +5071,13 @@ Rust-min migration (= moved out of build-tool/src/eval/special_forms.rs)."
     (apply #'insert-file-contents filename args)))
 (unless (fboundp 'processp)
   (defun processp (process)
-    (or (and (vectorp process) (eq (aref process 0) 'process))
+    (or (and (vectorp process) (> (length process) 0) (eq (aref process 0) 'process))
         (and (fboundp 'nelisp-process-object-p)
              (nelisp-process-object-p process)))))
 (unless (fboundp 'process-get)
   (defun process-get (process key)
     (cond
-     ((and (vectorp process) (eq (aref process 0) 'process))
+     ((and (vectorp process) (> (length process) 0) (eq (aref process 0) 'process))
       (cdr (assq key (aref process 4))))
      ((and (fboundp 'nelisp-process-object-p)
            (nelisp-process-object-p process))
@@ -5062,7 +5088,7 @@ Rust-min migration (= moved out of build-tool/src/eval/special_forms.rs)."
     (unless (processp process)
       (signal 'wrong-type-argument (list 'processp process)))
     (cond
-     ((and (vectorp process) (eq (aref process 0) 'process))
+     ((and (vectorp process) (> (length process) 0) (eq (aref process 0) 'process))
       (let ((cell (assq key (aref process 4))))
         (if cell
             (setcdr cell value)
@@ -5093,13 +5119,15 @@ Rust-min migration (= moved out of build-tool/src/eval/special_forms.rs)."
     ;; `processp'.  Measured -- the two look the same from a single failing
     ;; case, and the earlier reading here came from a string argument.
     (unless (or (stringp process) (processp process)
-                (and (vectorp process) (eq (aref process 0) 'process)))
+                (and (vectorp process) (> (length process) 0)
+                     (eq (aref process 0) 'process)))
       (signal 'wrong-type-argument (list 'processp process)))
     (cond
      ((and (fboundp 'nelisp-process-object-p)
            (nelisp-process-object-p process))
       (nelisp--process-status-symbol (nelisp-process-status process)))
-     ((and (vectorp process) (eq (aref process 0) 'process))
+     ((and (vectorp process) (> (length process) 0)
+           (eq (aref process 0) 'process))
       (aref process 2))
      ;; Emacs answers NIL for anything else -- it accepts a buffer or a
      ;; process NAME too, so "not a process object" is not an error here.
@@ -5112,12 +5140,18 @@ Rust-min migration (= moved out of build-tool/src/eval/special_forms.rs)."
      ((and (fboundp 'nelisp-process-object-p)
            (nelisp-process-object-p process))
       (nelisp-process-exit-status process))
-     ((and (vectorp process) (eq (aref process 0) 'process))
+     ((and (vectorp process) (> (length process) 0) (eq (aref process 0) 'process))
       (aref process 3))
      (t (signal 'wrong-type-argument (list 'processp process))))))
 (unless (fboundp 'process-live-p)
   (defun process-live-p (process)
-    (eq (process-status process) 'run)))
+    ;; Answers nil for a non-process, unlike `process-status' beside it --
+    ;; so it cannot simply delegate, which is what made it inherit the
+    ;; signal.
+    (and (or (processp process)
+             (and (vectorp process) (> (length process) 0)
+                  (eq (aref process 0) 'process)))
+         (eq (process-status process) 'run))))
 (unless (fboundp 'delete-process)
   (defun delete-process (process)
     (when (and (fboundp 'nelisp-process-object-p)
@@ -5201,7 +5235,7 @@ Rust-min migration (= moved out of build-tool/src/eval/special_forms.rs)."
                    (nelisp-process-object-p proc)
                    (fboundp 'nelisp-process-wait))
           (nelisp-process-wait proc))
-        (when (and (vectorp proc) (eq (aref proc 0) 'process))
+        (when (and (vectorp proc) (> (length proc) 0) (eq (aref proc 0) 'process))
           (aset proc 2 'exit)
           (aset proc 3 0))
         (let ((sentinel (process-get proc :sentinel)))
@@ -5263,9 +5297,14 @@ No-ops on substrates without `nelisp--syscall-path-int' (the historic stub)."
 (unless (boundp 'nelisp-stdlib--symbol-plists)
   (setq nelisp-stdlib--symbol-plists (make-hash-table)))
 (unless (fboundp 'symbol-plist)
-  (defun symbol-plist (sym) (gethash sym nelisp-stdlib--symbol-plists)))
+  (defun symbol-plist (sym)
+    (nelisp--check-symbol sym)
+    (gethash sym nelisp-stdlib--symbol-plists)))
 (unless (fboundp 'setplist)
-  (defun setplist (sym plist) (puthash sym plist nelisp-stdlib--symbol-plists) plist))
+  (defun setplist (sym plist)
+    (nelisp--check-symbol sym)
+    (puthash sym plist nelisp-stdlib--symbol-plists)
+    plist))
 (unless (fboundp 'get)
   (defun get (sym prop)
     (nelisp--check-symbol sym)
@@ -5398,6 +5437,7 @@ Doc 156: was `(apply #\\='vector ...)', but the reader now exposes a native
          ;; flat-alist shape (cdr a cons / nil) too.
          (or (null c) (vectorp c) (and (consp c) (consp (car c)))))))
 (defun maphash (fn table)
+  (unless (hash-table-p table) (signal 'wrong-type-argument (list 'hash-table-p table)))
   ;; The core `make-hash-table' returns (Int(0) . BUCKETS) where BUCKETS is a
   ;; vector whose slots are node lists of (KEY . VALUE) pairs.  (A legacy shape
   ;; stored a flat ((KEY . VALUE) ...) alist directly in the cdr.)  Walk both.
@@ -5984,6 +6024,7 @@ first `getenv' is not overwritten by the value the process started with."
 (defvar nelisp--temp-name-counter 0)
 (unless (fboundp 'make-temp-name)
   (defun make-temp-name (prefix)
+    (nelisp--check-string prefix)
     (setq nelisp--temp-name-counter (1+ nelisp--temp-name-counter))
     (format "%s%d-%d" prefix nelisp--temp-name-counter (length prefix))))
 ;; File-system ops via the reader's path-syscall builtins (nelisp--syscall-path
@@ -6162,7 +6203,9 @@ first `getenv' is not overwritten by the value the process started with."
       (defun file-readable-p (filename) (eq (nelisp--syscall-stat filename) 'file))
     (defun file-readable-p (filename) (= 0 (nelisp--syscall-path-int 21 filename 4)))))
 (unless (fboundp 'file-writable-p)
-  (defun file-writable-p (filename) (= 0 (nelisp--syscall-path-int 21 filename 2))))
+  (defun file-writable-p (filename)
+    (nelisp--check-string filename)
+    (= 0 (nelisp--syscall-path-int 21 filename 2))))
 (unless (fboundp 'delete-file)
   (defun delete-file (filename &optional _trash) (nelisp--syscall-path 87 filename) nil))
 (defun nelisp--delete-directory-recursive (path)
@@ -6243,6 +6286,7 @@ first `getenv' is not overwritten by the value the process started with."
     nil))
 (unless (fboundp 'file-executable-p)
   (defun file-executable-p (filename)
+    (nelisp--check-string filename)
     (= 0 (nelisp--syscall-path-int 21 filename 1))))  ; access X_OK
 (unless (fboundp 'make-temp-file)
   (defun make-temp-file (prefix &optional dir-flag suffix text)

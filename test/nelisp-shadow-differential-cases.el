@@ -748,6 +748,26 @@
        (condition-case e (seq-empty-p '(1 . 2) -1) (error (car e)))
        (condition-case e (file-truename nil 'x 0.0) (error e))
        (condition-case e (generate-new-buffer ["a"] nil) (error e)))
+
+ ;; `(and (vectorp X) (eq (aref X 0) 'tag))' is unsafe for an EMPTY vector:
+ ;; `aref' signals args-out-of-range, so six predicates written that way
+ ;; reported a range error where they should have answered nil.
+ (list (processp []) (process-live-p '(1 2 . 3))
+       (condition-case e (process-status []) (error e))
+       (condition-case e (maphash #'ignore 'x) (error e))
+       (condition-case e (file-executable-p nil) (error e))
+       (condition-case e (file-writable-p ["a"]) (error e))
+       (condition-case e (make-list "x" []) (error e)) (make-list 2 'a)
+       (condition-case e (make-string 3 -1) (error e)) (make-string 2 ?a)
+       (condition-case e (exp '("a")) (error e))
+       (< (abs (- (exp 1.0) 2.718281828459045)) 1e-12) (exp 0)
+       (condition-case e (lsh 48 "a") (error e)) (lsh 8 -1)
+       (condition-case e (symbol-plist "x") (error e))
+       (condition-case e (setplist "a" 7) (error e))
+       (condition-case e (make-temp-name nil) (error e))
+       (functionp t) (functionp nil) (functionp 'car)
+       (condition-case e (mapc #'identity 0) (error e)) (mapc #'identity '(1 2))
+       (condition-case e (string-pad nil '(1 . 2)) (error e)))
 )
 
 ;;; nelisp-shadow-differential-cases.el ends here

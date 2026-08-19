@@ -625,6 +625,8 @@ or signals otherwise.  Replaces the deleted Rust `bi_require'."
 (defalias 'eql 'equal)
 (unless (fboundp 'lsh)
   (defun lsh (value count)
+    (nelisp--check-integer value)
+    (nelisp--check-integer count)
     (if (>= count 0)
         (ash value count)
       (if (>= value 0)
