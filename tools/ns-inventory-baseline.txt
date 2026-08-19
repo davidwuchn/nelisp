@@ -131,7 +131,12 @@
 # in both the prelude and the lisp/ mirror that already named them, plus the
 # `nelisp--check-string' helper following `file-truename' across.  All
 # byte-identical, so this is the benign same-definition kind.
-ns-collision 169
+# 169 -> 170 on 2026-08-20: `path-separator', which
+# packages/nelisp-process/src/nelisp-process.el already declared -- but the
+# standalone does not load that package, so the variable was void there.
+# Byte-identical, benign same-definition.  171 also covers `bool-vector',
+# which the standalone did not have.
+ns-collision 171
 # 97 -> 96 on 2026-08-19: `string-equal' no longer differs between the two
 # files -- the prelude's now signals for a non-string instead of falling
 # through to `equal', and the lisp copy was brought with it.  Ratcheted down

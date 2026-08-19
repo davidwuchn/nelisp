@@ -656,6 +656,19 @@
        (< (abs (- (log 2.718281828459045) 1.0)) 1e-12)
        (< (abs (- (log 8 2) 3.0)) 1e-12)
        (condition-case e (generate-new-buffer ["a"]) (error e)))
+
+ ;; `remove' is type-preserving: answering a list of character codes for a
+ ;; string is a different TYPE flowing into whatever the caller does next.
+ ;; `string-lessp' takes a string OR a symbol, like `string='.
+ ;; NOTE: `bool-vector' is NOT compared here -- Emacs prints #&3"" for a
+ ;; distinct object type this runtime does not have (recorded in
+ ;; tools/partial-accepted.txt); the values agree under `aref' and `length'.
+ (list (condition-case e (string-lessp 1 "a") (error e))
+       (string-lessp 'a "b") (string-lessp "a" "b")
+       (condition-case e (string-greaterp 1 "a") (error e)) (string-greaterp "b" "a")
+       path-separator
+       (remove ?a "abc") (remove 2 [1 2 3]) (remove 2 '(1 2 3)) (remove 9 '(1 2))
+       (help-add-fundoc-usage "Doc." '(a b)) (help-add-fundoc-usage nil '(x)))
 )
 
 ;;; nelisp-shadow-differential-cases.el ends here

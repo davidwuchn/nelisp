@@ -838,17 +838,8 @@ Non-letter chars pass through unchanged."
     (make-vector length (and init t)))
 
 (defun bool-vector (&rest args)
-  "Variadic constructor: each ARG is coerced to t/nil and stored in a
-fresh vector."
-  (let* ((n (length args))
-         (out (make-vector n nil))
-         (i 0)
-         (tail args))
-    (while tail
-      (aset out i (and (car tail) t))
-      (setq i (1+ i))
-      (setq tail (cdr tail)))
-    out))
+    "Bool vectors are plain vectors of t/nil in this runtime (Doc 22)."
+    (apply #'vector (mapcar (lambda (x) (and x t)) args)))
 
 (defun bool-vector-p (object)
   "Return non-nil when OBJECT is a vector all of whose elements are

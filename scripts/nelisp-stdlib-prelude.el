@@ -156,6 +156,15 @@
             (setq k (1+ k)))
           (let ((ln (+ (* 2.0 sum) (* n 0.6931471805599453))))
             (if base (/ ln (log base)) ln)))))))
+(unless (fboundp 'bool-vector)
+  (defun bool-vector (&rest args)
+    "Bool vectors are plain vectors of t/nil in this runtime (Doc 22)."
+    (apply #'vector (mapcar (lambda (x) (and x t)) args))))
+;; Byte-identical to the packages/nelisp-process copy so `make ns-gate'
+;; polices the two.  It has to be here as well: the standalone does not load
+;; that package, so the variable was void.
+(unless (boundp 'path-separator)
+  (defconst path-separator ":"))
 (unless (fboundp 'locate-file)
   (defun locate-file (filename path &optional suffixes _predicate)
     "Find FILENAME in PATH, trying each of SUFFIXES; nil when not found."
@@ -1596,7 +1605,16 @@ loop for the exponent (= no `expt' / `float' primitive needed)."
     (if (< n 2) n (let ((x n) (y (/ (+ n 2) 2))) (while (< y x) (setq x y y (/ (+ x (/ n x)) 2))) x))))
 (unless (fboundp 'remove)
   (defun remove (item seq)
-    (let (acc) (dolist (x (nelisp-seq--to-list seq) (nreverse acc)) (unless (equal x item) (push x acc))))))
+    "Return a copy of SEQ without members `equal' to ITEM.
+Type-preserving: a string answers a string and a vector a vector, as in
+Emacs.  Answering a list of character codes for a string is a different
+TYPE flowing into whatever the caller does next."
+    (let ((kept (let (acc)
+                  (dolist (x (nelisp-seq--to-list seq) (nreverse acc))
+                    (unless (equal x item) (push x acc))))))
+      (cond ((stringp seq) (apply #'string kept))
+            ((vectorp seq) (apply #'vector kept))
+            (t kept)))))
 (unless (fboundp 'ffloor) (defun ffloor (x) (float (floor x))))
 (unless (fboundp 'fceiling) (defun fceiling (x) (float (ceiling (nelisp--check-float-arg x)))))
 (unless (fboundp 'ftruncate) (defun ftruncate (x) (float (truncate (nelisp--check-float-arg x)))))
@@ -1652,6 +1670,10 @@ wider than the one it replaces once the mapping leaves ASCII."
 (unless (fboundp 'char-uppercase-p) (defun char-uppercase-p (ch) (and (>= ch ?A) (<= ch ?Z))))
 (unless (fboundp 'string-lessp)
   (defun string-lessp (a b)
+    ;; `string-lessp' takes a string OR a symbol, like `string=' -- checking
+    ;; for a string outright would reject the symbol Emacs accepts.
+    (unless (or (stringp a) (symbolp a)) (signal 'wrong-type-argument (list 'stringp a)))
+    (unless (or (stringp b) (symbolp b)) (signal 'wrong-type-argument (list 'stringp b)))
     (let* ((sa (if (symbolp a) (symbol-name a) a)) (sb (if (symbolp b) (symbol-name b) b))
            (la (length sa)) (lb (length sb)) (i 0) (res nil) (done nil))
       (while (and (not done) (< i la) (< i lb))
@@ -3682,9 +3704,15 @@ bodies (= Stage 4 follow-up).  Indent / edebug specs come back when
   (defun key-description (keys &optional _prefix)
     (mapconcat #'single-key-description (append keys nil) " ")))
 (unless (fboundp 'help-add-fundoc-usage)
-  (defun help-add-fundoc-usage (docstring _arglist)
-    "Minimal stub: return DOCSTRING unchanged (no usage line appended)."
-    (if (stringp docstring) docstring "")))
+  (defun help-add-fundoc-usage (docstring arglist)
+    "Append the usage line Emacs appends, rather than dropping ARGLIST."
+    (concat (if (stringp docstring) docstring "")
+            "\n\n(fn"
+            ;; Emacs UPCASES the argument names in the usage line -- that is
+            ;; what makes them read as placeholders rather than as values.
+            (mapconcat (lambda (a) (concat " " (upcase (format "%s" a))))
+                       (append arglist nil) "")
+            ")")))
 (unless (fboundp 'help-split-fundoc)
   (defun help-split-fundoc (docstring _def &optional _section)
     "Minimal stub: no embedded usage line, so return (nil . DOCSTRING)."
@@ -5359,11 +5387,15 @@ Doc 156: was `(apply #\\='vector ...)', but the reader now exposes a native
   (apply #'concat (car state)))
 
 (defun nelisp--prn-string-escaped (s)
-  "Return S with `\"' / `\\' / `\\n' / `\\r' / `\\t' escaped per Emacs prin1.
-Other characters pass through verbatim, matching the Rust printer.
-Char comparisons use raw integer codepoints (34 / 92 / 10 / 13 / 9)
-to sidestep any difference in how `?\\X' literals get parsed by the
-bundled reader vs the host."
+  "Return S with `\"' and `\\' escaped, which is what Emacs `prin1' escapes.
+Measured on Emacs 30.1 rather than assumed: a newline, tab, carriage return,
+BEL and NUL all pass through VERBATIM inside a printed string -- only the
+two characters that would end the literal or start an escape are doubled.
+Escaping \\n as well made every printed string containing a newline differ
+from Emacs, which `make emacs-parity' caught the first time a case had one.
+Char comparisons use raw integer codepoints (34 / 92) to sidestep any
+difference in how `?\\X' literals get parsed by the bundled reader vs the
+host."
   (let ((chunks (cons nil nil))
         (i 0)
         (n (length s)))
@@ -5372,9 +5404,6 @@ bundled reader vs the host."
         (cond
          ((= c 34) (nelisp--prn-chunks-add chunks "\\\"")) ; ?\"
          ((= c 92) (nelisp--prn-chunks-add chunks "\\\\")) ; ?\\
-         ((= c 10) (nelisp--prn-chunks-add chunks "\\n"))  ; ?\n
-         ((= c 13) (nelisp--prn-chunks-add chunks "\\r"))  ; ?\r
-         ((= c 9)  (nelisp--prn-chunks-add chunks "\\t"))  ; ?\t
          (t        (nelisp--prn-chunks-add chunks (char-to-string c)))))
       (setq i (1+ i)))
     (nelisp--prn-chunks-string chunks)))

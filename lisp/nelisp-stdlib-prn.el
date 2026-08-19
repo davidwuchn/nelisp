@@ -40,11 +40,15 @@
   (apply #'concat (car state)))
 
 (defun nelisp--prn-string-escaped (s)
-  "Return S with `\"' / `\\' / `\\n' / `\\r' / `\\t' escaped per Emacs prin1.
-Other characters pass through verbatim, matching the Rust printer.
-Char comparisons use raw integer codepoints (34 / 92 / 10 / 13 / 9)
-to sidestep any difference in how `?\\X' literals get parsed by the
-bundled reader vs the host."
+  "Return S with `\"' and `\\' escaped, which is what Emacs `prin1' escapes.
+Measured on Emacs 30.1 rather than assumed: a newline, tab, carriage return,
+BEL and NUL all pass through VERBATIM inside a printed string -- only the
+two characters that would end the literal or start an escape are doubled.
+Escaping \\n as well made every printed string containing a newline differ
+from Emacs, which `make emacs-parity' caught the first time a case had one.
+Char comparisons use raw integer codepoints (34 / 92) to sidestep any
+difference in how `?\\X' literals get parsed by the bundled reader vs the
+host."
   (let ((chunks (cons nil nil))
         (i 0)
         (n (length s)))
@@ -53,9 +57,6 @@ bundled reader vs the host."
         (cond
          ((= c 34) (nelisp--prn-chunks-add chunks "\\\"")) ; ?\"
          ((= c 92) (nelisp--prn-chunks-add chunks "\\\\")) ; ?\\
-         ((= c 10) (nelisp--prn-chunks-add chunks "\\n"))  ; ?\n
-         ((= c 13) (nelisp--prn-chunks-add chunks "\\r"))  ; ?\r
-         ((= c 9)  (nelisp--prn-chunks-add chunks "\\t"))  ; ?\t
          (t        (nelisp--prn-chunks-add chunks (char-to-string c)))))
       (setq i (1+ i)))
     (nelisp--prn-chunks-string chunks)))
