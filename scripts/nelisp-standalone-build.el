@@ -3687,6 +3687,17 @@ argument (reachability + in-arena bounds checks).")
     ;; representation.  `make-hash-table' itself is the prelude's defun.
     ((:lit "make-hash-table")  . (nl_ht_make out))
     ((:lit "nelisp--hash-table-make-raw") . (nl_ht_make out))
+    ;; The equal-only `assoc' under a private name, so the prelude can add
+    ;; the TESTFN argument -- which the native arm ignored, silently using
+    ;; `equal' for a caller who asked for something else.
+    ((:lit "nelisp--assoc-raw") . (if (if (= (ptr-read-u64 (wf_arg_ptr args 1) 0) 0) 1 (if (= (ptr-read-u64 (wf_arg_ptr args 1) 0) 7) 1 0))
+                            (seq (wf_assoc args out)
+                                 (if (= (ptr-read-u64 out 0) 0)
+                                     (if (= (bf_proper_list_raw (wf_arg_ptr args 1)) 0)
+                                         (bf_wrong_type_listp (wf_arg_ptr args 1))
+                                       0)
+                                   0))
+                          (bf_wrong_type_listp (wf_arg_ptr args 1))))
     ;; A closure's captured value is a lexical CELL (tag 11), and the printer
     ;; had no way to look inside one -- so every captured variable printed as
     ;; `#<unprintable>' where Emacs shows the value.  This is the read side of
@@ -3766,19 +3777,18 @@ argument (reachability + in-arena bounds checks).")
                                         (mut-str-finalize ms out) 0))
                             (bf_wrong_type_characterp (wf_arg_ptr args 1)))
                           (bf_wrong_type_named (wf_arg_ptr args 0) 7887331704299284599 112 0 9)))
-    ((:lit "concat")           . (let* ((bad (m5_concat_first_bad args)))
-                                   (if (= bad 0)
-                                       (let* ((bt (m5_concat_bad_tail args)))
-                                         (if (= bt 0)
-                                             (let* ((bc (m5_concat_bad_char args)))
-                                               (if (= bc 0)
-                                                   (let* ((ms (alloc-bytes 32 8)))
-                                                     (seq (mut-str-make-empty ms 16)
-                                                          (m5_concat_walk ms args)
-                                                          (mut-str-finalize ms out) 0))
-                                                 (bf_wrong_type_characterp bc)))
-                                           (bf_wrong_type_listp bt)))
-                                     (bf_wrong_type_sequencep bad))))
+    ((:lit "concat")           . (let* ((why (m5_concat_first_bad_kind args)))
+                                   (if (= why 0)
+                                       (let* ((ms (alloc-bytes 32 8)))
+                                         (seq (mut-str-make-empty ms 16)
+                                              (m5_concat_walk ms args)
+                                              (mut-str-finalize ms out) 0))
+                                     (let* ((bad (m5_concat_first_bad_ptr args)))
+                                       (if (= why 1)
+                                           (bf_wrong_type_sequencep bad)
+                                         (if (= why 2)
+                                             (bf_wrong_type_listp bad)
+                                           (bf_wrong_type_characterp bad)))))))
     ;; An out-of-range FROM/TO was clamped by the byte walk and came back as a
     ;; shorter slice: (substring "abc" 0 9) answered "abc" and
     ;; (substring "abc" 2 1) answered "".  Emacs signals both, and a caller
@@ -7225,6 +7235,38 @@ unresolved at link time."
                     t0))
               (m5_concat_bad_tail (nl_cons_cdr_ptr cur))))
         0))
+    ;; 0 = fine, 1 = not a sequence, 2 = improper list, 3 = bad element.
+    (defun m5_concat_arg_kind (a)
+      (let* ((tg (ptr-read-u64 a 0)))
+        (if (if (= tg 0) 1 (if (= tg 7) 1 (if (= tg 8) 1 (if (= tg 5) 1 (if (= tg 6) 1 0)))))
+            (if (= tg 7)
+                (if (= (m5_improper_tail a) 0)
+                    (if (= (m5_elem_bad_char a) 0) 0 3)
+                  2)
+              (if (= tg 8)
+                  (if (= (m5_vec_bad_char a 0 (vector-len a)) 0) 0 3)
+                0))
+          1)))
+    (defun m5_concat_arg_ptr (a)
+      (let* ((tg (ptr-read-u64 a 0)))
+        (if (= tg 7)
+            (let* ((t0 (m5_improper_tail a)))
+              (if (= t0 0) (m5_elem_bad_char a) t0))
+          (if (= tg 8)
+              (m5_vec_bad_char a 0 (vector-len a))
+            a))))
+    (defun m5_concat_first_bad_kind (cur)
+      (if (= (ptr-read-u64 cur 0) 7)
+          (let* ((k (m5_concat_arg_kind (nl_cons_car_ptr cur))))
+            (if (= k 0) (m5_concat_first_bad_kind (nl_cons_cdr_ptr cur)) k))
+        0))
+    (defun m5_concat_first_bad_ptr (cur)
+      (if (= (ptr-read-u64 cur 0) 7)
+          (let* ((a (nl_cons_car_ptr cur)))
+            (if (= (m5_concat_arg_kind a) 0)
+                (m5_concat_first_bad_ptr (nl_cons_cdr_ptr cur))
+              (m5_concat_arg_ptr a)))
+        0))
     (defun m5_concat_one (ms carp)
       (let* ((tg (ptr-read-u64 carp 0)))
         (if (= tg 0) 1
@@ -7584,12 +7626,21 @@ unresolved at link time."
                   0))
             0)
         0))
-    (defun bf_elt_list_walk (node idx out)
+    ;; A NEGATIVE index on a list is index zero -- `nth' clamps, and
+    ;; answering nil said "past the end" about the first element.
+    (defun bf_elt_list_walk (node idx0 out)
+      (bf_elt_list_walk2 node (if (< idx0 0) 0 idx0) out node))
+    ;; Running off an IMPROPER list is an error naming the WHOLE list, the
+    ;; way `nth' reports it -- answering nil said "past the end" about a list
+    ;; that could not be walked at all.
+    (defun bf_elt_list_walk2 (node idx out orig)
       (if (= (ptr-read-u64 node 0) 7)
           (if (= idx 0)
               (seq (wf_copy32 out (nl_cons_car_ptr node)) 0)
-            (bf_elt_list_walk (nl_cons_cdr_ptr node) (- idx 1) out))
-        (seq (wf_write_nil out) 0)))
+            (bf_elt_list_walk2 (nl_cons_cdr_ptr node) (- idx 1) out orig))
+        (if (= (ptr-read-u64 node 0) 0)
+            (seq (wf_write_nil out) 0)
+          (bf_wrong_type_listp orig))))
     ;; elt SEQ N.  Emacs defines this as `nth' for a list and `aref' for
     ;; anything else, and that is now literally what it does -- because the
     ;; hand-written version was `bf_aref' minus every repair `bf_aref' has
@@ -7872,6 +7923,37 @@ unresolved at link time."
     ;; name -- so one generic "bad type" signal would be no better than none.
     ;; (/ 1 0) and (% 1 0) trapped in hardware -- SIGFPE, no signal stash, so
     ;; no handler could see it.  Emacs signals `arith-error' with no data.
+    ;; `setting-constant' names the constant that cannot be assigned.
+    ;; A symbol whose function cell names ITSELF would loop at call time;
+    ;; Emacs refuses it up front rather than storing a definition nothing
+    ;; can call.
+    (defun bf_cyclic_function (offender)
+      (let* ((sbuf (alloc-bytes 32 1))
+             (nil-slot (alloc-bytes 32 8)))
+        (seq
+         (ptr-write-u64 sbuf 0 7362650270261803363)
+         (ptr-write-u64 (+ sbuf 8) 0 3273676477859851893)
+         (ptr-write-u64 (+ sbuf 16) 0 8386658473162862185)
+         (ptr-write-u64 (+ sbuf 24) 0 7237481)
+         (nl_alloc_symbol sbuf 27 268435480)
+         (wf_write_nil nil-slot)
+         (nelisp_cons_construct offender nil-slot 268435512)
+         (ptr-write-u64 268435472 0 1)
+         (atomic-fetch-add 268435544 1)
+         1)))
+    (defun bf_setting_constant (offender)
+      (let* ((sbuf (alloc-bytes 24 1))
+             (nil-slot (alloc-bytes 32 8)))
+        (seq
+         (ptr-write-u64 sbuf 0 3271705053512361331)
+         (ptr-write-u64 (+ sbuf 8) 0 8389750308618530659)
+         (ptr-write-u64 (+ sbuf 16) 0 0)
+         (nl_alloc_symbol sbuf 16 268435480)
+         (wf_write_nil nil-slot)
+         (nelisp_cons_construct offender nil-slot 268435512)
+         (ptr-write-u64 268435472 0 1)
+         (atomic-fetch-add 268435544 1)
+         1)))
     (defun bf_arith_error ()
       (let* ((sbuf (alloc-bytes 24 1)))
         (seq
@@ -8045,6 +8127,35 @@ unresolved at link time."
             (bf_proper_list_raw (nl_cons_cdr_ptr p))
           0)))
     ;; String (5), MutStr (6), Vector (8): what `arrayp' accepts here.
+    ;; nil and t compare by their NAMES: (string< " a b " nil) is t because
+    ;; "nil" sorts after " a b ".  They carry their own tags rather than the
+    ;; Symbol one, so the byte comparison read them as empty strings and
+    ;; every ordering that mentioned one came out backwards.
+    (defun bf_str_or_name (p out)
+      (if (= (ptr-read-u64 p 0) 0)
+          (let* ((ms (alloc-bytes 32 8)))
+            (seq (mut-str-make-empty ms 8)
+                 (mut-str-push-byte ms 110)
+                 (mut-str-push-byte ms 105)
+                 (mut-str-push-byte ms 108)
+                 (mut-str-finalize ms out)
+                 out))
+        (if (= (ptr-read-u64 p 0) 1)
+            (let* ((ms (alloc-bytes 32 8)))
+              (seq (mut-str-make-empty ms 8)
+                   (mut-str-push-byte ms 116)
+                   (mut-str-finalize ms out)
+                   out))
+          p)))
+    ;; A KEYWORD is bound to itself, so `symbol-value' answers the symbol
+    ;; rather than `void-variable' -- which is what made (add-to-list :k X)
+    ;; complain about the variable instead of about its value.
+    (defun bf_keyword_raw (p)
+      (if (= (ptr-read-u64 p 0) 4)
+          (if (< (ptr-read-u64 (+ p 24) 0) 1)
+              0
+            (if (= (ptr-read-u8 (ptr-read-u64 (+ p 16) 0) 0) 58) 1 0))
+        0))
     (defun bf_arrayp_raw (p)
       (let* ((tg (ptr-read-u64 p 0)))
         (if (= tg 5) 1 (if (= tg 6) 1 (if (= tg 8) 1 0)))))
@@ -8910,7 +9021,7 @@ Wave-2 (C) appends bf_ash (shl/sar compose) + bf_str_lt (byte-lexicographic).")
     ((:lit "symbol-value") . (if (if (= (ptr-read-u64 (wf_arg_ptr args 0) 0) 4) 1
                                    (if (= (ptr-read-u64 (wf_arg_ptr args 0) 0) 0) 2
                                      (if (= (ptr-read-u64 (wf_arg_ptr args 0) 0) 1) 2 0)))
-                            (if (= (ptr-read-u64 (wf_arg_ptr args 0) 0) 4) (bf_symbol_value args env out) (seq (wf_copy32 out (wf_arg_ptr args 0)) 0))
+                            (if (= (ptr-read-u64 (wf_arg_ptr args 0) 0) 4) (if (= (bf_keyword_raw (wf_arg_ptr args 0)) 1) (seq (wf_copy32 out (wf_arg_ptr args 0)) 0) (bf_symbol_value args env out)) (seq (wf_copy32 out (wf_arg_ptr args 0)) 0))
                           (bf_wrong_type_symbolp (wf_arg_ptr args 0))))
     ((:lit "fboundp")  . (bf_fboundp args env out))
     ((:lit "boundp")   . (bf_boundp args env out))
@@ -9061,8 +9172,10 @@ Wave-2 (C) appends bf_ash (shl/sar compose) + bf_str_lt (byte-lexicographic).")
                             (bf_wrong_type_stringp (wf_arg_ptr args 0))
                           (if (= (bf_strsym_raw (wf_arg_ptr args 1)) 0)
                               (bf_wrong_type_stringp (wf_arg_ptr args 1))
-                            (if (= (bf_str_lt (wf_arg_ptr args 0) (wf_arg_ptr args 1)) 1)
-                                (wf_write_t out) (wf_write_nil out)))))
+                            (let* ((sa (alloc-bytes 32 8)) (sb (alloc-bytes 32 8)))
+                              (if (= (bf_str_lt (bf_str_or_name (wf_arg_ptr args 0) sa)
+                                                (bf_str_or_name (wf_arg_ptr args 1) sb)) 1)
+                                  (wf_write_t out) (wf_write_nil out))))))
     ;; --- §S4 low-level thread / atomic / memory primitives (interpreter
     ;; dispatch).  These let INTERPRETED driver code spawn clone(2) threads,
     ;; do SeqCst atomics, raw memory access, and arena allocation — the
@@ -12647,7 +12760,7 @@ value (matches the binary's M8 read+eval-loop driver)."
     "nelisp--env-globals-op"
     ;; M4 hash tables
     "make-hash-table" "puthash" "gethash" "remhash" "hash-table-count" "maphash"
-    "nelisp--hash-table-make-raw" "nelisp--cell-value"
+    "nelisp--hash-table-make-raw" "nelisp--cell-value" "nelisp--assoc-raw"
     ;; List search hot paths
     "memq" "member" "assq" "assoc" "rassoc"
     ;; M5 strings + format
@@ -17097,8 +17210,27 @@ This swaps `nl_bf_bind_rest' for the rc/lifetime-safe version and makes
          ;; of `nl_apply_do_fset' is REPLACED by this defconst at build time,
          ;; so an edit there would have been discarded (the same shape as the
          ;; sf-cc patch).
-         (if (= (ptr-read-u64 sym_ptr 0) 4)
+         ;; nil and t ARE symbols -- they carry their own tags rather than
+         ;; the Symbol one, and rejecting them made (defalias t F) a type
+         ;; error about t where Emacs simply defines it.
+         ;; Setting nil's function cell to NIL changes nothing, and Emacs
+         ;; lets that through -- only a real definition is `setting-constant'.
+         (if (if (= (ptr-read-u64 sym_ptr 0) 0)
+                 (if (= (ptr-read-u64 def_ptr 0) 0) 0 1)
+               0)
+             (bf_setting_constant sym_ptr)
+         (if (if (= (ptr-read-u64 sym_ptr 0) 4) 1
+               (if (= (ptr-read-u64 sym_ptr 0) 1) 1
+                 (if (= (ptr-read-u64 sym_ptr 0) 0) 1 0)))
          (if (= def_ptr 0) (nl_apply_stash_wta env args_list_ptr)
+           (if (if (= (ptr-read-u64 def_ptr 0) 4)
+                   (if (= (ptr-read-u64 sym_ptr 0) 4)
+                       (let* ((r (alloc-bytes 32 8)))
+                         (seq (nelisp_eq_symbol sym_ptr def_ptr r)
+                              (if (= (ptr-read-u64 r 0) 1) 1 0)))
+                     0)
+                 0)
+               (bf_cyclic_function sym_ptr)
            (let* ((mirror_ptr (+ env 0)) (unbound_ptr (+ env 64))
                   (def_tag (ptr-read-u64 def_ptr 0)))
              (let* ((resolved_slot (alloc-bytes 32 8)))
@@ -17128,8 +17260,8 @@ This swaps `nl_bf_bind_rest' for the rc/lifetime-safe version and makes
                       (nl_apply_build_fn_scratch unbound_ptr resolved_slot sym_scratch)
                       (nelisp_mirror_set_function_or_insert mirror_ptr sym_ptr sym_scratch 0)
                       (nl_sexp_clone_into def_ptr out)
-                      0)))))))
-           (nl_apply_stash_wrong_symbolp env sym_ptr)))))
+                      0))))))))
+           (nl_apply_stash_wrong_symbolp env sym_ptr))))))
   "Rc-correct, `not'-free replacement for the shipped nl_apply_do_fset.")
 
 ;; `(symbol-function SYM)' (FINDINGS.md recommendation 1(a), same class as

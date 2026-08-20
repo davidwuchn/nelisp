@@ -189,7 +189,14 @@ ns-collision 178
 # the host that the hosted copy does not have -- the improper-list tail, the
 # sign-dependent COUNT predicate, the odd-length plist, and `file-missing'
 # with its three fields.  Notes in scripts/nl-ns-accepted.el.
-ns-collision-divergent 115
+# 115 -> 122 on 2026-08-20: `append', `assoc', `file-truename',
+# `macroexp-parse-body', `mod', `plist-get' and the `boundp' shim.  Each
+# prelude copy carries a rule measured against the host that the hosted copy
+# does not -- the improper-list tail, the TESTFN argument the native `assoc'
+# ignored, COUNTER as the cons Emacs makes it, the body/docstring split, the
+# float divisor of zero, and the pair-guarded plist walk.  Notes for each in
+# scripts/nl-ns-accepted.el.
+ns-collision-divergent 122
 # 850 -> 851 on 2026-08-19: `nl-check-file-quoted-unsafe', the entry point
 # that reports the unsafe calls inside quoted forms.  Same situation as the
 # nl-ns pair above -- it is public because tools/nl-check-inventory.el calls

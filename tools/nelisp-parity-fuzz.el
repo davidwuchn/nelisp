@@ -70,10 +70,19 @@ took the scratch directory's own permissions away mid-run, and every
 process launched after that died with \"Setting current directory:
 Permission denied\" -- reported as a hundred missing results rather than as
 the one call that caused them."
-  (let ((d (or nelisp-parity-fuzz--scratch
-               (setq nelisp-parity-fuzz--scratch
-                     (expand-file-name "target/parity-fuzz-scratch/"
-                                       nelisp-parity-fuzz--root)))))
+  (let ((d (let ((dir (expand-file-name "target/parity-fuzz-scratch/"
+                                        nelisp-parity-fuzz--root)))
+             ;; ONE directory, EMPTIED before every capture.  Generated
+             ;; calls leave files behind, so without the clearing the second
+             ;; runtime saw what the first had just created -- and with a
+             ;; directory per side instead, every path-returning call
+             ;; disagreed because the two paths were different.  Same name,
+             ;; same empty contents, for both.
+             (when (file-directory-p dir)
+               (condition-case err
+                   (delete-directory dir t)
+                 (error (message "parity-fuzz: cannot clear %s: %S" dir err))))
+             dir)))
     (unless (file-directory-p d) (make-directory d t))
     (condition-case err
         (set-file-modes d #o755)
@@ -158,6 +167,20 @@ the one call that caused them."
     ;; measurement of the same call signals `invalid-function' every time.
     ;; Not a runtime difference; a measurement the harness cannot make.
     princ prin1 print terpri print-char write-char
+    ;; reads the host obarray: which symbols exist is host state
+    intern-soft
+    ;; nil means the CURRENT BUFFER, and batch Emacs moves between *scratch*
+    ;; and *Messages* on its own -- the answer names whichever it is
+    process-status
+    ;; searches the HOST's load-path, whose contents this runtime does not
+    ;; share -- (locate-library "") answers an Emacs .elc there and nil here
+    locate-library require-with-check
+    ;; the host pre-populates properties on its own symbols -- nil carries
+    ;; event-symbol-element-mask and friends -- so this reads host state,
+    ;; not the argument
+    symbol-plist
+    ;; inode numbers and mtimes: not a function of the arguments
+    file-attributes
     ;; process / file / world
     load require provide kill-emacs delete-file write-region make-directory
     insert-file-contents find-file expand-file-name file-exists-p
@@ -201,6 +224,14 @@ printed is a gap somebody has to rediscover."
     "byte-code function: Emacs's stdlib is compiled, so the value it hands back prints as byte code; this one is an interpreted closure")
    ((and (stringp emacs) (string-match-p "\\`-?[0-9]\\{19,\\}\\'" emacs))
     "bignum: the answer needs more than 64 bits and this runtime has fixnums only")
+   ;; A unibyte answer PRINTS as octal escapes where a multibyte one prints
+   ;; the characters.  Matched on the shape rather than the name, so a call
+   ;; that diverges for some other reason still counts.
+   ((and (stringp emacs) (string-match-p "\\\\[0-3][0-7][0-7]" emacs)
+         (stringp nelisp) (not (string-match-p "\\\\[0-3][0-7][0-7]" nelisp)))
+    "unibyte string: Emacs tracks a per-string multibyte flag; every string here is UTF-8 bytes")
+   ((and (stringp emacs) (string-match-p "Multibyte character in data" emacs))
+    "unibyte string: Emacs tracks a per-string multibyte flag; every string here is UTF-8 bytes")
    ((memq name '(string-as-unibyte string-make-unibyte string-to-unibyte
                  string-as-multibyte string-to-multibyte multibyte-string-p))
     "unibyte string: Emacs tracks a per-string multibyte flag; every string here is UTF-8 bytes")
@@ -302,10 +333,20 @@ few lines down, and what `make fallback-inventory' flags a bare handler for."
 (defun nelisp-parity-fuzz--driver (cases)
   "Return driver source that prints one tab-separated line per case in CASES."
   (concat
-   "(defun pfz--flat (s) (let ((i 0) (n (length s)) (o \"\")) (while (< i n) "
-   "(let ((c (aref s i))) (setq o (concat o (cond ((eq c 10) \"\\\\n\") "
-   "((eq c 13) \"\\\\r\") ((eq c 9) \"\\\\t\") (t (char-to-string c)))))) "
-   "(setq i (1+ i))) o))\n"
+   ;; Fast path: a result with no newline, tab or return -- which is nearly
+   ;; all of them -- is handed back UNCHANGED.  The character loop rebuilt
+   ;; the whole string per character, so a 12KB answer cost 76MB of copying
+   ;; and the two runtimes disagreed about `(string-pad "a" 12354)' because
+   ;; one of them had not finished writing it.  A harness slow enough to
+   ;; truncate its own measurement reports that as a finding.
+   "(defun pfz--needs-flat (s) (let ((i 0) (n (length s)) (hit nil)) "
+   "(while (and (< i n) (not hit)) (let ((c (aref s i))) "
+   "(if (or (eq c 10) (eq c 13) (eq c 9)) (setq hit t))) (setq i (1+ i))) hit))\n"
+   "(defun pfz--flat (s) (if (not (pfz--needs-flat s)) s "
+   "(let ((i 0) (n (length s)) (parts nil)) (while (< i n) "
+   "(let ((c (aref s i))) (setq parts (cons (cond ((eq c 10) \"\\\\n\") "
+   "((eq c 13) \"\\\\r\") ((eq c 9) \"\\\\t\") (t (char-to-string c))) parts))) "
+   "(setq i (1+ i))) (apply (function concat) (nreverse parts)))))\n"
    (mapconcat
     (lambda (c)
       (format "(princ \"##\")(princ %S)(princ \"\\t\")(princ (pfz--flat (condition-case e (format \"%%S\" %s) (error (format \"ERR %%S\" e)))))(princ \"\\n\")"

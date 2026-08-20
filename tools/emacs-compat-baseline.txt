@@ -50,7 +50,13 @@
 # shadowing defun does the checks and calls the raw constructor underneath.
 # This is the one shape where shadowing is the fix rather than the bug: the
 # gate's usual advice (wrap it in fboundp) would restore the silence.
-shared-shadowing 249
+# 249 -> 251 on 2026-08-20: `boundp' and `assoc', both unconditional
+# `defun's on purpose and for the same reason `make-hash-table' is one --
+# each is a native builtin, so `(unless (fboundp ...))' never fires and the
+# check has nowhere else to live.  `boundp' has to answer t for the
+# self-evaluating symbols; `assoc' has to honour TESTFN, which the native
+# arm ignored.  Both call the native walk underneath.
+shared-shadowing 251
 
 # 2026-08-19, reviewing the 245 rather than counting them.  The table now
 # carries the defining file, which is half of what makes a class actionable:

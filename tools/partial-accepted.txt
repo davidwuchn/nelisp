@@ -30,7 +30,7 @@ executable-find|scripts/nelisp-stdlib-prelude.el|_remote|not yet reviewed
 file-attributes|scripts/nelisp-stdlib-prelude.el|_id-format|not yet reviewed
 format-time-string|scripts/nelisp-stdlib-prelude.el|_args|not yet reviewed
 goto-char|lisp/nelisp-stdlib-misc.el|_p|not yet reviewed
-help-split-fundoc|scripts/nelisp-stdlib-prelude.el|_def _section|not yet reviewed
+help-split-fundoc|scripts/nelisp-stdlib-prelude.el|_def|not yet reviewed
 ignore|scripts/nelisp-stdlib-prelude.el|_arguments|not yet reviewed
 insert-file-contents|lisp/nelisp-stdlib-misc.el|_path|not yet reviewed
 insert-file-contents|scripts/nelisp-stdlib-prelude.el|_args|not yet reviewed
@@ -60,6 +60,5 @@ locate-library|scripts/nelisp-stdlib-prelude.el|_interactive-call _nosuffix _pat
 bool-vector-p|scripts/nelisp-stdlib-prelude.el|_x|always nil: bool vectors are plain vectors here, so nothing can be one
 bool-vector-p|lisp/nelisp-stdlib-plist-str.el|_x|always nil; byte-identical to the prelude copy
 generate-new-buffer|scripts/nelisp-stdlib-prelude.el|_inhibit-buffer-hooks|there are no buffer hooks here, so nothing can be inhibited
-file-truename|scripts/nelisp-stdlib-prelude.el|_prev-dirs|PREV-DIRS ignored: no symlink is resolved AT ALL -- this is `expand-file-name' with the two argument checks Emacs performs, so a path through a symlink comes back unresolved and a cycle is neither followed nor reported.  Resolving them needs a readlink primitive the standalone does not have
 file-truename|lisp/nelisp-stdlib-misc.el|_prev-dirs|the same; byte-identical to the prelude copy
 run-at-time|scripts/nelisp-stdlib-prelude.el|_repeat|REPEAT ignored: the function runs once, immediately, so a repeating timer never repeats
