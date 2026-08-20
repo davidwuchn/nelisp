@@ -17736,7 +17736,30 @@ genuine general interpreter for the 11 special forms + installed builtins."
                                                 (string= name "eval-inner.o")
                                                 (string= name "combiner-cons.o")
                                                 (string= name "combiner-apply.o"))
-                                      (nelisp-standalone--unit-for entry))))
+                                      (cond
+                                       ;; PERSISTENT-INSTALL escape sites in the env
+                                       ;; mirror, same class as the frame-backing and
+                                       ;; setq sites in `real-sf' below.  Installing an
+                                       ;; entry (or a function cell) puts an
+                                       ;; arena-allocated box into the global table, so
+                                       ;; `nl_boundary_maybe_reclaim' must not treat the
+                                       ;; form as having escaped nothing.  Without these
+                                       ;; bumps, `(fset 'k 5)' at top level -- result an
+                                       ;; immediate, epoch unmoved -- rewound the arena
+                                       ;; over the new entry and its bucket cells, and
+                                       ;; UNRELATED bindings in the same bucket went with
+                                       ;; it.  `bucket_prepend' covers every insert
+                                       ;; whichever `_or_insert' wrapper called it;
+                                       ;; `set_function_or_insert' additionally covers the
+                                       ;; hit path, which stores a box into an existing
+                                       ;; record.
+                                       ((string= name "mirror-prepend.o")
+                                        (nelisp-standalone--reader-extra-unit-epoch
+                                         entry '(nelisp_mirror_bucket_prepend)))
+                                       ((string= name "mirror-setfn.o")
+                                        (nelisp-standalone--reader-extra-unit-epoch
+                                         entry '(nelisp_mirror_set_function_or_insert)))
+                                       (t (nelisp-standalone--unit-for entry))))))
                                 nelisp-standalone--manifest)))
          ;; Full reader applyfn (arithmetic + HT + strings/format + file I/O).
          (applyfn (nelisp-standalone--cached-unit

@@ -1,74 +1,106 @@
-# Inserting a mirror entry with an immediate function cell destroys unrelated bindings
+# A top-level form whose result is immediate could rewind the arena over a fresh mirror entry
 
-Status: **open**.  Found 2026-08-20 while chasing the last generative-differential
-disagreement.  Not fixed here — the accompanying differential fix only stops
-`fset` from *reaching* the broken path for the common `nil` case.
+Status: **fixed 2026-08-21.**  This file previously described the same defect
+with the wrong cause; the correction is the point of this rewrite, so the
+original claim is kept below rather than quietly replaced.
 
-## What happens
+## What was wrong with the first diagnosis
 
-`(fset 'FRESH-SYMBOL V)` where V is an immediate (tag 0 `nil`, tag 1 `t`,
-tag 2 integer) and FRESH-SYMBOL has no mirror entry yet takes the insert path
-(`nl_apply_do_fset` -> `nelisp_mirror_set_function_or_insert` ->
-`nelisp_mirror_alloc_entry` + `nelisp_mirror_bucket_prepend`).  The symbol
-itself binds correctly, but an *unrelated* global function binding disappears.
+The first write-up said the deciding factor was the VALUE BEING STORED: that
+`(fset 'FRESH 5)` corrupted the table because `5` is an immediate, while
+`(fset 'FRESH "s")` was clean because a string is heap-tagged.  It came with a
+table of measurements that all agreed with it.
 
-Measured on `target/nelisp` at 13217c44d, over the 468 `defun` names in
-`scripts/nelisp-stdlib-prelude.el` (count = names for which `fboundp` is nil):
+They agreed because every case in that table was a bare `fset`, and a bare
+`fset` RETURNS the value it stores.  The table could not tell the two apart.
+Separating them takes four cases, not two:
 
-| stored value          | inserts | bindings lost |
-|-----------------------|---------|---------------|
-| `5`      (Int, tag 2) | 6       | 2             |
-| `nil`    (Nil, tag 0) | 6       | 3             |
-| `"s"`    (Str, tag 5) | 6       | 0             |
-| `(lambda (x) x)`      | 6       | 0             |
-| `'car`   (Symbol)     | 6       | 0             |
+| stored value  | form's result | bindings lost |
+|---------------|---------------|---------------|
+| `5`  immediate| immediate     | 2             |
+| `5`  immediate| `"heap"`      | 0             |
+| `"s"` heap    | `7` immediate | **2**         |
+| `"s"` heap    | heap          | 0             |
 
-Heap-tagged values are clean; immediates are not.  Interleaving the inserts
-with a walk over those 468 names **segfaults** (exit 139) after two or three
-inserts, and one run answered `fboundp` = t for a name that is genuinely void,
-so lookups can also return a wrong entry before the crash.
+Row 3 is the falsifier: storing a heap string still loses bindings when the
+form returns an integer.  **The stored value is irrelevant.  What matters is
+the tag of the value the top-level form returns.**
 
-## Reproducer
+## The actual cause
 
-```sh
-python3 - <<'PY' > /tmp/repro.el
-import re
-names = sorted(set(re.findall(r"^\s*\(defun ([^\s()]+)",
-                              open("scripts/nelisp-stdlib-prelude.el").read(), re.M)))
-print("(defvar ns '(" + " ".join(names) + "))")
-print('(defun nvoid () (let ((n 0)) (dolist (x ns) (unless (fboundp x) (setq n (1+ n)))) n))')
-print('(princ (format "pre=%S" (nvoid)))')
-for i in range(6):
-    print("(fset 'gi%d 5)" % i)
-print('(princ (format " post=%S\\n" (nvoid)))')
-PY
-mkdir -p /tmp/probe-run && cd /tmp/probe-run && "$OLDPWD/target/nelisp" --load /tmp/repro.el
-```
+`nl_boundary_maybe_reclaim` (`scripts/nelisp-standalone-build.el`) rewinds the
+per-form bump arena to a mark when all of:
 
-`pre=1 post=3`.  Replace `5` with `"s"` and it is `pre=1 post=1`.
+1. boundary reclamation is enabled,
+2. the form's result is an immediate (`nl_boundary_immediate_result_p`, tag <= 3),
+3. the mutation epoch at `268435544` is unchanged since the form began,
+4. no signal is pending.
 
-## Where to look
+Condition 3 is the guard that should have stopped it.  Installing an entry in
+the env mirror IS a mutation -- it puts an arena-allocated record, and the
+bucket cons cells linking it, into a table that outlives the form.  But the
+mirror install path did not bump the epoch, so the guard saw a form that had
+allegedly escaped nothing, and the arena was rewound out from under the new
+entry.  The bucket then pointed into reclaimed space; the entries behind the
+new head went with it; a later allocation landing on that space is what ended
+the process.
 
-* `lisp/nelisp-cc-mirror-alloc-entry.el` — the `and` chain over `record-make`
-  + four `record-slot-set`.  Its docstring asserts "All sub-ops materialise
-  non-zero rax sentinels so the `and' value-form chain threads through"; if
-  `record-slot-set` returns 0 for an immediate the chain short-circuits and
-  `nelisp_mirror_bucket_prepend` never runs.  That was NOT observed (the
-  symbol does bind), so the sentinel claim needs measuring rather than
-  assuming — it is the only step in the path that sees the value's tag.
-* `lisp/nelisp-cc-mirror-bucket-prepend.el` — `vector-slot-set` drops the old
-  bucket head after `cons-set-cdr` clones it.  If that clone does not bump the
-  refcount of a dump-baked chain, the drop frees entries that are still
-  reachable, which matches "one unrelated binding dies per insert" and the
-  later use-after-free crash.
-* A stride mismatch worth ruling out: `nl_alloc_vector` allocates `cap*8` and
-  `vector-ref-ptr` reads at `idx*8`, while the registry comment for
-  `nl_vector_set_slot` in `scripts/compile-elisp-objects.el` still says it
-  "writes 32 bytes to data_ptr + n*32".  One of the two is stale.
+Confirmed by disabling reclamation and rebuilding: all four cases above go to
+zero losses, and the interleaved walk that used to end the process runs clean.
 
-## Why the differential did not catch it
+## Why the guard had this hole
 
-The generative fuzz runs each case in a fresh process, so a lost binding rarely
-has a later case that needs it.  The one case that did surface
-(`(seq-do 'foo (list 'quote 'sym))` reporting `void-function nil`) was a
-*different* bug in the same area, fixed alongside this note.
+This is the third instance of one pattern, and the source already documented
+the other two:
+
+- the macro-expansion cache store (`nl_mxcache_store`), fixed by bumping the
+  epoch, with a root-cause comment describing exactly this failure;
+- `nelisp_frame_push` / `nelisp_frame_pop_inner` installing the depth Int into
+  the persistent frames record, same fix, same comment.
+
+A 2026-06-01 note in the same file is blunter still: this reclamation was
+prototyped, measured to be a large win, and **left out as incorrect**, naming
+`(fset 'g ..) (g 1) (g 10)` -> 0 among its failures, because "the eval
+machinery escapes boxes above the mark ... that the build-glue cannot
+enumerate".  Doc 140 Stage 5 later shipped it behind the epoch gate.  The gate
+is only as good as the list of sites that bump it, and the list is maintained
+by hand -- the comment above it claims `fset` bumps, and it did not.
+
+## The fix
+
+`mirror-prepend.o` and `mirror-setfn.o` now go through the same
+`--reader-extra-unit-epoch` wrapper the frame and setq sites use:
+
+- `nelisp_mirror_bucket_prepend` -- every insert, whichever `_or_insert`
+  wrapper called it;
+- `nelisp_mirror_set_function_or_insert` -- additionally the hit path, which
+  stores a box into an existing record.
+
+Over-bumping is safe by design here ("under-bumping would corrupt,
+over-bumping only leaks").
+
+## Verified
+
+- the four cases above: 0 losses each;
+- the interleaved insert-and-walk that used to end the process: 4 rounds, no
+  losses, exit 0;
+- neighbouring escape sites probed for the same hazard and clean: hit-path
+  `fset` with a heap value and an immediate result, `set` on a fresh global,
+  `defvar`, `defun`, `puthash`;
+- `make test` 5036 tests, 0 unexpected; emacs-parity byte-identical; eleven
+  gates PASS; ten fuzz seeds x 1500 cases, 0 disagreements.
+
+## Pre-existing failures this did NOT touch
+
+`tools/ai/nelisp-ai.sh check` is red for two reasons that are older than this
+work, both measured at `e368da033` without the fix applied:
+
+- `parens-check`: 6 findings.  `(unless (fboundp 'string-version-lessp) ...)`
+  in the prelude never closes, so the 183 top-level forms after it are nested
+  inside it; if that name ever became fbound natively, all 183 definitions
+  would silently vanish.  Same shape twice more, in
+  `lisp/nelisp-stdlib-misc.el:665` and `lisp/nelisp-stdlib-search.el:50`.
+- `standalone-reader-test`: fails at "generated reader literal smoke".  A
+  control build at `e368da033` fails identically, so it is not from this
+  change.  (The stale report `verify` was reading named a different sub-smoke,
+  `compile-runtime-image` -- worth knowing that the two differ.)
