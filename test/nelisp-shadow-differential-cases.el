@@ -1200,7 +1200,24 @@
        (condition-case e (lsh -1.5 [1 2 3]) (error e))
        (condition-case e (lsh 1.5 1) (error e))
        (condition-case e (elt '(1 . 2) 12354) (error e))
-       (elt '(a b) -1))
+       (elt '(a b) -1)
+       ;; `fmakunbound' is `(fset SYM nil)', so a nil function cell IS the
+       ;; unbound state: the call must name the SYMBOL.  Measured 2026-08-20 --
+       ;; the direct-call path answered `(void-function nil)' while `funcall'
+       ;; and `apply' answered correctly, so all three are pinned here.
+       (progn (fset 'par-fn-1 (lambda (y) y)) (fmakunbound 'par-fn-1)
+              (condition-case e (par-fn-1 1) (error e)))
+       (progn (fset 'par-fn-2 (lambda (y) y)) (fmakunbound 'par-fn-2)
+              (condition-case e (funcall 'par-fn-2 1) (error e)))
+       (progn (fset 'par-fn-3 (lambda (y) y)) (fmakunbound 'par-fn-3)
+              (condition-case e (apply 'par-fn-3 '(1)) (error e)))
+       ;; A void function cell reads back as nil; it does not signal.
+       (symbol-function 'par-never-defined)
+       (progn (fset 'par-fn-4 nil)
+              (list (fboundp 'par-fn-4) (symbol-function 'par-fn-4)))
+       (fmakunbound 'par-fn-5)
+       (condition-case e (fmakunbound "s") (error e))
+       (progn (fset 'par-fn-6 (lambda (y) (* y 3))) (par-fn-6 4)))
 )
 
 ;;; nelisp-shadow-differential-cases.el ends here

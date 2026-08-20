@@ -11866,6 +11866,37 @@ collapses to nil instead of surfacing an error.  Patch the specific
           (t node))))
     (rw form)))
 
+(defun nelisp-standalone--patch-nil-cell-void-function-1 (form miss-var slot-var offender-var)
+  "Rewrite FORM's `(if (= MISS-VAR 0) HIT MISS)' arm so a function cell that
+resolved to `nil' reports `(void-function OFFENDER-VAR)' instead of trying to
+apply the nil.
+
+`fmakunbound' is `(fset SYM nil)', so a nil function cell is exactly Emacs's
+unbound state.  The resolve succeeded (rc = 0) and SLOT-VAR holds `nil', which
+the apply path then named as the offender -- measured against Emacs:
+
+    (fmakunbound 'foo) (foo 1)
+      emacs   (void-function foo)
+      nelisp  (void-function nil)
+
+MUST be composed AFTER the miss-arm rewrites, which match on the else-branch
+still being a bare `1'."
+  (cl-labels
+      ((rw (node)
+         (cond
+          ((and (consp node)
+                (eq (car node) 'if)
+                (equal (cadr node) (list '= miss-var 0)))
+           (list 'if
+                 (list '= miss-var 0)
+                 (list 'if (list '= (list 'sexp-tag slot-var) 0)
+                       (list 'nl_cons_stash_void_function 'env offender-var)
+                       (rw (nth 2 node)))
+                 (rw (nth 3 node))))
+          ((consp node) (cons (rw (car node)) (rw (cdr node))))
+          (t node))))
+    (rw form)))
+
 (defun nelisp-standalone--patch-macro-cache (src)
   "Patch combiner-cons SRC: swap nl_cons_macro_apply_eval for the caching version
 and thread head_ptr at its call site in nl_eval_inner_cons.  COMPOSE AFTER
@@ -11904,7 +11935,9 @@ never sees it), which blocked the anvil-pkg ERT suite at its first test."
           (mapcar (lambda (form)
                     (if (and (consp form) (eq (car form) 'defun)
                              (eq (cadr form) 'nl_eval_inner_cons))
-                        (nelisp-standalone--patch-void-function-miss form)
+                        (nelisp-standalone--patch-nil-cell-void-function-1
+                         (nelisp-standalone--patch-void-function-miss form)
+                         'rc_lu 'func_slot 'head_ptr)
                       form))
                   (cdr patched)))))
 
@@ -12009,7 +12042,15 @@ and `nl_eval_inner_cons' swapped for the cache-aware versions above."
              nelisp-standalone--mxcache-macro-apply-eval)
             ((and (consp form) (eq (car form) 'defun)
                   (eq (cadr form) 'nl_eval_inner_cons))
-             nelisp-standalone--mxcache-eval-inner-cons)
+             ;; The cache-aware body REPLACES the one `--patch-combiner-cons-full'
+             ;; just rewrote, so the nil-function-cell arm has to be re-applied
+             ;; here or it is silently discarded -- which is exactly what
+             ;; happened the first time round: `(fmakunbound 'f) (f 1)' still
+             ;; answered `(void-function nil)' from this path while `funcall'
+             ;; and `apply' were already correct.
+             (nelisp-standalone--patch-nil-cell-void-function-1
+              nelisp-standalone--mxcache-eval-inner-cons
+              'rc_lu 'func_slot 'head_ptr))
             (t form)))
          (cdr src))))
 
@@ -17223,6 +17264,29 @@ This swaps `nl_bf_bind_rest' for the rc/lifetime-safe version and makes
                (if (= (ptr-read-u64 sym_ptr 0) 1) 1
                  (if (= (ptr-read-u64 sym_ptr 0) 0) 1 0)))
          (if (= def_ptr 0) (nl_apply_stash_wta env args_list_ptr)
+           ;; A NIL definition is Emacs's *unbound* state, not a stored
+           ;; value: `fmakunbound' is literally `(fset SYM nil)', and there
+           ;; `(fboundp SYM)' is nil and a call names SYM, not the cell.
+           ;; Route it to `nelisp_mirror_set_function' -- the hit-only
+           ;; variant.  Never inserting matters twice over: an unbound
+           ;; symbol has no entry to begin with (Emacs leaves it that way),
+           ;; and inserting an entry whose function slot is an immediate
+           ;; corrupts the mirror -- measured: six such inserts destroy two
+           ;; to three UNRELATED global bindings, and more of them segfault
+           ;; the process.  See handoff/nelisp_mirror_immediate_insert_corruption.md.
+           (if (= (ptr-read-u64 def_ptr 0) 0)
+               (let* ((mirror_ptr (+ env 0)) (unbound_ptr (+ env 64))
+                      (probe_slot (alloc-bytes 32 8)))
+                 (seq
+                  (if (= (nelisp_env_lookup_function mirror_ptr unbound_ptr sym_ptr probe_slot) 0)
+                      (let* ((resolved_slot (alloc-bytes 32 8))
+                             (scratch_slot (alloc-bytes 32 8)))
+                        (seq (nl_sexp_clone_into def_ptr resolved_slot)
+                             (nl_apply_build_fn_scratch unbound_ptr resolved_slot scratch_slot)
+                             (nelisp_mirror_set_function_or_insert mirror_ptr sym_ptr scratch_slot 0)))
+                    0)
+                  (nl_sexp_clone_into def_ptr out)
+                  0))
            (if (if (= (ptr-read-u64 def_ptr 0) 4)
                    (if (= (ptr-read-u64 sym_ptr 0) 4)
                        (let* ((r (alloc-bytes 32 8)))
@@ -17260,7 +17324,7 @@ This swaps `nl_bf_bind_rest' for the rc/lifetime-safe version and makes
                       (nl_apply_build_fn_scratch unbound_ptr resolved_slot sym_scratch)
                       (nelisp_mirror_set_function_or_insert mirror_ptr sym_ptr sym_scratch 0)
                       (nl_sexp_clone_into def_ptr out)
-                      0))))))))
+                      0)))))))))
            (nl_apply_stash_wrong_symbolp env sym_ptr))))))
   "Rc-correct, `not'-free replacement for the shipped nl_apply_do_fset.")
 
@@ -17281,7 +17345,10 @@ This swaps `nl_bf_bind_rest' for the rc/lifetime-safe version and makes
            (let* ((rc (nelisp_env_lookup_function mirror_ptr unbound_ptr arg0_ptr out)))
              (if (= rc 0)
                  0
-               (nl_cons_stash_void_function env arg0_ptr)))))))
+               ;; Emacs answers nil for a symbol with no function cell --
+               ;; `(symbol-function 'never-defined)' is nil, not an error.
+               ;; Signalling here was measured against Emacs and diverged.
+               (nl_apply_write_nil out)))))))
   "Rc-correct `(symbol-function SYM)' handler: stashes `void-function' on an
 unbound-symbol miss instead of passing a bare, unstashed rc=1 through.")
 
@@ -17517,12 +17584,16 @@ swap below, so it rewrites the resulting (rc-correct) `nl_apply_do_apply'."
            (cond
             ((and (consp form) (eq (car form) 'defun)
                   (eq (cadr form) 'nl_apply_do_funcall))
-             (nelisp-standalone--patch-apply-void-function-miss-1
-              form 'rc_lu 'arg0_ptr))
+             (nelisp-standalone--patch-nil-cell-void-function-1
+              (nelisp-standalone--patch-apply-void-function-miss-1
+               form 'rc_lu 'arg0_ptr)
+              'rc_lu 'func_slot 'arg0_ptr))
             ((and (consp form) (eq (car form) 'defun)
                   (eq (cadr form) 'nl_apply_do_apply))
-             (nelisp-standalone--patch-apply-void-function-miss-1
-              form 'resolve_rc 'arg0_ptr))
+             (nelisp-standalone--patch-nil-cell-void-function-1
+              (nelisp-standalone--patch-apply-void-function-miss-1
+               form 'resolve_rc 'arg0_ptr)
+              'resolve_rc 'func_slot 'arg0_ptr))
             (t form)))
          (cdr src))))
 
