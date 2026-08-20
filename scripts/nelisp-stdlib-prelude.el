@@ -7928,6 +7928,16 @@ computed from it."
 ;; => "0.0" vs Emacs "0.1" (the f64->decimal extraction cannot see the
 ;; sub-ULP excess).
 
+(defun nelisp--fmt-epos (s)
+  "Index of the exponent marker in S, or nil when there is none.
+`inf' and `nan' have no exponent, which is how the `#'-on-%g path below
+tells a finite rendering from one it must leave alone."
+  (let ((i 0) (n (length s)) (r nil))
+    (while (and (null r) (< i n))
+      (let ((c (aref s i)))
+        (if (or (= c 101) (= c 69)) (setq r i) (setq i (1+ i)))))
+    r))
+
 (defun nelisp--format-check-arg (conv arg)
   "Return ARG, or signal the way Emacs does when it cannot match CONV.
 The native delegate formats whatever bits it is handed rather than
@@ -7988,9 +7998,27 @@ layer."
                     (setq p (+ (* p 10) (- (aref template j) 48)) j (1+ j)))
                   (setq prec p)))
               (if (>= j n)
-                  (setq out (concat out "%") i (1+ i))
+                  ;; Emacs does not pass a dangling "%" through: "%", "%5",
+                  ;; "%-" and "%." all signal.
+                  (signal 'error
+                          (list "Format string ends in middle of format specifier"))
                 (let ((conv (aref template j)))
                   (setq i (1+ j))
+                  ;; Emacs accepts s S d i o x X e f g c and %% -- everything
+                  ;; else is "Invalid format operation".  This accepted the C
+                  ;; uppercase spellings (%E %F %G) because the conversion char
+                  ;; was handed straight to the native delegate, and answered
+                  ;; the SPEC STRING itself ("%b", "%z") for the ones the
+                  ;; delegate did not know either.  `a'/`A' stay: the C99
+                  ;; hex-float conversions are a deliberate NeLisp superset
+                  ;; (Doc 159 sec 11), documented as having no Emacs oracle.
+                  (unless (or (= conv 115) (= conv 83) (= conv 100) (= conv 105)
+                              (= conv 111) (= conv 120) (= conv 88) (= conv 101)
+                              (= conv 102) (= conv 103) (= conv 99) (= conv 37)
+                              (= conv 97) (= conv 65))
+                    (signal 'error
+                            (list (concat "Invalid format operation %"
+                                          (char-to-string conv)))))
                   (if (= conv 37)        ; ?%
                       (setq out (concat out "%"))
                     (let* ((arg (nelisp--format-check-arg conv (car argp)))
@@ -8015,6 +8043,28 @@ layer."
                                                     (= conv 120) (= conv 88)))
                                            (truncate arg) arg))))))
                       (setq argp (cdr argp))
+                      ;; `#' on %g keeps the trailing zeros %g strips, and
+                      ;; keeps the point even when nothing follows it
+                      ;; ("%#.1g" of 1.0 is "1.").  C picks %f or %e from the
+                      ;; exponent, so read the exponent back out of an %e
+                      ;; rendering instead of guessing it; inf/nan have none
+                      ;; and are left alone.
+                      (when (and fhash (= conv 103) (numberp arg))
+                        (let* ((v (if (integerp arg) (+ arg 0.0) arg))
+                               (p (if prec (if (= prec 0) 1 prec) 6))
+                               (estr (nelisp--fmt-float v 101 (1- p)))
+                               (epos (nelisp--fmt-epos estr)))
+                          (when epos
+                            (let* ((x (string-to-number (substring estr (1+ epos))))
+                                   (usef (and (< x p) (>= x -4)))
+                                   (fp (if usef (- p 1 x) (1- p)))
+                                   (str (if usef (nelisp--fmt-float v 102 fp) estr)))
+                              (when (= fp 0)
+                                (setq str (if usef
+                                              (concat str ".")
+                                            (concat (substring str 0 epos) "."
+                                                    (substring str epos)))))
+                              (setq body str)))))
                       (when (and prec (or (= conv 115) (= conv 83))   ; s S
                                  (> (length body) prec))
                         (setq body (substring body 0 prec)))

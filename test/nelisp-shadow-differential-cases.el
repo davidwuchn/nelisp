@@ -1239,7 +1239,29 @@
        (condition-case e (format "%c" 65.0) (error e))
        (condition-case e (format "%c" -1) (error e))
        (condition-case e (format "%x" t) (error e))
-       (format "%c" 65) (format "%d" 2.0))
+       (format "%c" 65) (format "%d" 2.0)
+       ;; `#' on %g keeps the trailing zeros %g strips, and keeps the point
+       ;; even when nothing follows it.
+       (format "%#g" 1.0) (format "%#g" 0.0) (format "%#g" 0.0001)
+       (format "%#g" 0.00001) (format "%#.3g" 1.0) (format "%#.1g" 1.0)
+       (format "%#.1g" 1.0e20) (format "%#010.3g" 1.0) (format "%#g" 100000.0)
+       (format "%#g" 1000000.0) (format "%#.2g" 0.000123) (format "%#g" -2.5)
+       ;; Emacs accepts s S d i o x X e f g c and %% only.  The C uppercase
+       ;; spellings got through because the conversion character was handed
+       ;; straight to the native delegate, and an unknown one answered the
+       ;; SPEC STRING itself.  (%a / %A stay accepted -- deliberate NeLisp
+       ;; superset, Doc 159 sec 11.)
+       (condition-case e (format "%G" 1.0) (error e))
+       (condition-case e (format "%E" 1.0) (error e))
+       (condition-case e (format "%F" 1.0) (error e))
+       (condition-case e (format "%b" 5) (error e))
+       (condition-case e (format "%z" 5) (error e))
+       ;; A format string that stops inside a specifier is an error, not a
+       ;; literal "%".
+       (condition-case e (format "%") (error e))
+       (condition-case e (format "%5") (error e))
+       (condition-case e (format "%.") (error e))
+       (format "%i" 5) (format "a%%b"))
 )
 
 ;;; nelisp-shadow-differential-cases.el ends here
