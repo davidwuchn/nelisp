@@ -1217,7 +1217,29 @@
               (list (fboundp 'par-fn-4) (symbol-function 'par-fn-4)))
        (fmakunbound 'par-fn-5)
        (condition-case e (fmakunbound "s") (error e))
-       (progn (fset 'par-fn-6 (lambda (y) (* y 3))) (par-fn-6 4)))
+       (progn (fset 'par-fn-6 (lambda (y) (* y 3))) (par-fn-6 4))
+       ;; `format' flags.  The zero-pad guard asked whether the first character
+       ;; was a DECIMAL digit, which is false for hex output beginning a-f, so
+       ;; "%02x" of 10 space-padded to " a".  `#' was scanned and thrown away.
+       ;; `+' and a leading space were wired to d/f/e/g only.
+       (format "%02x" 10) (format "%04X" 255) (format "%05x" -255)
+       (format "%#x" 10) (format "%#X" 255) (format "%#o" 8)
+       (format "%#x" 0) (format "%#o" 0) (format "%#05x" 10) (format "%#x" -10)
+       (format "%#5x" 10) (format "%#-5x|" 10)
+       (format "%+05x" 10) (format "% 05x" 10) (format "%+i" 5)
+       (format "%#d" 5) (format "%05s" "ab") (format "%08.3f" 1.5)
+       ;; A wrong-typed argument reached the native delegate, which formatted
+       ;; whatever bits it was handed: (format "%o" [1]) answered a raw pointer
+       ;; value and (format "%d" nil) answered 0.  Emacs signals for both.
+       (condition-case e (format "%d" "s") (error e))
+       (condition-case e (format "%d" nil) (error e))
+       (condition-case e (format "%o" [1]) (error e))
+       (condition-case e (format "%e" "s") (error e))
+       (condition-case e (format "%c" "a") (error e))
+       (condition-case e (format "%c" 65.0) (error e))
+       (condition-case e (format "%c" -1) (error e))
+       (condition-case e (format "%x" t) (error e))
+       (format "%c" 65) (format "%d" 2.0))
 )
 
 ;;; nelisp-shadow-differential-cases.el ends here

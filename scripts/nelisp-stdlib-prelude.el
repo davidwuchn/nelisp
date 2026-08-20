@@ -7928,6 +7928,31 @@ computed from it."
 ;; => "0.0" vs Emacs "0.1" (the f64->decimal extraction cannot see the
 ;; sub-ULP excess).
 
+(defun nelisp--format-check-arg (conv arg)
+  "Return ARG, or signal the way Emacs does when it cannot match CONV.
+The native delegate formats whatever bits it is handed rather than
+complaining, so a wrong-typed argument came back as plausible-looking
+output instead of an error: (format \"%o\" [1]) answered a raw pointer
+value, (format \"%d\" nil) answered 0, and (format \"%c\" \"a\") answered a
+NUL.  Emacs signals for every one of those."
+  (cond
+   ;; d i o x X e E f F g G a A -- any number, integer or float.  A marker is
+   ;; NOT accepted: Emacs signals for one too (measured).
+   ((or (= conv 100) (= conv 105) (= conv 111) (= conv 120) (= conv 88)
+        (= conv 101) (= conv 69) (= conv 102) (= conv 70)
+        (= conv 103) (= conv 71) (= conv 97) (= conv 65))
+    (unless (numberp arg)
+      (signal 'error (list "Format specifier doesn’t match argument type"))))
+   ;; c -- an integer, and then a valid character code.  Emacs draws the line
+   ;; in two places: a float is a specifier mismatch, a negative integer is
+   ;; `(wrong-type-argument characterp -1)'.
+   ((= conv 99)
+    (unless (integerp arg)
+      (signal 'error (list "Format specifier doesn’t match argument type")))
+    (unless (and (>= arg 0) (<= arg 4194303))
+      (signal 'wrong-type-argument (list 'characterp arg)))))
+  arg)
+
 (defun format (template &rest args)
   "Format TEMPLATE with ARGS honoring %[flags][width][.prec]conv (Doc 22 A7).
 Width, left-justify (-), zero-pad (0), sign (+/space) and string precision
@@ -7941,7 +7966,7 @@ layer."
       (let ((ch (aref template i)))
         (if (= ch 37)                   ; ?%
             (let ((j (1+ i))
-                  (f- nil) (f0 nil) (fplus nil) (fspace nil)
+                  (f- nil) (f0 nil) (fplus nil) (fspace nil) (fhash nil)
                   (width nil) (prec nil) (scan t))
               (while (and scan (< j n))
                 (let ((c (aref template j)))
@@ -7950,7 +7975,7 @@ layer."
                    ((= c 48) (setq f0 t j (1+ j)))        ; 0
                    ((= c 43) (setq fplus t j (1+ j)))     ; +
                    ((= c 32) (setq fspace t j (1+ j)))    ; space
-                   ((= c 35) (setq j (1+ j)))             ; # (accept, ignore)
+                   ((= c 35) (setq fhash t j (1+ j)))     ; #
                    (t (setq scan nil)))))
               (let ((w 0) (have nil))
                 (while (and (< j n) (nelisp--digit-char-p (aref template j)))
@@ -7968,7 +7993,7 @@ layer."
                   (setq i (1+ j))
                   (if (= conv 37)        ; ?%
                       (setq out (concat out "%"))
-                    (let* ((arg (car argp))
+                    (let* ((arg (nelisp--format-check-arg conv (car argp)))
                            (body (if (and (numberp arg)
                                           (or (= conv 102) (= conv 70)   ; f F
                                               (= conv 101) (= conv 69)   ; e E
@@ -7993,7 +8018,28 @@ layer."
                       (when (and prec (or (= conv 115) (= conv 83))   ; s S
                                  (> (length body) prec))
                         (setq body (substring body 0 prec)))
-                      (when (and (or (= conv 100) (= conv 102) (= conv 101) (= conv 103)) ; d f e g
+                      ;; `#' is the alternate form, and it reaches only o/x/X
+                      ;; here: Emacs writes "0xa" / "0XFF" / "010", omits the
+                      ;; prefix for a zero value, and puts it AFTER the sign
+                      ;; ("-0xa").  The native delegate does not implement `#'
+                      ;; at all -- it hands back the spec string unchanged --
+                      ;; so the prefix has to be built here.
+                      (when (and fhash (or (= conv 111) (= conv 120) (= conv 88))
+                                 (> (length body) 0))
+                        (let* ((neg (= (aref body 0) 45))
+                               (mag (if neg (substring body 1) body)))
+                          (unless (or (string= mag "0") (= (length mag) 0))
+                            (setq mag (cond ((= conv 120) (concat "0x" mag))
+                                            ((= conv 88) (concat "0X" mag))
+                                            ((= (aref mag 0) 48) mag)
+                                            (t (concat "0" mag))))
+                            (setq body (if neg (concat "-" mag) mag)))))
+                      ;; `+' and a leading space apply to the integer
+                      ;; conversions as well -- "%+05x" of 10 is "+000a" in
+                      ;; Emacs, and o/x/X/i were all missing from this list.
+                      (when (and (or (= conv 100) (= conv 105) (= conv 111)
+                                     (= conv 120) (= conv 88)
+                                     (= conv 102) (= conv 101) (= conv 103))
                                  (> (length body) 0) (not (= (aref body 0) 45)))
                         (cond (fplus (setq body (concat "+" body)))
                               (fspace (setq body (concat " " body)))))
@@ -8001,21 +8047,44 @@ layer."
                         (let ((pad (- width (length body))))
                           (cond
                            (f- (setq body (concat body (make-string pad 32))))
-                           ((and f0 (or (= conv 100) (= conv 120) (= conv 88)
-                                        (= conv 111) (= conv 102) (= conv 101) (= conv 103))
-                                 ;; only zero-pad numeric output; inf/nan get
-                                 ;; space-pad like Emacs (Doc 159 §13)
-                                 (let ((k (if (and (> (length body) 0)
-                                                   (or (= (aref body 0) 45) (= (aref body 0) 43)))
-                                              1 0)))
-                                   (and (< k (length body))
-                                        (>= (aref body k) 48) (<= (aref body k) 57))))
-                            (if (and (> (length body) 0)
-                                     (or (= (aref body 0) 45) (= (aref body 0) 43)))
-                                (setq body (concat (substring body 0 1)
-                                                   (make-string pad 48)
-                                                   (substring body 1)))
-                              (setq body (concat (make-string pad 48) body))))
+                           ((and f0
+                                 ;; d/i/o/x/X always produce digits, so `0'
+                                 ;; always applies.  The old guard asked whether
+                                 ;; the first character was a DECIMAL digit,
+                                 ;; which is false for hex output beginning a-f:
+                                 ;; "%02x" of 10 space-padded to " a" where
+                                 ;; Emacs writes "0a".  For f/e/g the guard is
+                                 ;; still needed -- inf/nan space-pad (Doc 159
+                                 ;; §13).
+                                 (if (or (= conv 100) (= conv 105) (= conv 111)
+                                         (= conv 120) (= conv 88))
+                                     t
+                                   (and (or (= conv 102) (= conv 101) (= conv 103))
+                                        (let ((k (if (and (> (length body) 0)
+                                                          (or (= (aref body 0) 45)
+                                                              (= (aref body 0) 43)
+                                                              (= (aref body 0) 32)))
+                                                     1 0)))
+                                          (and (< k (length body))
+                                               (>= (aref body k) 48)
+                                               (<= (aref body k) 57))))))
+                            ;; The zeros go after the sign AND after a `#'
+                            ;; prefix: Emacs writes "-00ff" and "0x00a", never
+                            ;; "00-ff" or "000xa".
+                            (let ((k 0))
+                              (when (and (> (length body) 0)
+                                         (or (= (aref body 0) 45) (= (aref body 0) 43)
+                                             (= (aref body 0) 32)))
+                                (setq k 1))
+                              (when (and (or (= conv 120) (= conv 88))
+                                         (> (length body) (+ k 1))
+                                         (= (aref body k) 48)
+                                         (or (= (aref body (+ k 1)) 120)
+                                             (= (aref body (+ k 1)) 88)))
+                                (setq k (+ k 2)))
+                              (setq body (concat (substring body 0 k)
+                                                 (make-string pad 48)
+                                                 (substring body k)))))
                            (t (setq body (concat (make-string pad 32) body))))))
                       (setq out (concat out body)))))))
           (setq out (concat out (char-to-string ch)) i (1+ i)))))
