@@ -18703,6 +18703,15 @@ all combine so a single wrong primitive shifts the result off 42."
    "       (if (= (nth 2 (list 9 8 42 7)) 42) 0 100)\n"   ; nth -> 42
    "       (if (= (plist-get (list 'a 1 'b 42) 'b) 42) 0 100)\n" ; plist-get -> 42
    "       (if (= ?λ 955) 0 100)\n"                 ; UTF-8 char literal -> codepoint
+   ;; `nelisp-format-hexfloat' is the only route to the C99 hex-float
+   ;; formatter now that `format' rejects %a for Emacs parity (Doc 159
+   ;; sec 11).  Without a check here the route would rot unnoticed --
+   ;; nothing else calls it, and the differential cannot: there is no
+   ;; Emacs oracle for a conversion Emacs refuses.  Values are glibc's.
+   "       (if (string= (nelisp-format-hexfloat 1.0) \"0x1p+0\") 0 100)\n"
+   "       (if (string= (nelisp-format-hexfloat 1.5 0) \"0x2p+0\") 0 100)\n"
+   "       (if (string= (nelisp-format-hexfloat 1.0 nil t) \"0X1P+0\") 0 100)\n"
+   "       (if (string= (nelisp-format-hexfloat 0.0) \"0x0p+0\") 0 100)\n"
    "       (if (= (length `(1 ,b ,@c 5)) 5) 42 100))))\n")) ; backquote length 5 -> 42
 
 ;;;###autoload

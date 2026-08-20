@@ -7928,6 +7928,28 @@ computed from it."
 ;; => "0.0" vs Emacs "0.1" (the f64->decimal extraction cannot see the
 ;; sub-ULP excess).
 
+(defun nelisp-format-hexfloat (value &optional precision upcase)
+  "Format VALUE as a C99 hexadecimal float: \"0x1.8p+0\", \"0x1p+0\", \"inf\".
+
+PRECISION is the number of hex fraction digits; nil means unspecified, which
+strips trailing-zero nibbles (and the point with them).  UPCASE non-nil gives
+the %A spelling (\"0X1P+0\", \"INF\").
+
+This is a NeLisp superset with no Emacs counterpart, which is why it is NOT
+reachable as `(format \"%a\" ...)': Emacs signals for %a, so accepting it there
+would be a divergence pointing the other way.  The formatter is the one
+described in Doc 159 sec 11 and matches glibc printf(\"%a\") exactly."
+  (unless (numberp value)
+    (signal 'wrong-type-argument (list 'numberp value)))
+  (when precision
+    (unless (integerp precision)
+      (signal 'wrong-type-argument (list 'integerp precision)))
+    (when (< precision 0)
+      (signal 'args-out-of-range (list precision))))
+  (nelisp--fmt-float (if (integerp value) (+ value 0.0) value)
+                     (if upcase 65 97)
+                     (or precision -1)))
+
 (defun nelisp--fmt-epos (s)
   "Index of the exponent marker in S, or nil when there is none.
 `inf' and `nan' have no exponent, which is how the `#'-on-%g path below
@@ -8009,13 +8031,19 @@ layer."
                   ;; uppercase spellings (%E %F %G) because the conversion char
                   ;; was handed straight to the native delegate, and answered
                   ;; the SPEC STRING itself ("%b", "%z") for the ones the
-                  ;; delegate did not know either.  `a'/`A' stay: the C99
-                  ;; hex-float conversions are a deliberate NeLisp superset
-                  ;; (Doc 159 sec 11), documented as having no Emacs oracle.
+                  ;; delegate did not know either.
+                  ;;
+                  ;; `a'/`A' are rejected too, and that is a deliberate
+                  ;; NARROWING: the C99 hex-float conversions used to be a
+                  ;; NeLisp superset (Doc 159 sec 11).  Parity with Emacs won
+                  ;; -- a program that runs here and signals there is a
+                  ;; divergence whichever direction it points.  The hex-float
+                  ;; formatter itself is still in the AOT dialect
+                  ;; (`m5_fmt_hexfloat'), it just has no route through
+                  ;; `format' any more.
                   (unless (or (= conv 115) (= conv 83) (= conv 100) (= conv 105)
                               (= conv 111) (= conv 120) (= conv 88) (= conv 101)
-                              (= conv 102) (= conv 103) (= conv 99) (= conv 37)
-                              (= conv 97) (= conv 65))
+                              (= conv 102) (= conv 103) (= conv 99) (= conv 37))
                     (signal 'error
                             (list (concat "Invalid format operation %"
                                           (char-to-string conv)))))
@@ -8026,7 +8054,14 @@ layer."
                                           (or (= conv 102) (= conv 70)   ; f F
                                               (= conv 101) (= conv 69)   ; e E
                                               (= conv 103) (= conv 71)   ; g G
-                                              (= conv 97) (= conv 65)))  ; a A (Doc 159 §11)
+                                              ;; a/A can no longer reach here:
+                                              ;; the conversion check above
+                                              ;; rejects them for Emacs parity.
+                                              ;; Kept so the routing is still
+                                              ;; visible if %a is ever exposed
+                                              ;; through a non-`format' entry
+                                              ;; point (Doc 159 sec 11).
+                                              (= conv 97) (= conv 65)))  ; a A
                                      (nelisp--fmt-float
                                       (if (integerp arg) (+ arg 0.0) arg)
                                       conv (if (or (= conv 97) (= conv 65))

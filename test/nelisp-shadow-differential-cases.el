@@ -1261,7 +1261,14 @@
        (condition-case e (format "%") (error e))
        (condition-case e (format "%5") (error e))
        (condition-case e (format "%.") (error e))
-       (format "%i" 5) (format "a%%b"))
+       (format "%i" 5) (format "a%%b")
+       ;; %a / %A were a deliberate NeLisp superset (C99 hex-float, Doc 159
+       ;; sec 11) until 2026-08-21.  Emacs rejects them, so a program that
+       ;; formats here and signals there was a divergence too; parity won.
+       (condition-case e (format "%a" 1.0) (error e))
+       (condition-case e (format "%A" 1.0) (error e))
+       (condition-case e (format "%.3a" 1.5) (error e))
+       (condition-case e (format "%#a" 1.0) (error e)))
 )
 
 ;;; nelisp-shadow-differential-cases.el ends here
