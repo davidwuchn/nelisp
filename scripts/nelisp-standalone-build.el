@@ -18225,6 +18225,7 @@ loader when it is absent."
               (let ((nelisp-standalone--reader-out out))
                 (dolist (smoke '(nelisp-standalone--reader-temp-name-uniqueness-smoke
                                  nelisp-standalone--reader-temp-outside-cwd-smoke
+                                 nelisp-standalone--reader-asm-arm64-byte-identity-smoke
                                  nelisp-standalone--reader-hash-table-literal-smoke
                                  nelisp-standalone--reader-large-quoted-alist-mutation-smoke
                                  nelisp-standalone--reader-setcar-setcdr-type-smoke
@@ -18393,6 +18394,57 @@ loader when it is absent."
       (ignore-errors (delete-file runtime-image))
       (ignore-errors (delete-file runtime-artifact-out))
       (ignore-errors (delete-file (concat runtime-artifact-out ".manifest.el"))))))
+
+(defun nelisp-standalone--reader-asm-arm64-byte-identity-smoke ()
+  "Assert the arm64 assembler emits the same bytes here as on the host.
+
+`nelisp-asm-arm64' counts and indexes its own output with `length' and `aref',
+which are CHARACTER operations.  Host Emacs builds the chunks with
+`unibyte-string' so the two agree; the standalone stores every string as UTF-8
+with no unibyte flag, so a byte pair that forms a valid sequence comes back as
+one character and every offset after it is short.
+
+The x86_64 half of this was found by the self-host test and is covered by it.
+The arm64 half had no gate reaching it at all -- the self-host driver is
+x86_64-only -- and was found by inspection afterwards.  Against the unfixed
+file this program dies with `args-out-of-range (704 0 255)'.
+
+Not an ERT test, because host Emacs cannot reproduce the defect: there `length'
+and `aref' ARE bytewise for these strings.  It only exists in the standalone,
+so the check has to run there, which means loading the assembler as source."
+  (let ((tmp (make-temp-file "nelisp-reader-asm-arm64-" nil ".el"))
+        (root nelisp-standalone--repo-root)
+        (rc nil))
+    (unwind-protect
+        (progn
+          (with-temp-file tmp
+            (insert-file-contents
+             (expand-file-name "scripts/nelisp-stdlib-prelude.el" root))
+            (goto-char (point-max))
+            (insert-file-contents
+             (expand-file-name "lisp/nelisp-asm-arm64.el" root))
+            (goto-char (point-max))
+            (insert
+             ;; mov x0,#1 / add x0,x0,x0 / ret -- host emits 20 00 80 d2 ...
+             "\n(let ((buf (nelisp-asm-arm64-make-buffer)))\n"
+             "  (nelisp-asm-arm64--emit-word buf #xd2800020)\n"
+             "  (nelisp-asm-arm64--emit-word buf #x8b000000)\n"
+             "  (nelisp-asm-arm64--emit-word buf #xd65f03c0)\n"
+             "  (let* ((b (nelisp-asm-arm64-resolve-fixups buf))\n"
+             "         (pos (nelisp-asm-arm64-buffer-pos buf))\n"
+             "         (n (nelisp-asm-arm64--byte-length b))\n"
+             "         (want (list 32 0 128 210 0 0 0 139 192 3 95 214))\n"
+             "         (bad -1) (i 0))\n"
+             "    (while (< i (if (< n 12) n 12))\n"
+             "      (when (and (= bad -1)\n"
+             "                 (/= (nelisp-asm-arm64--byte-at b i) (nth i want)))\n"
+             "        (setq bad i))\n"
+             "      (setq i (1+ i)))\n"
+             "    (if (and (= pos 12) (= n 12) (= bad -1)) 42 13)))\n"))
+          (setq rc (call-process nelisp-standalone--reader-out nil nil nil tmp))
+          (unless (= rc 42)
+            (error "arm64 byte-identity smoke exit=%S (expected 42)" rc)))
+      (ignore-errors (delete-file tmp)))))
 
 (defun nelisp-standalone--reader-temp-outside-cwd-smoke ()
   "Assert a compile writes no temp file into the working directory.
