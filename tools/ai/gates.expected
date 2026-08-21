@@ -168,6 +168,99 @@ nelisp-native-artifact-gate
 nelisp-performance-gate
 standalone-selfhost-test
 
-# `make audit' is deliberately absent: it exits 1 on 26 PENDING
+# ===================================================================
+# The 2026-08-21 sweep: every gate-like make target, measured
+# ===================================================================
+#
+# 49 gate-like targets in the Makefile were not listed here, and nothing was
+# running them.  All 49 were measured.  What follows is where each one landed,
+# so the next person does not have to run the sweep again to find out.
+#
+# Five defects came out of it, four of them the same defect -- `length' and
+# `aref' counting CHARACTERS where bytes were meant, in the arm64 assembler and
+# in five sites of the ELF writer.  A 120-byte .text section measured 118.
+# Details in the commit; the point here is that these gates existed and were
+# not run, so the defects sat.
+#
+# GREEN AND WIRED ABOVE: the reader smokes are covered by
+# `standalone-reader-test' (11 checks), which now includes the arm64
+# byte-identity check.  Beside it stand 28 individual `standalone-reader-*'
+# targets, each measured green on 2026-08-21 -- two of them only after the
+# fixes in this sweep.  Named in full so a later reader can tell "measured and
+# green" from "nobody looked":
+#
+#   standalone-reader-catch-throw-tag-smoke   standalone-reader-checked
+#   standalone-reader-checked-soak            standalone-reader-cond-let-shape-smoke
+#   standalone-reader-current-time-smoke      standalone-reader-declare-strip-smoke
+#   standalone-reader-derived-mode-shape-smoke standalone-reader-elt-smoke
+#   standalone-reader-ffi-smoke  (was red: print-circle in the unit cache key)
+#   standalone-reader-fmt-smoke               standalone-reader-getenv-smoke
+#   standalone-reader-intern-soft-loop-smoke  standalone-reader-intern-soft-smoke
+#   standalone-reader-load-smoke              standalone-reader-match-data-smoke
+#   standalone-reader-mod-float-smoke  (was red: `mod' with a negative divisor)
+#   standalone-reader-nested-backquote-macro-smoke
+#   standalone-reader-number-token-smoke      standalone-reader-pcase-quote-literal-smoke
+#   standalone-reader-prelude-equal-reload-smoke  standalone-reader-prelude-test
+#   standalone-reader-process-smoke           standalone-reader-realrt-smoke
+#   standalone-reader-recursion-guard-smoke   standalone-reader-repl-smoke
+#   standalone-reader-require-provide-smoke   standalone-reader-shadow-smoke
+#   standalone-reader-tls-smoke
+#
+# GREEN, NOT LISTED, AND THAT IS A GAP WORTH KNOWING: these produce a clean
+# result but have no report, so `verify' cannot hold anyone to them.  Wiring
+# them means giving each a GATE-COUNT line and a `nelisp-ai.sh gate' wrapper,
+# which is a line of work each and was not done in this pass:
+#
+#   prelude-toplevel-check   643 forms, 0 findings
+#   partial-inventory         55 checked, 0 findings
+#   gate-selfcheck            11 checked, 0 findings
+#   ns-gate                 1918 checked, 0 findings
+#   nl-check-gate            clean (3 gated, 2 accepted)
+#   fallback-inventory-selftest, nelisp-runtime-image-cache-gate,
+#   nelisp-source-command-substrate-gate, standalone-chunk-growth-test,
+#   standalone-parallel-compile-test, standalone-selfhost-mt-test,
+#   wasm-dtw-skeleton-smoke, wasm-runtime-image-smoke
+#
+# CANNOT RUN HERE, AND SAY SO BADLY: these exit non-zero for want of a host or
+# a checkout, where the other standalone gates print GATE-SKIP with a reason.
+# Same shape as the skip paths added to the four gates above; each needs the
+# same three-outcome treatment before it can be listed:
+#
+#   macho-acceptance-test        "checks require macOS (got Linux)" -- then exits 2
+#   nelisp-nelix-command-gate    needs NELIX_REPO / nelix-compat.el
+#   nelisp-nelix-operational-gate    same
+#   nelisp-nelix-native-hot-gate     same
+#   wasm-dtw-smoke               needs the newDTW-nelisp checkout (a Windows
+#   wasm-dtw-site-smoke          path is baked into the data it opens)
+#
+# RED, AND THE RED IS CORRECT:
+#
+#   gate-mutation -- 5 checks, 2 findings.  It injects a real defect in front
+#   of a gate and asks whether the gate goes red.  Two do not: `ns-gate' stays
+#   green when `round' diverges from its lisp/ mirror, and `parity-coverage'
+#   stays green when a covered name stops being mentioned.  That is the gate
+#   working: it is reporting two checks that cannot see what they claim to
+#   check.  Listing it as required would turn a true report into a red column
+#   everyone learns to ignore; fixing the two checks is what clears it.
+#
+# RED, AND OPEN:
+#
+#   standalone-eval-test -- fails at link, not at runtime.  `shim.o' calls
+#   `nl_gc_ctx_pop' and `applyfn.o' calls `nl_os_write_file_handle', both
+#   defined only in reader-only units that the legacy eval manifest does not
+#   list.  Appending those units moves the error to the next symbol rather
+#   than clearing it, and the comment on `--applyfn-census-helpers' shows the
+#   tree's chosen direction is the opposite one: move reader-only code out of
+#   shared units.  That is a layering decision about what the eval binary is
+#   for, not a patch, so it is recorded rather than guessed at.
+#
+# `make audit' is deliberately absent: it exits 1 on 27 PENDING
 # sub-phases, which is a roadmap state rather than a defect, and a gate
 # that is red by design trains people to ignore the column.
+#
+# NOT GATES, and listed so the absence is a decision rather than an oversight:
+# `test', `test-fast', `test-jit', `test-nojit', `test-one' and
+# `test-parallel' are ERT drivers over the same suite `ert-full' already
+# reports on -- listing them would count the same evidence six more times.
+# `release-checksum' and `alloc-check-collect' are tooling that produces
+# artifacts, not checks that can pass or fail.
