@@ -301,6 +301,57 @@ standalone-reader-smokes
 #   floor went 157 -> 259 in the same pass: a floor 102 below the measurement
 #   is not a floor.
 #
+# Later the same day, the same lesson was generalized to the other
+# baseline/ratchet gates in `tools/ai/nelisp-ai.sh check': every count-only
+# ratchet over an INVENTORY OF BAD THINGS (not a curated accept-list) can
+# hide a swap the same way -- one entry resolves, a different one appears,
+# the total does not move.  Four gates got the ns-gate/parity-coverage
+# treatment (an identity-pinned baseline alongside the count, regenerated
+# from the clean tree), and 5/5 became 10/10:
+#
+#   unsafe-inventory pins `pinned-kernel-touch' (87 kernel files that touch
+#   raw memory, replacing the bare `kernel-files' count in
+#   tools/unsafe-kernel.txt) and `pinned-kernel-call FILE COUNT' (the 3
+#   kernel files with an unquoted `unsafe-call', replacing the bare `total'
+#   in tools/unsafe-inventory-baseline.txt).  Verified against the exact
+#   defect: moving one call from `nelisp-flat-arena-probe.el' to
+#   `nelisp-cc-alloc-dealloc.el' left `kernel-files' at 87 and `total' at
+#   538, unmoved, and the new pins caught it by name.
+#
+#   ns-inventory pins `pinned-collision KEY' for `ns-collision' and
+#   `ns-collision-divergent' (279 entries), KEY in `nl-ns-finding-key' shape
+#   -- the same kind+subject+files+shape key ns-gate's fix introduced, reused
+#   here rather than reinvented.  `ns-collision' also dropped 178 -> 157,
+#   its measured value; the ceiling had drifted the same way parity-coverage's
+#   had.  `ns-prefix-violation' (853) and `ns-private-escape' (611) stay
+#   count-only, and say why in tools/nl-ns-inventory.el: they are roughly
+#   8x the size of the pinned pair, `ns-private-escape' is an explicitly
+#   CONCEDED and growing debt rather than a curated set, and most of
+#   `ns-prefix-violation' is public API surface already visible through
+#   `nl-check-gate' and `ns-gate' -- a reasoned exception, not a silent one.
+#
+#   fallback-inventory pins `pinned-site KEY COUNT' across all four kinds
+#   (113 keys, 119 sites -- COUNT because two structurally identical
+#   handlers in one toplevel hash to the same key, and presence alone would
+#   let a third land unpinned).  Regenerating this baseline found the tree
+#   had already drifted past it unnoticed (49/37/33 measured against
+#   48/32/32 checked in) -- caught up in the same commit as the pins, the
+#   same live demonstration parity-coverage's own history gives for why a
+#   number needs a name attached.
+#
+#   pkg-graph pins `pinned-host-require FEATURE FILE' (1 entry).  Verified
+#   by swapping `filenotify' for an unrelated `ert-x' require in the same
+#   file: `hard-host-require' stayed at 1, and the pin caught the new
+#   feature by name.
+#
+#   generated-source-parse had no mutation case at all.  It now does: a
+#   closing paren dropped from a `"(defvar features nil)\n"' string literal
+#   inside `nelisp-standalone--artifact-command-cache-src', the same defect
+#   class -- and the same generator -- the gate was built to catch on
+#   2026-08-19.
+#
+# Each was verified red-then-green against the real swap before being
+# folded into the row below, not only against a plain addition.
 gate-mutation
 #
 # RED, AND OPEN:
