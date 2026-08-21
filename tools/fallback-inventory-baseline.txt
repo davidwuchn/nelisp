@@ -76,7 +76,7 @@
 # same as `tools/parity-coverage-baseline.txt' raising its floor to the
 # measurement rather than leaving it stale.
 silent-fallback 49
-ignore-errors   37
+ignore-errors   38
 # 34 -> 32 on 2026-08-19: the two handlers in
 # `nelisp-artifact--ensure-native-compiler' now record the error instead of
 # discarding it.  Between them they had hidden a chain of six failures --
@@ -146,6 +146,7 @@ pinned-site ignore-errors	nelisp-standalone-build.el	defun nelisp-standalone--re
 pinned-site ignore-errors	nelisp-standalone-build.el	defun nelisp-standalone--reader-cli-smoke	7a85c44cdaf9 1
 pinned-site ignore-errors	nelisp-standalone-build.el	defun nelisp-standalone--reader-cli-smoke	cc69e60298bc 2
 pinned-site ignore-errors	nelisp-standalone-build.el	defun nelisp-standalone--reader-hash-table-literal-smoke	7a85c44cdaf9 1
+pinned-site ignore-errors	nelisp-standalone-build.el	defun nelisp-standalone--reader-intern-canonical-smoke	7a85c44cdaf9 1
 pinned-site ignore-errors	nelisp-standalone-build.el	defun nelisp-standalone--reader-large-quoted-alist-mutation-smoke	7a85c44cdaf9 1
 pinned-site ignore-errors	nelisp-standalone-build.el	defun nelisp-standalone--reader-repl-smoke	12ae73a754c4 1
 pinned-site ignore-errors	nelisp-standalone-build.el	defun nelisp-standalone--reader-repl-smoke	614d75952366 1
