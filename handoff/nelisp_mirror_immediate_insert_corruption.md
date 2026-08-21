@@ -95,12 +95,37 @@ over-bumping only leaks").
 `tools/ai/nelisp-ai.sh check` is red for two reasons that are older than this
 work, both measured at `e368da033` without the fix applied:
 
-- `parens-check`: 6 findings.  `(unless (fboundp 'string-version-lessp) ...)`
-  in the prelude never closes, so the 183 top-level forms after it are nested
-  inside it; if that name ever became fbound natively, all 183 definitions
-  would silently vanish.  Same shape twice more, in
-  `lisp/nelisp-stdlib-misc.el:665` and `lisp/nelisp-stdlib-search.el:50`.
+- `parens-check`: 6 findings.  Fixed separately, and the severity I first
+  reported was wrong -- see the note at the end of this file.
 - `standalone-reader-test`: fails at "generated reader literal smoke".  A
   control build at `e368da033` fails identically, so it is not from this
   change.  (The stale report `verify` was reading named a different sub-smoke,
   `compile-runtime-image` -- worth knowing that the two differ.)
+
+
+## Correction: the `parens-check` findings were indentation, not structure
+
+I first reported these as an unclosed `unless` in the prelude that swallowed
+the 183 top-level forms after it, so that if `string-version-lessp` ever became
+fbound natively all 183 definitions would vanish.  That was wrong, and reading
+the checker's message instead of measuring the structure is how I got there.
+
+Measured, the form has exactly two body forms:
+
+    form #231: unless with 2 body form(s)
+      body heads: ((defun nelisp--version-rank) (defun string-version-lessp))
+
+The other two sites are the same shape -- a guard helper and the function it
+guards, both intended to be inside the `unless`.  All three parse as intended
+and always did.
+
+The real defect is that the inner `defun` was written at column 0, so the
+nesting is invisible to a reader: the code looks like a top-level definition
+that a missing paren has accidentally swallowed.  `parens-check` flags exactly
+that, because a genuine missing-paren bug is indistinguishable from it on
+sight.  "absorbed the 183 top-level forms" is the checker's heuristic phrasing
+for a column-0 form found nested, not a claim about the parse.
+
+Fixed by re-indenting the three forms, whitespace only.  Verified by reading
+every form in each file before and after and comparing: 641/641, 66/66 and 4/4
+forms, `equal` in all three.

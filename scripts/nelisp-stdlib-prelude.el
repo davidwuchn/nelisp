@@ -2270,7 +2270,7 @@ argument error entirely."
   (defun string> (a b) (string-lessp b a)))
 (unless (fboundp 'string-version-lessp)
   (defun nelisp--version-rank (c)
-  "Collation weight for C in `string-version-lessp'.
+    "Collation weight for C in `string-version-lessp'.
 
 NOT the code point.  Derived by sorting 1..127 with Emacs 30.1 and reading
 the order off:
@@ -2281,14 +2281,14 @@ So an ALPHANUMERIC sorts below a punctuation or control character --
 (string-version-lessp \"n\" \"\\t\") is t, which plain code-point order gets
 backwards.  That is the case a nil argument lands on, since nil compares as
 its name \"nil\", and it is how this rule was noticed at all."
-  (cond ((= c ?.) 0)
-        ((= c ?~) 1)
-        ((and (>= c ?0) (<= c ?9)) (+ 2 (- c ?0)))
-        ((and (>= c ?A) (<= c ?Z)) (+ 12 (- c ?A)))
-        ((and (>= c ?a) (<= c ?z)) (+ 38 (- c ?a)))
-        (t (+ 64 c))))
+    (cond ((= c ?.) 0)
+          ((= c ?~) 1)
+          ((and (>= c ?0) (<= c ?9)) (+ 2 (- c ?0)))
+          ((and (>= c ?A) (<= c ?Z)) (+ 12 (- c ?A)))
+          ((and (>= c ?a) (<= c ?z)) (+ 38 (- c ?a)))
+          (t (+ 64 c))))
 
-(defun string-version-lessp (a b)
+  (defun string-version-lessp (a b)
     "Compare A and B, reading runs of digits as NUMBERS.
 Not `string-lessp': (string-version-lessp \"a2\" \"a10\") is t while
 `string-lessp' says nil, because 2 < 10 but \"2\" sorts after \"1\".

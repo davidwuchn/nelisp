@@ -49,11 +49,11 @@
 
 (unless (fboundp 'assoc)
   (unless (fboundp 'nelisp--check-list)
-  (defun nelisp--check-list (x)
-    (unless (listp x) (signal 'wrong-type-argument (list 'listp x)))
-    x))
+    (defun nelisp--check-list (x)
+      (unless (listp x) (signal 'wrong-type-argument (list 'listp x)))
+      x))
 
-(defun assoc (key alist &optional testfn)
+  (defun assoc (key alist &optional testfn)
     (nelisp--check-list alist)
     (let ((found nil))
       (cond

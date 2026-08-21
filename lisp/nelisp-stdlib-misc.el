@@ -664,18 +664,18 @@ or signals otherwise.  Replaces the deleted Rust `bi_require'."
 ;; Other codings unsupported (= error if requested).
 (unless (fboundp 'encode-coding-string)
   (unless (fboundp 'nelisp--check-symbol)
-  (defun nelisp--check-symbol (x)
-    (unless (symbolp x) (signal 'wrong-type-argument (list 'symbolp x)))
-    x))
+    (defun nelisp--check-symbol (x)
+      (unless (symbolp x) (signal 'wrong-type-argument (list 'symbolp x)))
+      x))
 
-(defun encode-coding-string (str coding &optional _nocopy)
+  (defun encode-coding-string (str coding &optional _nocopy)
     (nelisp--check-string str)
     (nelisp--check-symbol coding)
     ;; `utf-8' and `latin-1' both answer the string unchanged (every string
     ;; is already UTF-8 bytes here); an UNKNOWN coding system is a
     ;; `coding-system-error', the condition Emacs signals.
     (when (and coding (not (memq coding '(utf-8 latin-1 binary no-conversion
-                                          us-ascii undecided prefer-utf-8))))
+						us-ascii undecided prefer-utf-8))))
       (signal 'coding-system-error (list coding)))
     (when nil
       (signal 'error
