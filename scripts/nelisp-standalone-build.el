@@ -18224,6 +18224,7 @@ loader when it is absent."
           (condition-case err
               (let ((nelisp-standalone--reader-out out))
                 (dolist (smoke '(nelisp-standalone--reader-temp-name-uniqueness-smoke
+                                 nelisp-standalone--reader-temp-outside-cwd-smoke
                                  nelisp-standalone--reader-hash-table-literal-smoke
                                  nelisp-standalone--reader-large-quoted-alist-mutation-smoke
                                  nelisp-standalone--reader-setcar-setcdr-type-smoke
@@ -18392,6 +18393,45 @@ loader when it is absent."
       (ignore-errors (delete-file runtime-image))
       (ignore-errors (delete-file runtime-artifact-out))
       (ignore-errors (delete-file (concat runtime-artifact-out ".manifest.el"))))))
+
+(defun nelisp-standalone--reader-temp-outside-cwd-smoke ()
+  "Assert a compile writes no temp file into the working directory.
+
+Several `nelisp-artifact--make-temp-path' call sites pass a constant name
+rather than a path, so `file-name-directory' answers nil and the name used to
+expand against `default-directory'.  Compiling from inside a checkout put the
+object file and the helper temps beside the sources; one survived a run that
+did not reach its cleanup and was committed.
+
+Checked by taking the write permission off the working directory rather than
+by looking for leftovers afterwards.  Leftovers are the rare case -- the
+cleanup normally runs -- so an after-the-fact directory listing was clean both
+before and after the change, and proves nothing.  A directory that cannot be
+written to fails the compile outright if anything still tries."
+  (let* ((cwd (make-temp-file "nelisp-reader-ro-cwd" t))
+         (work (make-temp-file "nelisp-reader-ro-work" t))
+         (src (expand-file-name "ro.el" work))
+         (out (expand-file-name "ro.neln" work))
+         (rc nil))
+    (unwind-protect
+        (progn
+          (with-temp-file src
+            (insert "(defun nelisp-reader-ro-probe (n) (+ n 1))\n"
+                    "(provide 'nelisp-reader-ro)\n"))
+          (set-file-modes cwd #o555)
+          (let ((default-directory (file-name-as-directory cwd)))
+            (setq rc (call-process nelisp-standalone--reader-out nil nil nil
+                                   "compile-elisp-artifact"
+                                   "--kind" "neln"
+                                   "--native-policy" "required"
+                                   "--input" src
+                                   "--output" out)))
+          (unless (and (eq rc 0) (file-exists-p out))
+            (error "read-only cwd compile exit=%S output-written=%S"
+                   rc (file-exists-p out))))
+      (ignore-errors (set-file-modes cwd #o755))
+      (ignore-errors (delete-directory cwd t))
+      (ignore-errors (delete-directory work t)))))
 
 (defun nelisp-standalone--reader-temp-name-uniqueness-smoke ()
   "Assert two processes do not agree on a `make-temp-name' result.

@@ -409,9 +409,36 @@ plist through the standalone reader."
   (when (and path (file-exists-p path))
     (delete-file path)))
 
+(defun nelisp-artifact--temp-directory ()
+  "Return the directory for temp files that do not belong beside a target."
+  (if (and (boundp 'temporary-file-directory)
+           (stringp temporary-file-directory)
+           (> (length temporary-file-directory) 0))
+      temporary-file-directory
+    "/tmp/"))
+
 (defun nelisp-artifact--make-temp-path (path suffix)
-  "Return a temp path near PATH using SUFFIX."
-  (let ((dir (file-name-directory path))
+  "Return a temp path for PATH using SUFFIX.
+
+Where the result goes depends on what PATH is, and the two cases have
+different requirements.
+
+PATH with a directory component is a real target -- an artifact or its
+manifest.  Its temp is the staging or backup file that `rename-file' later
+moves onto that target, and a rename is only atomic within one filesystem, so
+the temp has to stay in the target's directory.
+
+PATH that is a bare name -- `neln-obj', `neln-probe', `nelisp-host-helper',
+`nelisp-win-env', `nelisp-native-helper' -- has no target to stay beside.
+`file-name-directory' answers nil for those, which `expand-file-name' resolved
+against `default-directory': compile
+artifacts from inside a checkout and the object files and helper logs landed
+beside the sources.  They are deleted on the way out, so what survived came
+from runs that did not get there -- one of them reached a commit and sat in
+the tree until 2026-08-21.  Nothing renames these, so nothing keeps them on a
+particular filesystem, and they belong in the temp directory."
+  (let ((dir (or (file-name-directory path)
+                 (nelisp-artifact--temp-directory)))
         (name (file-name-nondirectory path)))
     (expand-file-name
      (format ".%s.%s.%d.%d"
@@ -422,12 +449,13 @@ plist through the standalone reader."
 
 (defun nelisp-artifact--make-temp-directory (prefix)
   "Return a new temporary directory named with PREFIX.
-Prefer system `mktemp -d' because standalone NeLisp's compatibility
-`make-temp-file' can collide across concurrent native-exec processes."
-  (let* ((base (if (and (boundp 'temporary-file-directory)
-                        (stringp temporary-file-directory))
-                   temporary-file-directory
-                 "/tmp/"))
+Prefers system `mktemp -d', which claims the name atomically.  That was once
+the only thing standing between concurrent native-exec processes and a shared
+directory, because the standalone `make-temp-file' named from a per-process
+counter and so named identically in every process.  That is fixed -- the
+process id is in the name again -- but mktemp is still the stronger of the
+two, and the fallback is what runs where mktemp is absent."
+  (let* ((base (nelisp-artifact--temp-directory))
          (template (expand-file-name (concat prefix ".XXXXXX") base))
          (mktemp (and (fboundp 'executable-find)
                       (executable-find "mktemp"))))
