@@ -72,61 +72,68 @@ runtime-probe?
 wasm-smoke?
 
 # Standalone gates.  These build a binary from the tree and run it, so
-# they need a Linux host; on Windows they now report a reasoned skip
-# (GATE-SKIP) rather than exiting 0, which used to read as a pass.
+# they need a Linux x86_64 host.  Everywhere else the default target
+# (linux-x86_64) is not runnable, `nelisp-standalone--target-runnable-on-host-p'
+# is nil, and the gate prints GATE-SKIP with a reason rather than exiting 0
+# -- which used to read as a pass.  `verify' accepts a reasoned skip for a
+# required gate, so requiring this one does not paint macOS or Windows red.
 #
-# standalone-reader-test is OPTIONAL because it is currently red on
-# Linux, and was before this contract reached it.  Verified 2026-08-18 in
-# WSL Debian on both this branch and plain main, failing identically at
-# the fifth of its eight checks:
+# standalone-reader-test was OPTIONAL because it was red on Linux, and had
+# been before this contract reached it: `require' began signalling
+# `file-missing' instead of silently succeeding (a good change), and the
+# standalone path carried requires that only ever worked because it did not.
+# Measured 2026-08-18 in WSL Debian, failing at the fifth of its eight
+# checks with `file-missing: url-parse'.
 #
-#   GATE-COUNT checked=5 findings=1
-#   FAIL: command smoke: eval-elisp-artifact exit=1
-#         "nelisp: uncaught error: file-missing: url-parse"
+# cd64c0bd7 (2026-08-19) resolved it, by measuring what the tree actually
+# needs rather than assuming: every name the code uses from `subr-x' is
+# already defined by the stdlib prelude, and `url-parse'/`url-util' are
+# wanted only so the primitive install loop finds real function objects on
+# a real host -- a loop that already guards each entry with `fboundp'.  The
+# requires were made optional; the functions were never missing, only the
+# files.
 #
-# Cause: `require' now signals `file-missing' instead of silently
-# succeeding (a good change), and the standalone path carries requires
-# that only ever worked because it did not.  src/nelisp-eval.el:101
-# requires the host library `url-parse', which the standalone runtime
-# does not have; `make pkg-graph' independently lists url-parse among
-# the requires nothing in the tree provides.
+# Promoted 2026-08-21, on measurement rather than on that reasoning:
 #
-# It is a chain, not a line.  Guarding the url-* requires with
-# `ignore-errors' (measured in a throwaway WSL clone) moves the failure
-# on to `file-missing: nelisp-core-fileio', which is a tree file, so the
-# remaining question is how the standalone resolves its own requires --
-# a policy decision for whoever owns that path, not a patch to guess at
-# from here.  `locate-library' is void in the standalone, so that guard
-# is not available either.
+#   HEAD  8 of 8 checks, 0 findings -- twice, once from a wiped target/
+#   main  fails at 5 of 8, `file-missing: url-parse' -- the 08-18 shape
 #
-# One defect, every Linux standalone gate.  Measured 2026-08-18 in WSL:
+# main is an ancestor of HEAD, so the fix and this line merge together and
+# there is no window where the requirement outruns the fix.
 #
-#   standalone-reader-test        file-missing: url-parse   (5 of 8 checks in)
-#   nelisp-native-artifact-gate   file-missing: url-parse   (load_source_uses_neln)
-#   nelisp-performance-gate       file-missing: url-parse   (cache_default_load)
-#   standalone-selfhost-test      file-missing: macroexp    (fact driver)
+# It is not in `nelisp-ai.sh check', for the reason `ert-full' is not: it
+# builds a binary.  `nelisp-ai.sh standalone' produces the report, and
+# `verify' prints its age.
+standalone-reader-test
 #
-# The last one names a different library, which makes the shape clear:
-# it is not one bad require, it is every require the standalone path
-# makes to something it cannot resolve.  Resolving that unblocks four
-# gates at once, which is why it is worth doing before wiring any of
-# the other three.
-#
-# Required-vs-optional here is a judgement, not an oversight: making it
-# required would paint every Linux verify red for a defect this harness
-# only reports.  Promote the line once the require chain is resolved.
-standalone-reader-test?
-#
-# Not yet wired, and not wired blind: adding a wrapper whose success
-# path has never run would be the same unverified-gate problem in a new
-# place.
+# The three below are not yet wired, and not wired blind: adding a wrapper
+# whose success path has never run would be the same unverified-gate
+# problem in a new place.
 #
 # To adopt one, on a machine that can run it: give the script a
 # GATE-COUNT line where it already knows its case count, make the
 # can't-run path print a reason instead of failing, wrap it with
 # `nelisp-ai.sh gate', and move the name above this comment.
 #
-# standalone-reader-test
+# All four shared the `file-missing: url-parse' defect, and this file said
+# resolving it would unblock four gates at once.  Half right, measured
+# 2026-08-21 after cd64c0bd7:
+#
+#   standalone-reader-test       green, and now required above
+#   nelisp-native-artifact-gate  green -- `load_source_uses_neln' rc=0,
+#                                which is the check that carried url-parse
+#   nelisp-performance-gate      past it: `cache_default_load' rc=0, now
+#                                fails at `fallback_load' with
+#                                "Wrong type argument: sequencep, nil"
+#   standalone-selfhost-test     past it: no longer `macroexp', now
+#                                `file-missing: nelisp-asm-arm64' -- a tree
+#                                file, so still the standalone require
+#                                question, not a host-library one
+#
+# So the common cause was real and the two remaining failures are each
+# their own defect, not the old chain.  Wire them when they are green;
+# nelisp-native-artifact-gate is the one that is ready.
+#
 # standalone-selfhost-test
 # nelisp-performance-gate
 # nelisp-native-artifact-gate

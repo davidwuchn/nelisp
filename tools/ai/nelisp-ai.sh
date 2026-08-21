@@ -65,6 +65,7 @@ usage: tools/ai/nelisp-ai.sh <command> [args]
   check               run the fast gates, then verify — the pre-commit command
   verify              aggregate gate reports and print one verdict
   test                run the full ERT suite as gate "ert-full"
+  standalone          build the binary and run gate "standalone-reader-test"
   test-one FILE...    run selected test files as gate "ert-focus"
   compile             byte-compile with error-on-warn as gate "compile"
   ns [FILE...]        namespace check (defaults to the recipe skeletons)
@@ -144,6 +145,15 @@ run_ert_gate() {
 
 cmd_test() {
     run_ert_gate ert-full "$(test_files)"
+}
+
+cmd_standalone() {
+    # Not in `check' for the same reason `test' is not: it builds a binary
+    # from the tree, which is minutes rather than seconds.  `verify' holds
+    # you to the last report and prints its age, so this is the command to
+    # run when that column says the evidence is old.  On a host that cannot
+    # run the target it reports a reasoned skip, not a pass.
+    cmd_gate standalone-reader-test -- make standalone-reader-test
 }
 
 cmd_test_one() {
@@ -446,6 +456,7 @@ case "$command" in
     check)          cmd_check ;;
     verify)         cmd_verify ;;
     test)           cmd_test ;;
+    standalone)     cmd_standalone ;;
     test-one)       cmd_test_one "$@" ;;
     compile)        cmd_compile ;;
     gate)           cmd_gate "$@" ;;
