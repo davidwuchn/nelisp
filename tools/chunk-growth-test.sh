@@ -60,5 +60,11 @@ fi
 echo "[chunk-growth] restoring the default (256 MiB) reader binary ..."
 build_reader ""
 
-if [ "$rc" = "0" ]; then echo "[chunk-growth] RESULT: PASS"; else echo "[chunk-growth] RESULT: FAIL"; fi
+if [ "$rc" = "0" ]; then
+  echo "GATE-COUNT checked=1 findings=0"
+  echo "[chunk-growth] RESULT: PASS"
+else
+  echo "GATE-COUNT checked=1 findings=1"
+  echo "[chunk-growth] RESULT: FAIL"
+fi
 exit "$rc"

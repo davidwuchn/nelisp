@@ -7,6 +7,21 @@
 # widened to the evaluator substrate.
 set -euo pipefail
 
+# A gate whose only output is its own result lines cannot be told apart from a
+# gate that ran nothing.  CASES counts the checks that finished; the trap
+# reports it however the script exits, so a failure says how far it got.
+# Findings comes from the exit status: this script stops at the first failure.
+CASES=0
+gate_report_count() {
+  gate_rc=$?
+  if [ "$gate_rc" -eq 0 ]; then
+    printf 'GATE-COUNT checked=%s findings=0\n' "$CASES"
+  else
+    printf 'GATE-COUNT checked=%s findings=1\n' "$CASES"
+  fi
+}
+
+
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_ROOT"
 
@@ -15,6 +30,7 @@ NELISP="${NELISP:-$REPO_ROOT/target/nelisp}"
 TMP_DIR="$(mktemp -d)"
 
 cleanup() {
+  gate_report_count
   rm -rf "$TMP_DIR"
 }
 trap cleanup EXIT
@@ -59,6 +75,7 @@ run_timed() {
     sed 's/^/runtime_image_cache_gate_stderr /' "$err_file" >&2
     exit "$rc"
   fi
+  CASES=$((CASES + 1))
 }
 
 expect_out() {
@@ -118,4 +135,5 @@ if ! grep -q ':runtime-image' "$IMAGE.nelc.manifest.el"; then
   exit 1
 fi
 
+CASES=$((CASES + 1))
 echo "runtime_image_cache_gate_result label=runtime_image_cache_gate rc=0"

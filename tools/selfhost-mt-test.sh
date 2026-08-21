@@ -15,6 +15,21 @@
 #   not be 42, so the assertion is meaningful.
 set -euo pipefail
 
+# A gate whose only output is its own result lines cannot be told apart from a
+# gate that ran nothing.  CASES counts the checks that finished; the trap
+# reports it however the script exits, so a failure says how far it got.
+# Findings comes from the exit status: this script stops at the first failure.
+CASES=0
+gate_report_count() {
+  gate_rc=$?
+  if [ "$gate_rc" -eq 0 ]; then
+    printf 'GATE-COUNT checked=%s findings=0\n' "$CASES"
+  else
+    printf 'GATE-COUNT checked=%s findings=1\n' "$CASES"
+  fi
+}
+
+
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$here"
 
@@ -28,7 +43,7 @@ fi
 
 driver="$(mktemp /tmp/nelisp-selfhost-mt-XXXXXX.el)"
 outbin="$(mktemp /tmp/nelisp-selfhost-mt-bin-XXXXXX)"
-trap 'rm -f "$driver" "$outbin"' EXIT
+trap 'gate_report_count; rm -f "$driver" "$outbin"' EXIT
 
 # Dependency order matters now that `require' signals on a missing file
 # instead of silently succeeding: `nelisp-aot-compiler.el' requires the two
@@ -127,5 +142,6 @@ for i in 1 2 3 4 5; do
     echo "[selfhost-mt] FAIL: run $i -> exit $rc (expected 42 = 3 parallel workers x 14)"; exit 1
   fi
 done
+CASES=$((CASES + 1))
 echo "[selfhost-mt] PASS: standalone-compiled 3-thread clone(2)+atomics program -> exit 42 x5 (parallel)"
 exit 0

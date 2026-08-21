@@ -140,11 +140,20 @@ wasm-runtime-image-smoke:
 	  echo "  Its message is above; it exits 0 either way, so without this"; \
 	  echo "  check the failure arrives as an ENOENT from node opening a"; \
 	  echo "  file nobody wrote."; \
+	  echo "GATE-COUNT checked=2 findings=1"; \
 	  exit 1; }
-	node tools/wasm-driver.mjs target/wasm-runtime-image/runtime-image.wasm _start 3
+	@if node tools/wasm-driver.mjs target/wasm-runtime-image/runtime-image.wasm _start 3; then \
+	  echo "GATE-COUNT checked=2 findings=0"; \
+	else \
+	  echo "GATE-COUNT checked=2 findings=1"; exit 1; \
+	fi
 
 wasm-dtw-skeleton-smoke:
-	node tools/wasm-proofs/p4-run-all.mjs
+	@if node tools/wasm-proofs/p4-run-all.mjs; then \
+	  echo "GATE-COUNT checked=1 findings=0"; \
+	else \
+	  echo "GATE-COUNT checked=1 findings=1"; exit 1; \
+	fi
 
 wasm-dtw-transpile:
 	mkdir -p target/wasm-dtw
@@ -394,8 +403,10 @@ fallback-inventory-selftest:
 	echo "$$out" | grep -qE '^bare-handler +1 ' || { echo "  expected bare-handler 1"; ok=0; }; \
 	echo "$$out" | grep -qE '^dbg-note +0 ' || { echo "  expected dbg-note 0"; ok=0; }; \
 	if [ "$$ok" = 1 ]; then \
+	  echo "GATE-COUNT checked=4 findings=0"; \
 	  echo "[fallback-inventory-selftest] PASS"; \
 	else \
+	  echo "GATE-COUNT checked=4 findings=1"; \
 	  echo "[fallback-inventory-selftest] FAIL"; exit 1; \
 	fi
 
@@ -473,6 +484,71 @@ reader-surface-audit:
 	$(EMACS) --batch -Q -L lisp -L src -L scripts \
 	  --eval '(setq load-prefer-newer t)' \
 	  -l reader-surface-audit -f nelisp-reader-surface-audit
+
+# ---- standalone-reader-smokes -------------------------------------------
+#
+# The 28 individual reader smokes, run as one gate.
+#
+# `standalone-reader-test' runs eleven checks built into the build script.
+# These 28 are separate make targets testing separate things -- format
+# directives, getenv, TLS, processes, match-data, intern-soft, the FFI bridge
+# -- and until 2026-08-21 nothing ran them, which is how a `print-circle'
+# defect in the unit cache key and a wrong-signed `mod' both sat in the tree.
+#
+# One gate rather than 28 entries in gates.expected: 28 reports would demand 28
+# freshness checks for one build's worth of evidence, and a ledger nobody can
+# keep current is a ledger nobody reads.  The count is the signal -- 28 checked
+# is the claim, and a target that stops existing shows up as a smaller number.
+STANDALONE_READER_SMOKES = \
+  standalone-reader-catch-throw-tag-smoke \
+  standalone-reader-checked \
+  standalone-reader-checked-soak \
+  standalone-reader-cond-let-shape-smoke \
+  standalone-reader-current-time-smoke \
+  standalone-reader-declare-strip-smoke \
+  standalone-reader-derived-mode-shape-smoke \
+  standalone-reader-elt-smoke \
+  standalone-reader-ffi-smoke \
+  standalone-reader-fmt-smoke \
+  standalone-reader-getenv-smoke \
+  standalone-reader-intern-soft-loop-smoke \
+  standalone-reader-intern-soft-smoke \
+  standalone-reader-load-smoke \
+  standalone-reader-match-data-smoke \
+  standalone-reader-mod-float-smoke \
+  standalone-reader-nested-backquote-macro-smoke \
+  standalone-reader-number-token-smoke \
+  standalone-reader-pcase-quote-literal-smoke \
+  standalone-reader-prelude-equal-reload-smoke \
+  standalone-reader-prelude-test \
+  standalone-reader-process-smoke \
+  standalone-reader-realrt-smoke \
+  standalone-reader-recursion-guard-smoke \
+  standalone-reader-repl-smoke \
+  standalone-reader-require-provide-smoke \
+  standalone-reader-shadow-smoke \
+  standalone-reader-tls-smoke
+
+.PHONY: standalone-reader-smokes
+standalone-reader-smokes:
+	@ran=0; failed=0; failed_names=""; \
+	for t in $(STANDALONE_READER_SMOKES); do \
+	  if $(MAKE) --no-print-directory "$$t" > /tmp/nelisp-smoke-$$t.log 2>&1; then \
+	    ran=$$((ran + 1)); \
+	  else \
+	    ran=$$((ran + 1)); failed=$$((failed + 1)); \
+	    failed_names="$$failed_names $$t"; \
+	    echo "[reader-smokes] FAIL: $$t"; \
+	    tail -3 /tmp/nelisp-smoke-$$t.log | sed 's/^/    /'; \
+	  fi; \
+	  rm -f /tmp/nelisp-smoke-$$t.log; \
+	done; \
+	echo "GATE-COUNT checked=$$ran findings=$$failed"; \
+	if [ "$$failed" -eq 0 ]; then \
+	  echo "[reader-smokes] PASS: $$ran smokes"; \
+	else \
+	  echo "[reader-smokes] FAIL:$$failed_names"; exit 1; \
+	fi
 
 standalone-reader-test:
 	$(EMACS) --batch -Q -L lisp -L src -L scripts \

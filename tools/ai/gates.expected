@@ -206,20 +206,42 @@ standalone-selfhost-test
 #   standalone-reader-require-provide-smoke   standalone-reader-shadow-smoke
 #   standalone-reader-tls-smoke
 #
-# GREEN, NOT LISTED, AND THAT IS A GAP WORTH KNOWING: these produce a clean
-# result but have no report, so `verify' cannot hold anyone to them.  Wiring
-# them means giving each a GATE-COUNT line and a `nelisp-ai.sh gate' wrapper,
-# which is a line of work each and was not done in this pass:
+# GREEN AND NOW WIRED: these were measured clean by the sweep and had no
+# report, so `verify' could not hold anyone to them.  Each now prints a
+# GATE-COUNT line and is required below.  Nine needed the line added; four
+# already printed one and only needed listing.
 #
-#   prelude-toplevel-check   643 forms, 0 findings
-#   partial-inventory         55 checked, 0 findings
-#   gate-selfcheck            11 checked, 0 findings
-#   ns-gate                 1918 checked, 0 findings
-#   nl-check-gate            clean (3 gated, 2 accepted)
-#   fallback-inventory-selftest, nelisp-runtime-image-cache-gate,
-#   nelisp-source-command-substrate-gate, standalone-chunk-growth-test,
-#   standalone-parallel-compile-test, standalone-selfhost-mt-test,
-#   wasm-dtw-skeleton-smoke, wasm-runtime-image-smoke
+# Split by cost, because that decides where they run:
+#
+#   in `check' (seconds, no binary):
+#     prelude-toplevel-check  partial-inventory  gate-selfcheck  ns-gate
+#     nl-check-gate  fallback-inventory-selftest  wasm-dtw-skeleton-smoke
+#
+#   `nelisp-ai.sh extras' (each builds a binary):
+#     nelisp-runtime-image-cache-gate  nelisp-source-command-substrate-gate
+#     standalone-chunk-growth-test  standalone-parallel-compile-test
+#     standalone-selfhost-mt-test  wasm-runtime-image-smoke
+#
+#   `nelisp-ai.sh smokes':
+#     standalone-reader-smokes -- the 28 individual reader smokes as ONE gate.
+#     28 separate reports would demand 28 freshness checks for one build's
+#     worth of evidence; the count is the signal, and a target that stops
+#     existing shows up as a smaller number.
+#
+prelude-toplevel-check
+partial-inventory
+gate-selfcheck
+ns-gate
+nl-check-gate
+fallback-inventory-selftest
+wasm-dtw-skeleton-smoke
+nelisp-runtime-image-cache-gate
+nelisp-source-command-substrate-gate
+standalone-chunk-growth-test
+standalone-parallel-compile-test
+standalone-selfhost-mt-test
+wasm-runtime-image-smoke
+standalone-reader-smokes
 #
 # CANNOT RUN HERE, AND SAY SO BADLY: these exit non-zero for want of a host or
 # a checkout, where the other standalone gates print GATE-SKIP with a reason.

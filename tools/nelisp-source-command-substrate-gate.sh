@@ -9,6 +9,21 @@
 # bottleneck.
 set -euo pipefail
 
+# A gate whose only output is its own result lines cannot be told apart from a
+# gate that ran nothing.  CASES counts the checks that finished; the trap
+# reports it however the script exits, so a failure says how far it got.
+# Findings comes from the exit status: this script stops at the first failure.
+CASES=0
+gate_report_count() {
+  gate_rc=$?
+  if [ "$gate_rc" -eq 0 ]; then
+    printf 'GATE-COUNT checked=%s findings=0\n' "$CASES"
+  else
+    printf 'GATE-COUNT checked=%s findings=1\n' "$CASES"
+  fi
+}
+
+
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_ROOT"
 
@@ -20,6 +35,7 @@ HEAVY_TIMEOUT_SECONDS="${NELISP_SUBSTRATE_HEAVY_TIMEOUT_SECONDS:-180}"
 TMP_DIR="$(mktemp -d)"
 
 cleanup() {
+  gate_report_count
   rm -rf "$TMP_DIR"
 }
 trap cleanup EXIT
@@ -75,6 +91,7 @@ run_timed() {
     sed 's/^/substrate_gate_stderr /' "$err_file" >&2
     exit "$rc"
   fi
+  CASES=$((CASES + 1))
 }
 
 expect_out() {
@@ -159,4 +176,5 @@ else
   echo "substrate_gate_result label=compile_substrate_artifact_eval_only rc=77 skipped=1 reason=heavy-opt-in"
 fi
 
+CASES=$((CASES + 1))
 echo "substrate_gate_result label=source_command_substrate_gate rc=0"

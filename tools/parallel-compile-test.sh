@@ -107,9 +107,13 @@ for pair in "$o1:11" "$o2:22" "$o3:33" "$o4:44"; do
   if [ "$got" != "$want" ]; then echo "[parallel] FAIL: $f -> $got (expected $want)"; fail=1; fi
 done
 
+# Machine-readable tail: four workers, four checks.  Without it a clean run and
+# a run that started no workers print the same thing to `nelisp-ai.sh gate'.
 if [ "$fail" = 0 ]; then
+  echo "GATE-COUNT checked=4 findings=0"
   echo "[parallel] PASS: 4 units compiled CONCURRENTLY by standalone NeLisp -> 11,22,33,44"
   exit 0
 else
+  echo "GATE-COUNT checked=4 findings=1"
   exit 1
 fi

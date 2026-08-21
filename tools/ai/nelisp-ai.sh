@@ -69,6 +69,8 @@ usage: tools/ai/nelisp-ai.sh <command> [args]
   native-artifact     build the binary and run gate "nelisp-native-artifact-gate"
   selfhost            build the binary and run gate "standalone-selfhost-test"
   perf                build the binary and run gate "nelisp-performance-gate"
+  smokes              run the 28 individual reader smokes as one gate
+  extras              run the remaining binary-building gates, one report each
   test-one FILE...    run selected test files as gate "ert-focus"
   compile             byte-compile with error-on-warn as gate "compile"
   ns [FILE...]        namespace check (defaults to the recipe skeletons)
@@ -102,6 +104,9 @@ cmd_check() {
     # its age.  Run `test' when the age column says the evidence is old.
     failures=0
     for step in compile parens-check generated-source-parse \
+                prelude-toplevel-check partial-inventory gate-selfcheck \
+                ns-gate nl-check-gate fallback-inventory-selftest \
+                wasm-dtw-skeleton-smoke \
                 unsafe-inventory ns-inventory \
                 reader-surface-audit pkg-graph pkg-load-lists ns; do
         printf '\n=== %s ===\n' "$step"
@@ -171,6 +176,31 @@ cmd_perf() {
     # the same module, and the build must restore the cache enable marker it
     # removed.  Builds a binary; out of `check'.
     cmd_gate nelisp-performance-gate -- make nelisp-performance-gate
+}
+
+cmd_smokes() {
+    # The 28 `standalone-reader-*' targets, as one gate.  They test things
+    # `standalone-reader-test' does not -- format directives, getenv, TLS,
+    # processes, match-data, intern-soft, the FFI bridge -- and until the
+    # 2026-08-21 sweep nothing ran them.
+    cmd_gate standalone-reader-smokes -- make standalone-reader-smokes
+}
+
+cmd_extras() {
+    # The green gates that build a binary and were not wired.  One report each,
+    # because unlike the reader smokes these are independent gates over
+    # different subsystems: collapsing them would hide which one went red.
+    failures=0
+    for g in nelisp-runtime-image-cache-gate \
+             nelisp-source-command-substrate-gate \
+             standalone-chunk-growth-test \
+             standalone-parallel-compile-test \
+             standalone-selfhost-mt-test \
+             wasm-runtime-image-smoke; do
+        printf '\n=== %s ===\n' "$g"
+        ( cmd_gate "$g" -- make "$g" ) || failures=$((failures + 1))
+    done
+    [ "$failures" -eq 0 ]
 }
 
 cmd_standalone() {
@@ -486,6 +516,8 @@ case "$command" in
     native-artifact) cmd_native_artifact ;;
     selfhost)       cmd_selfhost ;;
     perf)           cmd_perf ;;
+    smokes)         cmd_smokes ;;
+    extras)         cmd_extras ;;
     test-one)       cmd_test_one "$@" ;;
     compile)        cmd_compile ;;
     gate)           cmd_gate "$@" ;;
