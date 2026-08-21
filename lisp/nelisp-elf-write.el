@@ -164,6 +164,18 @@ already in the exact byte form `write-region' needs."
   (nelisp-elf--coerce-unibyte
    (apply #'concat (nreverse (plist-get cbuf :chunks)))))
 
+(defsubst nelisp-elf--byte-length (bytes)
+  "Return the number of BYTES in BYTES, counting bytes and not characters.
+
+`length' answers characters.  Host Emacs builds these buffers with
+`unibyte-string', so the two agree there; the standalone runtime stores every
+string as UTF-8 with no unibyte flag, so a byte pair that happens to form a
+valid sequence counts as one character.  Every offset computed from it is then
+short, which is how a 120-byte .text section reported 118 and the writer's own
+`offset drift' guard stopped the self-hosted compile.  `string-bytes' answers
+bytes on both."
+  (string-bytes bytes))
+
 (defsubst nelisp-elf-buffer-length (cbuf)
   "Return current cumulative byte length of CBUF (= O(1))."
   (plist-get cbuf :length))
@@ -174,7 +186,7 @@ Uses `setcar' against the plist value cells so the original `cbuf'
 cons survives — callers that hold a reference (= every writer
 helper) see the new length without needing to rebind."
   (let* ((bytes (nelisp-elf--coerce-unibyte bytes))
-         (len (length bytes))
+         (len (nelisp-elf--byte-length bytes))
         ;; cbuf = (:chunks CHUNKS :length LEN)
         ;;        car=:chunks cdr=(CHUNKS :length LEN)
         ;;                        car=CHUNKS cdr=(:length LEN)
@@ -277,7 +289,7 @@ host-only unibyte helpers."
   (let ((bytes (nelisp-elf--coerce-unibyte bytes)))
     (if (bufferp buf)
         (insert bytes)
-      (let ((len (length bytes))
+      (let ((len (nelisp-elf--byte-length bytes))
           (chunks-cell (cdr buf))
           (length-cell (cdr (cdr (cdr buf)))))
         (setcar chunks-cell (cons bytes (car chunks-cell)))
@@ -626,7 +638,7 @@ is left unchanged (= dedup)."
      (cached cached)
      ((string-empty-p str) 0)
      (t
-      (let ((offset (length bytes)))
+      (let ((offset (nelisp-elf--byte-length bytes)))
         (plist-put state :bytes
                    (concat bytes
                            (encode-coding-string str 'utf-8 t)
@@ -845,7 +857,7 @@ table starts with a NUL byte (offset 0 = the empty string), as ELF requires."
   (let ((bytes (unibyte-string 0)) (offsets (list (cons "" 0))))
     (dolist (s strings)
       (unless (assoc s offsets)
-        (push (cons s (length bytes)) offsets)
+        (push (cons s (nelisp-elf--byte-length bytes)) offsets)
         (setq bytes (concat bytes (string-to-unibyte s) (unibyte-string 0)))))
     (cons bytes (nreverse offsets))))
 
@@ -863,8 +875,8 @@ table starts with a NUL byte (offset 0 = the empty string), as ELF requires."
 
 (defun nelisp-elf--pad-to (bytes target)
   "Right-pad unibyte BYTES with NULs up to TARGET length."
-  (if (>= (length bytes) target) bytes
-    (concat bytes (make-string (- target (length bytes)) 0))))
+  (if (>= (nelisp-elf--byte-length bytes) target) bytes
+    (concat bytes (make-string (- target (nelisp-elf--byte-length bytes)) 0))))
 
 (defun nelisp-elf--dynsym-undef-func (st-name)
   "Elf64_Sym (24 bytes) for an UNDEF GLOBAL FUNC import; ST-NAME = .dynstr off."

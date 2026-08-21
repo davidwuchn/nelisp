@@ -29,10 +29,16 @@ o1="$(mktemp /tmp/nelisp-par-o1-XXXXXX)"; o2="$(mktemp /tmp/nelisp-par-o2-XXXXXX
 o3="$(mktemp /tmp/nelisp-par-o3-XXXXXX)"; o4="$(mktemp /tmp/nelisp-par-o4-XXXXXX)"
 trap 'rm -f "$driver" "$o1" "$o2" "$o3" "$o4"' EXIT
 
+# Dependency order matters now that `require' signals on a missing file instead
+# of silently succeeding: `nelisp-aot-compiler.el' requires the two assemblers,
+# the layout and the ELF writer, so in one concatenated file their `provide' has
+# to run first.  Same list and same reason as selfhost-test.sh.
 cat scripts/nelisp-stdlib-prelude.el \
-    lisp/nelisp-aot-compiler.el \
+    lisp/nelisp-asm-arm64.el \
     lisp/nelisp-asm-x86_64.el \
+    lisp/nelisp-sexp-layout.el \
     lisp/nelisp-elf-write.el \
+    lisp/nelisp-aot-compiler.el \
     lisp/nelisp-static-linker.el > "$driver"
 
 # positional self-host compile entry (compile-sexp is a cl-defun with &key,

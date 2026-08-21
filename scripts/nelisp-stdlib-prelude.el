@@ -7878,7 +7878,11 @@ A half is rounded to the even neighbour, as in Emacs."
       (let* ((n (if (< b 0) (- b) b))
              (r (- a (* n (/ a n)))))
         (when (< r 0) (setq r (+ r n)))
-        (if (< b 0) (- r) r)))))
+        ;; R is now the remainder against |B|, in [0, |B|).  Emacs `mod'
+        ;; returns a value with the sign of B, so for a negative B the answer
+        ;; is R + B, not -R: `(mod 7 -3)' is -2 (7 = -3 * -3 + -2), and -1 is
+        ;; what negating gives.  Zero has no sign to carry and stays 0.
+        (if (and (< b 0) (/= r 0)) (+ r b) r)))))
 
 ;; A3: native `equal' never compared vectors element-wise.  Capture native
 ;; `equal' for the atom/string/number leaves and recurse over cons + vector.

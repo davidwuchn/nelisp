@@ -131,7 +131,7 @@ wasm-runtime-image-smoke:
 	  --eval "(progn \
 	    (require 'nelisp-artifact) \
 	    (compile-runtime-image \
-	     '(\"compile-runtime-image\" \"--kind\" \"neln\" \
+	     '(\"compile-runtime-image\" \"--kind\" \"wasm\" \
 	       \"--target\" \"wasm32-wasi\" \
 	       \"--input\" \"tools/wasm-runtime-image-p3c.nlri\" \
 	       \"--output\" \"target/wasm-runtime-image/runtime-image.wasm\")))"

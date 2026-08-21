@@ -1119,11 +1119,21 @@ entries carry explicit hex-encoded byte sections."
 (defun nelisp-standalone--unit-cache-key (source)
   "Content key for SOURCE: what is compiled, plus what compiles it.
 
-`print-length'/`print-level'/`print-circle' are bound OFF deliberately.  A
-truncated print would let two different sources share a key, which is the
-one way a content-addressed cache can be worse than a dependency list --
-it would hand back an object for code that was never compiled."
-  (let ((print-length nil) (print-level nil) (print-circle nil)
+`print-length' and `print-level' are bound OFF deliberately.  A truncated
+print would let two different sources share a key, which is the one way a
+content-addressed cache can be worse than a dependency list -- it would hand
+back an object for code that was never compiled.
+
+`print-circle' is bound ON for the opposite reason.  With it off the printer
+has no record of what it has visited, so it falls back to a depth heuristic
+and signals `Apparently circular structure being printed' at 200 levels of
+nesting -- on a structure that is deep but perfectly acyclic.  The unit built
+under NELISP_READER_DYNAMIC is past that depth, so `make
+standalone-reader-ffi-smoke' died in the digest before compiling anything.
+Turning it on is not a truncation: it labels shared structure as `#1=' / `#1#'
+rather than dropping it, so two different sources still print differently.  It
+can only make the key MORE discriminating -- a cache miss, never a wrong hit."
+  (let ((print-length nil) (print-level nil) (print-circle t)
         (print-quoted t) (print-escape-nonascii t))
     (secure-hash 'sha1 (concat (nelisp-standalone--toolchain-digest) "\0"
                                (prin1-to-string source)))))
