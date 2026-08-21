@@ -907,7 +907,20 @@ The file must contain one readable plist with keys `:emacs-version',
                                   :files (cdr collision)
                                   :count (length (cdr collision)))
                             (if divergent
-                                (list :heads (nreverse heads))
+                                ;; `:shape' fingerprints WHAT diverges, not
+                                ;; merely that something does.  Without it the
+                                ;; accepted-set key is kind+subject+files, so
+                                ;; once a divergence is accepted the two
+                                ;; definitions may drift into any other shape
+                                ;; and still match the same key.  Measured
+                                ;; 2026-08-21 by `gate-mutation': injecting a
+                                ;; real change into the prelude's `round' left
+                                ;; ns-gate green, because `round' was already
+                                ;; an accepted divergence.
+                                (list :heads (nreverse heads)
+                                      :shape (nl-ns--definition-shape
+                                              (cdr collision) analysis
+                                              (car collision)))
                               nil))
                     findings))))
     findings))
@@ -1239,6 +1252,19 @@ BASELINE is nil, a baseline plist, or a path accepted by
 ;; new.  Removing a divergence is also visible -- the entry goes stale --
 ;; so the list cannot quietly grow stale in the other direction either.
 
+(defun nl-ns--definition-shape (files analysis symbol)
+  "Return a short digest of how SYMBOL is defined across FILES.
+
+Two definitions that differ anywhere produce different digests, so an accepted
+divergence stops matching the moment either side is edited.  That is the point:
+accepting a divergence should accept THAT divergence, not the name."
+  (let ((parts nil))
+    (dolist (file (sort (copy-sequence files) #'string<))
+      (let* ((entry (nl-ns--analysis-file-entry analysis file))
+             (form (nl-ns--entry-definition entry symbol)))
+        (setq parts (cons (if form (format "%S" form) "-") parts))))
+    (secure-hash 'sha1 (mapconcat #'identity (nreverse parts) "\0"))))
+
 (defun nl-ns-finding-key (finding)
   "Return a stable string key for FINDING.
 Built from kind, subject and the sorted file list, so it survives a
@@ -1246,10 +1272,14 @@ reordering of the scan and changes only when the finding itself does."
   (let ((files nil))
     (dolist (f (plist-get finding :files))
       (setq files (cons f files)))
-    (format "%s\t%s\t%s"
+    (format "%s\t%s\t%s%s"
             (plist-get finding :kind)
             (plist-get finding :subject)
-            (mapconcat #'identity (sort files #'string<) " "))))
+            (mapconcat #'identity (sort files #'string<) " ")
+            ;; The shape, when the finding carries one, so accepting a
+            ;; divergence accepts THAT divergence rather than the name.
+            (let ((shape (plist-get finding :shape)))
+              (if shape (format "\t%s" (substring shape 0 12)) "")))))
 
 (defun nl-ns-load-accepted (path)
   "Read the accepted-divergence file at PATH.

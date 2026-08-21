@@ -61,6 +61,33 @@
       (when (re-search-forward "^covered +\\([0-9]+\\)" nil t)
         (string-to-number (match-string 1))))))
 
+(defun nelisp-parity-coverage--pinned ()
+  "Return the names the baseline file pins as covered.
+
+A COUNT alone cannot see a name leave.  Coverage ran 102 above its floor, so
+dropping one covered name still cleared it -- `gate-mutation' measured exactly
+that on 2026-08-21, renaming `generate-new-buffer' out of the corpus and
+watching this gate stay green.  The floor answers \"is there enough coverage\";
+the pinned set answers \"is THIS name still covered\", which is the question a
+deleted case actually raises."
+  (let ((names nil))
+    (when (file-exists-p nelisp-parity-coverage--baseline)
+      (with-temp-buffer
+        (insert-file-contents nelisp-parity-coverage--baseline)
+        (goto-char (point-min))
+        (while (re-search-forward "^pinned +\\([^ \n]+\\)" nil t)
+          (push (match-string 1) names))))
+    (nreverse names)))
+
+(defun nelisp-parity-coverage--lost (covered)
+  "Return the pinned names missing from COVERED, or nil."
+  (let ((have (make-hash-table :test #'equal))
+        (lost nil))
+    (dolist (c covered) (puthash c t have))
+    (dolist (p (nelisp-parity-coverage--pinned))
+      (unless (gethash p have) (push p lost)))
+    (nreverse lost)))
+
 (defconst nelisp-parity-coverage--sample 24
   "How many uncovered names to name in the report.")
 
@@ -96,6 +123,14 @@
      ((null baseline)
       (princ (format "parity-coverage: FAIL (no `covered' line in %s)\n"
                      nelisp-parity-coverage--baseline))
+      (kill-emacs 1))
+     ((nelisp-parity-coverage--lost covered)
+      (let ((lost (nelisp-parity-coverage--lost covered)))
+        (princ (format "parity-coverage: FAIL (%d pinned name%s no longer covered)\n"
+                       (length lost) (if (= (length lost) 1) "" "s")))
+        (princ "  A name the corpus used to exercise is not mentioned any more:\n")
+        (dolist (l lost) (princ (format "    %s\n" l)))
+        (princ "  Restore the case, or drop the `pinned' line and say why.\n"))
       (kill-emacs 1))
      ((< n baseline)
       (princ (format "parity-coverage: FAIL (%d covered, baseline %d -- a case was removed or a name was added to the shared surface without a case; add one or lower the baseline and say why)\n"

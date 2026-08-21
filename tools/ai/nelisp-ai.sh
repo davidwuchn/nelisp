@@ -105,6 +105,7 @@ cmd_check() {
     failures=0
     for step in compile parens-check generated-source-parse \
                 prelude-toplevel-check partial-inventory gate-selfcheck \
+                gate-mutation \
                 ns-gate nl-check-gate fallback-inventory-selftest \
                 wasm-dtw-skeleton-smoke \
                 unsafe-inventory ns-inventory \

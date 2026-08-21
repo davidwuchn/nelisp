@@ -281,15 +281,27 @@ standalone-reader-smokes
 # a gate that runs and finds a real defect is exactly how a check starts passing
 # by not running.
 #
-# RED, AND THE RED IS CORRECT:
+# gate-mutation injects a real defect in front of a gate and asks whether the
+# gate goes red.  On 2026-08-21 two of five did not, and it was listed here as
+# correctly-red rather than required -- a true report, not a failure.  Both are
+# fixed, so it is 5/5 and required:
 #
-#   gate-mutation -- 5 checks, 2 findings.  It injects a real defect in front
-#   of a gate and asks whether the gate goes red.  Two do not: `ns-gate' stays
-#   green when `round' diverges from its lisp/ mirror, and `parity-coverage'
-#   stays green when a covered name stops being mentioned.  That is the gate
-#   working: it is reporting two checks that cannot see what they claim to
-#   check.  Listing it as required would turn a true report into a red column
-#   everyone learns to ignore; fixing the two checks is what clears it.
+#   ns-gate stayed green when `round' diverged from its lisp/ mirror, because
+#   the accepted-set key was kind+subject+files.  Once a divergence is
+#   accepted, the two definitions could drift into any other shape and still
+#   match.  The key now carries a digest of the definitions, so accepting a
+#   divergence accepts THAT divergence rather than the name.  (Re-pinned: the
+#   key changed, so the accepted set was regenerated from the clean tree --
+#   144 entries, same as before.)
+#
+#   parity-coverage stayed green when a covered name stopped being mentioned,
+#   because it ratchets on a COUNT and was running 102 above its floor.  A
+#   count cannot see a specific name leave.  The baseline now also pins the
+#   259 names the corpus covers today; losing one fails and says which.  The
+#   floor went 157 -> 259 in the same pass: a floor 102 below the measurement
+#   is not a floor.
+#
+gate-mutation
 #
 # RED, AND OPEN:
 #
