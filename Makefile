@@ -155,9 +155,22 @@ wasm-dtw-skeleton-smoke:
 	  echo "GATE-COUNT checked=1 findings=1"; exit 1; \
 	fi
 
+# The DTW slice transpiles a game-state file that lives in a SEPARATE checkout
+# (newDTW-nelisp), whose default path in transpile-slice.mjs is a Windows one.
+# Absent, this used to die inside node with an ENOENT -- a gate that cannot run
+# reported as a gate that failed.  DTW_GAME_ROOT points it at a checkout;
+# without one the chain says so and skips, which `verify' accepts for a
+# required gate.
+DTW_GAME_ROOT ?= $(CURDIR)/../newDTW-nelisp
+
 wasm-dtw-transpile:
-	mkdir -p target/wasm-dtw
-	node tools/wasm-dtw-p4b/transpile-slice.mjs
+	@if [ ! -f "$(DTW_GAME_ROOT)/nelisp_runtime/gamedata-state-dungeon.el" ]; then \
+	  echo "GATE-SKIP newDTW-nelisp checkout absent (looked for $(DTW_GAME_ROOT))"; \
+	  echo "[wasm-dtw] SKIP: no game data to transpile"; \
+	  exit 0; \
+	fi; \
+	mkdir -p target/wasm-dtw && \
+	node tools/wasm-dtw-p4b/transpile-slice.mjs "$(DTW_GAME_ROOT)"
 
 wasm-dtw-compile: wasm-dtw-transpile
 	HOME="$(CURDIR)" XDG_CONFIG_HOME="$(CURDIR)" $(EMACS) --batch -Q -L lisp -L src \
@@ -165,19 +178,39 @@ wasm-dtw-compile: wasm-dtw-transpile
 	  --eval "(progn \
 	    (require 'nelisp-artifact) \
 	    (compile-runtime-image \
-	     '(\"compile-runtime-image\" \"--kind\" \"neln\" \
+	     '(\"compile-runtime-image\" \"--kind\" \"wasm\" \
 	       \"--target\" \"wasm32-wasi\" \
 	       \"--input\" \"target/wasm-dtw/dtw-p4b.nlri\" \
 	       \"--output\" \"target/wasm-dtw/dtw.wasm\")))"
 
 wasm-dtw-smoke: wasm-dtw-compile
-	node tools/wasm-dtw-p4b/smoke.mjs target/wasm-dtw/dtw.wasm
+	@if [ ! -s target/wasm-dtw/dtw.wasm ]; then \
+	  echo "GATE-SKIP no dtw.wasm (the transpile step skipped: see above)"; \
+	  exit 0; \
+	fi; \
+	if node tools/wasm-dtw-p4b/smoke.mjs target/wasm-dtw/dtw.wasm; then \
+	  echo "GATE-COUNT checked=1 findings=0"; \
+	else \
+	  echo "GATE-COUNT checked=1 findings=1"; exit 1; \
+	fi
 
 wasm-dtw-site: wasm-dtw-compile
+	@if [ ! -s target/wasm-dtw/dtw.wasm ]; then \
+	  echo "[wasm-dtw] SKIP: no dtw.wasm to build a site from"; \
+	  exit 0; \
+	fi; \
 	node tools/wasm-dtw-p4b/build-site.mjs
 
 wasm-dtw-site-smoke: wasm-dtw-site
-	node tools/wasm-dtw-p4b/site-smoke.mjs site/dtw
+	@if [ ! -d site/dtw ]; then \
+	  echo "GATE-SKIP no site/dtw (the transpile step skipped: see above)"; \
+	  exit 0; \
+	fi; \
+	if node tools/wasm-dtw-p4b/site-smoke.mjs site/dtw; then \
+	  echo "GATE-COUNT checked=1 findings=0"; \
+	else \
+	  echo "GATE-COUNT checked=1 findings=1"; exit 1; \
+	fi
 
 # nl-check owns the expansion-time checks (`nl-must-use', resource
 # tracking).  Until now nothing ran them as a gate: `unsafe-inventory'

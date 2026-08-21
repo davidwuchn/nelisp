@@ -38,9 +38,16 @@ if [ ! -x "$NELISP" ]; then
   exit 1
 fi
 
+# Three outcomes, not two.  This used to exit 1 when the sibling checkout is
+# absent, which `nelisp-ai.sh gate' can only read as a failure -- so a gate
+# that cannot run here looked identical to one that ran and found something.
+# GATE-SKIP records it as a reasoned skip, which `verify' accepts for a
+# required gate.  "The repo is missing" and "the gate failed" are different
+# facts and now print differently.
 if [ ! -f "$NELIX_REPO/scripts/nelix-aot-native-subset.el" ]; then
-  echo "nelix_native_hot_gate_fail reason=missing-nelix-repo path=$NELIX_REPO" >&2
-  exit 1
+  echo "GATE-SKIP nelix checkout absent (looked for $NELIX_REPO)"
+  echo "nelix_native_hot_gate_result label=nelix_native_hot_gate rc=0 skipped=1"
+  exit 0
 fi
 
 for tool in cc objcopy; do

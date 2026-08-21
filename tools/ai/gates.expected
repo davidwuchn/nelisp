@@ -243,17 +243,43 @@ standalone-selfhost-mt-test
 wasm-runtime-image-smoke
 standalone-reader-smokes
 #
-# CANNOT RUN HERE, AND SAY SO BADLY: these exit non-zero for want of a host or
-# a checkout, where the other standalone gates print GATE-SKIP with a reason.
-# Same shape as the skip paths added to the four gates above; each needs the
-# same three-outcome treatment before it can be listed:
+# CANNOT RUN HERE, AND NOW SAY SO: three of these exit 0 with a GATE-SKIP line
+# and a reason, which `verify' accepts for a required gate.  They are not
+# listed as required yet only because nothing has run their success path --
+# adding a wrapper whose green has never been seen is the unverified-gate
+# problem in a new place -- but the skip is no longer indistinguishable from a
+# failure:
 #
-#   macho-acceptance-test        "checks require macOS (got Linux)" -- then exits 2
-#   nelisp-nelix-command-gate    needs NELIX_REPO / nelix-compat.el
-#   nelisp-nelix-operational-gate    same
-#   nelisp-nelix-native-hot-gate     same
-#   wasm-dtw-smoke               needs the newDTW-nelisp checkout (a Windows
-#   wasm-dtw-site-smoke          path is baked into the data it opens)
+#   macho-acceptance-test   GATE-SKIP macho acceptance requires macOS.  Also
+#                           counts its 8 checks now, so a macOS runner gets a
+#                           number rather than silence.
+#   wasm-dtw-smoke          GATE-SKIP newDTW-nelisp checkout absent.  The
+#   wasm-dtw-site-smoke     transpile step decides it, so the whole chain skips
+#                           together; DTW_GAME_ROOT points it at a checkout.
+#                           (Its compile step also asked for `--kind neln' with
+#                           a `.wasm' output, the same mismatch fixed in
+#                           wasm-runtime-image-smoke -- corrected here too, so
+#                           a machine that HAS the checkout gets past it.)
+#
+# NOT A HOST PROBLEM AFTER THE MEASUREMENT: the three nelix gates were filed
+# here as "needs an external checkout".  That was wrong -- `../nelix' exists
+# (its own repository, last commit 2026-06-25) and the gates reach it.  They
+# fail on defects:
+#
+#   nelisp-nelix-command-gate   `file-missing: "nelix-compat.el"'.  Not a
+#   nelisp-nelix-operational-gate  missing file: `../nelix/nelix-compat.el' is
+#                               there.  `nelix/bin/nelix' sets no `load-path'
+#                               for its nelisp-runtime path, so the
+#                               `(require 'nelix-compat)' in nelix-build.el and
+#                               friends cannot resolve.  Setting NELIX_LISPDIR
+#                               does not help (measured).
+#   nelisp-nelix-native-hot-gate  reaches the repo and fails on an output
+#                               mismatch at `standalone_subset_audit_id_native'.
+#
+# The defect is in `dev/nelix', a separate repository, so it is recorded rather
+# than patched from here.  They are deliberately NOT given a GATE-SKIP: skipping
+# a gate that runs and finds a real defect is exactly how a check starts passing
+# by not running.
 #
 # RED, AND THE RED IS CORRECT:
 #

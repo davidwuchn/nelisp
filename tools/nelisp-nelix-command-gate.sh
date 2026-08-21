@@ -22,9 +22,16 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Three outcomes, not two.  This used to exit 1 when the sibling checkout is
+# absent, which `nelisp-ai.sh gate' can only read as a failure -- so a gate
+# that cannot run here looked identical to one that ran and found something.
+# GATE-SKIP records it as a reasoned skip, which `verify' accepts for a
+# required gate.  "The repo is missing" and "the gate failed" are different
+# facts and now print differently.
 if [ ! -x "$NELIX_REPO/bin/nelix" ]; then
-  echo "nelix_gate_fail reason=missing-nelix-bin path=$NELIX_REPO/bin/nelix" >&2
-  exit 1
+  echo "GATE-SKIP nelix checkout absent (looked for $NELIX_REPO/bin/nelix)"
+  echo "nelix_gate_result label=nelix_command_gate rc=0 skipped=1"
+  exit 0
 fi
 
 if [ ! -x "$NELISP" ]; then
