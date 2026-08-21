@@ -241,6 +241,7 @@ nelisp-source-command-substrate-gate
 standalone-chunk-growth-test
 standalone-parallel-compile-test
 standalone-selfhost-mt-test
+standalone-eval-test
 wasm-runtime-image-smoke
 standalone-reader-smokes
 # nelisp-nelix-native-hot-gate: promoted 2026-08-21, see "THE nelix GATES,
@@ -454,16 +455,40 @@ nelisp-nelix-native-hot-gate
 # folded into the row below, not only against a plain addition.
 gate-mutation
 #
-# RED, AND OPEN:
+# WAS RED, AND OPEN; NOW FIXED AND REQUIRED: standalone-eval-test failed at
+# link, not at runtime -- `shim.o' called `nl_gc_ctx_pop', defined only in
+# the reader-only `nelisp-standalone--gc-source', which the eval manifest did
+# not list (measured before: `Error: nelisp-link--unresolved-symbol
+# ("nl_gc_ctx_pop" "shim.o")').  The direction recorded here at the time
+# (move reader-only code out of shared units, per `--applyfn-census-helpers')
+# was the right one but incomplete: fixing it uncovered four more of the same
+# shape, each only visible once the linker got past the one before it --
 #
-#   standalone-eval-test -- fails at link, not at runtime.  `shim.o' calls
-#   `nl_gc_ctx_pop' and `applyfn.o' calls `nl_os_write_file_handle', both
-#   defined only in reader-only units that the legacy eval manifest does not
-#   list.  Appending those units moves the error to the next symbol rather
-#   than clearing it, and the comment on `--applyfn-census-helpers' shows the
-#   tree's chosen direction is the opposite one: move reader-only code out of
-#   shared units.  That is a layering decision about what the eval binary is
-#   for, not a patch, so it is recorded rather than guessed at.
+#   nl_gc_ctx_push/_pop, nl_gc_eval_ctx_push/_pop -- core eval-path plumbing
+#   (`nelisp_eval_call''s only caller) that was misfiled in `gc-source';
+#   moved to `nelisp-standalone--shim-source', shim.o's own unit.
+#
+#   nl_fa_write_all/_read_all, bf_arena_dump_image_to_file and the rest of
+#   the flat-arena persistence + swizzle family in `--applyfn-core-helpers'
+#   -- reader-only (OS file primitives + real GC mark/arena calls), dead in
+#   the baked build (their dispatch arms sit past the baked table's 19-entry
+#   cutoff); excised to `--applyfn-fa-file-helpers' and (one function,
+#   sharing the census family's own reason) `--applyfn-census-helpers'.
+#
+#   bf_sig_copy32 -- core eval plumbing (`eval-inner.o'/`combiner-cons.o'/
+#   `combiner-apply.o' all call it directly to stash a signal), misfiled in
+#   the reader-only `--applyfn-bf-helpers'; moved to `--applyfn-core-helpers'.
+#
+#   nl_gc_free_block/_in_arena/_is_boot/_mark_slot -- `arglist.o',
+#   `rootstack.o', `val-load.o' and `mirror-lookup.o' each call one of these
+#   directly for their own real arena bookkeeping (not dead code, unlike the
+#   flat-arena family above); `reader-gc.o' itself is self-contained (no
+#   dependency on any reader-only I/O unit) and the reader build already
+#   links it unconditionally, so it was added to the eval manifest too,
+#   under the same name, rather than duplicating or stubbing its functions.
+#
+# Measured after: `make standalone-eval-test' builds (47 linked units) and
+# passes (`[standalone] PASS: ... -> exit 3 (expected 3)').
 #
 # `make audit' is deliberately absent: it exits 1 while sub-phases are
 # PENDING (26 at the 2026-08-21 measurement), which is a roadmap state

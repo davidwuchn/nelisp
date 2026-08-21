@@ -3190,75 +3190,20 @@ arm64 Linux has no legacy x86 numbering)."
                (nl_compact_clear_fl 0)
                (nl_compact_unpin_src)
                (nl_compact_unpin_roots))))))))
-    ;; Doc 152 §11.41 Stage 4a / Doc 33 item 228: evaluator GC-context stack
-    ;; ops.  The driver pushes full reader roots (env/result/out/pool/src/
-    ;; cursor/bsym); every nelisp_eval_call pushes the current form/env/out
-    ;; triple with the reader-only fields set to 0.  A mid-form collect marks
-    ;; all recorded frames, so native evaluator continuations no longer depend
-    ;; on the conservative stack scan.
-    (defun nl_gc_ctx_max_depth () 1024)
-    (defun nl_gc_ctx_store (base env result out pool src cursor bsym)
-      (seq (ptr-write-u64 base 0 env) (ptr-write-u64 base 8 result)
-           (ptr-write-u64 base 16 out) (ptr-write-u64 base 24 pool)
-           (ptr-write-u64 base 32 src) (ptr-write-u64 base 40 cursor)
-           (ptr-write-u64 base 48 bsym) 0))
-    (defun nl_gc_ctx_push (env result out pool src cursor bsym)
-      (if (< (ptr-read-u64 (data-addr nl_gc_loop_ctx) 0) (nl_gc_ctx_max_depth))
-          (nl_seq2
-           (nl_gc_ctx_store
-            (+ (data-addr nl_gc_loop_ctx)
-               (+ 64 (* (ptr-read-u64 (data-addr nl_gc_loop_ctx) 0) 56)))
-            env result out pool src cursor bsym)
-           (nl_seq2
-            (ptr-write-u64 (data-addr nl_gc_loop_ctx) 0
-                           (+ (ptr-read-u64 (data-addr nl_gc_loop_ctx) 0) 1))
-            1))
-        0))
-    (defun nl_gc_eval_ctx_push (env result out _pad)
-      (if (< (ptr-read-u64 (data-addr nl_gc_loop_ctx) 0) (nl_gc_ctx_max_depth))
-          (let* ((base (+ (data-addr nl_gc_loop_ctx)
-                          (+ 64 (* (ptr-read-u64 (data-addr nl_gc_loop_ctx) 0) 56)))))
-            (seq
-             (ptr-write-u64 base 0 env)
-             (ptr-write-u64 base 8 result)
-             (ptr-write-u64 base 16 out)
-             (ptr-write-u64 base 24 0)
-             (ptr-write-u64 base 32 0)
-             (ptr-write-u64 base 40 0)
-             (ptr-write-u64 base 48 0)
-             (ptr-write-u64 (data-addr nl_gc_loop_ctx) 0
-                            (+ (ptr-read-u64 (data-addr nl_gc_loop_ctx) 0) 1))
-             1))
-        0))
-    (defun nl_gc_ctx_pop ()
-      (if (> (ptr-read-u64 (data-addr nl_gc_loop_ctx) 0) 0)
-          (ptr-write-u64 (data-addr nl_gc_loop_ctx) 0
-                         (- (ptr-read-u64 (data-addr nl_gc_loop_ctx) 0) 1))
-        0))
-    (defun nl_gc_ctx_pop_frame (env result out)
-      (if (> (ptr-read-u64 (data-addr nl_gc_loop_ctx) 0) 0)
-          (let* ((base (+ (data-addr nl_gc_loop_ctx)
-                          (+ 64 (* (- (ptr-read-u64 (data-addr nl_gc_loop_ctx) 0) 1) 56)))))
-            (if (= (ptr-read-u64 base 0) env)
-                (if (= (ptr-read-u64 base 8) result)
-                    (if (= (ptr-read-u64 base 16) out)
-                        (nl_gc_ctx_pop)
-                      0)
-                  0)
-              0))
-        0))
-    (defun nl_gc_eval_ctx_pop (env result out _pad)
-      (if (> (ptr-read-u64 (data-addr nl_gc_loop_ctx) 0) 0)
-          (let* ((base (+ (data-addr nl_gc_loop_ctx)
-                          (+ 64 (* (- (ptr-read-u64 (data-addr nl_gc_loop_ctx) 0) 1) 56)))))
-            (if (= (ptr-read-u64 base 0) env)
-                (if (= (ptr-read-u64 base 8) result)
-                    (if (= (ptr-read-u64 base 16) out)
-                        (nl_gc_ctx_pop)
-                      0)
-                  0)
-              0))
-        0))
+    ;; nl_gc_ctx_max_depth/_store/_push/_pop, nl_gc_eval_ctx_push/_pop and
+    ;; nl_gc_ctx_pop_frame (the evaluator GC-context stack ops; Doc 152
+    ;; §11.41 Stage 4a / Doc 33 item 228) moved to `nelisp-standalone--shim-
+    ;; source': shim.o's `nelisp_eval_call' is their only eval-path caller,
+    ;; and shim.o is not in the eval manifest, so those calls (in
+    ;; `nelisp_eval_call'/`nelisp_eval_call_recorded_done' below) were
+    ;; unresolved at link time (`make standalone-eval-test').
+    ;; The backing store is `nl_gc_loop_ctx', a `nelisp-link-symbol' data
+    ;; slot external to every compiled unit, so this move does not touch
+    ;; storage; the mark/mid-form-collect code below (`nl_gc_mark_roots' &c.)
+    ;; reads/writes that slot directly and never calls these functions, so
+    ;; the reader build's own root-walk is unaffected.  `nl_gc_ctx_pop_frame'
+    ;; has zero callers anywhere in the tree (grep-verified); it moved with
+    ;; the rest rather than splitting a contiguous block for dead code.
     ;; ===== Doc 152 §11.41 Stage 4b step 2: sound mid-form collect =====
     ;; The driver records the executing top-level form's precise root-set into
     ;; nl_gc_loop_ctx (Stage 4b step 1); a mid-form collect reads those frames
@@ -3458,7 +3403,77 @@ argument (reachability + in-arena bounds checks).")
 ;; the report.  The `268435544' mutation-epoch slot + `wf_dirty' instrumentation
 ;; below are inert with the reset disabled.
 (defconst nelisp-standalone--shim-source
-  '(seq (defun nelisp_eval_call_done (rc rec_cur rec_cur_addr _pad)
+  '(seq
+    ;; Doc 152 §11.41 Stage 4a / Doc 33 item 228: evaluator GC-context stack
+    ;; ops.  The driver pushes full reader roots (env/result/out/pool/src/
+    ;; cursor/bsym); every nelisp_eval_call pushes the current form/env/out
+    ;; triple with the reader-only fields set to 0.  A mid-form collect marks
+    ;; all recorded frames, so native evaluator continuations no longer depend
+    ;; on the conservative stack scan.
+    (defun nl_gc_ctx_max_depth () 1024)
+    (defun nl_gc_ctx_store (base env result out pool src cursor bsym)
+      (seq (ptr-write-u64 base 0 env) (ptr-write-u64 base 8 result)
+           (ptr-write-u64 base 16 out) (ptr-write-u64 base 24 pool)
+           (ptr-write-u64 base 32 src) (ptr-write-u64 base 40 cursor)
+           (ptr-write-u64 base 48 bsym) 0))
+    (defun nl_gc_ctx_push (env result out pool src cursor bsym)
+      (if (< (ptr-read-u64 (data-addr nl_gc_loop_ctx) 0) (nl_gc_ctx_max_depth))
+          (nl_seq2
+           (nl_gc_ctx_store
+            (+ (data-addr nl_gc_loop_ctx)
+               (+ 64 (* (ptr-read-u64 (data-addr nl_gc_loop_ctx) 0) 56)))
+            env result out pool src cursor bsym)
+           (nl_seq2
+            (ptr-write-u64 (data-addr nl_gc_loop_ctx) 0
+                           (+ (ptr-read-u64 (data-addr nl_gc_loop_ctx) 0) 1))
+            1))
+        0))
+    (defun nl_gc_eval_ctx_push (env result out _pad)
+      (if (< (ptr-read-u64 (data-addr nl_gc_loop_ctx) 0) (nl_gc_ctx_max_depth))
+          (let* ((base (+ (data-addr nl_gc_loop_ctx)
+                          (+ 64 (* (ptr-read-u64 (data-addr nl_gc_loop_ctx) 0) 56)))))
+            (seq
+             (ptr-write-u64 base 0 env)
+             (ptr-write-u64 base 8 result)
+             (ptr-write-u64 base 16 out)
+             (ptr-write-u64 base 24 0)
+             (ptr-write-u64 base 32 0)
+             (ptr-write-u64 base 40 0)
+             (ptr-write-u64 base 48 0)
+             (ptr-write-u64 (data-addr nl_gc_loop_ctx) 0
+                            (+ (ptr-read-u64 (data-addr nl_gc_loop_ctx) 0) 1))
+             1))
+        0))
+    (defun nl_gc_ctx_pop ()
+      (if (> (ptr-read-u64 (data-addr nl_gc_loop_ctx) 0) 0)
+          (ptr-write-u64 (data-addr nl_gc_loop_ctx) 0
+                         (- (ptr-read-u64 (data-addr nl_gc_loop_ctx) 0) 1))
+        0))
+    (defun nl_gc_ctx_pop_frame (env result out)
+      (if (> (ptr-read-u64 (data-addr nl_gc_loop_ctx) 0) 0)
+          (let* ((base (+ (data-addr nl_gc_loop_ctx)
+                          (+ 64 (* (- (ptr-read-u64 (data-addr nl_gc_loop_ctx) 0) 1) 56)))))
+            (if (= (ptr-read-u64 base 0) env)
+                (if (= (ptr-read-u64 base 8) result)
+                    (if (= (ptr-read-u64 base 16) out)
+                        (nl_gc_ctx_pop)
+                      0)
+                  0)
+              0))
+        0))
+    (defun nl_gc_eval_ctx_pop (env result out _pad)
+      (if (> (ptr-read-u64 (data-addr nl_gc_loop_ctx) 0) 0)
+          (let* ((base (+ (data-addr nl_gc_loop_ctx)
+                          (+ 64 (* (- (ptr-read-u64 (data-addr nl_gc_loop_ctx) 0) 1) 56)))))
+            (if (= (ptr-read-u64 base 0) env)
+                (if (= (ptr-read-u64 base 8) result)
+                    (if (= (ptr-read-u64 base 16) out)
+                        (nl_gc_ctx_pop)
+                      0)
+                  0)
+              0))
+        0))
+    (defun nelisp_eval_call_done (rc rec_cur rec_cur_addr _pad)
           (nl_seq2 (ptr-write-u64 rec_cur_addr 0 rec_cur) rc))
         (defun nelisp_eval_call_recorded_done (rc form_ptr env out rec_cur rec_cur_addr)
           (seq (nl_gc_ctx_pop)
@@ -4498,22 +4513,16 @@ unresolved at link time."
         (nl_seq2 (bf_arena_mr_chunk chunk reach total)
                  (bf_arena_mr_chunks (ptr-read-u64 (+ chunk 48) 0)
                                      reach total))))
-    (defun bf_arena_mark_reach_verify (out)
-      (let* ((reach (alloc-bytes 8 8)) (total (alloc-bytes 8 8))
-             (nil-slot (alloc-bytes 32 8)) (s1 (alloc-bytes 32 8)))
-        (seq
-         (ptr-write-u64 reach 0 0)
-         (ptr-write-u64 total 0 0)
-         (ptr-write-u64 (data-addr nl_gc_loop_ctx) 24 1)
-         (nl_gc_mark_recorded_contexts)
-         (nl_gc_mark_rootstack)
-         (nl_gc_mark_symentry)
-         (ptr-write-u64 (data-addr nl_gc_loop_ctx) 24 0)
-         (bf_arena_mr_chunks (ptr-read-u64 268436160 0) reach total)
-         (wf_write_nil nil-slot)
-         (wf_cons_int (ptr-read-u64 total 0) nil-slot s1)
-         (wf_cons_int (ptr-read-u64 reach 0) s1 out)
-         0)))
+    ;; bf_arena_mark_reach_verify moved to
+    ;; `nelisp-standalone--applyfn-census-helpers': like the bf_size_census
+    ;; family already there, it calls real GC mark entry points
+    ;; (`nl_gc_mark_recorded_contexts' / `-rootstack' / `-symentry'), which
+    ;; only `reader-gc.o' defines -- baking it here left those GC symbols
+    ;; unresolved in the eval build even though its own dispatch arm
+    ;; (`nelisp--arena-mark-reach-verify') is reader-only.  `bf_arena_mr_chunk'/
+    ;; `-mr_chunks' below stay: pure pointer walk, no GC-only reference, and
+    ;; still called from here by the (also core-helpers-resident) file-persist
+    ;; dump/restore siblings across the unit boundary.
     ;; flat-arena spike step 3b-ii: the pointer SWIZZLE proper.  Mirrors the
     ;; GC per-type walk (`nl_gc_mark_slot' / `-cons' / `-vec_slots') from the
     ;; frame[0] globals root, but at every pointer FIELD it rewrites the
@@ -4594,13 +4603,12 @@ unresolved at link time."
         (if (< lo 0)
             (if (if (< addr ib) 0 (if (< addr ie) 1 0)) (+ total (- addr ib)) 0)
           lo)))
-    ;; stream each chunk's live region [cds,cds+used) to FD in chain (=logical) order.
-    (defun nl_mc_write_chunks (fd chunk)
-      (if (= chunk 0) 0
-        (nl_seq2
-         (nl_fa_write_all fd (+ (ptr-read-u64 chunk 0) 1024)
-                          (bf_arena_chunk_used chunk) 0)
-         (nl_mc_write_chunks fd (ptr-read-u64 (+ chunk 48) 0)))))
+    ;; nl_mc_write_chunks moved to `nelisp-standalone--applyfn-fa-file-
+    ;; helpers': it calls `nl_fa_write_all', a reader-only OS file
+    ;; primitive wrapper (see that group's own header comment).  Its
+    ;; siblings (nl_mc_logoff/_phys/_total/_imgoff, pure arithmetic) stay:
+    ;; `nl_fa_field' below still needs them, and they carry no OS/GC
+    ;; reference of their own.
     ;; in-place un-swizzle (offset -> pointer) over the LIVE multi-chunk arena via
     ;; the table of logical field offsets.  For 1 chunk this equals the single-chunk
     ;; restore (nl_mc_phys = sstart + off).
@@ -4646,290 +4654,18 @@ unresolved at link time."
                       (nl_fa_emit loc (+ span (- tgt ib)) wlog dest span ib ie cin dir)
                     (ptr-write-u64 cout 0 (+ (ptr-read-u64 cout 0) 1)))
                 (nl_fa_emit loc tlog wlog dest span ib ie cin dir)))))))
-    (defun nl_fa_vec_slots (data_ptr i len ds span dest cin cout dir)
-      (if (= (nl_gc_in_arena data_ptr) 0) 0
-        (let ((k i))
-          (while (< k len)
-            (nl_seq2
-             (let ((vw (ptr-read-u64 (+ data_ptr (* k 8)) 0)))
-               (if (= (logand vw 1) 1) 0
-                 (nl_seq2 (nl_fa_field (+ data_ptr (* k 8)) vw ds span dest cin cout dir)
-                          (if (= (nl_gc_mark_block vw) 0) 0
-                            (nl_fa_slot vw ds span dest cin cout dir)))))
-             (setq k (+ k 1))))
-          0)))
-    (defun nl_fa_cons (sp ds span dest cin cout dir)
-      (let ((box (ptr-read-u64 sp 8)))
-        (nl_seq2 (nl_fa_field (+ sp 8) box ds span dest cin cout dir)
-          (if (= (nl_gc_mark_block box) 0) 0
-            (nl_seq2
-             (let ((cw (ptr-read-u64 box 0)))
-               (if (= (logand cw 1) 1) 0
-                 (nl_seq2 (nl_fa_field box cw ds span dest cin cout dir)
-                          (if (= (nl_gc_mark_block cw) 0) 0
-                            (nl_fa_slot cw ds span dest cin cout dir)))))
-             (let ((dw (ptr-read-u64 box 8)))
-               (if (= (logand dw 1) 1) 0
-                 (nl_seq2 (nl_fa_field (+ box 8) dw ds span dest cin cout dir)
-                          (if (= (nl_gc_mark_block dw) 0) 0
-                            (if (= (ptr-read-u8 dw 0) 7)
-                                (nl_fa_cons dw ds span dest cin cout dir)
-                              (nl_fa_slot dw ds span dest cin cout dir)))))))))))
-    (defun nl_fa_slot (sp ds span dest cin cout dir)
-      (let ((tag (ptr-read-u8 sp 0)))
-        (if (= tag 7)
-            (nl_fa_cons sp ds span dest cin cout dir)
-          (if (= tag 8)
-              (let ((box (ptr-read-u64 sp 8)))
-                (nl_seq2 (nl_fa_field (+ sp 8) box ds span dest cin cout dir)
-                  (if (= (nl_gc_mark_block box) 0) 0
-                    (let ((data_ptr (ptr-read-u64 box 8)) (len (ptr-read-u64 box 16)))
-                      (nl_seq2 (nl_fa_field (+ box 8) data_ptr ds span dest cin cout dir)
-                               (nl_fa_vec_slots data_ptr 0 len ds span dest cin cout dir))))))
-            (if (= tag 12)
-                (let ((box (ptr-read-u64 sp 8)))
-                  (nl_seq2 (nl_fa_field (+ sp 8) box ds span dest cin cout dir)
-                    (if (= (nl_gc_mark_block box) 0) 0
-                      (let ((data_ptr (ptr-read-u64 box 32)) (len (ptr-read-u64 box 48)))
-                        (nl_seq2 (nl_fa_slot box ds span dest cin cout dir)
-                          (nl_seq2 (nl_fa_field (+ box 32) data_ptr ds span dest cin cout dir)
-                                   (nl_fa_vec_slots data_ptr 0 len ds span dest cin cout dir)))))))
-              (if (= tag 11)
-                  (let ((box (ptr-read-u64 sp 8)))
-                    (nl_seq2 (nl_fa_field (+ sp 8) box ds span dest cin cout dir)
-                      (if (= (nl_gc_mark_block box) 0) 0
-                        (let ((vw (ptr-read-u64 box 0)))
-                          (if (= (logand vw 1) 1) 0
-                            (nl_seq2 (nl_fa_field box vw ds span dest cin cout dir)
-                              (if (= (nl_gc_mark_block vw) 0) 0
-                                (nl_fa_slot vw ds span dest cin cout dir))))))))
-                (if (= tag 6)
-                    (let ((box (ptr-read-u64 sp 8)))
-                      (nl_seq2 (nl_fa_field (+ sp 8) box ds span dest cin cout dir)
-                        (if (= (nl_gc_mark_block box) 0) 0
-                          (nl_fa_field (+ box 8) (ptr-read-u64 box 8) ds span dest cin cout dir))))
-                  (if (= tag 5)
-                      (nl_fa_field (+ sp 16) (ptr-read-u64 sp 16) ds span dest cin cout dir)
-                    (if (= tag 4)
-                        (nl_fa_field (+ sp 16) (ptr-read-u64 sp 16) ds span dest cin cout dir)
-                      (if (= tag 9)
-                          (nl_fa_field (+ sp 8) (ptr-read-u64 sp 8) ds span dest cin cout dir)
-                        (if (= tag 10)
-                            (nl_fa_field (+ sp 8) (ptr-read-u64 sp 8) ds span dest cin cout dir)
-                          0)))))))))))
-    (defun nl_fa_pool_slots (base i cap ds span dest cin cout dir)
-      (let* ((k i))
-        (while (< k cap)
-          (nl_seq2 (nl_fa_slot (+ base (* k 32)) ds span dest cin cout dir)
-                   (setq k (+ k 1))))
-        0))
-    (defun nl_fa_pool (base cap ds span dest cin cout dir)
-      (if (= base 0) 0
-        (nl_fa_pool_slots base 0 cap ds span dest cin cout dir)))
-    (defun nl_fa_mirror_buckets (mirror ds span dest cin cout dir)
-      (if (= (sexp-tag mirror) 12)
-          (let* ((mirror_box (ptr-read-u64 mirror 8))
-                 (mirror_data (if (= (nl_gc_in_arena mirror_box) 0) 0
-                                (ptr-read-u64 mirror_box 32))))
-            (if (= (nl_gc_in_arena mirror_data) 0) 0
-              (let* ((ht_word (ptr-read-u64 mirror_data 0)))
-                (if (= (logand ht_word 1) 1) 0
-                  (if (= (nl_gc_in_arena ht_word) 0) 0
-                    (if (= (sexp-tag ht_word) 12)
-                        (let* ((ht_box (ptr-read-u64 ht_word 8))
-                               (ht_data (if (= (nl_gc_in_arena ht_box) 0) 0
-                                          (ptr-read-u64 ht_box 32))))
-                          (if (= (nl_gc_in_arena ht_data) 0) 0
-                            (let* ((buckets_word (ptr-read-u64 (+ ht_data 8) 0)))
-                              (if (= (logand buckets_word 1) 1) 0
-                                (if (= (nl_gc_in_arena buckets_word) 0) 0
-                                  (nl_seq2
-                                   (nl_fa_field (+ ht_data 8) buckets_word ds span dest cin cout dir)
-                                   (if (= (nl_gc_mark_block buckets_word) 0) 0
-                                     (nl_fa_slot buckets_word ds span dest cin cout dir))))))))
-                      0))))))
-        0))
-    (defun nl_fa_recorded_slot (sp ds span dest cin cout dir)
-      (if (= sp 0) 0
-        (nl_fa_slot sp ds span dest cin cout dir)))
-    (defun nl_fa_recorded_env (env ds span dest cin cout dir)
-      (if (= env 0) 0
-        (nl_seq2 (nl_fa_recorded_slot (+ env 0) ds span dest cin cout dir)
-         (nl_seq2 (nl_fa_mirror_buckets (+ env 0) ds span dest cin cout dir)
-          (nl_seq2 (nl_fa_recorded_slot (+ env 32) ds span dest cin cout dir)
-                   (nl_fa_recorded_slot (+ env 64) ds span dest cin cout dir))))))
-    ;; step 3c (all roots): walk every recorded frame's roots + global roots,
-    ;; mirroring `nl_gc_mark_recorded_frame' / `-contexts_from' /
-    ;; `nl_gc_mark_rootstack' / `nl_gc_mark_symentry' so the persisted
-    ;; relocation reaches the same pointer-slot families as GC.  In
-    ;; particular, POOL is a raw cap*32 Sexp buffer, not a single slot; missing
-    ;; those interiors leaves aliased Symbol/String buffers unre-based.
-    (defun nl_fa_frame_at (base ds span dest cin cout dir)
-      (nl_seq2
-       (nl_fa_recorded_env (ptr-read-u64 base 0) ds span dest cin cout dir)
-       (nl_seq2 (nl_fa_recorded_slot (ptr-read-u64 base 8) ds span dest cin cout dir)
-        (nl_seq2 (nl_fa_recorded_slot (ptr-read-u64 base 16) ds span dest cin cout dir)
-         (nl_seq2 (nl_fa_pool (ptr-read-u64 base 24) (nl_gc_pool_cap) ds span dest cin cout dir)
-          (nl_seq2 (nl_fa_recorded_slot (ptr-read-u64 base 32) ds span dest cin cout dir)
-           (nl_seq2 (nl_fa_recorded_slot (ptr-read-u64 base 40) ds span dest cin cout dir)
-                    (nl_fa_recorded_slot (ptr-read-u64 base 48) ds span dest cin cout dir))))))))
-    (defun nl_fa_frames_from (i depth ds span dest cin cout dir)
-      (if (< i depth)
-          (nl_seq2
-           (nl_fa_frame_at (+ (data-addr nl_gc_loop_ctx) (+ 64 (* i 56)))
-                           ds span dest cin cout dir)
-           (nl_fa_frames_from (+ i 1) depth ds span dest cin cout dir))
-        0))
-    (defun nl_fa_rootstack_walk (p end ds span dest cin cout dir)
-      (if (< p end)
-          (nl_seq2 (nl_fa_slot p ds span dest cin cout dir)
-                   (nl_fa_rootstack_walk (+ p 32) end ds span dest cin cout dir))
-        0))
-    (defun nl_fa_rootstack (ds span dest cin cout dir)
-      (if (= (ptr-read-u64 (data-addr nl_rootstack_top) 0) 0) 0
-        (nl_fa_rootstack_walk (data-addr nl_rootstack_region)
-                              (ptr-read-u64 (data-addr nl_rootstack_top) 0)
-                              ds span dest cin cout dir)))
-    (defun nl_fa_symentry (ds span dest cin cout dir)
-      (if (= (ptr-read-u64 268436328 0) 0) 0
-        (if (= (nl_gc_mark_block (ptr-read-u64 268436328 0)) 0) 0
-          (nl_fa_slot (ptr-read-u64 268436328 0) ds span dest cin cout dir))))
-    (defun nl_fa_roots (ds span dest cin cout dir)
-      (nl_seq2
-       (nl_fa_frames_from 0 (ptr-read-u64 (data-addr nl_gc_loop_ctx) 0)
-                          ds span dest cin cout dir)
-       (nl_seq2 (nl_fa_rootstack ds span dest cin cout dir)
-                (nl_fa_symentry ds span dest cin cout dir))))
-    (defun bf_arena_swizzle_verify (out)
-      (let* ((head (ptr-read-u64 268436160 0))
-             (sstart (ptr-read-u64 (+ head 24) 0))
-             (cursor (bf_arena_chunk_cursor head))
-             (slen (if (< cursor 1024) 0 (- cursor 1024)))
-             ;; dest holds the copied region in [0,slen); the verification
-             ;; counters live in the tail [slen, slen+256) of the SAME buffer
-             ;; so they are never inside the compared region nor written by
-             ;; the field-swizzle (which only writes dest+[0,slen)).
-             (dest (alloc-bytes (+ slen 256) 8))
-             (cin (+ dest slen)) (cout (+ dest slen 8)) (cmis (+ dest slen 16))
-             (ctr (+ dest slen 24))
-             (depth (ptr-read-u64 (data-addr nl_gc_loop_ctx) 0))
-             (env (if (= depth 0) 0
-                    (ptr-read-u64 (+ (data-addr nl_gc_loop_ctx) 64) 0)))
-             (i 0)
-             (nil-slot (alloc-bytes 32 8)) (s2 (alloc-bytes 32 8)) (s1 (alloc-bytes 32 8)))
-        (seq
-         (ptr-write-u64 cin 0 0) (ptr-write-u64 cout 0 0) (ptr-write-u64 cmis 0 0)
-         (ptr-write-u64 ctr 0 0)
-         ;; 1. bulk-copy chunk-0 live region
-         (while (< i slen)
-           (seq (ptr-write-u64 (+ dest i) 0 (ptr-read-u64 (+ sstart i) 0))
-                (setq i (+ i 8))))
-         (if (= env 0) 0
-           (seq
-            ;; 2. swizzle pass (abs -> offset) from ALL roots
-            (ptr-write-u64 (data-addr nl_gc_loop_ctx) 24 1)
-            (nl_fa_roots sstart slen dest cin cout 0)
-            (ptr-write-u64 (data-addr nl_gc_loop_ctx) 24 0)
-            (bf_arena_mr_chunks (ptr-read-u64 268436160 0) ctr ctr)   ; clear marks
-            ;; 3. unswizzle pass (offset -> abs)
-            (ptr-write-u64 (data-addr nl_gc_loop_ctx) 24 1)
-            (nl_fa_roots sstart slen dest cin cout 1)
-            (ptr-write-u64 (data-addr nl_gc_loop_ctx) 24 0)
-            (bf_arena_mr_chunks (ptr-read-u64 268436160 0) ctr ctr)
-            ;; 4. round-trip identity: copy must equal source again
-            (setq i 0)
-            (while (< i slen)
-              (seq (if (= (ptr-read-u64 (+ dest i) 0) (ptr-read-u64 (+ sstart i) 0)) 0
-                     (ptr-write-u64 cmis 0 (+ (ptr-read-u64 cmis 0) 1)))
-                   (setq i (+ i 8))))))
-         (wf_write_nil nil-slot)
-         (wf_cons_int (ptr-read-u64 cmis 0) nil-slot s2)
-         (wf_cons_int (ptr-read-u64 cout 0) s2 s1)
-         (wf_cons_int (ptr-read-u64 cin 0) s1 out)
-         0)))
-    ;; flat-arena spike step 4 (core LOAD mechanic): relocate the image into a
-    ;; FRESH base and prove the result is a structurally valid arena.  Copy
-    ;; chunk-0 into DEST (so DEST itself is the new base = where data-start now
-    ;; lives), then rebase every in-region pointer to DEST via the per-type
-    ;; walk (dir 2: DEST[field] = tgt + (dest - sstart)).  This is exactly what
-    ;; loading the relocatable image at a kernel-chosen base does.  Then verify
-    ;; the LOADED image is well-formed: a linear [header][object] walk of DEST
-    ;; must reach the end exactly (relocate only rewrote pointer fields, never
-    ;; the BLOCK_TOTAL headers).  Returns (RELOCATED-PTRS BLOCKS WELLFORMED);
-    ;; RELOCATED-PTRS should match the swizzle's in-region count and WELLFORMED
-    ;; = 1 means the load produced a sound arena at the new base.  (Single-root
-    ;; + chunk-0; the boot hook that installs a loaded image in place of the
-    ;; source replay is the remaining integration -- it needs the multi-region
-    ;; / multi-root completeness of step 3c first.)
-    (defun bf_arena_load_relocate_verify (out)
-      (let* ((head (ptr-read-u64 268436160 0))
-             (sstart (ptr-read-u64 (+ head 24) 0))
-             (cursor (bf_arena_chunk_cursor head))
-             (slen (if (< cursor 1024) 0 (- cursor 1024)))
-             ;; step 3c: the image is two regions -- chunk-0 [0,slen) then the
-             ;; interned symbol-name region [slen, slen+isz).  Copy BOTH so the
-             ;; relocated interned pointers (dest+slen+off) land on real data.
-             (abase (- sstart 1024))
-             (ib (ptr-read-u64 (+ abase 832) 0))
-             (ie (ptr-read-u64 (+ abase 840) 0))
-             (isz (nl_align_up (if (< ie ib) 0 (- ie ib)) 8))
-             (dest (alloc-bytes (+ (+ slen isz) 256) 8))
-             (crel (+ dest slen isz)) (cwf (+ dest slen isz 8))
-             (cnblk (+ dest slen isz 16)) (ctr (+ dest slen isz 24))
-             (depth (ptr-read-u64 (data-addr nl_gc_loop_ctx) 0))
-             (env (if (= depth 0) 0
-                    (ptr-read-u64 (+ (data-addr nl_gc_loop_ctx) 64) 0)))
-             (i 0) (j 0) (hdr 0)
-             (nil-slot (alloc-bytes 32 8)) (s2 (alloc-bytes 32 8)) (s1 (alloc-bytes 32 8)))
-        (seq
-         (ptr-write-u64 crel 0 0) (ptr-write-u64 cwf 0 1) (ptr-write-u64 cnblk 0 0)
-         ;; 1. copy chunk-0 live region into DEST (DEST is the new base)
-         (while (< i slen)
-           (seq (ptr-write-u64 (+ dest i) 0 (ptr-read-u64 (+ sstart i) 0))
-                (setq i (+ i 8))))
-         ;; 1b. copy the interned region into DEST[slen .. slen+isz)
-         (while (< j isz)
-           (seq (ptr-write-u64 (+ dest (+ slen j)) 0 (ptr-read-u64 (+ ib j) 0))
-                (setq j (+ j 8))))
-         (if (= env 0) 0
-           (seq
-            ;; 2. relocate DEST's in-region pointers to base = dest (dir 2),
-            ;; from ALL roots
-            (ptr-write-u64 (data-addr nl_gc_loop_ctx) 24 1)
-            (nl_fa_roots sstart slen dest crel ctr 2)
-            (ptr-write-u64 (data-addr nl_gc_loop_ctx) 24 0)
-            (bf_arena_mr_chunks (ptr-read-u64 268436160 0) ctr ctr)
-            ;; 3. verify the LOADED image: linear [hdr][obj] walk of DEST must
-            ;; reach the end exactly (block headers untouched by relocate).
-            (setq hdr 0)
-            (while (and (= (ptr-read-u64 cwf 0) 1) (< hdr slen))
-              (let* ((h (ptr-read-u64 (+ dest hdr) 0))
-                     (bt (- h (logand h 7))))
-                (if (< bt 8)
-                    (nl_seq2 (ptr-write-u64 cwf 0 0) (setq hdr slen))
-                  (if (> (+ hdr bt) slen)
-                      (nl_seq2 (ptr-write-u64 cwf 0 0) (setq hdr slen))
-                    (nl_seq2 (ptr-write-u64 cnblk 0 (+ (ptr-read-u64 cnblk 0) 1))
-                             (setq hdr (+ hdr bt)))))))
-            ;; require reaching the end exactly
-            (if (= hdr slen) 0 (ptr-write-u64 cwf 0 0))))
-         (wf_write_nil nil-slot)
-         (wf_cons_int (ptr-read-u64 cwf 0) nil-slot s2)
-         (wf_cons_int (ptr-read-u64 cnblk 0) s2 s1)
-         (wf_cons_int (ptr-read-u64 crel 0) s1 out)
-         0)))
-    ;; flat-arena spike step 4-boot precondition: capture the ROOT METADATA the
-    ;; boot loader needs.  An image is loaded by mmap'ing a fresh arena, copying
-    ;; the regions, relocating the pointers (steps done), then pointing a fresh
-    ;; EvalCtx's roots at the loaded root objects -- which requires each root's
-    ;; IMAGE OFFSET (where, within the image, its boxed object lives).
-    ;; `nl_img_off' maps an absolute address to its image offset (chunk-0 ->
-    ;; addr-ds; interned -> span + addr-ib; out -> -1).
-    ;; `bf_arena_image_root_verify' reports the image offsets of the 3 EvalCtx
-    ;; roots (globals_record @ env+0, frames_record @ env+32, unbound_marker @
-    ;; env+64; each a 32B Sexp slot whose boxed payload pointer is at slot+8).
-    ;; A non-negative offset means the root lives inside the dumped image and
-    ;; the boot can relocate + reinstall it as `newbase + offset'.  READ-ONLY.
+
+    ;; nl_fa_cons/_slot/_vec_slots/_mirror_buckets/_frame_at/_symentry/
+    ;; _recorded_slot/_recorded_env/_frames_from/_rootstack/_rootstack_walk/
+    ;; _pool/_pool_slots and bf_arena_swizzle_verify/_load_relocate_verify/
+    ;; _dump_table_verify moved to `nelisp-standalone--applyfn-fa-file-
+    ;; helpers' (reader-only): each calls `nl_gc_mark_block' or
+    ;; `nl_gc_in_arena' or `nl_gc_pool_cap' -- all `reader-gc.o'-only --
+    ;; either directly or through this call chain, so baking them here
+    ;; left those GC symbols unresolved even though nothing in the baked
+    ;; dispatch table's 19-entry subset reaches them.  `nl_fa_field'/
+    ;; `nl_fa_emit' (pure pointer arithmetic, no GC reference) stay, and
+    ;; the moved functions reach them across the unit boundary.
     (defun nl_img_off (addr ds span ib ie)
       (if (if (< addr ds) 0 (if (< addr (+ ds span)) 1 0))
           (- addr ds)
@@ -4968,64 +4704,258 @@ unresolved at link time."
     ;; loaded image is well-formed.  Returns (TABLE-LEN OUT-OF-REGION BLOCKS
     ;; WELLFORMED): OUT-OF-REGION 0 + WELLFORMED 1 means the table fully
     ;; describes the relocation and the table-driven load rebuilds a sound arena.
-    (defun bf_arena_dump_table_verify (out)
-      (let* ((head (ptr-read-u64 268436160 0))
-             (sstart (ptr-read-u64 (+ head 24) 0))
-             (cursor (bf_arena_chunk_cursor head))
-             (slen (if (< cursor 1024) 0 (- cursor 1024)))
-             (abase (- sstart 1024))
-             (ib (ptr-read-u64 (+ abase 832) 0))
-             (ie (ptr-read-u64 (+ abase 840) 0))
-             (isz (nl_align_up (if (< ie ib) 0 (- ie ib)) 8))
-             (tcap (* 8 200000))
-             (dest (alloc-bytes (+ slen (+ isz (+ 256 tcap))) 8))
-             (tbl (+ dest (+ slen (+ isz 256))))
-             (cin (+ dest slen isz)) (cout (+ dest slen isz 8))
-             (cwf (+ dest slen isz 16)) (cnblk (+ dest slen isz 24))
-             (i 0) (j 0) (hdr 0) (ti 0) (n 0)
-             (nil-slot (alloc-bytes 32 8)) (s3 (alloc-bytes 32 8))
-             (s2 (alloc-bytes 32 8)) (s1 (alloc-bytes 32 8)))
+    (defun bf_arena_force_grow_smoke (out)
+      (let* ((chunk (ptr-read-u64 268436168 0))
+             (cursor-addr (if (= chunk (ptr-read-u64 268436160 0))
+                              268435456
+                            (+ chunk 16)))
+             (size (ptr-read-u64 (+ chunk 8) 0))
+             (near (if (< size 2048) 1024 (- size 32)))
+             (p 0))
         (seq
-         (ptr-write-u64 cin 0 0) (ptr-write-u64 cout 0 0)
-         (ptr-write-u64 cwf 0 1) (ptr-write-u64 cnblk 0 0)
-         ;; 1. copy chunk-0 + interned into DEST
-         (while (< i slen)
-           (seq (ptr-write-u64 (+ dest i) 0 (ptr-read-u64 (+ sstart i) 0))
-                (setq i (+ i 8))))
-         (while (< j isz)
-           (seq (ptr-write-u64 (+ dest (+ slen j)) 0 (ptr-read-u64 (+ ib j) 0))
-                (setq j (+ j 8))))
-         ;; 2. swizzle DEST + emit the relocation table (dir 3)
-         (ptr-write-u64 (data-addr nl_gc_loop_ctx) 24 1)
-         (nl_fa_roots sstart slen dest cin cout 3)
-         (ptr-write-u64 (data-addr nl_gc_loop_ctx) 24 0)
-         (bf_arena_mr_chunks (ptr-read-u64 268436160 0) cnblk cnblk)
-         (ptr-write-u64 cnblk 0 0)
-         ;; 3. LOAD as the boot would: per table entry F, DEST[F] += DEST
-         (setq n (ptr-read-u64 cin 0))
-         (setq ti 0)
-         (while (< ti n)
-           (let ((f (ptr-read-u64 (+ tbl (* ti 8)) 0)))
-             (ptr-write-u64 (+ dest f) 0 (+ dest (ptr-read-u64 (+ dest f) 0))))
-           (setq ti (+ ti 1)))
-         ;; 4. verify the loaded image is well-formed (chunk-0 block walk)
-         (setq hdr 0)
-         (while (and (= (ptr-read-u64 cwf 0) 1) (< hdr slen))
-           (let* ((h (ptr-read-u64 (+ dest hdr) 0))
-                  (bt (- h (logand h 7))))
-             (if (< bt 8)
-                 (nl_seq2 (ptr-write-u64 cwf 0 0) (setq hdr slen))
-               (if (> (+ hdr bt) slen)
-                   (nl_seq2 (ptr-write-u64 cwf 0 0) (setq hdr slen))
-                 (nl_seq2 (ptr-write-u64 cnblk 0 (+ (ptr-read-u64 cnblk 0) 1))
-                          (setq hdr (+ hdr bt)))))))
-         (if (= hdr slen) 0 (ptr-write-u64 cwf 0 0))
+         (ptr-write-u64 cursor-addr 0 near)
+         (setq p (alloc-bytes 64 8))
+         (if (= p 0)
+             (wf_write_int out 0)
+           (bf_arena_stats out)))))
+    ;; wf_dirty: bump the MUTATION EPOCH counter @268435544 (NO-ESCAPE gate
+    ;; in `nelisp_eval_call').  Called by every primitive that installs a box
+    ;; into PRE-EXISTING (persistent) structure — setcar/setcdr/aset/puthash —
+    ;; so the per-eval arena reset never frees a still-reachable escapee.
+    (defun wf_dirty ()
+      ;; SeqCst atomic increment so concurrent threads (parallel build) never
+      ;; lose a mutation-epoch bump (the old read;+1;write was a racy RMW).
+      (atomic-fetch-add 268435544 1))
+    (defun wf_sum (list_ptr acc)
+      (if (= (ptr-read-u64 list_ptr 0) 7)
+          (let* ((car_ptr (nl_cons_car_ptr list_ptr)) (v (ptr-read-u64 car_ptr 8)))
+            (wf_sum (nl_cons_cdr_ptr list_ptr) (+ acc v))) acc))
+    (defun wf_prod (list_ptr acc)
+      (if (= (ptr-read-u64 list_ptr 0) 7)
+          (let* ((car_ptr (nl_cons_car_ptr list_ptr)) (v (ptr-read-u64 car_ptr 8)))
+            (wf_prod (nl_cons_cdr_ptr list_ptr) (* acc v))) acc))
+    ;; `/' folds over EVERY divisor: (/ 100 5 2) is 10, and reading only the
+    ;; first two arguments answered 20 -- a wrong number, silently.  Integer
+    ;; division by zero traps in hardware, so the divisors are scanned for a
+    ;; zero before any of them is used.
+    (defun wf_quot (list_ptr acc)
+      (if (= (ptr-read-u64 list_ptr 0) 7)
+          (wf_quot (nl_cons_cdr_ptr list_ptr)
+                   (/ acc (ptr-read-u64 (nl_cons_car_ptr list_ptr) 8)))
+        acc))
+    (defun wf_zero_divisor (list_ptr)
+      (if (= (ptr-read-u64 list_ptr 0) 7)
+          (if (= (ptr-read-u64 (nl_cons_car_ptr list_ptr) 8) 0)
+              1
+            (wf_zero_divisor (nl_cons_cdr_ptr list_ptr)))
+        0))
+    (defun wf_fdivtail (list_ptr acc_bits scratch)
+      (if (= (ptr-read-u64 list_ptr 0) 7)
+          (let* ((vb (wf_elem_fbits (nl_cons_car_ptr list_ptr) scratch)))
+            (let* ((result-bits (f64-bits (f64-div (bits-to-f64 acc_bits) (bits-to-f64 vb)))))
+              (seq (sexp-write-float scratch (bits-to-f64 result-bits))
+                   (wf_fdivtail (nl_cons_cdr_ptr list_ptr) (ptr-read-u64 scratch 8) scratch))))
+        acc_bits))
+    (defun wf_subtail (list_ptr acc)
+      (if (= (ptr-read-u64 list_ptr 0) 7)
+          (let* ((car_ptr (nl_cons_car_ptr list_ptr)) (v (ptr-read-u64 car_ptr 8)))
+            (wf_subtail (nl_cons_cdr_ptr list_ptr) (- acc v))) acc))
+    (defun wf_diff (list_ptr)
+      (if (= (ptr-read-u64 list_ptr 0) 7)
+          (let* ((car_ptr (nl_cons_car_ptr list_ptr)) (first (ptr-read-u64 car_ptr 8))
+                 (rest (nl_cons_cdr_ptr list_ptr)))
+            ;; elisp `-': 1-arg `(- x)' = NEGATION (-x), not x; n-arg subtracts
+            ;; the tail from the first.  The old `first' fallthrough made `(- 5)'
+            ;; return 5, breaking every `(ash v (- (* i 8)))' byte-extraction.
+            (if (= (ptr-read-u64 rest 0) 7) (wf_subtail rest first) (- 0 first))) 0))
+    ;; --- FLOAT-AWARE arithmetic.  The integer wf_sum/wf_prod/wf_subtail/wf_diff
+    ;; above read slot+8 as a raw i64 with NO tag check, so a Float operand
+    ;; (tag 3, IEEE-754 bits inline at +8) is folded as garbage and written via
+    ;; wf_write_int (tag 2 Int) -> `(+ 2.5 2.5)' returned a huge Int, not 5.0.
+    ;; These mirror the tag-aware wf_num_lt family + the reader's nl_str_to_float
+    ;; production idiom: the accumulator is carried as u64 BITS (i64-typed, safe
+    ;; across recursion).  A binop result is first reinterpreted with
+    ;; `f64-bits', then restored from a GP local with `bits-to-f64' for the
+    ;; dedicated `sexp-write-float' grammar op.  This is required because a
+    ;; generic call cannot safely marshal a binop result as the f64 argument of
+    ;; nl_sexp_write_float (especially under Win64's positional GP/XMM ABI).
+    ;; 0 = every argument is an integer, 1 = at least one float, 2 = one is
+    ;; not a number at all.  The third answer rides along on the walk this
+    ;; already does; a separate type-checking pass cost ~6% on an
+    ;; arithmetic-heavy benchmark, measured, and this costs nothing on the
+    ;; path that succeeds -- `wf_first_non_number' is called only to name the
+    ;; offender once the answer is already known to be 2.
+    (defun wf_has_float (list_ptr)
+      (if (= (ptr-read-u64 list_ptr 0) 7)
+          (if (= (ptr-read-u64 (nl_cons_car_ptr list_ptr) 0) 3)
+              1
+            (wf_has_float (nl_cons_cdr_ptr list_ptr)))
+        0))
+    ;; The WHOLE list is scanned for a non-number before any float is
+    ;; reported: stopping at the first float let (/ 1.5 nil) reach the float
+    ;; path, where nil's payload word became a divisor and the answer came
+    ;; back 1.0e+INF instead of the type error Emacs raises.
+    (defun wf_any_float (list_ptr)
+      (if (= (wf_first_non_number list_ptr) 0)
+          (wf_has_float list_ptr)
+        2))
+    (defun wf_elem_fbits (car_ptr scratch)
+      (if (= (ptr-read-u64 car_ptr 0) 3)
+          (ptr-read-u64 car_ptr 8)
+        (seq (sexp-write-float scratch (i64-to-f64 (ptr-read-u64 car_ptr 8)))
+             (ptr-read-u64 scratch 8))))
+    (defun wf_int_fbits (n scratch)
+      (seq (sexp-write-float scratch (i64-to-f64 n)) (ptr-read-u64 scratch 8)))
+    (defun wf_fsum (list_ptr acc_bits scratch)
+      (if (= (ptr-read-u64 list_ptr 0) 7)
+          (let* ((vb (wf_elem_fbits (nl_cons_car_ptr list_ptr) scratch)))
+            (let* ((result-bits (f64-bits (f64-add (bits-to-f64 acc_bits) (bits-to-f64 vb)))))
+              (seq (sexp-write-float scratch (bits-to-f64 result-bits))
+                   (wf_fsum (nl_cons_cdr_ptr list_ptr) (ptr-read-u64 scratch 8) scratch))))
+        acc_bits))
+    (defun wf_fprod (list_ptr acc_bits scratch)
+      (if (= (ptr-read-u64 list_ptr 0) 7)
+          (let* ((vb (wf_elem_fbits (nl_cons_car_ptr list_ptr) scratch)))
+            (let* ((result-bits (f64-bits (f64-mul (bits-to-f64 acc_bits) (bits-to-f64 vb)))))
+              (seq (sexp-write-float scratch (bits-to-f64 result-bits))
+                   (wf_fprod (nl_cons_cdr_ptr list_ptr) (ptr-read-u64 scratch 8) scratch))))
+        acc_bits))
+    (defun wf_fsubtail (list_ptr acc_bits scratch)
+      (if (= (ptr-read-u64 list_ptr 0) 7)
+          (let* ((vb (wf_elem_fbits (nl_cons_car_ptr list_ptr) scratch)))
+            (let* ((result-bits (f64-bits (f64-sub (bits-to-f64 acc_bits) (bits-to-f64 vb)))))
+              (seq (sexp-write-float scratch (bits-to-f64 result-bits))
+                   (wf_fsubtail (nl_cons_cdr_ptr list_ptr) (ptr-read-u64 scratch 8) scratch))))
+        acc_bits))
+    (defun wf_fdiff (list_ptr scratch)
+      (let* ((first_b (wf_elem_fbits (nl_cons_car_ptr list_ptr) scratch))
+             (rest (nl_cons_cdr_ptr list_ptr)))
+        ;; elisp `-': 1-arg = negation; n-arg = first - rest.  Negate via x*-1.0
+        ;; (sign XOR), NOT 0.0-x, so -(+0.0) yields -0.0 (Doc 159 §12).
+        (if (= (ptr-read-u64 rest 0) 7)
+            (wf_fsubtail rest first_b scratch)
+          (let* ((result-bits (f64-bits (f64-mul (bits-to-f64 first_b) (i64-to-f64 -1)))))
+            (seq (sexp-write-float scratch (bits-to-f64 result-bits))
+                 (ptr-read-u64 scratch 8))))))
+    ;; float `/' (2-arg, mirroring the integer `/' arity): a/b in f64.
+    (defun wf_fdiv2 (args scratch)
+      (let* ((ab (wf_elem_fbits (wf_arg_ptr args 0) scratch))
+             (bb (wf_elem_fbits (wf_arg_ptr args 1) scratch)))
+        (let* ((result-bits (f64-bits (f64-div (bits-to-f64 ab) (bits-to-f64 bb)))))
+          (sexp-write-float scratch (bits-to-f64 result-bits)))))
+    ;; float -> int conversions (each takes a Float Sexp ptr; integer args are
+    ;; handled as identity in the dispatch arm).  f64-to-i64-trunc rounds toward
+    ;; zero (= truncate); floor rounds toward -inf, ceiling toward +inf.  Cross-
+    ;; arch safe (no syscall).  Note: `round' (banker's rounding) and `float-time'
+    ;; (needs a per-arch clock_gettime OS helper) are deferred.
+    (defun wf_ftrunc (p)
+      (f64-to-i64-trunc (bits-to-f64 (sexp-float-unwrap p))))
+    (defun wf_ffloor (p)
+      (let* ((t0 (f64-to-i64-trunc (bits-to-f64 (sexp-float-unwrap p)))))
+        (if (= (f64-lt (bits-to-f64 (sexp-float-unwrap p)) (i64-to-f64 t0)) 1)
+            (- t0 1)
+          t0)))
+    (defun wf_fceil (p)
+      (let* ((t0 (f64-to-i64-trunc (bits-to-f64 (sexp-float-unwrap p)))))
+        (if (= (f64-gt (bits-to-f64 (sexp-float-unwrap p)) (i64-to-f64 t0)) 1)
+            (+ t0 1)
+          t0)))
+    ;; float-time wrapper: the nl_os_float_time extern must be called from a
+    ;; helper defun (its own frame), not inline in a dispatch arm -- an inline
+    ;; extern call from the spliced dispatch if-chain aborts at runtime (same as
+    ;; nl_sexp_write_float, which only works from wf_fsum/wf_fprod helpers).
+    ;; Write into a fresh scratch slot, then copy to `out' -- exactly like the
+    ;; float arithmetic (nl_sexp_write_float -> scratch, wf_copy32 -> out).
+    ;; Calling the extern with `out' (the dispatch result slot) directly aborts.
+    (defun wf_float_time (out)
+      (let* ((sc (alloc-bytes 32 8)))
+        (seq (nl_os_float_time sc) (wf_copy32 out sc))))
+    (defun bf_sig_copy32 (dst src)
+      (seq (ptr-write-u64 dst 0 (ptr-read-u64 src 0))
+           (ptr-write-u64 dst 8 (ptr-read-u64 src 8))
+           (ptr-write-u64 dst 16 (ptr-read-u64 src 16))
+           (ptr-write-u64 dst 24 (ptr-read-u64 src 24)) 0))
+    ;; bf_arith_error / bf_wrong_type_number_or_marker /
+    ;; bf_wrong_type_int_or_marker / bf_first_non_integer: the
+    ;; mod/percent/arithmetic/comparison arms of
+    ;; `nelisp-standalone--applyfn-dispatch-table' reference these in both
+    ;; the baked and the reader build -- error-checked arithmetic is
+    ;; language-rule core, so they live here rather than in the reader-only
+    ;; `nelisp-standalone--applyfn-bf-helpers' group with their
+    ;; `bf_wrong_type_*p' siblings.  `bf_wrong_type_int_or_marker' needs
+    ;; `bf_wrong_type_named', so that moved too (its other reader-only
+    ;; callers -- `bf_wrong_type_numberp' &c. -- still reach it: the reader
+    ;; build compiles core + bf-helpers as one combined applyfn unit).
+    ;; `zerop' is (= N 0), and `=' names `number-or-marker-p' when its
+    ;; argument is not a number -- not `numberp'.  Same shape as
+    ;; `bf_wrong_type_listp'; the 18-byte predicate name needs three writes.
+    (defun bf_wrong_type_named (offender cbuf-w0 cbuf-w1 cbuf-w2 clen)
+      (let* ((wbuf (alloc-bytes 24 1))
+             (cbuf (alloc-bytes 24 1))
+             (expected (alloc-bytes 32 8))
+             (nil-slot (alloc-bytes 32 8))
+             (data-tail (alloc-bytes 32 8)))
+        (seq
+         (ptr-write-u64 wbuf 0 8751669898145395319)
+         (ptr-write-u64 (+ wbuf 8) 0 7887324063363589488)
+         (ptr-write-u64 (+ wbuf 16) 0 7630437)
+         (nl_alloc_symbol wbuf 19 268435480)
+         (ptr-write-u64 cbuf 0 cbuf-w0)
+         (ptr-write-u64 (+ cbuf 8) 0 cbuf-w1)
+         (ptr-write-u64 (+ cbuf 16) 0 cbuf-w2)
+         (nl_alloc_symbol cbuf clen expected)
          (wf_write_nil nil-slot)
-         (wf_cons_int (ptr-read-u64 cwf 0) nil-slot s3)
-         (wf_cons_int (ptr-read-u64 cnblk 0) s3 s2)
-         (wf_cons_int (ptr-read-u64 cout 0) s2 s1)
-         (wf_cons_int (ptr-read-u64 cin 0) s1 out)
-         0)))
+         (nelisp_cons_construct offender nil-slot data-tail)
+         (nelisp_cons_construct expected data-tail 268435512)
+         (ptr-write-u64 268435472 0 1)
+         (atomic-fetch-add 268435544 1)
+         1)))
+    (defun bf_arith_error ()
+      (let* ((sbuf (alloc-bytes 24 1)))
+        (seq
+         (ptr-write-u64 sbuf 0 8243044619624477281)
+         (ptr-write-u64 (+ sbuf 8) 0 7499634)
+         (ptr-write-u64 (+ sbuf 16) 0 0)
+         (nl_alloc_symbol sbuf 11 268435480)
+         (wf_write_nil 268435512)
+         (ptr-write-u64 268435472 0 1)
+         (atomic-fetch-add 268435544 1)
+         1)))
+    (defun bf_wrong_type_int_or_marker (offender)
+      (bf_wrong_type_named offender 3274791373809938025 7308060583107850863 7351666 19))
+    (defun bf_first_non_integer (args)
+      (if (= (sexp-tag args) 7)
+          (let* ((a (nl_cons_car_ptr args)))
+            (if (= (ptr-read-u64 a 0) 2)
+                (bf_first_non_integer (nl_cons_cdr_ptr args))
+              a))
+        0))
+    (defun bf_wrong_type_number_or_marker (offender)
+      (let* ((wbuf (alloc-bytes 24 1))
+             (cbuf (alloc-bytes 24 1))
+             (expected (alloc-bytes 32 8))
+             (nil-slot (alloc-bytes 32 8))
+             (data-tail (alloc-bytes 32 8)))
+        (seq
+         (ptr-write-u64 wbuf 0 8751669898145395319)
+         (ptr-write-u64 (+ wbuf 8) 0 7887324063363589488)
+         (ptr-write-u64 (+ wbuf 16) 0 7630437)
+         (nl_alloc_symbol wbuf 19 268435480)
+         (ptr-write-u64 cbuf 0 8011185091930584430)   ; "number-o"
+         (ptr-write-u64 (+ cbuf 8) 0 8243112831976549746) ; "r-marker"
+         (ptr-write-u64 (+ cbuf 16) 0 28717)          ; "-p"
+         (nl_alloc_symbol cbuf 18 expected)
+         (wf_write_nil nil-slot)
+         (nelisp_cons_construct offender nil-slot data-tail)
+         (nelisp_cons_construct expected data-tail 268435512)
+         (ptr-write-u64 268435472 0 1)
+         (atomic-fetch-add 268435544 1)
+         1)))
+    )
+  "Core wf_* dispatch helpers (shared by baked + reader applyfn).")
+
+(defconst nelisp-standalone--applyfn-fa-file-helpers
+  '(
     ;; flat-arena boot-wiring (2): FILE persistence.  The cold-start image is
     ;; written to / read from a file as {64B header | table | regions}:
     ;;   header: magic@0, slen@8, isz@16, tlen@24, globals_off@32, frames_off@40,
@@ -5421,6 +5351,369 @@ unresolved at link time."
                     (wf_write_nil out)
                   (record-slot-ref entry 0 out)))
               0))))))
+    ;; The rest of the flat-arena in-memory swizzle machinery, moved from
+    ;; `nelisp-standalone--applyfn-core-helpers': it calls `nl_gc_mark_block'/
+    ;; `nl_gc_in_arena'/`nl_gc_pool_cap' (directly or transitively), which
+    ;; only `reader-gc.o' defines.  `nl_fa_field'/`nl_fa_emit' (no GC
+    ;; reference) still live in core-helpers; these reach them across the
+    ;; unit boundary the same way the file-persistence group above reaches
+    ;; `nl_fa_roots'/`bf_arena_mr_chunks'.
+    (defun nl_fa_vec_slots (data_ptr i len ds span dest cin cout dir)
+      (if (= (nl_gc_in_arena data_ptr) 0) 0
+        (let ((k i))
+          (while (< k len)
+            (nl_seq2
+             (let ((vw (ptr-read-u64 (+ data_ptr (* k 8)) 0)))
+               (if (= (logand vw 1) 1) 0
+                 (nl_seq2 (nl_fa_field (+ data_ptr (* k 8)) vw ds span dest cin cout dir)
+                          (if (= (nl_gc_mark_block vw) 0) 0
+                            (nl_fa_slot vw ds span dest cin cout dir)))))
+             (setq k (+ k 1))))
+          0)))
+    (defun nl_fa_cons (sp ds span dest cin cout dir)
+      (let ((box (ptr-read-u64 sp 8)))
+        (nl_seq2 (nl_fa_field (+ sp 8) box ds span dest cin cout dir)
+          (if (= (nl_gc_mark_block box) 0) 0
+            (nl_seq2
+             (let ((cw (ptr-read-u64 box 0)))
+               (if (= (logand cw 1) 1) 0
+                 (nl_seq2 (nl_fa_field box cw ds span dest cin cout dir)
+                          (if (= (nl_gc_mark_block cw) 0) 0
+                            (nl_fa_slot cw ds span dest cin cout dir)))))
+             (let ((dw (ptr-read-u64 box 8)))
+               (if (= (logand dw 1) 1) 0
+                 (nl_seq2 (nl_fa_field (+ box 8) dw ds span dest cin cout dir)
+                          (if (= (nl_gc_mark_block dw) 0) 0
+                            (if (= (ptr-read-u8 dw 0) 7)
+                                (nl_fa_cons dw ds span dest cin cout dir)
+                              (nl_fa_slot dw ds span dest cin cout dir)))))))))))
+    (defun nl_fa_slot (sp ds span dest cin cout dir)
+      (let ((tag (ptr-read-u8 sp 0)))
+        (if (= tag 7)
+            (nl_fa_cons sp ds span dest cin cout dir)
+          (if (= tag 8)
+              (let ((box (ptr-read-u64 sp 8)))
+                (nl_seq2 (nl_fa_field (+ sp 8) box ds span dest cin cout dir)
+                  (if (= (nl_gc_mark_block box) 0) 0
+                    (let ((data_ptr (ptr-read-u64 box 8)) (len (ptr-read-u64 box 16)))
+                      (nl_seq2 (nl_fa_field (+ box 8) data_ptr ds span dest cin cout dir)
+                               (nl_fa_vec_slots data_ptr 0 len ds span dest cin cout dir))))))
+            (if (= tag 12)
+                (let ((box (ptr-read-u64 sp 8)))
+                  (nl_seq2 (nl_fa_field (+ sp 8) box ds span dest cin cout dir)
+                    (if (= (nl_gc_mark_block box) 0) 0
+                      (let ((data_ptr (ptr-read-u64 box 32)) (len (ptr-read-u64 box 48)))
+                        (nl_seq2 (nl_fa_slot box ds span dest cin cout dir)
+                          (nl_seq2 (nl_fa_field (+ box 32) data_ptr ds span dest cin cout dir)
+                                   (nl_fa_vec_slots data_ptr 0 len ds span dest cin cout dir)))))))
+              (if (= tag 11)
+                  (let ((box (ptr-read-u64 sp 8)))
+                    (nl_seq2 (nl_fa_field (+ sp 8) box ds span dest cin cout dir)
+                      (if (= (nl_gc_mark_block box) 0) 0
+                        (let ((vw (ptr-read-u64 box 0)))
+                          (if (= (logand vw 1) 1) 0
+                            (nl_seq2 (nl_fa_field box vw ds span dest cin cout dir)
+                              (if (= (nl_gc_mark_block vw) 0) 0
+                                (nl_fa_slot vw ds span dest cin cout dir))))))))
+                (if (= tag 6)
+                    (let ((box (ptr-read-u64 sp 8)))
+                      (nl_seq2 (nl_fa_field (+ sp 8) box ds span dest cin cout dir)
+                        (if (= (nl_gc_mark_block box) 0) 0
+                          (nl_fa_field (+ box 8) (ptr-read-u64 box 8) ds span dest cin cout dir))))
+                  (if (= tag 5)
+                      (nl_fa_field (+ sp 16) (ptr-read-u64 sp 16) ds span dest cin cout dir)
+                    (if (= tag 4)
+                        (nl_fa_field (+ sp 16) (ptr-read-u64 sp 16) ds span dest cin cout dir)
+                      (if (= tag 9)
+                          (nl_fa_field (+ sp 8) (ptr-read-u64 sp 8) ds span dest cin cout dir)
+                        (if (= tag 10)
+                            (nl_fa_field (+ sp 8) (ptr-read-u64 sp 8) ds span dest cin cout dir)
+                          0)))))))))))
+    (defun nl_fa_pool_slots (base i cap ds span dest cin cout dir)
+      (let* ((k i))
+        (while (< k cap)
+          (nl_seq2 (nl_fa_slot (+ base (* k 32)) ds span dest cin cout dir)
+                   (setq k (+ k 1))))
+        0))
+    (defun nl_fa_pool (base cap ds span dest cin cout dir)
+      (if (= base 0) 0
+        (nl_fa_pool_slots base 0 cap ds span dest cin cout dir)))
+    (defun nl_fa_mirror_buckets (mirror ds span dest cin cout dir)
+      (if (= (sexp-tag mirror) 12)
+          (let* ((mirror_box (ptr-read-u64 mirror 8))
+                 (mirror_data (if (= (nl_gc_in_arena mirror_box) 0) 0
+                                (ptr-read-u64 mirror_box 32))))
+            (if (= (nl_gc_in_arena mirror_data) 0) 0
+              (let* ((ht_word (ptr-read-u64 mirror_data 0)))
+                (if (= (logand ht_word 1) 1) 0
+                  (if (= (nl_gc_in_arena ht_word) 0) 0
+                    (if (= (sexp-tag ht_word) 12)
+                        (let* ((ht_box (ptr-read-u64 ht_word 8))
+                               (ht_data (if (= (nl_gc_in_arena ht_box) 0) 0
+                                          (ptr-read-u64 ht_box 32))))
+                          (if (= (nl_gc_in_arena ht_data) 0) 0
+                            (let* ((buckets_word (ptr-read-u64 (+ ht_data 8) 0)))
+                              (if (= (logand buckets_word 1) 1) 0
+                                (if (= (nl_gc_in_arena buckets_word) 0) 0
+                                  (nl_seq2
+                                   (nl_fa_field (+ ht_data 8) buckets_word ds span dest cin cout dir)
+                                   (if (= (nl_gc_mark_block buckets_word) 0) 0
+                                     (nl_fa_slot buckets_word ds span dest cin cout dir))))))))
+                      0))))))
+        0))
+    (defun nl_fa_recorded_slot (sp ds span dest cin cout dir)
+      (if (= sp 0) 0
+        (nl_fa_slot sp ds span dest cin cout dir)))
+    (defun nl_fa_recorded_env (env ds span dest cin cout dir)
+      (if (= env 0) 0
+        (nl_seq2 (nl_fa_recorded_slot (+ env 0) ds span dest cin cout dir)
+         (nl_seq2 (nl_fa_mirror_buckets (+ env 0) ds span dest cin cout dir)
+          (nl_seq2 (nl_fa_recorded_slot (+ env 32) ds span dest cin cout dir)
+                   (nl_fa_recorded_slot (+ env 64) ds span dest cin cout dir))))))
+    ;; step 3c (all roots): walk every recorded frame's roots + global roots,
+    ;; mirroring `nl_gc_mark_recorded_frame' / `-contexts_from' /
+    ;; `nl_gc_mark_rootstack' / `nl_gc_mark_symentry' so the persisted
+    ;; relocation reaches the same pointer-slot families as GC.  In
+    ;; particular, POOL is a raw cap*32 Sexp buffer, not a single slot; missing
+    ;; those interiors leaves aliased Symbol/String buffers unre-based.
+    (defun nl_fa_frame_at (base ds span dest cin cout dir)
+      (nl_seq2
+       (nl_fa_recorded_env (ptr-read-u64 base 0) ds span dest cin cout dir)
+       (nl_seq2 (nl_fa_recorded_slot (ptr-read-u64 base 8) ds span dest cin cout dir)
+        (nl_seq2 (nl_fa_recorded_slot (ptr-read-u64 base 16) ds span dest cin cout dir)
+         (nl_seq2 (nl_fa_pool (ptr-read-u64 base 24) (nl_gc_pool_cap) ds span dest cin cout dir)
+          (nl_seq2 (nl_fa_recorded_slot (ptr-read-u64 base 32) ds span dest cin cout dir)
+           (nl_seq2 (nl_fa_recorded_slot (ptr-read-u64 base 40) ds span dest cin cout dir)
+                    (nl_fa_recorded_slot (ptr-read-u64 base 48) ds span dest cin cout dir))))))))
+    (defun nl_fa_frames_from (i depth ds span dest cin cout dir)
+      (if (< i depth)
+          (nl_seq2
+           (nl_fa_frame_at (+ (data-addr nl_gc_loop_ctx) (+ 64 (* i 56)))
+                           ds span dest cin cout dir)
+           (nl_fa_frames_from (+ i 1) depth ds span dest cin cout dir))
+        0))
+    (defun nl_fa_rootstack_walk (p end ds span dest cin cout dir)
+      (if (< p end)
+          (nl_seq2 (nl_fa_slot p ds span dest cin cout dir)
+                   (nl_fa_rootstack_walk (+ p 32) end ds span dest cin cout dir))
+        0))
+    (defun nl_fa_rootstack (ds span dest cin cout dir)
+      (if (= (ptr-read-u64 (data-addr nl_rootstack_top) 0) 0) 0
+        (nl_fa_rootstack_walk (data-addr nl_rootstack_region)
+                              (ptr-read-u64 (data-addr nl_rootstack_top) 0)
+                              ds span dest cin cout dir)))
+    (defun nl_fa_symentry (ds span dest cin cout dir)
+      (if (= (ptr-read-u64 268436328 0) 0) 0
+        (if (= (nl_gc_mark_block (ptr-read-u64 268436328 0)) 0) 0
+          (nl_fa_slot (ptr-read-u64 268436328 0) ds span dest cin cout dir))))
+    (defun nl_fa_roots (ds span dest cin cout dir)
+      (nl_seq2
+       (nl_fa_frames_from 0 (ptr-read-u64 (data-addr nl_gc_loop_ctx) 0)
+                          ds span dest cin cout dir)
+       (nl_seq2 (nl_fa_rootstack ds span dest cin cout dir)
+                (nl_fa_symentry ds span dest cin cout dir))))
+    (defun bf_arena_swizzle_verify (out)
+      (let* ((head (ptr-read-u64 268436160 0))
+             (sstart (ptr-read-u64 (+ head 24) 0))
+             (cursor (bf_arena_chunk_cursor head))
+             (slen (if (< cursor 1024) 0 (- cursor 1024)))
+             ;; dest holds the copied region in [0,slen); the verification
+             ;; counters live in the tail [slen, slen+256) of the SAME buffer
+             ;; so they are never inside the compared region nor written by
+             ;; the field-swizzle (which only writes dest+[0,slen)).
+             (dest (alloc-bytes (+ slen 256) 8))
+             (cin (+ dest slen)) (cout (+ dest slen 8)) (cmis (+ dest slen 16))
+             (ctr (+ dest slen 24))
+             (depth (ptr-read-u64 (data-addr nl_gc_loop_ctx) 0))
+             (env (if (= depth 0) 0
+                    (ptr-read-u64 (+ (data-addr nl_gc_loop_ctx) 64) 0)))
+             (i 0)
+             (nil-slot (alloc-bytes 32 8)) (s2 (alloc-bytes 32 8)) (s1 (alloc-bytes 32 8)))
+        (seq
+         (ptr-write-u64 cin 0 0) (ptr-write-u64 cout 0 0) (ptr-write-u64 cmis 0 0)
+         (ptr-write-u64 ctr 0 0)
+         ;; 1. bulk-copy chunk-0 live region
+         (while (< i slen)
+           (seq (ptr-write-u64 (+ dest i) 0 (ptr-read-u64 (+ sstart i) 0))
+                (setq i (+ i 8))))
+         (if (= env 0) 0
+           (seq
+            ;; 2. swizzle pass (abs -> offset) from ALL roots
+            (ptr-write-u64 (data-addr nl_gc_loop_ctx) 24 1)
+            (nl_fa_roots sstart slen dest cin cout 0)
+            (ptr-write-u64 (data-addr nl_gc_loop_ctx) 24 0)
+            (bf_arena_mr_chunks (ptr-read-u64 268436160 0) ctr ctr)   ; clear marks
+            ;; 3. unswizzle pass (offset -> abs)
+            (ptr-write-u64 (data-addr nl_gc_loop_ctx) 24 1)
+            (nl_fa_roots sstart slen dest cin cout 1)
+            (ptr-write-u64 (data-addr nl_gc_loop_ctx) 24 0)
+            (bf_arena_mr_chunks (ptr-read-u64 268436160 0) ctr ctr)
+            ;; 4. round-trip identity: copy must equal source again
+            (setq i 0)
+            (while (< i slen)
+              (seq (if (= (ptr-read-u64 (+ dest i) 0) (ptr-read-u64 (+ sstart i) 0)) 0
+                     (ptr-write-u64 cmis 0 (+ (ptr-read-u64 cmis 0) 1)))
+                   (setq i (+ i 8))))))
+         (wf_write_nil nil-slot)
+         (wf_cons_int (ptr-read-u64 cmis 0) nil-slot s2)
+         (wf_cons_int (ptr-read-u64 cout 0) s2 s1)
+         (wf_cons_int (ptr-read-u64 cin 0) s1 out)
+         0)))
+    ;; flat-arena spike step 4 (core LOAD mechanic): relocate the image into a
+    ;; FRESH base and prove the result is a structurally valid arena.  Copy
+    ;; chunk-0 into DEST (so DEST itself is the new base = where data-start now
+    ;; lives), then rebase every in-region pointer to DEST via the per-type
+    ;; walk (dir 2: DEST[field] = tgt + (dest - sstart)).  This is exactly what
+    ;; loading the relocatable image at a kernel-chosen base does.  Then verify
+    ;; the LOADED image is well-formed: a linear [header][object] walk of DEST
+    ;; must reach the end exactly (relocate only rewrote pointer fields, never
+    ;; the BLOCK_TOTAL headers).  Returns (RELOCATED-PTRS BLOCKS WELLFORMED);
+    ;; RELOCATED-PTRS should match the swizzle's in-region count and WELLFORMED
+    ;; = 1 means the load produced a sound arena at the new base.  (Single-root
+    ;; + chunk-0; the boot hook that installs a loaded image in place of the
+    ;; source replay is the remaining integration -- it needs the multi-region
+    ;; / multi-root completeness of step 3c first.)
+    (defun bf_arena_load_relocate_verify (out)
+      (let* ((head (ptr-read-u64 268436160 0))
+             (sstart (ptr-read-u64 (+ head 24) 0))
+             (cursor (bf_arena_chunk_cursor head))
+             (slen (if (< cursor 1024) 0 (- cursor 1024)))
+             ;; step 3c: the image is two regions -- chunk-0 [0,slen) then the
+             ;; interned symbol-name region [slen, slen+isz).  Copy BOTH so the
+             ;; relocated interned pointers (dest+slen+off) land on real data.
+             (abase (- sstart 1024))
+             (ib (ptr-read-u64 (+ abase 832) 0))
+             (ie (ptr-read-u64 (+ abase 840) 0))
+             (isz (nl_align_up (if (< ie ib) 0 (- ie ib)) 8))
+             (dest (alloc-bytes (+ (+ slen isz) 256) 8))
+             (crel (+ dest slen isz)) (cwf (+ dest slen isz 8))
+             (cnblk (+ dest slen isz 16)) (ctr (+ dest slen isz 24))
+             (depth (ptr-read-u64 (data-addr nl_gc_loop_ctx) 0))
+             (env (if (= depth 0) 0
+                    (ptr-read-u64 (+ (data-addr nl_gc_loop_ctx) 64) 0)))
+             (i 0) (j 0) (hdr 0)
+             (nil-slot (alloc-bytes 32 8)) (s2 (alloc-bytes 32 8)) (s1 (alloc-bytes 32 8)))
+        (seq
+         (ptr-write-u64 crel 0 0) (ptr-write-u64 cwf 0 1) (ptr-write-u64 cnblk 0 0)
+         ;; 1. copy chunk-0 live region into DEST (DEST is the new base)
+         (while (< i slen)
+           (seq (ptr-write-u64 (+ dest i) 0 (ptr-read-u64 (+ sstart i) 0))
+                (setq i (+ i 8))))
+         ;; 1b. copy the interned region into DEST[slen .. slen+isz)
+         (while (< j isz)
+           (seq (ptr-write-u64 (+ dest (+ slen j)) 0 (ptr-read-u64 (+ ib j) 0))
+                (setq j (+ j 8))))
+         (if (= env 0) 0
+           (seq
+            ;; 2. relocate DEST's in-region pointers to base = dest (dir 2),
+            ;; from ALL roots
+            (ptr-write-u64 (data-addr nl_gc_loop_ctx) 24 1)
+            (nl_fa_roots sstart slen dest crel ctr 2)
+            (ptr-write-u64 (data-addr nl_gc_loop_ctx) 24 0)
+            (bf_arena_mr_chunks (ptr-read-u64 268436160 0) ctr ctr)
+            ;; 3. verify the LOADED image: linear [hdr][obj] walk of DEST must
+            ;; reach the end exactly (block headers untouched by relocate).
+            (setq hdr 0)
+            (while (and (= (ptr-read-u64 cwf 0) 1) (< hdr slen))
+              (let* ((h (ptr-read-u64 (+ dest hdr) 0))
+                     (bt (- h (logand h 7))))
+                (if (< bt 8)
+                    (nl_seq2 (ptr-write-u64 cwf 0 0) (setq hdr slen))
+                  (if (> (+ hdr bt) slen)
+                      (nl_seq2 (ptr-write-u64 cwf 0 0) (setq hdr slen))
+                    (nl_seq2 (ptr-write-u64 cnblk 0 (+ (ptr-read-u64 cnblk 0) 1))
+                             (setq hdr (+ hdr bt)))))))
+            ;; require reaching the end exactly
+            (if (= hdr slen) 0 (ptr-write-u64 cwf 0 0))))
+         (wf_write_nil nil-slot)
+         (wf_cons_int (ptr-read-u64 cwf 0) nil-slot s2)
+         (wf_cons_int (ptr-read-u64 cnblk 0) s2 s1)
+         (wf_cons_int (ptr-read-u64 crel 0) s1 out)
+         0)))
+    ;; flat-arena spike step 4-boot precondition: capture the ROOT METADATA the
+    ;; boot loader needs.  An image is loaded by mmap'ing a fresh arena, copying
+    ;; the regions, relocating the pointers (steps done), then pointing a fresh
+    ;; EvalCtx's roots at the loaded root objects -- which requires each root's
+    ;; IMAGE OFFSET (where, within the image, its boxed object lives).
+    ;; `nl_img_off' maps an absolute address to its image offset (chunk-0 ->
+    ;; addr-ds; interned -> span + addr-ib; out -> -1).
+    ;; `bf_arena_image_root_verify' reports the image offsets of the 3 EvalCtx
+    ;; roots (globals_record @ env+0, frames_record @ env+32, unbound_marker @
+    ;; env+64; each a 32B Sexp slot whose boxed payload pointer is at slot+8).
+    ;; A non-negative offset means the root lives inside the dumped image and
+    ;; the boot can relocate + reinstall it as `newbase + offset'.  READ-ONLY.
+    (defun bf_arena_dump_table_verify (out)
+      (let* ((head (ptr-read-u64 268436160 0))
+             (sstart (ptr-read-u64 (+ head 24) 0))
+             (cursor (bf_arena_chunk_cursor head))
+             (slen (if (< cursor 1024) 0 (- cursor 1024)))
+             (abase (- sstart 1024))
+             (ib (ptr-read-u64 (+ abase 832) 0))
+             (ie (ptr-read-u64 (+ abase 840) 0))
+             (isz (nl_align_up (if (< ie ib) 0 (- ie ib)) 8))
+             (tcap (* 8 200000))
+             (dest (alloc-bytes (+ slen (+ isz (+ 256 tcap))) 8))
+             (tbl (+ dest (+ slen (+ isz 256))))
+             (cin (+ dest slen isz)) (cout (+ dest slen isz 8))
+             (cwf (+ dest slen isz 16)) (cnblk (+ dest slen isz 24))
+             (i 0) (j 0) (hdr 0) (ti 0) (n 0)
+             (nil-slot (alloc-bytes 32 8)) (s3 (alloc-bytes 32 8))
+             (s2 (alloc-bytes 32 8)) (s1 (alloc-bytes 32 8)))
+        (seq
+         (ptr-write-u64 cin 0 0) (ptr-write-u64 cout 0 0)
+         (ptr-write-u64 cwf 0 1) (ptr-write-u64 cnblk 0 0)
+         ;; 1. copy chunk-0 + interned into DEST
+         (while (< i slen)
+           (seq (ptr-write-u64 (+ dest i) 0 (ptr-read-u64 (+ sstart i) 0))
+                (setq i (+ i 8))))
+         (while (< j isz)
+           (seq (ptr-write-u64 (+ dest (+ slen j)) 0 (ptr-read-u64 (+ ib j) 0))
+                (setq j (+ j 8))))
+         ;; 2. swizzle DEST + emit the relocation table (dir 3)
+         (ptr-write-u64 (data-addr nl_gc_loop_ctx) 24 1)
+         (nl_fa_roots sstart slen dest cin cout 3)
+         (ptr-write-u64 (data-addr nl_gc_loop_ctx) 24 0)
+         (bf_arena_mr_chunks (ptr-read-u64 268436160 0) cnblk cnblk)
+         (ptr-write-u64 cnblk 0 0)
+         ;; 3. LOAD as the boot would: per table entry F, DEST[F] += DEST
+         (setq n (ptr-read-u64 cin 0))
+         (setq ti 0)
+         (while (< ti n)
+           (let ((f (ptr-read-u64 (+ tbl (* ti 8)) 0)))
+             (ptr-write-u64 (+ dest f) 0 (+ dest (ptr-read-u64 (+ dest f) 0))))
+           (setq ti (+ ti 1)))
+         ;; 4. verify the loaded image is well-formed (chunk-0 block walk)
+         (setq hdr 0)
+         (while (and (= (ptr-read-u64 cwf 0) 1) (< hdr slen))
+           (let* ((h (ptr-read-u64 (+ dest hdr) 0))
+                  (bt (- h (logand h 7))))
+             (if (< bt 8)
+                 (nl_seq2 (ptr-write-u64 cwf 0 0) (setq hdr slen))
+               (if (> (+ hdr bt) slen)
+                   (nl_seq2 (ptr-write-u64 cwf 0 0) (setq hdr slen))
+                 (nl_seq2 (ptr-write-u64 cnblk 0 (+ (ptr-read-u64 cnblk 0) 1))
+                          (setq hdr (+ hdr bt)))))))
+         (if (= hdr slen) 0 (ptr-write-u64 cwf 0 0))
+         (wf_write_nil nil-slot)
+         (wf_cons_int (ptr-read-u64 cwf 0) nil-slot s3)
+         (wf_cons_int (ptr-read-u64 cnblk 0) s3 s2)
+         (wf_cons_int (ptr-read-u64 cout 0) s2 s1)
+         (wf_cons_int (ptr-read-u64 cin 0) s1 out)
+         0)))
+    ;; flat-arena FILE persistence (nl_fa_write_all/nl_fa_read_all,
+    ;; bf_arena_dump_image_to_file/_stream, bf_arena_load_image_from_file,
+    ;; bf_arena_boot_load_verify, bf_arena_load_split_verify,
+    ;; bf_arena_value_survival, bf_arena_inplace_restore) moved to
+    ;; `nelisp-standalone--applyfn-fa-file-helpers' (reader-only).  They
+    ;; call the low-level `nl_os_write_file_handle' / `nl_os_read_file_handle'
+    ;; / `nl_os_open_write_truncate' / `nl_os_open_read' / `nl_os_close_handle'
+    ;; OS file primitives, which only the reader's per-target OS-base units
+    ;; define -- emitting this family into the baked eval applyfn left those
+    ;; OS symbols unresolved at link time (`make standalone-eval-test').  The
+    ;; in-memory swizzle machinery above (nl_fa_field/nl_fa_slot/nl_fa_roots
+    ;; and friends) stays here: it touches only cons/pointer/arena units
+    ;; present in every manifest, so both the file-persistence group and this
+    ;; core group can still call across the unit boundary at link time.
     ;; NB: the `bf_size_census*' arena-diagnostic family moved to
     ;; `nelisp-standalone--applyfn-census-helpers' (reader-only).  It calls
     ;; `nl_gc_bt_ok' / `nl_gc_chunk_end', which only `reader-gc.o' defines, so
@@ -5428,174 +5721,47 @@ unresolved at link time."
     ;; dispatch arm is absent — dead code) left those GC symbols unresolved at
     ;; link time.  Census stays available to the reader applyfn, which links
     ;; `reader-gc.o'.  (Blocker fix: eval-path `nl_gc_bt_ok' unresolved.)
-    (defun bf_arena_force_grow_smoke (out)
-      (let* ((chunk (ptr-read-u64 268436168 0))
-             (cursor-addr (if (= chunk (ptr-read-u64 268436160 0))
-                              268435456
-                            (+ chunk 16)))
-             (size (ptr-read-u64 (+ chunk 8) 0))
-             (near (if (< size 2048) 1024 (- size 32)))
-             (p 0))
-        (seq
-         (ptr-write-u64 cursor-addr 0 near)
-         (setq p (alloc-bytes 64 8))
-         (if (= p 0)
-             (wf_write_int out 0)
-           (bf_arena_stats out)))))
-    ;; wf_dirty: bump the MUTATION EPOCH counter @268435544 (NO-ESCAPE gate
-    ;; in `nelisp_eval_call').  Called by every primitive that installs a box
-    ;; into PRE-EXISTING (persistent) structure — setcar/setcdr/aset/puthash —
-    ;; so the per-eval arena reset never frees a still-reachable escapee.
-    (defun wf_dirty ()
-      ;; SeqCst atomic increment so concurrent threads (parallel build) never
-      ;; lose a mutation-epoch bump (the old read;+1;write was a racy RMW).
-      (atomic-fetch-add 268435544 1))
-    (defun wf_sum (list_ptr acc)
-      (if (= (ptr-read-u64 list_ptr 0) 7)
-          (let* ((car_ptr (nl_cons_car_ptr list_ptr)) (v (ptr-read-u64 car_ptr 8)))
-            (wf_sum (nl_cons_cdr_ptr list_ptr) (+ acc v))) acc))
-    (defun wf_prod (list_ptr acc)
-      (if (= (ptr-read-u64 list_ptr 0) 7)
-          (let* ((car_ptr (nl_cons_car_ptr list_ptr)) (v (ptr-read-u64 car_ptr 8)))
-            (wf_prod (nl_cons_cdr_ptr list_ptr) (* acc v))) acc))
-    ;; `/' folds over EVERY divisor: (/ 100 5 2) is 10, and reading only the
-    ;; first two arguments answered 20 -- a wrong number, silently.  Integer
-    ;; division by zero traps in hardware, so the divisors are scanned for a
-    ;; zero before any of them is used.
-    (defun wf_quot (list_ptr acc)
-      (if (= (ptr-read-u64 list_ptr 0) 7)
-          (wf_quot (nl_cons_cdr_ptr list_ptr)
-                   (/ acc (ptr-read-u64 (nl_cons_car_ptr list_ptr) 8)))
-        acc))
-    (defun wf_zero_divisor (list_ptr)
-      (if (= (ptr-read-u64 list_ptr 0) 7)
-          (if (= (ptr-read-u64 (nl_cons_car_ptr list_ptr) 8) 0)
-              1
-            (wf_zero_divisor (nl_cons_cdr_ptr list_ptr)))
-        0))
-    (defun wf_fdivtail (list_ptr acc_bits scratch)
-      (if (= (ptr-read-u64 list_ptr 0) 7)
-          (let* ((vb (wf_elem_fbits (nl_cons_car_ptr list_ptr) scratch)))
-            (let* ((result-bits (f64-bits (f64-div (bits-to-f64 acc_bits) (bits-to-f64 vb)))))
-              (seq (sexp-write-float scratch (bits-to-f64 result-bits))
-                   (wf_fdivtail (nl_cons_cdr_ptr list_ptr) (ptr-read-u64 scratch 8) scratch))))
-        acc_bits))
-    (defun wf_subtail (list_ptr acc)
-      (if (= (ptr-read-u64 list_ptr 0) 7)
-          (let* ((car_ptr (nl_cons_car_ptr list_ptr)) (v (ptr-read-u64 car_ptr 8)))
-            (wf_subtail (nl_cons_cdr_ptr list_ptr) (- acc v))) acc))
-    (defun wf_diff (list_ptr)
-      (if (= (ptr-read-u64 list_ptr 0) 7)
-          (let* ((car_ptr (nl_cons_car_ptr list_ptr)) (first (ptr-read-u64 car_ptr 8))
-                 (rest (nl_cons_cdr_ptr list_ptr)))
-            ;; elisp `-': 1-arg `(- x)' = NEGATION (-x), not x; n-arg subtracts
-            ;; the tail from the first.  The old `first' fallthrough made `(- 5)'
-            ;; return 5, breaking every `(ash v (- (* i 8)))' byte-extraction.
-            (if (= (ptr-read-u64 rest 0) 7) (wf_subtail rest first) (- 0 first))) 0))
-    ;; --- FLOAT-AWARE arithmetic.  The integer wf_sum/wf_prod/wf_subtail/wf_diff
-    ;; above read slot+8 as a raw i64 with NO tag check, so a Float operand
-    ;; (tag 3, IEEE-754 bits inline at +8) is folded as garbage and written via
-    ;; wf_write_int (tag 2 Int) -> `(+ 2.5 2.5)' returned a huge Int, not 5.0.
-    ;; These mirror the tag-aware wf_num_lt family + the reader's nl_str_to_float
-    ;; production idiom: the accumulator is carried as u64 BITS (i64-typed, safe
-    ;; across recursion).  A binop result is first reinterpreted with
-    ;; `f64-bits', then restored from a GP local with `bits-to-f64' for the
-    ;; dedicated `sexp-write-float' grammar op.  This is required because a
-    ;; generic call cannot safely marshal a binop result as the f64 argument of
-    ;; nl_sexp_write_float (especially under Win64's positional GP/XMM ABI).
-    ;; 0 = every argument is an integer, 1 = at least one float, 2 = one is
-    ;; not a number at all.  The third answer rides along on the walk this
-    ;; already does; a separate type-checking pass cost ~6% on an
-    ;; arithmetic-heavy benchmark, measured, and this costs nothing on the
-    ;; path that succeeds -- `wf_first_non_number' is called only to name the
-    ;; offender once the answer is already known to be 2.
-    (defun wf_has_float (list_ptr)
-      (if (= (ptr-read-u64 list_ptr 0) 7)
-          (if (= (ptr-read-u64 (nl_cons_car_ptr list_ptr) 0) 3)
-              1
-            (wf_has_float (nl_cons_cdr_ptr list_ptr)))
-        0))
-    ;; The WHOLE list is scanned for a non-number before any float is
-    ;; reported: stopping at the first float let (/ 1.5 nil) reach the float
-    ;; path, where nil's payload word became a divisor and the answer came
-    ;; back 1.0e+INF instead of the type error Emacs raises.
-    (defun wf_any_float (list_ptr)
-      (if (= (wf_first_non_number list_ptr) 0)
-          (wf_has_float list_ptr)
-        2))
-    (defun wf_elem_fbits (car_ptr scratch)
-      (if (= (ptr-read-u64 car_ptr 0) 3)
-          (ptr-read-u64 car_ptr 8)
-        (seq (sexp-write-float scratch (i64-to-f64 (ptr-read-u64 car_ptr 8)))
-             (ptr-read-u64 scratch 8))))
-    (defun wf_int_fbits (n scratch)
-      (seq (sexp-write-float scratch (i64-to-f64 n)) (ptr-read-u64 scratch 8)))
-    (defun wf_fsum (list_ptr acc_bits scratch)
-      (if (= (ptr-read-u64 list_ptr 0) 7)
-          (let* ((vb (wf_elem_fbits (nl_cons_car_ptr list_ptr) scratch)))
-            (let* ((result-bits (f64-bits (f64-add (bits-to-f64 acc_bits) (bits-to-f64 vb)))))
-              (seq (sexp-write-float scratch (bits-to-f64 result-bits))
-                   (wf_fsum (nl_cons_cdr_ptr list_ptr) (ptr-read-u64 scratch 8) scratch))))
-        acc_bits))
-    (defun wf_fprod (list_ptr acc_bits scratch)
-      (if (= (ptr-read-u64 list_ptr 0) 7)
-          (let* ((vb (wf_elem_fbits (nl_cons_car_ptr list_ptr) scratch)))
-            (let* ((result-bits (f64-bits (f64-mul (bits-to-f64 acc_bits) (bits-to-f64 vb)))))
-              (seq (sexp-write-float scratch (bits-to-f64 result-bits))
-                   (wf_fprod (nl_cons_cdr_ptr list_ptr) (ptr-read-u64 scratch 8) scratch))))
-        acc_bits))
-    (defun wf_fsubtail (list_ptr acc_bits scratch)
-      (if (= (ptr-read-u64 list_ptr 0) 7)
-          (let* ((vb (wf_elem_fbits (nl_cons_car_ptr list_ptr) scratch)))
-            (let* ((result-bits (f64-bits (f64-sub (bits-to-f64 acc_bits) (bits-to-f64 vb)))))
-              (seq (sexp-write-float scratch (bits-to-f64 result-bits))
-                   (wf_fsubtail (nl_cons_cdr_ptr list_ptr) (ptr-read-u64 scratch 8) scratch))))
-        acc_bits))
-    (defun wf_fdiff (list_ptr scratch)
-      (let* ((first_b (wf_elem_fbits (nl_cons_car_ptr list_ptr) scratch))
-             (rest (nl_cons_cdr_ptr list_ptr)))
-        ;; elisp `-': 1-arg = negation; n-arg = first - rest.  Negate via x*-1.0
-        ;; (sign XOR), NOT 0.0-x, so -(+0.0) yields -0.0 (Doc 159 §12).
-        (if (= (ptr-read-u64 rest 0) 7)
-            (wf_fsubtail rest first_b scratch)
-          (let* ((result-bits (f64-bits (f64-mul (bits-to-f64 first_b) (i64-to-f64 -1)))))
-            (seq (sexp-write-float scratch (bits-to-f64 result-bits))
-                 (ptr-read-u64 scratch 8))))))
-    ;; float `/' (2-arg, mirroring the integer `/' arity): a/b in f64.
-    (defun wf_fdiv2 (args scratch)
-      (let* ((ab (wf_elem_fbits (wf_arg_ptr args 0) scratch))
-             (bb (wf_elem_fbits (wf_arg_ptr args 1) scratch)))
-        (let* ((result-bits (f64-bits (f64-div (bits-to-f64 ab) (bits-to-f64 bb)))))
-          (sexp-write-float scratch (bits-to-f64 result-bits)))))
-    ;; float -> int conversions (each takes a Float Sexp ptr; integer args are
-    ;; handled as identity in the dispatch arm).  f64-to-i64-trunc rounds toward
-    ;; zero (= truncate); floor rounds toward -inf, ceiling toward +inf.  Cross-
-    ;; arch safe (no syscall).  Note: `round' (banker's rounding) and `float-time'
-    ;; (needs a per-arch clock_gettime OS helper) are deferred.
-    (defun wf_ftrunc (p)
-      (f64-to-i64-trunc (bits-to-f64 (sexp-float-unwrap p))))
-    (defun wf_ffloor (p)
-      (let* ((t0 (f64-to-i64-trunc (bits-to-f64 (sexp-float-unwrap p)))))
-        (if (= (f64-lt (bits-to-f64 (sexp-float-unwrap p)) (i64-to-f64 t0)) 1)
-            (- t0 1)
-          t0)))
-    (defun wf_fceil (p)
-      (let* ((t0 (f64-to-i64-trunc (bits-to-f64 (sexp-float-unwrap p)))))
-        (if (= (f64-gt (bits-to-f64 (sexp-float-unwrap p)) (i64-to-f64 t0)) 1)
-            (+ t0 1)
-          t0)))
-    ;; float-time wrapper: the nl_os_float_time extern must be called from a
-    ;; helper defun (its own frame), not inline in a dispatch arm -- an inline
-    ;; extern call from the spliced dispatch if-chain aborts at runtime (same as
-    ;; nl_sexp_write_float, which only works from wf_fsum/wf_fprod helpers).
-    ;; Write into a fresh scratch slot, then copy to `out' -- exactly like the
-    ;; float arithmetic (nl_sexp_write_float -> scratch, wf_copy32 -> out).
-    ;; Calling the extern with `out' (the dispatch result slot) directly aborts.
-    (defun wf_float_time (out)
-      (let* ((sc (alloc-bytes 32 8)))
-        (seq (nl_os_float_time sc) (wf_copy32 out sc))))
-    )
-  "Core wf_* dispatch helpers (shared by baked + reader applyfn).")
+
+    ;; stream each chunk's live region [cds,cds+used) to FD in chain (=logical) order.
+    (defun nl_mc_write_chunks (fd chunk)
+      (if (= chunk 0) 0
+        (nl_seq2
+         (nl_fa_write_all fd (+ (ptr-read-u64 chunk 0) 1024)
+                          (bf_arena_chunk_used chunk) 0)
+         (nl_mc_write_chunks fd (ptr-read-u64 (+ chunk 48) 0)))))
+
+  )
+  "The flat-arena persistence + swizzle family (Doc 156), excised from
+`nelisp-standalone--applyfn-core-helpers': FILE dump/load-image-to/from-file
+(`nl_fa_write_all'/`_read_all', `bf_arena_dump_image_to_file'/`_stream',
+`bf_arena_load_image_from_file' &c., `nl_mc_write_chunks') plus the
+in-memory pointer-swizzle machinery they call that itself touches the real
+GC (`nl_fa_cons'/`_slot'/`_vec_slots'/`_mirror_buckets'/`_frame_at'/
+`_symentry'/`_recorded_slot'/`_recorded_env'/`_frames_from'/`_rootstack'/
+`_rootstack_walk'/`_pool'/`_pool_slots', `bf_arena_swizzle_verify'/
+`_load_relocate_verify'/`_dump_table_verify', `bf_arena_mark_reach_verify'
+-- the last of these lives in `nelisp-standalone--applyfn-census-helpers'
+instead, alongside its `bf_size_census' analogue).
+READER-ONLY for two independent reasons: (1) the file-persistence half
+calls `nl_os_write_file_handle'/`nl_os_read_file_handle'/
+`nl_os_open_write_truncate'/`nl_os_open_read'/`nl_os_close_handle', OS file
+primitives only the reader's per-target OS-base units define; (2) the
+swizzle half calls `nl_gc_mark_block'/`nl_gc_in_arena'/`nl_gc_pool_cap',
+which only `reader-gc.o' defines.  Either dependency alone would unresolve
+at eval-manifest link time; the baked eval applyfn never emits any of this
+because its own dispatch arms (`nelisp--arena-dump-image-to-file' &c.) all
+sit past `nelisp-standalone--applyfn-dispatch-table-baked''s 19-entry
+cutoff -- dead code, not a live reference, so nothing baked ever called
+INTO this family in the first place; the bug was this family's own bodies
+being compiled into applyfn.o regardless.  Reader applyfn links
+`reader-fileio.o' / target OS units / `reader-gc.o', so it can still call
+both.  The pure-arithmetic leaves this family calls back into
+(`nl_fa_field'/`nl_fa_emit', `nl_mc_logoff'/`_phys'/`_total'/`_imgoff',
+`bf_arena_mr_chunk'/`_mr_chunks', `bf_arena_chunk_cursor'/`_chunk_used'/
+`_chunks_used', &c.) have no GC/OS reference of their own and stay in
+`nelisp-standalone--applyfn-core-helpers', reached across the unit boundary
+the same way `nelisp_eval_call' already reaches into `reader-gc.o'."
+)
 
 ;; bf_size_census arena-diagnostic family (Doc 08 §8.14): BLOCK_TOTAL histogram
 ;; over the whole arena.  READER-ONLY: it walks the heap via `nl_gc_bt_ok' /
@@ -5740,9 +5906,35 @@ unresolved at link time."
          (wf_cons_int (ptr-read-u64 (+ acc 32) 0) s3 s2)
          (wf_cons_int (ptr-read-u64 (+ acc 24) 0) s2 s1)
          (wf_cons_int (ptr-read-u64 (+ acc 16) 0) s1 out)
+         0)))
+    ;; bf_arena_mark_reach_verify (Doc 156): moved from
+    ;; `nelisp-standalone--applyfn-core-helpers'.  Same reason as the
+    ;; census family above -- it calls the real GC mark entry points
+    ;; (`nl_gc_mark_recorded_contexts' / `-rootstack' / `-symentry'),
+    ;; which only `reader-gc.o' defines.  `bf_arena_mr_chunk'/`-mr_chunks'
+    ;; (the pure pointer-walk half) stay in core-helpers; this reaches
+    ;; them across the unit boundary the same way the census walk reaches
+    ;; `nl_gc_bt_ok'/`nl_gc_chunk_end'.
+    (defun bf_arena_mark_reach_verify (out)
+      (let* ((reach (alloc-bytes 8 8)) (total (alloc-bytes 8 8))
+             (nil-slot (alloc-bytes 32 8)) (s1 (alloc-bytes 32 8)))
+        (seq
+         (ptr-write-u64 reach 0 0)
+         (ptr-write-u64 total 0 0)
+         (ptr-write-u64 (data-addr nl_gc_loop_ctx) 24 1)
+         (nl_gc_mark_recorded_contexts)
+         (nl_gc_mark_rootstack)
+         (nl_gc_mark_symentry)
+         (ptr-write-u64 (data-addr nl_gc_loop_ctx) 24 0)
+         (bf_arena_mr_chunks (ptr-read-u64 268436160 0) reach total)
+         (wf_write_nil nil-slot)
+         (wf_cons_int (ptr-read-u64 total 0) nil-slot s1)
+         (wf_cons_int (ptr-read-u64 reach 0) s1 out)
          0))))
-  "Reader-only arena size-census diagnostics (call `nl_gc_bt_ok' /
-`nl_gc_chunk_end' from `reader-gc.o'); excluded from the baked eval applyfn.")
+  "Reader-only arena size-census + mark-reach diagnostics (call
+`nl_gc_bt_ok'/`nl_gc_chunk_end'/`nl_gc_mark_recorded_contexts'/
+`-rootstack'/`-symentry' from `reader-gc.o'); excluded from the baked
+eval applyfn.")
 
 ;; M4 hash-table helpers (cons-alist v1).  Reader-only: wf_key_eq uses symbol-eq
 ;; / str-eq grammar ops that lower to extern calls present only in the reader.
@@ -7758,11 +7950,16 @@ unresolved at link time."
     ;; condition-case never matched.  bf_signal re-allocs from the passed symbol's
     ;; name bytes (ptr@16/len@24 of a tag-4 Symbol); bf_error stashes the literal
     ;; `error' symbol (elisp `(error MSG)' signals the `error' condition).
-    (defun bf_sig_copy32 (dst src)
-      (seq (ptr-write-u64 dst 0 (ptr-read-u64 src 0))
-           (ptr-write-u64 dst 8 (ptr-read-u64 src 8))
-           (ptr-write-u64 dst 16 (ptr-read-u64 src 16))
-           (ptr-write-u64 dst 24 (ptr-read-u64 src 24)) 0))
+    ;; bf_sig_copy32 moved to `nelisp-standalone--applyfn-core-helpers':
+    ;; it is core eval plumbing, not a reader-only extra.  `eval-inner.o'/
+    ;; `combiner-cons.o'/`combiner-apply.o' (lisp/nelisp-cc-eval-inner.el,
+    ;; -evalport-combiner-cons.el, -combiner-apply.el; all three genuine
+    ;; eval-manifest units) call it directly to stash a signal's TAG/DATA
+    ;; when raising void-function/wrong-type-argument/invalid-function, so
+    ;; leaving it here (reader-only) left it unresolved at eval-manifest
+    ;; link time -- masked until the gc-ctx/flat-arena fixes let the linker
+    ;; reach this far.  `bf_signal'/`bf_error' below (their own dispatch
+    ;; arms sit past the baked-19 cutoff) still call it, now cross-unit.
     (defun bf_signal (args out)
       (let* ((sym (wf_arg_ptr args 0))
              (data (wf_arg_ptr args 1)))
@@ -7905,30 +8102,14 @@ unresolved at link time."
          (ptr-write-u64 268435472 0 1)
          (atomic-fetch-add 268435544 1)
          1)))
-    ;; `zerop' is (= N 0), and `=' names `number-or-marker-p' when its
-    ;; argument is not a number -- not `numberp'.  Same shape as
-    ;; `bf_wrong_type_listp'; the 18-byte predicate name needs three writes.
-    (defun bf_wrong_type_named (offender cbuf-w0 cbuf-w1 cbuf-w2 clen)
-      (let* ((wbuf (alloc-bytes 24 1))
-             (cbuf (alloc-bytes 24 1))
-             (expected (alloc-bytes 32 8))
-             (nil-slot (alloc-bytes 32 8))
-             (data-tail (alloc-bytes 32 8)))
-        (seq
-         (ptr-write-u64 wbuf 0 8751669898145395319)
-         (ptr-write-u64 (+ wbuf 8) 0 7887324063363589488)
-         (ptr-write-u64 (+ wbuf 16) 0 7630437)
-         (nl_alloc_symbol wbuf 19 268435480)
-         (ptr-write-u64 cbuf 0 cbuf-w0)
-         (ptr-write-u64 (+ cbuf 8) 0 cbuf-w1)
-         (ptr-write-u64 (+ cbuf 16) 0 cbuf-w2)
-         (nl_alloc_symbol cbuf clen expected)
-         (wf_write_nil nil-slot)
-         (nelisp_cons_construct offender nil-slot data-tail)
-         (nelisp_cons_construct expected data-tail 268435512)
-         (ptr-write-u64 268435472 0 1)
-         (atomic-fetch-add 268435544 1)
-         1)))
+    ;; bf_wrong_type_named, bf_arith_error, bf_wrong_type_int_or_marker,
+    ;; bf_first_non_integer and bf_wrong_type_number_or_marker moved to
+    ;; `nelisp-standalone--applyfn-core-helpers': the baked eval dispatch
+    ;; table's mod/%/arithmetic/comparison arms (in the shared
+    ;; `nelisp-standalone--applyfn-dispatch-table', baked subset included)
+    ;; reference them, and only core-helpers is in the baked applyfn --
+    ;; error-checked arithmetic is language-rule core, not a reader-only
+    ;; extra, so the baked dispatch table keeps every arm that used them.
     ;; Each of these names a DIFFERENT predicate, and a handler matches on the
     ;; name -- so one generic "bad type" signal would be no better than none.
     ;; (/ 1 0) and (% 1 0) trapped in hardware -- SIGFPE, no signal stash, so
@@ -7964,25 +8145,12 @@ unresolved at link time."
          (ptr-write-u64 268435472 0 1)
          (atomic-fetch-add 268435544 1)
          1)))
-    (defun bf_arith_error ()
-      (let* ((sbuf (alloc-bytes 24 1)))
-        (seq
-         (ptr-write-u64 sbuf 0 8243044619624477281)
-         (ptr-write-u64 (+ sbuf 8) 0 7499634)
-         (ptr-write-u64 (+ sbuf 16) 0 0)
-         (nl_alloc_symbol sbuf 11 268435480)
-         (wf_write_nil 268435512)
-         (ptr-write-u64 268435472 0 1)
-         (atomic-fetch-add 268435544 1)
-         1)))
     (defun bf_wrong_type_numberp (offender)
       (bf_wrong_type_named offender 31650977160197486 0 0 7))
     (defun bf_wrong_type_fixnump (offender)
       (bf_wrong_type_named offender 31645548523579750 0 0 7))
     (defun bf_wrong_type_integerp (offender)
       (bf_wrong_type_named offender 8102650174351109737 0 0 8))
-    (defun bf_wrong_type_int_or_marker (offender)
-      (bf_wrong_type_named offender 3274791373809938025 7308060583107850863 7351666 19))
     (defun bf_wrong_type_characterp (offender)
       (bf_wrong_type_named offender 7310577365311121507 28786 0 10))
     ;; ONE walk, in argument order: each byte is type-checked and then
@@ -8022,13 +8190,6 @@ unresolved at link time."
          (ptr-write-u64 268435472 0 1)
          (atomic-fetch-add 268435544 1)
          1)))
-    (defun bf_first_non_integer (args)
-      (if (= (sexp-tag args) 7)
-          (let* ((a (nl_cons_car_ptr args)))
-            (if (= (ptr-read-u64 a 0) 2)
-                (bf_first_non_integer (nl_cons_cdr_ptr args))
-              a))
-        0))
     ;; Measured on Emacs 30.1, and POSITION-dependent rather than
     ;; type-dependent: the FIRST argument names `integer-or-marker-p'
     ;; whatever is wrong with it, and a later one names
@@ -8066,27 +8227,6 @@ unresolved at link time."
          (nl_alloc_symbol wbuf 19 268435480)
          (ptr-write-u64 cbuf 0 31644423040104819) ; "symbolp"
          (nl_alloc_symbol cbuf 7 expected)
-         (wf_write_nil nil-slot)
-         (nelisp_cons_construct offender nil-slot data-tail)
-         (nelisp_cons_construct expected data-tail 268435512)
-         (ptr-write-u64 268435472 0 1)
-         (atomic-fetch-add 268435544 1)
-         1)))
-    (defun bf_wrong_type_number_or_marker (offender)
-      (let* ((wbuf (alloc-bytes 24 1))
-             (cbuf (alloc-bytes 24 1))
-             (expected (alloc-bytes 32 8))
-             (nil-slot (alloc-bytes 32 8))
-             (data-tail (alloc-bytes 32 8)))
-        (seq
-         (ptr-write-u64 wbuf 0 8751669898145395319)
-         (ptr-write-u64 (+ wbuf 8) 0 7887324063363589488)
-         (ptr-write-u64 (+ wbuf 16) 0 7630437)
-         (nl_alloc_symbol wbuf 19 268435480)
-         (ptr-write-u64 cbuf 0 8011185091930584430)   ; "number-o"
-         (ptr-write-u64 (+ cbuf 8) 0 8243112831976549746) ; "r-marker"
-         (ptr-write-u64 (+ cbuf 16) 0 28717)          ; "-p"
-         (nl_alloc_symbol cbuf 18 expected)
          (wf_write_nil nil-slot)
          (nelisp_cons_construct offender nil-slot data-tail)
          (nelisp_cons_construct expected data-tail 268435512)
@@ -9515,6 +9655,7 @@ plus the nil-safe car/cdr and tag-aware eq fixes), plus the Step C `nl-ffi-call'
 extern arms in dynamic builds."
   (nelisp-standalone--applyfn-assemble
    (list nelisp-standalone--applyfn-core-helpers
+         nelisp-standalone--applyfn-fa-file-helpers
          nelisp-standalone--applyfn-census-helpers
         nelisp-standalone--applyfn-ht-helpers
         nelisp-standalone--applyfn-search-helpers
@@ -12503,6 +12644,11 @@ KERNEL32!ExitProcess with the driver return already in x0/w0."
 ;; Manifest — ORDERED unit list.  Each entry: (NAME KIND SRC).
 ;;   KIND = a feature symbol  -> (require it); SRC = its --source defvar symbol
 ;;        = :glue              -> SRC is a local glue defconst symbol
+;;        = :raw               -> SRC is a function symbol; (funcall SRC)
+;;                                 returns an already-built raw link unit
+;;                                 (hand-assembled bytes, no elisp source to
+;;                                 compile or cache -- mirrors how the reader
+;;                                 build wires the same two units)
 ;;        = :start / :driver   -> synthesized specially
 ;; _start first, arena last (linker convention).
 ;; ===================================================================
@@ -12556,7 +12702,32 @@ KERNEL32!ExitProcess with the driver return already in x0/w0."
     ;; deps (nl_sci_store_imm, nl_sexp_clone_into, nl_alloc_bytes) are already
     ;; provided by clone.o / arena.o, so this closes the eval link cascade.
     ("val-load.o"          nelisp-cc-val-load                    nelisp-cc-val-load--source)
+    ;; nl_sexp_write_float / nl_os_float_time: the raw hand-assembled units the
+    ;; reader build links unconditionally (`nelisp-standalone--reader-units'),
+    ;; needed here too -- the +/1+/1- float arms and `wf_float_time' in
+    ;; `nelisp-standalone--applyfn-core-helpers' (baked applyfn.o) call them,
+    ;; and no elisp `defun' can express either (see the two functions' own
+    ;; doc comments: AOT syscall<->f64 codegen aborts at runtime).
+    ("reader-float.o"     :raw    nelisp-standalone--reader-float-unit)
+    ("float-time.o"       :raw    nelisp-standalone--float-time-unit)
     ("trap.o"             :glue   nelisp-standalone--trap-source)
+    ;; Core GC/arena primitives (`nl_gc_in_arena'/`_is_boot'/`_mark_slot'/
+    ;; `_free_block' &c.), unconditionally needed by several OTHER manifest
+    ;; units above for their own arena bookkeeping: `arglist.o' frees scratch
+    ;; blocks via `nl_gc_free_block', `rootstack.o' marks via
+    ;; `nl_gc_mark_slot', `val-load.o'/`mirror-lookup.o' gate on
+    ;; `nl_gc_in_arena'/`nl_gc_is_boot' via `extern-call'.  These are load-
+    ;; bearing calls in those units' own runtime behavior, not dead code to
+    ;; excise -- unlike the flat-arena/census diagnostics moved out of
+    ;; `nelisp-standalone--applyfn-core-helpers' above, which really were
+    ;; unreachable in the baked build.  `nelisp-standalone--gc-source' is
+    ;; self-contained (no dependency on any reader-only I/O unit -- its own
+    ;; ctx-stack push/pop moved OUT to `nelisp-standalone--shim-source', see
+    ;; that group's header) and the reader build already links it
+    ;; unconditionally as "reader-gc.o", so linking it here under the same
+    ;; name is not new surface, just closing a gap several units already
+    ;; silently depended on.
+    ("reader-gc.o"        :glue   nelisp-standalone--gc-source)
     ("arena.o"            :glue   nelisp-standalone--arena-source))
   "Ordered standalone-eval unit manifest.")
 
@@ -12577,6 +12748,9 @@ KERNEL32!ExitProcess with the driver return already in x0/w0."
                   (nelisp-standalone--target-arena-source)
                 (symbol-value src))
               nelisp-standalone--this-file))
+      ;; Already a built link unit (hand-assembled bytes); nothing to compile
+      ;; or cache, unlike :glue/feature units above.
+      (:raw (funcall src))
       (_ ;; feature unit
        (require kind)
        (nelisp-standalone--cached-unit name (symbol-value src)
@@ -12593,11 +12767,12 @@ N processes never contend.  Used by the multi-process parallel build
 (`tools/build-standalone-parallel.sh' on POSIX and
 `tools/build-standalone-parallel.ps1' on Windows).
 
-NOTE: for the current 37-unit set the per-unit compile cost (~0.4s
-total) is far below the per-process emacs startup + module-load cost
-(~4s), so the serial build is faster.  Parallelism pays off only once
-per-unit compilation dominates startup (e.g. many more / much heavier
-units)."
+NOTE: for the current unit set (see `nelisp-standalone--manifest', 46
+entries as of this writing -- count it, do not trust this number) the
+per-unit compile cost (~0.4s total) is far below the per-process emacs
+startup + module-load cost (~4s), so the serial build is faster.
+Parallelism pays off only once per-unit compilation dominates startup
+(e.g. many more / much heavier units)."
   (let* ((idx (string-to-number (or (getenv "NELISP_CHUNK_IDX") "0")))
          (n   (max 1 (string-to-number (or (getenv "NELISP_CHUNK_N") "1"))))
          (pos 0))
@@ -12674,6 +12849,11 @@ units)."
   "Build then run the standalone binary; assert exit == expected.  Exits 0/1."
   (if (not (nelisp-standalone--target-runnable-on-host-p))
       (progn
+        ;; See `nelisp-standalone-reader-test': a GATE-SKIP line lets
+        ;; `tools/ai/nelisp-ai.sh gate' record this as a reasoned skip
+        ;; instead of exiting 0 silently, which reads as a pass.
+        (message "GATE-SKIP target %S cannot run on host %S"
+                 nelisp-standalone--target system-configuration)
         (message "[standalone] SKIP: target %S cannot run on host %S"
                  nelisp-standalone--target system-configuration)
         (kill-emacs 0))
@@ -12681,9 +12861,11 @@ units)."
       (pcase-let ((`(,_op ,_a ,_b ,expected) (nelisp-standalone--form-params)))
         (let ((code (call-process out nil nil nil)))
           (if (= code expected)
-              (progn (message "[standalone] PASS: %s -> exit %d (expected %d)"
+              (progn (message "GATE-COUNT checked=1 findings=0")
+                     (message "[standalone] PASS: %s -> exit %d (expected %d)"
                               out code expected)
                      (kill-emacs 0))
+            (message "GATE-COUNT checked=1 findings=1")
             (message "[standalone] FAIL: %s -> exit %d (expected %d)"
                      out code expected)
             (kill-emacs 1)))))))
@@ -17730,15 +17912,28 @@ genuine general interpreter for the 11 special forms + installed builtins."
                         (u (nelisp-standalone--compile-to-unit
                             name (nelisp-standalone--reader-driver-source))))
                    (push name nelisp-standalone--recompiled) u))
-         ;; helpers: shipped manifest minus arena/trap and minus the units we
+         ;; helpers: shipped manifest minus arena/trap/gc and minus the units we
          ;; build from PATCHED sources below (eval-inner = M4 keyword self-eval,
          ;; combiner-cons = M6 catch/throw, combiner-apply = M3 do_fset fix).
+         ;; reader-gc.o is excluded here because it is built explicitly below
+         ;; (the `gc' binding) exactly as before this unit was added to the
+         ;; eval manifest; without this exclusion the reader build would link
+         ;; two "reader-gc.o" units -- a duplicate-definition link error.
+         ;; :raw entries (reader-float.o / float-time.o) are excluded the same
+         ;; way and for the same reason: `float-stub'/`float-time-stub' below
+         ;; already build them explicitly (they predate those units' addition
+         ;; to the eval manifest); a `nelisp-link--duplicate-symbol' on
+         ;; "nl_os_float_time" caught this the first time the exclusion list
+         ;; was updated by name instead of by kind, so :raw is excluded as a
+         ;; class -- any future :raw manifest entry needs the same explicit
+         ;; reader-side binding and must not double up here either.
          (helpers (delq nil
                         (mapcar (lambda (entry)
                                   (pcase-let ((`(,name ,kind ,_src) entry))
-                                    (unless (or (memq kind '(:start :driver))
+                                    (unless (or (memq kind '(:start :driver :raw))
                                                 (string= name "arena.o")
                                                 (string= name "trap.o")
+                                                (string= name "reader-gc.o")
                                                 ;; applyfn.o built from the FULL
                                                 ;; reader source (HT+str+file)
                                                 ;; below, not the baked subset.
