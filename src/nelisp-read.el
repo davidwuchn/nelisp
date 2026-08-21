@@ -142,7 +142,18 @@ Return (VALUE . NEW-POS)."
                          (string-match-p "[.eE]" tok))
                     (float n)
                   n))
-            (intern tok))
+            ;; `nil' and `t' must be THE nil and THE t, not fresh symbols that
+            ;; merely print that way.  `intern' is canonical for them on some
+            ;; substrates this reader runs in and not on others -- measured
+            ;; 2026-08-21, the artifact command source path read `:preloads nil'
+            ;; into a symbol named "nil" for which `null', `listp' and
+            ;; `sequencep' all answered nil.  Nothing printed differently, so
+            ;; `(dolist (rec preloads) ...)' over it failed with
+            ;; `wrong-type-argument sequencep nil', naming a value that looks
+            ;; exactly like the one that would have been fine.
+            (cond ((string= tok "nil") nil)
+                  ((string= tok "t") t)
+                  (t (intern tok))))
           end)))
 
 (defun nelisp-read--hex-digit-value (c)

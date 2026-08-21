@@ -2854,6 +2854,32 @@ loaded directly with artifact probing disabled to avoid recursive retries."
           (list :artifact nil
                 :value (nelisp-load-file source-path))))))
 
+(defun nelisp-artifact--c-identifier (name)
+  "Return NAME with every character a C identifier cannot carry replaced by `_'.
+
+Written out rather than done with `replace-regexp-in-string' because this runs
+in the standalone artifact runtime, which does not define that function: it was
+reaching it only because `nelisp-aot-compiler.el' required the whole CC
+pipeline at top level and something in there happened to define it.  Making
+that require lazy turned a native-exec into `void-function:
+replace-regexp-in-string', which is a fair description of the dependency this
+code always had.  Sanitising a symbol name into a C identifier needs no regexp
+engine."
+  (let ((out "")
+        (i 0)
+        (n (length name)))
+    (while (< i n)
+      (let ((c (aref name i)))
+        (setq out (concat out (char-to-string
+                               (if (or (and (>= c ?a) (<= c ?z))
+                                       (and (>= c ?A) (<= c ?Z))
+                                       (and (>= c ?0) (<= c ?9))
+                                       (eq c ?_))
+                                   c
+                                 ?_)))))
+      (setq i (1+ i)))
+    out))
+
 (defun nelisp-artifact-native-exec (artifact-path symbol args)
   "Doc 142 §6.4 native EXEC: run the native SYMBOL embedded in a `.neln'.
 Extracts the ET_REL object from ARTIFACT-PATH's `:native' section, links
@@ -2882,7 +2908,7 @@ native object, or SYMBOL is not one of its native functions."
              (obj2 (expand-file-name "mod-c.o" dir))
              (csrc (expand-file-name "drv.c" dir))
              (exe (expand-file-name "run" dir))
-             (csym (replace-regexp-in-string "[^A-Za-z0-9_]" "_" symbol))
+             (csym (nelisp-artifact--c-identifier symbol))
              (argc (length args)))
         (unwind-protect
             (progn
@@ -3026,7 +3052,7 @@ on the hot path, so use a small deterministic rolling hash there."
            (obj2 (expand-file-name "mod-c.o" dir))
            (csrc (expand-file-name "drv.c" dir))
            (built-exe (expand-file-name "run" dir))
-           (csym (replace-regexp-in-string "[^A-Za-z0-9_]" "_" symbol)))
+           (csym (nelisp-artifact--c-identifier symbol)))
       (unwind-protect
           (progn
             (nelisp-artifact--write-native-object-file artifact-path obj)
@@ -3098,7 +3124,7 @@ for diagnostics, symbol checks, and non-simple artifacts."
            (obj2 (expand-file-name "mod-c.o" dir))
            (csrc (expand-file-name "drv.c" dir))
            (exe (expand-file-name "run" dir))
-           (csym (replace-regexp-in-string "[^A-Za-z0-9_]" "_" symbol))
+           (csym (nelisp-artifact--c-identifier symbol))
            (argc (length args)))
       (unwind-protect
           (progn
@@ -3884,7 +3910,7 @@ implementation."
            (csrc (expand-file-name "drv.c" dir))
            (build-log (expand-file-name "build.log" dir))
            (built-exe (expand-file-name "run" dir))
-           (csym (replace-regexp-in-string "[^A-Za-z0-9_]" "_" symbol)))
+           (csym (nelisp-artifact--c-identifier symbol)))
       (unwind-protect
           (progn
             (nelisp-artifact--write-native-object-file artifact-path obj)

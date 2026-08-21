@@ -109,9 +109,24 @@
 (require 'macroexp nil t)
 (require 'nelisp-asm-arm64)
 (require 'nelisp-asm-x86_64)
-(require 'nelisp-cc-runtime)
 (require 'nelisp-elf-write)
 (require 'nelisp-sexp-layout)
+;; `nelisp-cc-runtime' is required where it is used, in
+;; `nelisp-aot-compiler--module-init-plan', which is the one function in this
+;; file that calls into it.  As a top-level require it pulled `nelisp-cc',
+;; `nelisp-cc-x86_64', `nelisp-cc-arm64', `nelisp-cc-pipeline' and
+;; `nelisp-closure' in behind it, so anything loading the AOT compiler had to
+;; carry the whole CC pipeline whether or not it ever asked for a module-init
+;; plan.  The self-host driver does not, and once `require' began signalling on
+;; a missing file rather than silently succeeding, that showed up as
+;; `file-missing: nelisp-cc-runtime' in a test about compiling `fact'.
+;;
+;; Same shape as the `nelisp-asm-wasm', `nelisp-mach-o-write', `nelisp-pe-write'
+;; and `nelisp-wasm-write' requires already in this file: needed by one code
+;; path, loaded when that path runs.
+
+(declare-function nelisp-cc-runtime-aot-module-init-plan "nelisp-cc-runtime"
+                  (init-helpers custom-metadata gc-roots closures))
 
 (declare-function nelisp-asm-wasm-make-buffer "nelisp-asm-wasm")
 (declare-function nelisp-asm-wasm-buffer-bytes "nelisp-asm-wasm" (buf))
@@ -2310,6 +2325,7 @@ This is the compiler-side handoff that combines top-level variable init
 helpers, defcustom metadata, GC root descriptors, and AOT closure
 descriptors into the runtime plan consumed by
 `nelisp-cc-runtime-run-aot-module-init-plan'."
+  (require 'nelisp-cc-runtime)
   (let ((ir (nelisp-aot-compiler--parse sexp nil)))
     (nelisp-cc-runtime-aot-module-init-plan
      (nelisp-aot-compiler--init-helper-descriptors sexp)

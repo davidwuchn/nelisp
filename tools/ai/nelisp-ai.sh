@@ -67,6 +67,8 @@ usage: tools/ai/nelisp-ai.sh <command> [args]
   test                run the full ERT suite as gate "ert-full"
   standalone          build the binary and run gate "standalone-reader-test"
   native-artifact     build the binary and run gate "nelisp-native-artifact-gate"
+  selfhost            build the binary and run gate "standalone-selfhost-test"
+  perf                build the binary and run gate "nelisp-performance-gate"
   test-one FILE...    run selected test files as gate "ert-focus"
   compile             byte-compile with error-on-warn as gate "compile"
   ns [FILE...]        namespace check (defaults to the recipe skeletons)
@@ -155,6 +157,20 @@ cmd_native_artifact() {
     # adjacent artifact.  Builds a binary, so it is out of `check' alongside
     # `standalone'.
     cmd_gate nelisp-native-artifact-gate -- make nelisp-native-artifact-gate
+}
+
+cmd_selfhost() {
+    # The standalone interpreter loading its own compiler toolchain as source
+    # and emitting a native ELF, with no Emacs in the loop.  Builds a binary,
+    # so it is out of `check' with the other standalone gates.
+    cmd_gate standalone-selfhost-test -- make standalone-selfhost-test
+}
+
+cmd_perf() {
+    # Artifact runtime cache vs source fallback: both paths must load and eval
+    # the same module, and the build must restore the cache enable marker it
+    # removed.  Builds a binary; out of `check'.
+    cmd_gate nelisp-performance-gate -- make nelisp-performance-gate
 }
 
 cmd_standalone() {
@@ -468,6 +484,8 @@ case "$command" in
     test)           cmd_test ;;
     standalone)     cmd_standalone ;;
     native-artifact) cmd_native_artifact ;;
+    selfhost)       cmd_selfhost ;;
+    perf)           cmd_perf ;;
     test-one)       cmd_test_one "$@" ;;
     compile)        cmd_compile ;;
     gate)           cmd_gate "$@" ;;

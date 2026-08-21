@@ -30,10 +30,16 @@ driver="$(mktemp /tmp/nelisp-selfhost-mt-XXXXXX.el)"
 outbin="$(mktemp /tmp/nelisp-selfhost-mt-bin-XXXXXX)"
 trap 'rm -f "$driver" "$outbin"' EXIT
 
+# Dependency order matters now that `require' signals on a missing file
+# instead of silently succeeding: `nelisp-aot-compiler.el' requires the two
+# assemblers, the layout and the ELF writer, so in one concatenated file their
+# `provide' has to run first.  Same list and same reason as selfhost-test.sh.
 cat scripts/nelisp-stdlib-prelude.el \
-    lisp/nelisp-aot-compiler.el \
+    lisp/nelisp-asm-arm64.el \
     lisp/nelisp-asm-x86_64.el \
+    lisp/nelisp-sexp-layout.el \
     lisp/nelisp-elf-write.el \
+    lisp/nelisp-aot-compiler.el \
     lisp/nelisp-static-linker.el > "$driver"
 
 cat >> "$driver" <<'WRAP'

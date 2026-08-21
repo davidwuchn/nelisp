@@ -137,38 +137,37 @@ standalone-reader-test
 # binary.
 nelisp-native-artifact-gate
 #
-# The two below are not yet wired, and not wired blind: adding a wrapper
-# whose success path has never run would be the same unverified-gate
-# problem in a new place.
+# nelisp-performance-gate and standalone-selfhost-test were the last two of the
+# four that shared the `file-missing: url-parse' defect.  Both were past it and
+# failing on their own, and both are wired and required as of 2026-08-21.
 #
-# To adopt one, on a machine that can run it: give the script a
-# GATE-COUNT line where it already knows its case count, make the
-# can't-run path print a reason instead of failing, wrap it with
-# `nelisp-ai.sh gate', and move the name above this comment.
+# nelisp-performance-gate exercises the pair the artifact runtime cache exists
+# for: the same module loaded and evaluated through the cache and through the
+# source fallback, plus the build restoring the enable marker it removes.  Only
+# the cache half had ever run green.  The source half failed at `fallback_load'
+# with `wrong-type-argument sequencep nil', which was the reader turning
+# `:preloads nil' into a symbol NAMED "nil" -- one that prints as nil and
+# answers nil to `null', `listp' and `sequencep' alike.  Fixed in
+# `nelisp-read--sexp'.
 #
-# All four shared the `file-missing: url-parse' defect, and this file said
-# resolving it would unblock four gates at once.  Half right, measured
-# 2026-08-21 after cd64c0bd7:
+# standalone-selfhost-test is the standalone interpreter loading its own
+# compiler toolchain as source and emitting a native x86_64 ELF with no Emacs
+# in the loop.  It failed at `file-missing: nelisp-asm-arm64' because the
+# driver concatenated its files in the wrong dependency order -- harmless while
+# `require' silently succeeded on a missing file, fatal once it signalled.
+# Behind that were two more: `nelisp-aot-compiler.el' pulled the whole CC
+# pipeline in through one top-level require, and the assembler counted and
+# indexed its own output in CHARACTERS, so a two-byte instruction whose bytes
+# form valid UTF-8 read back as one character 455 and failed a byte range
+# check.
 #
-#   standalone-reader-test       green, and now required above
-#   nelisp-native-artifact-gate  green, and now required above -- the check
-#                                that carried url-parse was
-#                                `load_source_uses_neln', which now passes
-#   nelisp-performance-gate      past it: `cache_default_load' rc=0, now
-#                                fails at `fallback_load' with
-#                                "Wrong type argument: sequencep, nil"
-#   standalone-selfhost-test     past it: no longer `macroexp', now
-#                                `file-missing: nelisp-asm-arm64' -- a tree
-#                                file, so still the standalone require
-#                                question, not a host-library one
-#
-# So the common cause was real, two of the four are now required, and the two
-# remaining failures are each their own defect rather than the old chain.
-# Wire them when they are green.
-#
-# standalone-selfhost-test
-# nelisp-performance-gate
-#
+# Both skip the same way as the other standalone gates, by asking
+# `--target-runnable-on-host-p'.  `nelisp-ai.sh perf' and `nelisp-ai.sh
+# selfhost' produce the reports; both build a binary, so both stay out of
+# `check'.
+nelisp-performance-gate
+standalone-selfhost-test
+
 # `make audit' is deliberately absent: it exits 1 on 26 PENDING
 # sub-phases, which is a roadmap state rather than a defect, and a gate
 # that is red by design trains people to ignore the column.
