@@ -16,8 +16,20 @@ NELIX_LARGE_AOT_UPGRADE_PLAN_MAX_MS="${NELIX_LARGE_AOT_UPGRADE_PLAN_MAX_MS:-5000
 NELIX_LARGE_DIRECT_AUDIT_FORMAT_MAX_BYTES="${NELIX_LARGE_DIRECT_AUDIT_FORMAT_MAX_BYTES:-5100273664}"
 NELIX_LARGE_DIRECT_UPGRADE_PLAN_FORMAT_MAX_BYTES="${NELIX_LARGE_DIRECT_UPGRADE_PLAN_FORMAT_MAX_BYTES:-5100273664}"
 TMP_DIR="$(mktemp -d)"
+CHECKED=0
 
+# `nelisp-ai.sh gate' requires a `GATE-COUNT checked=<n> findings=<n>' line
+# on every path out of this script, success or failure -- its absence reads
+# as "did not report what it checked", not as a pass.  An EXIT trap is the
+# only place that covers every `exit' call below (including `run_timed's
+# on a failing labeled step) without repeating the line at each call site.
+# `$?' inside an EXIT trap is the status that triggered it, captured before
+# anything else in this handler can change it.
 cleanup() {
+  status=$?
+  findings=0
+  [ "$status" -eq 0 ] || findings=1
+  printf 'GATE-COUNT checked=%s findings=%s\n' "$CHECKED" "$findings"
   rm -rf "$TMP_DIR"
 }
 trap cleanup EXIT
@@ -139,6 +151,7 @@ EOF
 chmod +x "$FAKE_NIX"
 
 run_timed() {
+  CHECKED=$((CHECKED + 1))
   local label="$1"; shift
   local out_file="$TMP_DIR/$label.out"
   local err_file="$TMP_DIR/$label.err"

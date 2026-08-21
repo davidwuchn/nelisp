@@ -243,6 +243,10 @@ standalone-parallel-compile-test
 standalone-selfhost-mt-test
 wasm-runtime-image-smoke
 standalone-reader-smokes
+# nelisp-nelix-native-hot-gate: promoted 2026-08-21, see "THE nelix GATES,
+# PART 2" below -- also `nelisp-ai.sh extras' (needs target/nelisp built,
+# does not build it).
+nelisp-nelix-native-hot-gate
 #
 # CANNOT RUN HERE, AND NOW SAY SO: three of these exit 0 with a GATE-SKIP line
 # and a reason, which `verify' accepts for a required gate.  They are not
@@ -262,25 +266,120 @@ standalone-reader-smokes
 #                           wasm-runtime-image-smoke -- corrected here too, so
 #                           a machine that HAS the checkout gets past it.)
 #
-# NOT A HOST PROBLEM AFTER THE MEASUREMENT: the three nelix gates were filed
-# here as "needs an external checkout".  That was wrong -- `../nelix' exists
-# (its own repository, last commit 2026-06-25) and the gates reach it.  They
-# fail on defects:
+# THE nelix GATES, PART 2 (2026-08-21): both recorded defects below were run
+# down to file:line and one of the two is fixed.  `../nelix' is a separate
+# repository (its own git history, last commit 2026-06-25 before this pass)
+# reached by three make targets; they were filed above as "needs an external
+# checkout" and that was already known to be wrong -- the checkout exists and
+# the gates reach it.  This pass re-measured each of the three from scratch
+# (`make nelisp-nelix-command-gate`, `-operational-gate`, `-native-hot-gate`
+# from this repo's root) before touching anything, to have an against-the-bug
+# baseline rather than trusting the prose above.
 #
-#   nelisp-nelix-command-gate   `file-missing: "nelix-compat.el"'.  Not a
-#   nelisp-nelix-operational-gate  missing file: `../nelix/nelix-compat.el' is
-#                               there.  `nelix/bin/nelix' sets no `load-path'
-#                               for its nelisp-runtime path, so the
-#                               `(require 'nelix-compat)' in nelix-build.el and
-#                               friends cannot resolve.  Setting NELIX_LISPDIR
-#                               does not help (measured).
-#   nelisp-nelix-native-hot-gate  reaches the repo and fails on an output
-#                               mismatch at `standalone_subset_audit_id_native'.
+#   nelisp-nelix-native-hot-gate -- FIXED, now green, promoted below.
+#     Baseline matched the record exactly: reaches the nelix checkout, passes
+#     four checks, then `expect_out standalone_subset_audit_id_native' fails
+#     with expected="ok\tfalse\n...bat\nbackend\tnix\n" (literal backslash-t /
+#     backslash-n) vs. actual containing real TAB/NEWLINE bytes.  Byte-level
+#     capture (`xxd` on the artifact's raw stdout) showed the actual value is
+#     `"ok<TAB>false<NL>present<TAB>ripgrep<NL>...nix<NL>"' -- a real
+#     Elisp `prin1-to-string' rendering of that string, wrapped in quotes,
+#     control characters left untouched.  Verified against stock host Emacs
+#     30.1: `(prin1-to-string "a\tb\nc")` also embeds a real TAB/NEWLINE, not
+#     the two-character sequences -- `print-escape-newlines' is nil by
+#     default and tab is never escaped regardless.  So nelisp's native output
+#     was already correct and the defect was the gate's own hard-coded
+#     expectation, in THIS repo, not nelix: `tools/nelisp-nelix-native-hot-
+#     gate.sh:180` and `:189` (`standalone_subset_audit_id_native' and
+#     `standalone_subset_upgrade_id_native') now build the expected value
+#     with `printf' so `\t'/`\n' are read as real bytes, matching every other
+#     payload literal already in this script.  Re-measured after the fix:
+#     6 of 6 checks, `nelix_native_hot_gate_result label=nelix_native_hot_gate
+#     rc=0` -- twice, once through `nelisp-ai.sh gate ... -- make
+#     nelisp-nelix-native-hot-gate`.  Also gained a `GATE-COUNT' line (it had
+#     none before; `nelisp-ai.sh gate' was reading a green run as "no
+#     GATE-COUNT line", i.e. a failure by omission) -- see the sweep note
+#     below.
 #
-# The defect is in `dev/nelix', a separate repository, so it is recorded rather
-# than patched from here.  They are deliberately NOT given a GATE-SKIP: skipping
-# a gate that runs and finds a real defect is exactly how a check starts passing
-# by not running.
+#   nelisp-nelix-command-gate / nelisp-nelix-operational-gate -- ONE defect
+#     fixed, a SECOND, DIFFERENT one is now the block; still red.  Baseline
+#     matched the record: `file-missing: "nelix-compat.el"' from the first
+#     direct-runtime call (`nelisp_direct_list').  Root cause was in
+#     `dev/nelix', confirmed by tracing the actual signal (`file-missing',
+#     not `require's own `file-error' shape) to
+#     `dev/nelix/scripts/nelix-nelisp-smoke.el's `nelix-nelisp-smoke--load-
+#     compat', which called `(load "nelix-compat.el")' -- a bare relative
+#     filename.  NeLisp's standalone `load' primitive
+#     (`nelisp--builtin-load' in this repo's `src/nelisp-load.el') treats its
+#     argument as a literal path and never searches a load-path (only
+#     `require'/`nelisp-locate-file' do); every OTHER cross-file reference in
+#     `bin/nelix' already passes an absolute path in a dedicated variable
+#     (`nelix-nelisp-smoke-*-source'), so this one bare string was the actual
+#     gap, not a load-path that was never set.  Setting NELIX_LISPDIR alone
+#     never reached this call at all, which is why the earlier note that it
+#     "does not help" was correct as stated.  Fixed in `dev/nelix': a new
+#     `nelix-nelisp-smoke-compat-source' variable
+#     (`scripts/nelix-nelisp-smoke.el:58`, consumed at `:184`) that
+#     `bin/nelix:2225` resolves to `${NELIX_LISPDIR:-<repo>}/nelix-compat.el'
+#     (so NELIX_LISPDIR now actually reaches this path, the documented knob
+#     made functional) and `bin/nelix:2259` sets before the direct runner
+#     calls `nelix-nelisp-smoke-preload-suite-runtime'.  Re-measured: the
+#     `file-missing' error is gone.
+#
+#     Past that point a SECOND, unrelated defect is reached and is still
+#     open: `void-function: (defvaralias)`, from `nelix-core.el:95`'s
+#     `(defvaralias 'nelix-default-backend 'nelix-core-default-backend)' (and
+#     four more calls just below it) -- ordinary top-level Elisp that host
+#     Emacs's `--runtime emacs' path runs fine, but NeLisp's standalone
+#     runtime has never implemented `defvaralias'.  This is NOT the same
+#     class of bug as the first one and is NOT a quick addition: the
+#     standalone `target/nelisp' reader-path binary this gate actually runs
+#     does not read `src/nelisp-eval.el's generic `nelisp--install-
+#     primitives' as ordinary Elisp at build time -- confirmed by adding a
+#     `defvaralias' primitive there exactly the way `defalias' already sits
+#     (same function, same registration call) and rebuilding
+#     (`make standalone-reader'): `defalias'/`boundp'/`require' remain
+#     `fboundp' in the rebuilt binary, `defvaralias' does not.  The binary is
+#     instead linked from a hand-curated table of native compiled units
+#     (`scripts/nelisp-standalone-build.el:12509`,
+#     `nelisp-standalone--manifest', plus a second `...--reader-extra-
+#     manifest' of hand-written machine-code fragments with explicit
+#     register-ABI and GC-arena-epoch bookkeeping) -- adding a primitive
+#     there means writing a new compiled unit through that pipeline, not a
+#     one-line Elisp addition, and a wrong arena-epoch annotation on
+#     anything that writes a new global binding is the silent-corruption
+#     class of bug this repo's own `nelisp-cc' commit history warns about.
+#     That is deep enough to guess wrong, so the speculative `nelisp-eval.el'
+#     addition was reverted rather than kept half-working; `target/nelisp'
+#     was rebuilt back to a clean HEAD binary and reconfirmed at the same
+#     `defvaralias' failure before recording this.  Nothing here should be
+#     "papered over" by rewriting `nelix-core.el' to avoid `defvaralias'
+#     either: that call is ordinary, idiomatic Elisp that already works
+#     under host Emacs, so the gap is NeLisp's language coverage, not
+#     nelix's code -- the opposite direction from the first defect, and the
+#     same principle (fix belongs on the side that is actually wrong).
+#     `nelisp-nelix-command-gate' and `nelisp-nelix-operational-gate' stay
+#     unpromoted and unwired below until that gap has an owner.
+#
+# Both scripts are deliberately NOT given a GATE-SKIP for either defect:
+# skipping a gate that runs and finds a real defect is exactly how a check
+# starts passing by not running.
+#
+# `nelisp-nelix-native-hot-gate' is required below on the strength of the
+# green measurement above.  It needs `target/nelisp' already built, the same
+# precondition every `nelisp-ai.sh extras' member already has (none of the
+# six build the standalone binary themselves either -- they consume it, same
+# as this one), so it joins that tier rather than `check'.  It joined without
+# a `GATE-COUNT' line before this pass; it has one now (6 checks, one per
+# `run_timed' call, via an EXIT trap so a failing run still reports how far
+# it got instead of vanishing into "no GATE-COUNT line").  `nelisp-nelix-
+# command-gate' got the identical trap+counter treatment (22 checks) so a
+# fixed run reports honestly too, but it is not listed as required and not
+# wired into any tier below -- it is still red on the `defvaralias' defect
+# above, and requiring a gate whose green side nobody has seen is the same
+# problem this file exists to prevent.  `nelisp-nelix-operational-gate' has
+# no script of its own (a Makefile dependency on the other two) and follows
+# whichever of them is weaker; it stays unrequired for the same reason.
 #
 # gate-mutation injects a real defect in front of a gate and asks whether the
 # gate goes red.  On 2026-08-21 two of five did not, and it was listed here as

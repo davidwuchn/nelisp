@@ -15,8 +15,20 @@ NELIX_REPO="${NELIX_REPO:-$REPO_ROOT/../nelix}"
 NELISP="${NELISP:-$REPO_ROOT/target/nelisp}"
 EMACS="${EMACS:-emacs}"
 TMP_DIR="$(mktemp -d)"
+CHECKED=0
 
+# `nelisp-ai.sh gate' requires a `GATE-COUNT checked=<n> findings=<n>' line
+# on every path out of this script, success or failure -- its absence reads
+# as "did not report what it checked", not as a pass.  An EXIT trap covers
+# every `exit' call below (including a failing `run_timed'/`expect_*'
+# assertion) without repeating the line at each call site.  `$?' inside an
+# EXIT trap is the status that triggered it, captured before anything else
+# in this handler can change it.
 cleanup() {
+  status=$?
+  findings=0
+  [ "$status" -eq 0 ] || findings=1
+  printf 'GATE-COUNT checked=%s findings=%s\n' "$CHECKED" "$findings"
   rm -rf "$TMP_DIR"
 }
 trap cleanup EXIT
@@ -68,6 +80,7 @@ CLI_ART="$CLI_SRC.neln"
 SUBSET_ART="$SUBSET_SRC.neln"
 
 run_timed() {
+  CHECKED=$((CHECKED + 1))
   local label="$1"; shift
   local out_file="$TMP_DIR/$label.out"
   local err_file="$TMP_DIR/$label.err"
@@ -156,12 +169,24 @@ id_audit_payload="$(printf 'NELIX-AOT-MANIFEST-V1\ntarget-id\t2\t2\ntarget-id\t4
 run_timed standalone_subset_audit_id_native \
   timeout 120 "$NELISP" native-exec-elisp-artifact "$SUBSET_ART" \
   nelix-aot-native-builder-audit-id-report-proof "$id_audit_payload" ""
-expect_out standalone_subset_audit_id_native '"ok\tfalse\npresent\tripgrep\nmissing\tbat\nbackend\tnix\n"'
+# The expected value below must contain real tab/newline bytes, not the
+# two-character sequences `\t'/`\n'.  Emacs Lisp `prin1'/`prin1-to-string'
+# do not escape embedded tab or newline characters by default (only
+# `print-escape-newlines' controls the latter, and it is nil here) -- a
+# string prints as a double-quoted literal with its control characters
+# left untouched.  Verified against both stock Emacs 30.1 and this
+# artifact's actual standalone output on 2026-08-21; a literal
+# `\t'/`\n' pair here never matches either.
+expect_out standalone_subset_audit_id_native \
+  "$(printf '"ok\tfalse\npresent\tripgrep\nmissing\tbat\nbackend\tnix\n"')"
 
 id_upgrade_payload="$(printf 'NELIX-AOT-MANIFEST-V1\ntarget-id\t1\t1\ntarget-id\t2\t2\ntarget-id\t3\t3\npin-id\t2\ninstalled-id\t1\ninstalled-id\t2\nend\n')"
 run_timed standalone_subset_upgrade_id_native \
   timeout 120 "$NELISP" native-exec-elisp-artifact "$SUBSET_ART" \
   nelix-aot-native-builder-upgrade-id-report-proof "$id_upgrade_payload" ""
-expect_out standalone_subset_upgrade_id_native '"upgrade\tmagit\npinned\tripgrep\nmissing\tfd\nbackend\tnix\n"'
+# Same real-byte-vs-escape-sequence fix as standalone_subset_audit_id_native
+# above.
+expect_out standalone_subset_upgrade_id_native \
+  "$(printf '"upgrade\tmagit\npinned\tripgrep\nmissing\tfd\nbackend\tnix\n"')"
 
 echo "nelix_native_hot_gate_result label=nelix_native_hot_gate rc=0"

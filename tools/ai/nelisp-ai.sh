@@ -197,7 +197,8 @@ cmd_extras() {
              standalone-chunk-growth-test \
              standalone-parallel-compile-test \
              standalone-selfhost-mt-test \
-             wasm-runtime-image-smoke; do
+             wasm-runtime-image-smoke \
+             nelisp-nelix-native-hot-gate; do
         printf '\n=== %s ===\n' "$g"
         ( cmd_gate "$g" -- make "$g" ) || failures=$((failures + 1))
     done
