@@ -40,7 +40,12 @@
 ;; provides are split into hard and optional, because off-host an optional
 ;; require answers nil while a hard one stops the file and everything that
 ;; requires it.  The hard count is ratcheted against
-;; tools/pkg-host-requires-baseline.txt.
+;; tools/pkg-host-requires-baseline.txt, which also pins the hard requires by
+;; (FEATURE . FILE): a count alone cannot see one hard require dropped while a
+;; DIFFERENT one is added, net unchanged -- the same swap `gate-mutation'
+;; measured against `parity-coverage' on 2026-08-21.  A pinned pair going
+;; away is still green; one that is neither pinned nor already counted fails
+;; and names it.
 
 ;;; Code:
 
@@ -48,6 +53,20 @@
 
 (defconst nelisp-pkg-graph--host-baseline-file
   "tools/pkg-host-requires-baseline.txt")
+
+(defun nelisp-pkg-graph--host-pins ()
+  "Return the pinned hard host requires as a list of (FEATURE . FILE).
+Read from `pinned-host-require FEATURE FILE' lines in
+`nelisp-pkg-graph--host-baseline-file'."
+  (let ((pins nil))
+    (when (file-exists-p nelisp-pkg-graph--host-baseline-file)
+      (with-temp-buffer
+        (insert-file-contents nelisp-pkg-graph--host-baseline-file)
+        (goto-char (point-min))
+        (while (re-search-forward
+                "^pinned-host-require +\\([^ \n]+\\) +\\([^ \n]+\\)" nil t)
+          (push (cons (intern (match-string 1)) (match-string 2)) pins))))
+    (nreverse pins)))
 
 (defun nelisp-pkg-graph--host-baseline ()
   "Return the allowed number of hard host requires, or nil when unreadable.
@@ -128,6 +147,24 @@ and pass one that has many.  The caller says which it is."
       (princ (format "pkg-graph: FAIL (no hard-host-require line in %s)\n"
                      nelisp-pkg-graph--host-baseline-file))
       (kill-emacs 1))
+    (let ((host-pins (nelisp-pkg-graph--host-pins))
+          (new-host nil))
+      (dolist (entry host-hard)
+        (unless (member entry host-pins) (push entry new-host)))
+      (setq new-host (nreverse new-host))
+      (when new-host
+        (princ (format "pkg-graph: FAIL (%d hard host require(s) not in `pinned-host-require'):\n"
+                       (length new-host)))
+        (dolist (entry new-host)
+          (princ (format "    %-16s %s\n" (car entry) (cdr entry))))
+        (princ (format "  Add a `pinned-host-require' line in %s and say there why the file cannot load without the host.\n"
+                       nelisp-pkg-graph--host-baseline-file))
+        (kill-emacs 1))
+      (let ((stale-pins (seq-remove (lambda (p) (member p host-hard)) host-pins)))
+        (when stale-pins
+          (princ (format "    %d `pinned-host-require' line(s) no longer require a host feature -- safe to drop:\n"
+                         (length stale-pins)))
+          (dolist (p stale-pins) (princ (format "      %s %s\n" (car p) (cdr p)))))))
     (when (> (length host-hard) host-baseline)
       (princ (format "pkg-graph: FAIL (%d hard host require(s), baseline %d -- make it optional, or raise the baseline and say in that file why the file cannot load without the host)\n"
                      (length host-hard) host-baseline))

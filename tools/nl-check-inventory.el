@@ -17,21 +17,34 @@
 ;; a generator body and a plain call are the same question once the
 ;; question is "does this file belong to the kernel".
 ;;
-;; GROWTH (reported).  Inside the kernel the counts are printed, with the
-;; number of kernel files ratcheted against that file.  The call count is
-;; not gated: these files are made of raw memory operations and the count
-;; moves whenever the runtime does, so ratcheting it would mean a baseline
-;; bump in most runtime commits -- friction that teaches people to bump
-;; without reading, which is how a gate stops being read at all.  Batch driver: scan every .el under lisp/
-;; and scripts/ with `nl-check-file', count `unsafe-call' findings
-;; (unsafe primitives called outside an `nl-unsafe' block; quoted
-;; forms -- i.e. the AOT grammar data -- are not scanned by design),
-;; and fail when the total EXCEEDS the checked-in baseline in
-;; tools/unsafe-inventory-baseline.txt.
+;; GROWTH (gated two ways).  Batch driver: scan every .el under lisp/ and
+;; scripts/ with `nl-check-file', count `unsafe-call' findings (unsafe
+;; primitives called outside an `nl-unsafe' block; quoted forms -- i.e. the
+;; AOT grammar data -- are not scanned by design), and fail when the total
+;; EXCEEDS the checked-in baseline in tools/unsafe-inventory-baseline.txt.
+;; A total below the baseline does not fail; it prints a ratchet notice so
+;; the baseline can be lowered in the same change that shrank the surface.
 ;;
-;; A total below the baseline does not fail; it prints a ratchet
-;; notice so the baseline can be lowered in the same change that
-;; shrank the surface.
+;; A bare count cannot see a swap: one kernel file's calls could drop while
+;; a DIFFERENT kernel file's calls rise by the same amount, and `total'
+;; alone would not move.  Two identity-pinned sets close that, the same way
+;; `tools/parity-coverage-baseline.txt' pins covered names rather than only
+;; a count:
+;;
+;;   `pinned-kernel-touch' in tools/unsafe-kernel.txt is the file set behind
+;;   `kernel-files' -- every kernel file that touches raw memory at all
+;;   (unsafe-call OR a quoted form).  A file leaving the set is still green;
+;;   a file neither pinned nor previously counted starting to touch raw
+;;   memory fails and names the file, whatever `kernel-files' does.
+;;
+;;   `pinned-kernel-call' in tools/unsafe-inventory-baseline.txt is the
+;;   per-file `unsafe-call' count behind `total' (three files today).  A
+;;   file's count falling is still green; a file's count rising past its
+;;   pin, or a file gaining its first unquoted call outside the pinned set,
+;;   fails and names the file with its old and new counts.
+;;
+;; Both are generated from a clean tree, not hand-typed; see the header of
+;; either baseline file for how.
 ;;
 ;; Run from the repo root:
 ;;   emacs --batch -Q -L packages/nl-prelude/src -L packages/nl-safe/src \
@@ -42,6 +55,13 @@
 
 (require 'nl-check)
 
+(defun nl-check-inventory--minus (a b)
+  "Return the elements of A (a list of strings) not present in B."
+  (let ((have (make-hash-table :test #'equal)) (out nil))
+    (dolist (x b) (puthash x t have))
+    (dolist (x a) (unless (gethash x have) (push x out)))
+    (nreverse out)))
+
 (defconst nl-check-inventory--baseline-file
   "tools/unsafe-inventory-baseline.txt")
 
@@ -51,7 +71,10 @@
 (defun nl-check-inventory--kernel ()
   "Return (PATTERNS . COUNT) from the kernel file, or nil when unreadable.
 PATTERNS are anchored regexps; COUNT is the ratcheted number of kernel
-files that hold an unsafe call, or nil when the file names no count."
+files that hold an unsafe call, or nil when the file names no count.
+Lines starting `pinned-kernel-touch' are a different table -- read by
+`nl-check-inventory--touch-pins' -- and are skipped here so they are
+never mistaken for a glob pattern."
   (when (file-exists-p nl-check-inventory--kernel-file)
     (with-temp-buffer
       (insert-file-contents nl-check-inventory--kernel-file)
@@ -62,6 +85,7 @@ files that hold an unsafe call, or nil when the file names no count."
                                                      (line-end-position)))))
             (cond
              ((or (string-empty-p line) (string-prefix-p "#" line)) nil)
+             ((string-prefix-p "pinned-kernel-touch " line) nil)
              ((string-match "\\`kernel-files +\\([0-9]+\\)\\'" line)
               (setq count (string-to-number (match-string 1 line))))
              (t (setq patterns
@@ -69,6 +93,38 @@ files that hold an unsafe call, or nil when the file names no count."
                             patterns)))))
           (forward-line 1))
         (cons (nreverse patterns) count)))))
+
+(defun nl-check-inventory--touch-pins ()
+  "Return the kernel files pinned as touching raw memory today.
+Read from `pinned-kernel-touch NAME' lines in
+`nl-check-inventory--kernel-file'.  This is the set behind `kernel-files':
+a file leaving it is still green, a file joining it that was not already
+pinned fails and is named."
+  (let ((names nil))
+    (when (file-exists-p nl-check-inventory--kernel-file)
+      (with-temp-buffer
+        (insert-file-contents nl-check-inventory--kernel-file)
+        (goto-char (point-min))
+        (while (re-search-forward "^pinned-kernel-touch +\\([^ \n]+\\)" nil t)
+          (push (match-string 1) names))))
+    (nreverse names)))
+
+(defun nl-check-inventory--call-pins ()
+  "Return an alist of (FILE . COUNT) from `pinned-kernel-call' lines in
+`nl-check-inventory--baseline-file'.  This is the per-file breakdown
+behind `total': a file's count falling is still green, a file's count
+rising past its pin -- or a new file gaining a call -- fails and is
+named with its old and new counts."
+  (let ((rows nil))
+    (when (file-exists-p nl-check-inventory--baseline-file)
+      (with-temp-buffer
+        (insert-file-contents nl-check-inventory--baseline-file)
+        (goto-char (point-min))
+        (while (re-search-forward
+                "^pinned-kernel-call +\\([^ \n]+\\) +\\([0-9]+\\)" nil t)
+          (push (cons (match-string 1) (string-to-number (match-string 2)))
+                rows))))
+    (nreverse rows)))
 
 (defun nl-check-inventory--kernel-p (path patterns)
   "Return non-nil when PATH is inside the kernel described by PATTERNS."
@@ -123,6 +179,8 @@ the number."
          (kernel-patterns (car kernel))
          (kernel-baseline (cdr kernel))
          (kernel-count 0)
+         (kernel-touched nil)
+         (kernel-calls nil)
          (escapes nil)
          (total 0)
          (scanned 0)
@@ -144,7 +202,11 @@ the number."
                 (setq quoted-rows (cons (cons f q) quoted-rows)))
               (when (> (+ n q) 0)
                 (if (nl-check-inventory--kernel-p f kernel-patterns)
-                    (setq kernel-count (+ kernel-count 1))
+                    (progn
+                      (setq kernel-count (+ kernel-count 1))
+                      (push (file-relative-name f) kernel-touched)
+                      (when (> n 0)
+                        (push (cons (file-relative-name f) n) kernel-calls)))
                   (setq escapes (cons (list (file-relative-name f) n q)
                                       escapes)))))
           (error
@@ -160,7 +222,21 @@ the number."
       (dolist (e (sort escapes (lambda (a b) (string< (car a) (car b)))))
         (princ (format "      %-46s call=%-4d quoted=%d\n"
                        (nth 0 e) (nth 1 e) (nth 2 e)))))
-    (let ((baseline (nl-check-inventory--baseline)))
+    (let* ((baseline (nl-check-inventory--baseline))
+           (touch-pins (nl-check-inventory--touch-pins))
+           (new-touch (nl-check-inventory--minus kernel-touched touch-pins))
+           (call-pins (nl-check-inventory--call-pins))
+           (call-new nil)
+           (call-grew nil))
+      (dolist (c (sort (copy-sequence kernel-calls)
+                       (lambda (a b) (string< (car a) (car b)))))
+        (let ((pin (assoc (car c) call-pins)))
+          (cond
+           ((null pin) (push c call-new))
+           ((> (cdr c) (cdr pin)) (push (list (car c) (cdr pin) (cdr c)) call-grew)))))
+      (setq new-touch (sort new-touch #'string<))
+      (setq call-new (nreverse call-new))
+      (setq call-grew (nreverse call-grew))
       (princ (format "unsafe-inventory: total=%d baseline=%s\n"
                      total (or baseline "ABSENT")))
       ;; Machine-readable tail, before the verdict so it survives every
@@ -184,12 +260,29 @@ the number."
         (princ (format "unsafe-inventory: FAIL (no kernel-files line in %s)\n"
                        nl-check-inventory--kernel-file))
         (kill-emacs 1))
+       (new-touch
+        (princ (format "unsafe-inventory: FAIL (%d kernel file(s) touch raw memory for the first time -- not in `pinned-kernel-touch'):\n"
+                       (length new-touch)))
+        (dolist (f new-touch) (princ (format "    %s\n" f)))
+        (princ (format "  Add a `pinned-kernel-touch' line in %s and say what it does.\n"
+                       nl-check-inventory--kernel-file))
+        (kill-emacs 1))
        ((> kernel-count kernel-baseline)
         (princ (format "unsafe-inventory: FAIL (%d kernel file(s) hold an unsafe call, baseline %d -- a file the patterns already covered has started touching raw memory; raise the baseline and say there what it does)\n"
                        kernel-count kernel-baseline))
         (kill-emacs 1))
        ((null baseline)
         (princ "unsafe-inventory: FAIL (no baseline file)\n")
+        (kill-emacs 1))
+       ((or call-new call-grew)
+        (princ (format "unsafe-inventory: FAIL (%d kernel file(s) call an unsafe primitive more than their `pinned-kernel-call' line allows):\n"
+                       (+ (length call-new) (length call-grew))))
+        (dolist (c call-new)
+          (princ (format "    %-52s NEW, %d call(s)\n" (car c) (cdr c))))
+        (dolist (c call-grew)
+          (princ (format "    %-52s %d -> %d\n" (nth 0 c) (nth 1 c) (nth 2 c))))
+        (princ (format "  Raise the `pinned-kernel-call' line(s) in %s and say why.\n"
+                       nl-check-inventory--baseline-file))
         (kill-emacs 1))
        ((> total baseline)
         (princ (format "unsafe-inventory: FAIL (+%d over baseline -- new unsafe-primitive calls outside nl-unsafe; either wrap them or consciously raise the baseline in the same commit)\n"
@@ -202,6 +295,11 @@ the number."
         (when (< total baseline)
           (princ (format "    ratchet available: unsafe-call is %d below baseline\n"
                          (- baseline total))))
+        (let ((stale-touch (nl-check-inventory--minus touch-pins kernel-touched)))
+          (when stale-touch
+            (princ (format "    %d `pinned-kernel-touch' line(s) no longer touch raw memory -- safe to drop:\n"
+                           (length stale-touch)))
+            (dolist (f (sort stale-touch #'string<)) (princ (format "      %s\n" f)))))
         (princ "unsafe-inventory: PASS\n"))))))
 
 (nl-check-inventory-run)
