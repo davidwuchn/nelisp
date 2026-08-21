@@ -1,81 +1,80 @@
-# `compile-elisp-artifact` silently does nothing (open)
+# `compile-elisp-artifact` silently did nothing (closed)
 
-Status: **open, isolated but not identified.**  Introduced by `b7ab399a7`
-("Take the differential from 146 disagreements to zero"), which is mine.  The
-sibling regression from the same commit -- generated `#s(hash-table ...)`
-literals -- is fixed in `2ebfb2a01`; this one is not.
-
-Everything below was measured.  The point of the file is the EXCLUSION LIST:
-several plausible causes are already ruled out, and re-testing them is wasted
-work.
+Status: **closed.**  Introduced by `b7ab399a7` ("Take the differential from 146
+disagreements to zero"), which is mine, and fixed by the commit that carries
+this note.  The sibling regression from the same commit -- generated
+`#s(hash-table ...)` literals -- was fixed earlier in `2ebfb2a01`.
 
 ## Symptom
 
     $ nelisp compile-elisp-artifact                       # no arguments
       at 2bce30617:  rc=1  "compile-elisp-artifact requires --kind, --input, and --output"
-      at HEAD:       rc=0  no output at all
+      before the fix: rc=0  no output at all
 
     $ nelisp compile-elisp-artifact --kind nelc --input src.el --output out.nelc
       at 2bce30617:  rc=0, writes out.nelc and out.nelc.manifest.el
-      at HEAD:       rc=0, writes nothing
+      before the fix: rc=0, writes nothing
 
-`inspect-elisp-artifact` is the same shape: 2bce30617 answers rc=2 with usage,
-HEAD answers rc=0 with nothing.  No error is signalled, no diagnostic printed.
+`inspect-elisp-artifact` was the same shape: usage and rc=2 before, rc=0 and
+silence after.  No error was signalled and no diagnostic printed.
+`make standalone-reader-test` failed at "command smoke:
+compile-elisp-artifact exit=0".
 
-`make standalone-reader-test` fails here, at `command smoke:
-compile-elisp-artifact exit=0`.  A full run at 2bce30617 passes every smoke
-(`PRE_EXIT=0`), which is what establishes this as a regression rather than an
-old defect.
+## Cause
 
-## Where it is NOT
+One dropped closing paren, in the generated text of `string-match` and
+`string-match-p`, in `scripts/nelisp-standalone-build.el`:
 
-- **Not the artifact runtime cache.**  Cross-swapping the cache file between a
-  HEAD build and a 2bce30617 build:
+    "(unless (fboundp 'string-match)\n"
+    "  (defun string-match (re s &optional start)\n"
+    ...
+    "    (nlre-string-match re s start))\n"     <- closes the defun, not the unless
+    "(unless (fboundp 'string-match-p)\n"       <- becomes the unless's second body form
 
-        HEAD binary    + 2bce30617 cache -> fails  (0 files)
-        2bce30617 binary + HEAD cache    -> works  (2 files)
+The rewrite that added the argument checks moved the last line's paren count
+and lost one.  Everything after the opening `unless` then became its body,
+cascading through the rest of the program.  In the standalone binary
+`string-match` IS fbound -- it is native -- so the guard is false and the whole
+body, the artifact command dispatch among it, never ran.  The command was never
+registered, so it did nothing and answered 0.
 
-  The cache is fine; the binary is not.
+Measured as top-level forms actually read out of each generated source:
 
-- **Not the host-helper path.**  No `/tmp/nelisp-host-helper*.log` is produced,
-  so `nelisp-artifact--standalone-host-helper-mode` returns nil on Linux and
-  the native path runs.  `getenv` is fbound and works, so the
-  `NELISP_DISABLE_HOST_HELPER=1` control was meaningful, and it changes nothing.
+    nelisp-standalone--artifact-command-runtime-src        3   (was 47)
+    nelisp-standalone--artifact-source-command-cache-src 683   (should be 1031)
 
-- **Not the prelude half of the commit.**  Reverting
-  `scripts/nelisp-stdlib-prelude.el` to 2bce30617 while keeping everything else
-  at HEAD still fails.
+47 forms is exactly what 2bce30617 produces, which is what identified the
+site.  Two parens per generator, four in total, restore both counts.
 
-- **Not the float-parsing change.**  Reverting
-  `lisp/nelisp-cc-evalport-str-to-float.el` likewise still fails.
+## Why nothing caught it
 
-- **Not hash tables.**  This was the leading hypothesis, since the same commit
-  changed the representation to `(MARKER . ALIST)`.  `make-hash-table`,
-  `puthash`, `gethash` (with and without a default), `maphash`, `remhash`,
-  `hash-table-count`, `hash-table-test`, `hash-table-p`, `copy-hash-table` and
-  `clrhash` all answer identically on both runtimes.
+`parens-check` reads the `.el` file, not the text that file produces.  These
+parens live inside string literals, so the gate was structurally unable to see
+them, and there was no other check that ever parsed the generated programs.
 
-- **Not the printing or error machinery.**  `audit-elisp-artifacts` reaches the
-  same code path through the same cache and correctly answers rc=1 with
-  `nelisp: audit-elisp-artifacts: no .el sources or .neln artifacts found`, so
-  `error`, `condition-case` and `nelisp-artifact--print-error` all work.
+That gap is now closed by `make generated-source-parse`
+(`tools/nelisp-generated-source-parse.el`), which reads forms from each
+generated source until it is consumed and requires the remainder to be
+whitespace.  A dropped paren leaves the rest of the program unread inside one
+unterminated form, which is precisely what it measures.  Confirmed by
+reintroducing the bug: findings=2, each naming its generator and the offending
+text.  It runs in `tools/ai/nelisp-ai.sh check` and is required in
+`gates.expected`.
 
-- **Not `plist-get` / `plist-member` / `intern` / `string=` on nil /
-  `error-message-string` / `expand-file-name` / `file-exists-p`.**  All compared
-  directly on both runtimes; all identical.
+`standalone-reader-test` would also have caught it, and was not in the gate
+list being run when `b7ab399a7` landed.  That was fixed separately in
+`892fcaf39`.
 
-## Where it is
+## Verification
 
-`scripts/nelisp-standalone-build.el`, in the 373-line half of `b7ab399a7`.
-That is the only runtime-affecting file left after the exclusions above (the
-commit's other files are tests, baselines and tools).
+    make standalone-reader-test              8 checks, 0 findings
+    nelisp-ai.sh test                        4893 tests, 0 failed, 143 skipped
+    make generated-source-parse              5 generators, 0 findings
+    nelisp compile-elisp-artifact            rc=1 with the usage message
+    nelisp inspect-elisp-artifact            rc=2 with the usage text
+    compile -> eval round trip               out.nelc + manifest written, 42
 
-The failure lands inside `nelisp-artifact-compile-file`
-(`lisp/nelisp-artifact.el`, untouched by me): it returns without writing and
-without signalling, so `compile-elisp-artifact`'s `condition-case` sees success
-and answers 0.
-
-## Two dispatchers, and a trap for the next session
+## Two dispatchers, and a trap worth keeping
 
 There are TWO generated dispatchers:
 
@@ -87,24 +86,21 @@ There are TWO generated dispatchers:
 Neither is baked into the binary -- `strings target/nelisp | grep -c
 compile-elisp-artifact` is **0**, while the same grep over
 `target/nelisp-artifact-runtime.el.nelc` is 2.  Instrumenting either dispatch
-source and rebuilding therefore prints NOTHING, which looks like "the command
-never dispatches" and is misleading.  I lost two build cycles to it.  Instrument
-the cache, or the functions in `lisp/nelisp-artifact.el`, instead.
+source and rebuilding therefore prints NOTHING, which reads as "the command
+never dispatches" and is misleading.  That cost two build cycles during this
+investigation.  Instrument the cache, or the functions in
+`lisp/nelisp-artifact.el`, instead.
 
-## Next step
+## What the search cost, for next time
 
-Bisect the `scripts/nelisp-standalone-build.el` diff of `b7ab399a7` by feature
-block -- the hash-table marker change, the new signallers, the new predicates,
-the `wf_any_float` rewrite, the fixed `fset`, the `string-match` rewrites --
-reverting one block at a time on top of HEAD.  Roughly a two-minute build per
-round, three or four rounds.
+The bisect ruled out, one build each: the artifact runtime cache (cross-swapped
+between builds -- the cache was fine, the binary was not), the host-helper
+path, the prelude half of the commit, `str-to-float`, ten hash-table operations
+(the leading hypothesis, since the same commit changed the representation to
+`(MARKER . ALIST)`), the error and printing machinery, and `plist-get` /
+`plist-member` / `intern` / `string=` on nil / `error-message-string` /
+`expand-file-name` / `file-exists-p`.
 
-    git diff 2bce30617 b7ab399a7 -- scripts/nelisp-standalone-build.el
-
-## Why it went unnoticed
-
-`standalone-reader-test` was not in the gate list I was running when
-`b7ab399a7` landed.  That gap is fixed (892fcaf39 widened
-`nelisp-validate`'s list to match `tools/ai/nelisp-ai.sh check`), but the gate
-is still red for this reason, so a green `nelisp-ai.sh check` is not available
-as a signal until this is closed.
+All of that was reasoning about behaviour.  What found it in minutes was
+parsing the generated text and comparing the form count against the previous
+commit.  When a generated program misbehaves, parse it first.

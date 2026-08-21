@@ -20,6 +20,14 @@ ert-full
 # prints a GATE-COUNT line so "clean" and "scanned nothing" can be told
 # apart; run them through `nelisp-ai.sh gate NAME -- make TARGET'.
 parens-check
+
+# The standalone build emits Elisp programs as string literals, whose parens
+# `parens-check' cannot see: it reads the .el file, not the text it produces.
+# One dropped paren nested the artifact command dispatch inside an `unless'
+# that never runs, and `compile-elisp-artifact' silently did nothing for two
+# days before a bisect found it.  This one parses the generated text.
+generated-source-parse
+
 unsafe-inventory
 ns-inventory
 reader-surface-audit

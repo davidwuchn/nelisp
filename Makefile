@@ -357,6 +357,7 @@ bootstrap-contract:
 # generated into docs/emacs-compat-table.txt so it can be grepped without
 # running anything.
 .PHONY: prelude-toplevel-check
+.PHONY: generated-source-parse
 .PHONY: partial-inventory
 .PHONY: gate-mutation
 .PHONY: gate-selfcheck
@@ -683,6 +684,17 @@ standalone-reader-elt-smoke: $(if $(wildcard target/nelisp target/nelisp.exe),,s
 # That happened twice on 2026-08-20.
 prelude-toplevel-check:
 	@$(EMACS) --batch -Q -l tools/nelisp-prelude-toplevel-check.el
+
+# The standalone build emits several Elisp programs as string literals, so
+# their parens are invisible to `parens-check', which reads the .el file and
+# not the text it produces.  One dropped paren on 2026-08-19 nested the
+# artifact command dispatch inside an `unless' that never runs, and
+# `compile-elisp-artifact' silently did nothing for two days.
+generated-source-parse:
+	@$(EMACS) --batch -Q -L lisp -L src -L scripts \
+	  --eval '(setq load-prefer-newer t)' \
+	  -l tools/nelisp-generated-source-parse.el \
+	  -f nelisp-generated-source-parse-run
 
 partial-inventory:
 	@$(EMACS) --batch -Q -l tools/nelisp-partial-inventory.el

@@ -97,7 +97,8 @@ cmd_check() {
     # `verify' already holds you to the last ert-full report and prints
     # its age.  Run `test' when the age column says the evidence is old.
     failures=0
-    for step in compile parens-check unsafe-inventory ns-inventory \
+    for step in compile parens-check generated-source-parse \
+                unsafe-inventory ns-inventory \
                 reader-surface-audit pkg-graph pkg-load-lists ns; do
         printf '\n=== %s ===\n' "$step"
         case "$step" in
