@@ -183,8 +183,9 @@ standalone-selfhost-test
 # not run, so the defects sat.
 #
 # GREEN AND WIRED ABOVE: the reader smokes are covered by
-# `standalone-reader-test' (11 checks), which now includes the arm64
-# byte-identity check.  Beside it stand 28 individual `standalone-reader-*'
+# `standalone-reader-test' (12 checks), which now includes the arm64
+# byte-identity check and the `intern'/`intern-soft' "nil"/"t"
+# canonicalization check.  Beside it stand 28 individual `standalone-reader-*'
 # targets, each measured green on 2026-08-21 -- two of them only after the
 # fixes in this sweep.  Named in full so a later reader can tell "measured and
 # green" from "nobody looked":
@@ -314,9 +315,10 @@ gate-mutation
 #   shared units.  That is a layering decision about what the eval binary is
 #   for, not a patch, so it is recorded rather than guessed at.
 #
-# `make audit' is deliberately absent: it exits 1 on 27 PENDING
-# sub-phases, which is a roadmap state rather than a defect, and a gate
-# that is red by design trains people to ignore the column.
+# `make audit' is deliberately absent: it exits 1 while sub-phases are
+# PENDING (26 at the 2026-08-21 measurement), which is a roadmap state
+# rather than a defect, and a gate that is red by design trains people
+# to ignore the column.
 #
 # NOT GATES, and listed so the absence is a decision rather than an oversight:
 # `test', `test-fast', `test-jit', `test-nojit', `test-one' and

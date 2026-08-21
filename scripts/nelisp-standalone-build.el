@@ -18234,6 +18234,7 @@ loader when it is absent."
           (condition-case err
               (let ((nelisp-standalone--reader-out out))
                 (dolist (smoke '(nelisp-standalone--reader-temp-name-uniqueness-smoke
+                                 nelisp-standalone--reader-intern-canonical-smoke
                                  nelisp-standalone--reader-temp-outside-cwd-smoke
                                  nelisp-standalone--reader-asm-arm64-byte-identity-smoke
                                  nelisp-standalone--reader-hash-table-literal-smoke
@@ -18527,6 +18528,39 @@ the defect was live -- which is why this spends a second binary invocation."
             (error "temp-name smoke saw no name, got %S" first))
           (when (string= first second)
             (error "temp-name smoke: two processes both answered %S" first)))
+      (ignore-errors (delete-file tmp)))))
+
+(defun nelisp-standalone--reader-intern-canonical-smoke ()
+  "Assert `intern' / `intern-soft' canonicalize the names \"nil\" and \"t\".
+
+Measured 2026-08-21 against the unfixed binary: `(intern \"nil\")' built and
+returned a genuine Symbol object named \"nil\" -- it PRINTED as nil (so
+print-debugging lied) but failed `eq', `null' and `listp' against the real
+nil -- and `(intern-soft \"nil\")' probed a table that had never had \"nil\"
+inserted into it (the reader bypasses `intern' for these two tokens
+entirely -- see nelisp-read.el:154 -- so nothing had ever interned them) and
+reported a miss, i.e. it printed nil while ALSO answering false to \"is this
+interned\".  Same defect class as the `:preloads nil' ->
+`wrong-type-argument sequencep nil' failure that broke
+nelisp-performance-gate: a value that looks exactly like the one that would
+have been fine.  `(car (read-from-string ...))' is included as a cross-check
+that the reader's own bypass (already fixed) still holds, and
+`(make-symbol \"nil\")' as a negative check that UNINTERNED \"nil\" must
+still NOT be eq to nil -- only `intern'/`intern-soft' canonicalize, not
+every string-to-symbol path."
+  (let ((tmp (make-temp-file "nelisp-reader-intern-canonical-" nil ".el"))
+        (out nil))
+    (unwind-protect
+        (progn
+          (with-temp-file tmp
+            (insert "(defvar nelisp-reader-intern-canonical-smoke t)\n"))
+          (with-temp-buffer
+            (call-process nelisp-standalone--reader-out nil t nil
+                          "eval-elisp-source" tmp
+                          "(list (eq (intern \"nil\") nil) (eq (intern \"t\") t) (eq (intern-soft \"nil\") nil) (eq (intern-soft \"t\") t) (eq (car (read-from-string \"nil\")) nil) (eq (car (read-from-string \"t\")) t) (not (eq (make-symbol \"nil\") nil)))")
+            (setq out (string-trim (buffer-string))))
+          (unless (string= out "(t t t t t t t)")
+            (error "intern canonicalization smoke -> %S (expected (t t t t t t t))" out)))
       (ignore-errors (delete-file tmp)))))
 
 (defun nelisp-standalone--reader-hash-table-literal-smoke ()

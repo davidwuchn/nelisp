@@ -261,18 +261,60 @@ lifetime of a Sexp value.  No `let' binding needed.")
           (nl_intern_insert slot p n result-slot (nl_intern_bump n))
         (nl_intern_write_sexp result-slot (ptr-read-u64 slot 8) n)))
 
-    ;; Alloc + write with n >= 0.  Intern via the region when set up (+832 !=
-    ;; 0); otherwise fall back to a fresh per-occurrence buffer.
+    ;; ---- nil/t name canonicalization ----
+    ;; `nil' and `t' are immediate Sexp values (tag=0 / tag=1 -- see
+    ;; `symbol-name''s reverse mapping above, which already turns those two
+    ;; tags back into the strings "nil"/"t"); they never occupy a slot in
+    ;; this intern-region table.  Before this fix `nl_alloc_symbol_pos' and
+    ;; `nl_intern_lookup_pos' had no inverse special case, so `(intern
+    ;; "nil")' built and returned a genuine tag=4 Symbol object NAMED "nil"
+    ;; -- printing exactly like nil (both print as `nil') but failing `eq',
+    ;; `null' and `listp' against it -- and `(intern-soft "nil")' probed a
+    ;; table that had never had "nil" inserted into it (the reader bypasses
+    ;; `intern' for these two tokens entirely, see nelisp-read.el) and
+    ;; reported a miss, i.e. nil-that-prints-as-nil-but-is-a-miss.  Measured
+    ;; 2026-08-21.  Any caller of `nl_alloc_symbol' / `nl_intern_lookup' --
+    ;; not just `intern' / `intern-soft' -- inherits the fix from here,
+    ;; since both public entries route through these two `_pos' helpers.
+    (defun nl_name_is_nil (p n)
+      (if (= n 3)
+          (if (= (ptr-read-u8 p 0) 110)
+              (if (= (ptr-read-u8 p 1) 105)
+                  (if (= (ptr-read-u8 p 2) 108) 1 0)
+                0)
+            0)
+        0))
+    (defun nl_name_is_t (p n)
+      (if (= n 1)
+          (if (= (ptr-read-u8 p 0) 116) 1 0)
+        0))
+    (defun nl_write_canonical_nil (result-slot)
+      (and (ptr-write-u64 result-slot 0 0) (ptr-write-u64 result-slot 8 0)
+           (ptr-write-u64 result-slot 16 0) (ptr-write-u64 result-slot 24 0)
+           result-slot))
+    (defun nl_write_canonical_t (result-slot)
+      (and (ptr-write-u64 result-slot 0 1) (ptr-write-u64 result-slot 8 0)
+           (ptr-write-u64 result-slot 16 0) (ptr-write-u64 result-slot 24 0)
+           result-slot))
+
+    ;; Alloc + write with n >= 0.  "nil"/"t" short-circuit to the canonical
+    ;; immediate value first (see above); otherwise intern via the region
+    ;; when set up (+832 != 0), or fall back to a fresh per-occurrence
+    ;; buffer.
     (defun nl_alloc_symbol_pos (bytes-ptr n result-slot)
-      (if (= (ptr-read-u64 268436288 0) 0)
-          (nl_alloc_symbol_write
-           bytes-ptr n (if (= n 0) 1 n) result-slot
-           (alloc-bytes (if (= n 0) 1 n) 1))
-        (nl_intern_finish
-         (nl_intern_probe (ptr-read-u64 268436288 0)
-                          (logand (nl_intern_hash bytes-ptr 0 n 2166136261) 1048575)
-                          bytes-ptr n)
-         bytes-ptr n result-slot)))
+      (if (= (nl_name_is_nil bytes-ptr n) 1)
+          (nl_write_canonical_nil result-slot)
+        (if (= (nl_name_is_t bytes-ptr n) 1)
+            (nl_write_canonical_t result-slot)
+          (if (= (ptr-read-u64 268436288 0) 0)
+              (nl_alloc_symbol_write
+               bytes-ptr n (if (= n 0) 1 n) result-slot
+               (alloc-bytes (if (= n 0) 1 n) 1))
+            (nl_intern_finish
+             (nl_intern_probe (ptr-read-u64 268436288 0)
+                              (logand (nl_intern_hash bytes-ptr 0 n 2166136261) 1048575)
+                              bytes-ptr n)
+             bytes-ptr n result-slot)))))
 
     ;; Public entry: nl_alloc_symbol(bytes_ptr, len, result_slot).
     (defun nl_alloc_symbol (bytes-ptr len result-slot)
@@ -306,21 +348,30 @@ lifetime of a Sexp value.  No `let' binding needed.")
           0
         (nl_intern_write_sexp result-slot (ptr-read-u64 slot 8) n)))
 
-    ;; Probe-only counterpart of `nl_alloc_symbol_pos'.  When the intern
-    ;; region has not been mapped (+832 == 0) there is no table to probe and
-    ;; therefore nothing can ever have been recorded as "interned" through
-    ;; it -- report a miss (0) rather than falling back to an allocator (a
-    ;; lookup must never allocate or have a side effect, unlike
-    ;; `nl_alloc_symbol_pos''s region-disabled fallback, which intentionally
-    ;; allocates a fresh per-occurrence buffer for `intern').
+    ;; Probe-only counterpart of `nl_alloc_symbol_pos'.  "nil"/"t" short-
+    ;; circuit to a HIT on the canonical immediate value first: they are
+    ;; always considered interned (matching host Emacs, where `intern-soft'
+    ;; on either never fails) even though the table itself never holds an
+    ;; entry for them -- `nl_alloc_symbol_pos' above never inserts one.
+    ;; Otherwise, when the intern region has not been mapped (+832 == 0)
+    ;; there is no table to probe and therefore nothing can ever have been
+    ;; recorded as "interned" through it -- report a miss (0) rather than
+    ;; falling back to an allocator (a lookup must never allocate or have a
+    ;; side effect, unlike `nl_alloc_symbol_pos''s region-disabled fallback,
+    ;; which intentionally allocates a fresh per-occurrence buffer for
+    ;; `intern').
     (defun nl_intern_lookup_pos (bytes-ptr n result-slot)
-      (if (= (ptr-read-u64 268436288 0) 0)
-          0
-        (nl_intern_lookup_finish
-         (nl_intern_probe (ptr-read-u64 268436288 0)
-                          (logand (nl_intern_hash bytes-ptr 0 n 2166136261) 1048575)
-                          bytes-ptr n)
-         n result-slot)))
+      (if (= (nl_name_is_nil bytes-ptr n) 1)
+          (nl_write_canonical_nil result-slot)
+        (if (= (nl_name_is_t bytes-ptr n) 1)
+            (nl_write_canonical_t result-slot)
+          (if (= (ptr-read-u64 268436288 0) 0)
+              0
+            (nl_intern_lookup_finish
+             (nl_intern_probe (ptr-read-u64 268436288 0)
+                              (logand (nl_intern_hash bytes-ptr 0 n 2166136261) 1048575)
+                              bytes-ptr n)
+             n result-slot)))))
 
     ;; Public entry: nl_intern_lookup(bytes_ptr, len, result_slot).
     ;; Returns 0 (RESULT-SLOT left untouched) when NAME has never been
@@ -349,6 +400,12 @@ Single `(seq DEFUN ...)' manifest.  Public entry points:
 Private helpers (shared within this `.o'):
 - `nl_alloc_str_copy_loop' / `nl_alloc_str_write' / `nl_alloc_str_pos'
   — Sexp::Str allocation chain.
+- `nl_name_is_nil' / `nl_name_is_t' / `nl_write_canonical_nil' /
+  `nl_write_canonical_t' — nil/t name canonicalization: `nl_alloc_symbol_pos'
+  and `nl_intern_lookup_pos' both check these FIRST so every caller of
+  `nl_alloc_symbol' / `nl_intern_lookup' (not just `intern' / `intern-soft')
+  gets the canonical tag=0/tag=1 immediate value for the names nil and t
+  rather than a tag=4 Symbol object that merely prints the same way.
 - `nl_alloc_symbol_write' / `nl_alloc_symbol_pos'
   — Sexp::Symbol allocate-or-intern chain (calls `nl_intern_finish' on
   a set-up region).
