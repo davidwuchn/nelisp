@@ -781,6 +781,17 @@
             0)
         0))
 
+    (defun nelisp_reader_p_symbol_test_p (sym)
+      (if (= (ptr-read-u64 sym 0) 4)
+          (if (and (= (str-len sym) 4)
+                   (= (str-byte-at sym 0) 116)
+                   (= (str-byte-at sym 1) 101)
+                   (= (str-byte-at sym 2) 115)
+                   (= (str-byte-at sym 3) 116))
+              1
+            0)
+        0))
+
     (defun nelisp_reader_p_hash_table_body_p (body)
       (if (= (ptr-read-u64 body 0) 7)
           (nelisp_reader_p_symbol_hash_table_p
@@ -798,6 +809,30 @@
                    (nl_cons_cdr_ptr rest)))
               0))
         0))
+
+    ;; `#s(hash-table test equal data (...))' -- the TEST decides how gethash
+    ;; compares, so it has to reach the marker.  Reading it as `eql' made every
+    ;; string key in a generated literal unfindable.
+    (defun nelisp_reader_p_hash_plist_find_test (plist)
+      (if (= (ptr-read-u64 plist 0) 7)
+          (let* ((key (nl_cons_car_ptr plist))
+                 (rest (nl_cons_cdr_ptr plist)))
+            (if (= (ptr-read-u64 rest 0) 7)
+                (if (= (nelisp_reader_p_symbol_test_p key) 1)
+                    (nl_cons_car_ptr rest)
+                  (nelisp_reader_p_hash_plist_find_test
+                   (nl_cons_cdr_ptr rest)))
+              0))
+        0))
+
+    (defun nelisp_reader_p_hash_pair_count (data n)
+      (if (= (ptr-read-u64 data 0) 7)
+          (let* ((rest (nl_cons_cdr_ptr data)))
+            (if (= (ptr-read-u64 rest 0) 7)
+                (nelisp_reader_p_hash_pair_count
+                 (nl_cons_cdr_ptr rest) (+ n 1))
+              n))
+        n))
 
     (defun nelisp_reader_p_list_nth_ptr (node n)
       (if (= (ptr-read-u64 node 0) 7)
@@ -836,10 +871,37 @@
         (if (= data 0)
             (setq data (nelisp_reader_p_list_nth_ptr body 4))
           0)
-        (and (sexp-int-make
-              (nelisp_reader_p_slot slot-pool
-                              (nelisp_reader_p_head_idx depth))
-              0)
+        ;; The table is `(MARKER . ALIST)' and MARKER is a 3-slot vector
+        ;; [hash-table COUNT TEST] -- `bf_hash_table_p_raw' tests for exactly
+        ;; that, because the older shape (an Int count in the car) was
+        ;; indistinguishable from an ordinary list.  This builder was left on
+        ;; the old shape when the representation changed, so every generated
+        ;; `#s(hash-table ...)' literal read back as a list and
+        ;; `hash-table-count'/`gethash' rejected it.
+        (and (let* ((head (nelisp_reader_p_slot slot-pool
+                                           (nelisp_reader_p_head_idx depth)))
+                    (cnt (alloc-bytes 32 8))
+                    (test (nelisp_reader_p_hash_plist_find_test
+                           (nl_cons_cdr_ptr body))))
+               (seq
+                ;; Build the marker IN THE SLOT POOL, not in scratch memory:
+                ;; the parser reuses scratch for the next top-level form, so a
+                ;; marker built there read back as garbage the moment a second
+                ;; form was parsed -- every form passed alone and the file
+                ;; failed as a whole.
+                (vector-make 3 head)
+                ;; Slot 0 is the literal's OWN `hash-table' symbol.  A symbol
+                ;; allocated here would name bytes with the same scratch
+                ;; lifetime; the parsed one points into the source buffer,
+                ;; which is what every other symbol here already does.
+                (vector-slot-set head 0 (nl_cons_car_ptr body))
+                (sexp-int-make cnt (nelisp_reader_p_hash_pair_count data 0))
+                (vector-slot-set head 1 cnt)
+                ;; TEST is metadata: `wf_key_eq' compares structurally either
+                ;; way, so an absent one stays nil and only changes how the
+                ;; table prints.
+                (if (= test 0) 0 (vector-slot-set head 2 test))
+                1))
              (cons-make-with-clone
               (nelisp_reader_p_slot slot-pool
                               (nelisp_reader_p_head_idx depth))
