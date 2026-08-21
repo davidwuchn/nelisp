@@ -7329,10 +7329,30 @@ and only running both says which."
     ;; enter is executable -- testing the empty name itself answered nil.
     (nelisp--check-string filename)
     (= 0 (nelisp--syscall-path-int 21 (expand-file-name filename) 1))))  ; X_OK
+;; A bare PREFIX (no directory component -- every caller in this tree passes
+;; one) hardcoded "/tmp/" and ignored both `temporary-file-directory' (never
+;; bound here; see `nelisp-artifact--temp-directory' for the same defensive
+;; check on that variable in lisp/nelisp-artifact.el) and TMPDIR.  Measured
+;; 2026-08-21: `TMPDIR=/some/dir (make-temp-file "x-")' still created under
+;; /tmp.  An ABSOLUTE PREFIX fared worse -- it was concatenated straight onto
+;; "/tmp/" regardless, producing a nonsense doubled path no caller here
+;; exercises but Emacs supports (PREFIX may be a full path; the resulting
+;; name is used as-is).  `expand-file-name' already implements exactly that
+;; split -- it ignores its second argument when the first is absolute -- so
+;; joining PREFIX against the resolved directory through it, rather than a
+;; hand-rolled `concat', gets both cases right together: this is the same
+;; `(expand-file-name prefix temporary-file-directory)' shape Emacs's own
+;; `make-temp-file' uses before calling `make-temp-name'.
 (unless (fboundp 'make-temp-file)
   (defun make-temp-file (prefix &optional dir-flag suffix text)
     (unless (sequencep prefix) (signal 'wrong-type-argument (list 'sequencep prefix)))
-    (let ((path (concat "/tmp/" (make-temp-name prefix) (or suffix ""))))
+    (let* ((tmpdir (if (and (boundp 'temporary-file-directory)
+                             (stringp temporary-file-directory)
+                             (> (length temporary-file-directory) 0))
+                        temporary-file-directory
+                      (or (getenv "TMPDIR") "/tmp")))
+           (path (concat (make-temp-name (expand-file-name prefix tmpdir))
+                         (or suffix ""))))
       (if dir-flag (make-directory path t) (write-region (or text "") nil path))
       path)))
 (unless (fboundp 'clrhash)
