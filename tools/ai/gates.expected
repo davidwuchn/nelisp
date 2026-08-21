@@ -105,8 +105,39 @@ wasm-smoke?
 # builds a binary.  `nelisp-ai.sh standalone' produces the report, and
 # `verify' prints its age.
 standalone-reader-test
+
+# nelisp-native-artifact-gate is the second half of the same unblocking, and
+# guards the contract Nelix needs before it can rely on precompiled elisp:
+# bulk .neln builds, `--native-policy required' proving every top-level defun
+# entered native code, the audit reporting coverage gaps, and the
+# load/eval/exec commands preferring the adjacent artifact.  Two of its nine
+# cases are negatives -- a required policy that must refuse an unsupported
+# target, an audit that must reject a missing artifact -- so it fails if the
+# contract stops being enforced, not only if it stops working.
 #
-# The three below are not yet wired, and not wired blind: adding a wrapper
+# Wired and promoted 2026-08-21, measured the same way:
+#
+#   HEAD                9 of 9 cases -- twice, once from a wiped target/
+#   main's binary       fails at case 3, `file-missing: url-parse'
+#
+# That control is the whole argument.  It ran HEAD's script against a binary
+# built from main, so the only variable is the binary: same host, same script,
+# same minute.  It also showed the partial count working -- GATE-COUNT
+# checked=2 findings=1 -- so a failure says how far it got rather than
+# disappearing into "no GATE-COUNT line".
+#
+# Skips the same way and for the same reason as standalone-reader-test, by
+# asking `--target-runnable-on-host-p' rather than keeping its own uname
+# table.  A predicate that cannot be asked is an error, not a skip: those two
+# are told apart by exit code, since folding them together is how a broken
+# invocation starts reading as a reasoned skip.
+#
+# `nelisp-ai.sh native-artifact' produces the report.  Out of `check'
+# alongside standalone-reader-test, for the reason ert-full is: it builds a
+# binary.
+nelisp-native-artifact-gate
+#
+# The two below are not yet wired, and not wired blind: adding a wrapper
 # whose success path has never run would be the same unverified-gate
 # problem in a new place.
 #
@@ -120,8 +151,9 @@ standalone-reader-test
 # 2026-08-21 after cd64c0bd7:
 #
 #   standalone-reader-test       green, and now required above
-#   nelisp-native-artifact-gate  green -- `load_source_uses_neln' rc=0,
-#                                which is the check that carried url-parse
+#   nelisp-native-artifact-gate  green, and now required above -- the check
+#                                that carried url-parse was
+#                                `load_source_uses_neln', which now passes
 #   nelisp-performance-gate      past it: `cache_default_load' rc=0, now
 #                                fails at `fallback_load' with
 #                                "Wrong type argument: sequencep, nil"
@@ -130,13 +162,12 @@ standalone-reader-test
 #                                file, so still the standalone require
 #                                question, not a host-library one
 #
-# So the common cause was real and the two remaining failures are each
-# their own defect, not the old chain.  Wire them when they are green;
-# nelisp-native-artifact-gate is the one that is ready.
+# So the common cause was real, two of the four are now required, and the two
+# remaining failures are each their own defect rather than the old chain.
+# Wire them when they are green.
 #
 # standalone-selfhost-test
 # nelisp-performance-gate
-# nelisp-native-artifact-gate
 #
 # `make audit' is deliberately absent: it exits 1 on 26 PENDING
 # sub-phases, which is a roadmap state rather than a defect, and a gate

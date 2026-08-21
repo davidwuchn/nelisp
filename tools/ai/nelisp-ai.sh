@@ -66,6 +66,7 @@ usage: tools/ai/nelisp-ai.sh <command> [args]
   verify              aggregate gate reports and print one verdict
   test                run the full ERT suite as gate "ert-full"
   standalone          build the binary and run gate "standalone-reader-test"
+  native-artifact     build the binary and run gate "nelisp-native-artifact-gate"
   test-one FILE...    run selected test files as gate "ert-focus"
   compile             byte-compile with error-on-warn as gate "compile"
   ns [FILE...]        namespace check (defaults to the recipe skeletons)
@@ -145,6 +146,15 @@ run_ert_gate() {
 
 cmd_test() {
     run_ert_gate ert-full "$(test_files)"
+}
+
+cmd_native_artifact() {
+    # The native artifact contract: bulk .neln builds, `--native-policy
+    # required' proving every top-level defun entered native code, the audit
+    # reporting coverage gaps, and the load/eval/exec commands preferring the
+    # adjacent artifact.  Builds a binary, so it is out of `check' alongside
+    # `standalone'.
+    cmd_gate nelisp-native-artifact-gate -- make nelisp-native-artifact-gate
 }
 
 cmd_standalone() {
@@ -457,6 +467,7 @@ case "$command" in
     verify)         cmd_verify ;;
     test)           cmd_test ;;
     standalone)     cmd_standalone ;;
+    native-artifact) cmd_native_artifact ;;
     test-one)       cmd_test_one "$@" ;;
     compile)        cmd_compile ;;
     gate)           cmd_gate "$@" ;;
