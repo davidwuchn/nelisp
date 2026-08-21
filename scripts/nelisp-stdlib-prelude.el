@@ -6993,12 +6993,47 @@ first `getenv' is not overwritten by the value the process started with."
             (setq tail (cdr tail)))
           (setq nelisp--environment (nreverse out)))))
     value))
+(defun nelisp--temp-name-process-token ()
+  "Return a token that no other live process shares, for temp names.
+Prefers the real process id; falls back to the clock, marked with a leading
+`t' so a name built from the weaker source can be recognised as such."
+  (let* ((stat (and (fboundp 'nelisp--syscall-read-file)
+                    (nelisp--syscall-read-file "/proc/self/stat")))
+         (pid (and (stringp stat) (> (length stat) 0)
+                   (string-to-number stat))))
+    (if (and (integerp pid) (> pid 0))
+        (number-to-string pid)
+      (let ((now (and (fboundp 'current-time) (current-time))))
+        (cond
+         ;; (HIGH LOW MICROSEC PICOSEC), the default shape.
+         ((and (consp now) (consp (cdr now)))
+          (format "t%d-%d-%d" (nth 0 now) (nth 1 now) (or (nth 2 now) 0)))
+         ;; (TICKS . HZ), when `current-time-list' is nil.
+         ((consp now) (format "t%d-%d" (car now) (cdr now)))
+         (t "t0"))))))
 (defvar nelisp--temp-name-counter 0)
+(defvar nelisp--temp-name-nonce nil
+  "This process's share of `make-temp-name' output, computed on first use.")
+;; Emacs guarantees the process id is part of a `make-temp-name' result, so
+;; that two processes cannot produce the same name.  A counter and the prefix
+;; length cannot guarantee it: both start at the same place in every process,
+;; so three runs of the same binary all answered "pfx-4-4" then "pfx-5-4".
+;; `make-temp-file' below builds on this and creates without O_EXCL, so those
+;; runs would have shared one file with neither noticing.
+;;
+;; `emacs-pid' does not exist here.  Linux publishes the id as the first field
+;; of /proc/self/stat, which `nelisp--syscall-read-file' can read and
+;; `string-to-number' will take the leading integer of.  Where there is no
+;; /proc the clock stands in -- weaker, since two processes reaching it in the
+;; same microsecond still match, but that is unlikely rather than certain.
 (unless (fboundp 'make-temp-name)
   (defun make-temp-name (prefix)
     (nelisp--check-string prefix)
+    (unless nelisp--temp-name-nonce
+      (setq nelisp--temp-name-nonce (nelisp--temp-name-process-token)))
     (setq nelisp--temp-name-counter (1+ nelisp--temp-name-counter))
-    (format "%s%d-%d" prefix nelisp--temp-name-counter (length prefix))))
+    (format "%s%s-%d" prefix nelisp--temp-name-nonce
+            nelisp--temp-name-counter)))
 ;; File-system ops via the reader's path-syscall builtins (nelisp--syscall-path
 ;; = syscall(NR, cpath); -path-int = syscall(NR, cpath, INT)).  x86_64 NRs:
 ;; access=21, unlink=87, mkdir=83.  Returns 0 on success / -errno.

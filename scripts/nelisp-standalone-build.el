@@ -18223,7 +18223,8 @@ loader when it is absent."
       (if (= code expected)
           (condition-case err
               (let ((nelisp-standalone--reader-out out))
-                (dolist (smoke '(nelisp-standalone--reader-hash-table-literal-smoke
+                (dolist (smoke '(nelisp-standalone--reader-temp-name-uniqueness-smoke
+                                 nelisp-standalone--reader-hash-table-literal-smoke
                                  nelisp-standalone--reader-large-quoted-alist-mutation-smoke
                                  nelisp-standalone--reader-setcar-setcdr-type-smoke
                                  nelisp-standalone--reader-runtime-image-smoke
@@ -18391,6 +18392,40 @@ loader when it is absent."
       (ignore-errors (delete-file runtime-image))
       (ignore-errors (delete-file runtime-artifact-out))
       (ignore-errors (delete-file (concat runtime-artifact-out ".manifest.el"))))))
+
+(defun nelisp-standalone--reader-temp-name-uniqueness-smoke ()
+  "Assert two processes do not agree on a `make-temp-name' result.
+
+Emacs puts the process id in the name precisely so that two processes cannot
+generate the same one.  The standalone compatibility `make-temp-name' used a
+counter and the prefix length instead, and both start at the same place in
+every process: three runs of one binary each answered `pfx-1-4\' then
+`pfx-2-4\'.  `make-temp-file' builds on it and creates without O_EXCL, so two
+runs shared a file and neither could tell.
+
+Two processes, not two calls.  The old implementation was already unique
+within a process, so a single-process check would have passed the whole time
+the defect was live -- which is why this spends a second binary invocation."
+  (let ((tmp (make-temp-file "nelisp-reader-temp-name-" nil ".el"))
+        (first nil)
+        (second nil))
+    (unwind-protect
+        (progn
+          (with-temp-file tmp
+            (insert "(defvar nelisp-reader-temp-name-smoke t)\n"))
+          (with-temp-buffer
+            (call-process nelisp-standalone--reader-out nil t nil
+                          "eval-elisp-source" tmp "(make-temp-name \"pfx-\")")
+            (setq first (string-trim (buffer-string))))
+          (with-temp-buffer
+            (call-process nelisp-standalone--reader-out nil t nil
+                          "eval-elisp-source" tmp "(make-temp-name \"pfx-\")")
+            (setq second (string-trim (buffer-string))))
+          (when (or (string= first "") (not (string-match-p "pfx-" first)))
+            (error "temp-name smoke saw no name, got %S" first))
+          (when (string= first second)
+            (error "temp-name smoke: two processes both answered %S" first)))
+      (ignore-errors (delete-file tmp)))))
 
 (defun nelisp-standalone--reader-hash-table-literal-smoke ()
   "Assert standalone-reader materialises generated reader literals."
