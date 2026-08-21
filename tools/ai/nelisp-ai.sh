@@ -107,6 +107,7 @@ cmd_check() {
                 prelude-toplevel-check partial-inventory gate-selfcheck \
                 gate-mutation \
                 ns-gate nl-check-gate fallback-inventory-selftest \
+                fallback-inventory bootstrap-contract \
                 wasm-dtw-skeleton-smoke \
                 unsafe-inventory ns-inventory \
                 reader-surface-audit pkg-graph pkg-load-lists ns; do

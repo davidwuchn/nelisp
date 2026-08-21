@@ -75,3 +75,16 @@
 # copies bytes.  $PWD was available and deliberately not used; being right
 # only sometimes is the worst thing a path source can be.
 unsafe-call 538
+
+# `pinned-kernel-call FILE COUNT' pins the per-file unquoted `unsafe-call'
+# count behind `total' above -- the three kernel files that actually carry
+# one today.  Added 2026-08-21, same reason as the `pinned' lines
+# tools/parity-coverage-baseline.txt carries: `total' is a sum, and a sum
+# cannot see one file's count fall while a different file's count rises by
+# the same amount.  A file's count falling below its pin is still green; a
+# file's count rising past its pin, or a kernel file with no pin gaining
+# its first call, fails and names the file with its old and new counts.
+# Regenerate from a clean tree; do not hand-edit into drift from the scan.
+pinned-kernel-call lisp/nelisp-stdlib-os-int-helpers.el 18
+pinned-kernel-call scripts/nelisp-flat-arena-probe.el 6
+pinned-kernel-call scripts/nelisp-standalone-build.el 514

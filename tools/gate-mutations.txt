@@ -27,3 +27,16 @@ parity-coverage|test/nelisp-shadow-differential-cases.el|s/generate-new-buffer/i
 prelude-toplevel-check|scripts/nelisp-stdlib-prelude.el|s/^(defun string-empty-p (s) (string-equal s ""))$/(defun string-empty-p (s) (string-equal s ""))\n  (nelisp--check-string s)/|a check lands outside a one-line defun
 # The sed expression cannot use `|' -- it is this file's field separator.
 prelude-toplevel-check|scripts/nelisp-stdlib-prelude.el|/^  (defun seq-length (seq) (length seq)))$/a\    (unless (sequencep seq) (signal (quote wrong-type-argument) (list (quote sequencep) seq)))|a check lands outside a one-line defun INSIDE an unless wrapper
+#
+# 2026-08-21 (this session): the five rows below cover the identity-pinning
+# added to unsafe-inventory, ns-inventory, fallback-inventory and pkg-graph,
+# plus generated-source-parse, which had no row at all.  Each is chosen so a
+# bare COUNT would not have moved: the pinned identity changes (a new one
+# appears, or an already-divergent pair's shape drifts) while the aggregate
+# stays where it was, which is exactly the blind spot `parity-coverage' and
+# `ns-gate' were caught in on 2026-08-21.
+unsafe-inventory|lisp/nelisp-cc-alloc-dealloc.el|/^(provide 'nelisp-cc-alloc-dealloc)$/i\(defun nl-check-inventory--gm-injected () (ptr-read-u64 nil 0))|a kernel file with no `pinned-kernel-call' line starts calling an unsafe primitive
+ns-inventory|lisp/nelisp-stdlib.el|s/^  (if (nelisp--num-lt2 x 0) (nelisp--sub2 0 x) x))$/  (progn (setq x x) (if (nelisp--num-lt2 x 0) (nelisp--sub2 0 x) x)))/|a pinned ns-collision-divergent pair's definition drifts to a new shape, subject and file list unchanged
+fallback-inventory|lisp/nelisp-artifact.el|s/^               (error nil)))$/               (error (progn nil))))/|a pinned bare-handler site's exact shape drifts while its file and toplevel stay the same
+pkg-graph|src/nelisp-file-notify.el|s/(require 'filenotify)/(require 'ert-x)/|a hard host require is swapped for a different unresolved one, count unchanged
+generated-source-parse|scripts/nelisp-standalone-build.el|s/"(defvar features nil)\\n"/"(defvar features nil\\n"/|drops a closing paren inside a generated string literal, invisible to parens-check

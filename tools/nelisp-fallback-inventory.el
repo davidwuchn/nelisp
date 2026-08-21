@@ -140,13 +140,15 @@ would answer a different question than the gate does.
     (and v (> (length v) 0) v)))
 
 (defun nelisp-fallback-inventory--note-site (kind form)
-  "Record a KIND finding at FORM for the listing."
-  (when (nelisp-fallback-inventory--listing-p)
-    (push (list kind
-                nelisp-fallback-inventory--current-file
-                nelisp-fallback-inventory--current-toplevel
-                form)
-          nelisp-fallback-inventory--sites)))
+  "Record a KIND finding at FORM.
+Always collected now, not only under `NELISP_FALLBACK_INVENTORY_LIST' --
+`nelisp-fallback-inventory--pin-key' needs every site to compare against
+the pinned identities, not just the ones a human asked to see printed."
+  (push (list kind
+              nelisp-fallback-inventory--current-file
+              nelisp-fallback-inventory--current-toplevel
+              form)
+        nelisp-fallback-inventory--sites))
 
 (defun nelisp-fallback-inventory--toplevel-name (form)
   "Return a short name for top-level FORM, or nil."
@@ -161,7 +163,9 @@ would answer a different question than the gate does.
        ((symbolp head) (format "%s" head))))))
 
 (defun nelisp-fallback-inventory--baseline ()
-  "Read the baseline as an alist of (KIND . COUNT), or nil when absent."
+  "Read the baseline as an alist of (KIND . COUNT), or nil when absent.
+Lines starting `pinned-site' are a different table, read by
+`nelisp-fallback-inventory--pins', and are skipped here."
   (when (file-exists-p nelisp-fallback-inventory--baseline-file)
     (with-temp-buffer
       (insert-file-contents nelisp-fallback-inventory--baseline-file)
@@ -171,13 +175,41 @@ would answer a different question than the gate does.
           (let ((line (buffer-substring-no-properties
                        (line-beginning-position) (line-end-position))))
             (unless (or (string-match-p "\\`[ \t]*#" line)
-                        (string-match-p "\\`[ \t]*\\'" line))
+                        (string-match-p "\\`[ \t]*\\'" line)
+                        (string-prefix-p "pinned-site " line))
               (when (string-match "\\`[ \t]*\\([^ \t]+\\)[ \t]+\\([0-9]+\\)" line)
                 (push (cons (intern (match-string 1 line))
                             (string-to-number (match-string 2 line)))
                       acc))))
           (forward-line 1))
         (nreverse acc)))))
+
+(defun nelisp-fallback-inventory--pin-key (kind file toplevel form)
+  "Return a stable identity key for a KIND finding.
+FILE and TOPLEVEL place it; a 12-hex digest of FORM's printed shape stands
+in for exact position, so a comment added above the handler does not
+change the key but editing the handler itself does -- the same reason
+`nl-ns-finding-key' carries `:shape' (2026-08-21)."
+  (format "%s\t%s\t%s\t%s"
+          kind (file-name-nondirectory (or file "?")) (or toplevel "(top level)")
+          (substring (secure-hash 'sha1 (format "%S" form)) 0 12)))
+
+(defun nelisp-fallback-inventory--pins ()
+  "Return the pinned site keys as a hash of KEY -> COUNT.
+Read from `pinned-site KEY COUNT' lines.  COUNT, not just presence: two
+structurally identical handlers in the same toplevel hash to the same
+KEY, and presence alone would let a THIRD identical one land unpinned --
+a duplicate is not a new shape, but one more of an already-accepted shape
+still has to be counted, the same way `pinned-kernel-call' counts rather
+than only naming a file."
+  (let ((counts (make-hash-table :test #'equal)))
+    (when (file-exists-p nelisp-fallback-inventory--baseline-file)
+      (with-temp-buffer
+        (insert-file-contents nelisp-fallback-inventory--baseline-file)
+        (goto-char (point-min))
+        (while (re-search-forward "^pinned-site \\(.+\\) \\([0-9]+\\)$" nil t)
+          (puthash (match-string 1) (string-to-number (match-string 2)) counts))))
+    counts))
 
 (defun nelisp-fallback-inventory--mentions-p (form names)
   "Return non-nil when FORM contains any symbol in NAMES."
@@ -326,19 +358,54 @@ where the read BEGAN, not from where it stopped."
       ;; path.  `checked' counts files: it is the only number that can tell a
       ;; clean tree from a scan that never ran (contract: tools/ai/README.md).
       (princ (format "GATE-COUNT checked=%d findings=%d\n" scanned total))
-      (cond
-       (unreadable
-        (princ "fallback-inventory: FAIL (unreadable file)\n")
-        (kill-emacs 1))
-       (over
-        (dolist (o (nreverse over))
-          (if (eq (cdr o) 'no-baseline)
-              (princ (format "fallback-inventory: FAIL (%s has no baseline)\n"
-                             (car o)))
-            (princ (format "fallback-inventory: FAIL (%s +%d over baseline -- a new error handler that neither records nor re-raises; either record the fall or raise the baseline in the same commit)\n"
-                           (car o) (cdr o)))))
-        (kill-emacs 1))
-       (t (princ "fallback-inventory: PASS\n"))))))
+      (let* ((pins (nelisp-fallback-inventory--pins))
+             (current-counts (make-hash-table :test #'equal))
+             (sample (make-hash-table :test #'equal))
+             (new-sites nil))
+        (dolist (site nelisp-fallback-inventory--sites)
+          (let ((key (nelisp-fallback-inventory--pin-key
+                      (nth 0 site) (nth 1 site) (nth 2 site) (nth 3 site))))
+            (puthash key (1+ (gethash key current-counts 0)) current-counts)
+            (unless (gethash key sample) (puthash key site sample))))
+        (maphash
+         (lambda (key n)
+           (when (> n (gethash key pins 0))
+             (push (cons key (gethash key sample)) new-sites)))
+         current-counts)
+        (setq new-sites (sort new-sites (lambda (a b) (string< (car a) (car b)))))
+        (cond
+         (unreadable
+          (princ "fallback-inventory: FAIL (unreadable file)\n")
+          (kill-emacs 1))
+         (new-sites
+          (princ (format "fallback-inventory: FAIL (%d site(s) exceed their `pinned-site' count -- a per-kind count can miss one handler disappearing while a different one appears, net unchanged; each of these is new or grew):\n"
+                         (length new-sites)))
+          (dolist (entry new-sites)
+            (let ((site (cdr entry)))
+              (princ (format "    %-15s %-34s %s\n"
+                             (nth 0 site) (file-name-nondirectory (or (nth 1 site) "?"))
+                             (or (nth 2 site) "(top level)")))))
+          (princ (format "  Add or raise a `pinned-site' line for each in %s, or record/re-raise instead.\n"
+                         nelisp-fallback-inventory--baseline-file))
+          (kill-emacs 1))
+         (over
+          (dolist (o (nreverse over))
+            (if (eq (cdr o) 'no-baseline)
+                (princ (format "fallback-inventory: FAIL (%s has no baseline)\n"
+                               (car o)))
+              (princ (format "fallback-inventory: FAIL (%s +%d over baseline -- a new error handler that neither records nor re-raises; either record the fall or raise the baseline in the same commit)\n"
+                             (car o) (cdr o)))))
+          (kill-emacs 1))
+         (t
+          (let ((stale 0))
+            (maphash (lambda (k _v)
+                       (when (< (gethash k current-counts 0) (gethash k pins 0))
+                         (setq stale (1+ stale))))
+                     pins)
+            (when (> stale 0)
+              (princ (format "    %d `pinned-site' line(s) count higher than the tree has now -- safe to lower\n"
+                             stale))))
+          (princ "fallback-inventory: PASS\n")))))))
 
 (nelisp-fallback-inventory-run)
 

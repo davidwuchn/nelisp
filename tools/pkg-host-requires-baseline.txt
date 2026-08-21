@@ -28,3 +28,10 @@
 # the host library or only its name.
 
 hard-host-require 1
+
+# `pinned-host-require FEATURE FILE' pins the hard requires above by
+# identity.  Added 2026-08-21, same reason as the other 2026-08-21 pins: a
+# count of 1 cannot see `filenotify' traded for a DIFFERENT unresolved hard
+# require, net still 1.  Losing a pin is still green; a hard require that is
+# neither pinned nor already counted fails and names it.
+pinned-host-require filenotify nelisp-file-notify.el
