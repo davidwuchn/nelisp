@@ -69,6 +69,32 @@
   (=.elc= -> host =load= + host eval; =.nelc=/=.neln= -> NeLisp runtime
   replay).  The manifest pins =:emacs-major-version= and the =.elc= integrity
   hash so a stale source or wrong Emacs version is rejected before load.
+- *Correction 2026-08-22*: the paragraph above was true only of the code path
+  host Emacs takes (gate 9 runs =test/nelisp-artifact-test.el= under
+  =$(EMACS) --batch=).  Nothing in any gate, smoke, or workflow ever ran
+  =--kind elc= on the STANDALONE =target/nelisp= binary itself, and it
+  crashed there: =Symbol's value as variable is void: invocation-name= --
+  =nelisp-artifact--byte-compile-to= unconditionally reads that host-Emacs-
+  only variable to relaunch itself as a clean =batch-byte-compile=
+  subprocess, which only exists when the caller already is host Emacs.
+  =nelisp-artifact--standalone-host-helper-mode= already had a working
+  fallback for exactly this case -- spawn a real host Emacs and run
+  =nelisp-artifact-compile-elc-file= inside it -- but gated it to Windows
+  only; fixed by making =elc= unconditionally =required= there, on every OS.
+  Separately, the standalone's own =eval-elisp-artifact=/=exec-elisp-
+  artifact= turned out to have NO execution path for =.elc= at all: their
+  native =nelisp-standalone-source-cache-load-artifact= has no GNU Emacs
+  bytecode VM (confirmed: the reader never parses =#[...]= literals) and
+  used to fall through to an unrelated =invalid artifact magic= error; it
+  now rejects =.elc= up front with a stated reason instead.  =inspect-elisp-
+  artifact= (metadata only, no execution) is unaffected and still works on
+  =.elc=.  The fixed, three-part contract -- (a) compile produces a real
+  =.elc=, (b) stock host Emacs loads and calls it, (c) the standalone's own
+  exec/eval reject it with a named reason rather than a crash or a silent
+  wrong success, plus (d) a negative for the host helper disabled -- is now
+  measured by =nelisp-standalone--reader-elc-smoke=, wired into the
+  =standalone-reader-test= dolist and run by =make standalone-reader-test=
+  (=tools/ai/gates.expected=, now 15 checks).
 - *Implementation note (§6.1 SHIPPED)*: the =.nelc= lane now precompiles
   eligible top-level =defun= bodies to NeLisp bytecode closures
   (=nelisp-bcl=, via =nelisp-bc-compile=) and replays them onto the NeLisp
@@ -305,6 +331,12 @@ Required behavior:
 - =eval-elisp-artifact= prints the last value for diagnostics.
 - Loading an artifact must not re-open the original source file unless debug
   metadata explicitly requests it.
+- =.elc= artifacts are HOST-EMACS-ONLY for these two commands: the standalone
+  runtime has no GNU Emacs bytecode VM, so its =exec-elisp-artifact=/=eval-
+  elisp-artifact= must reject a =.elc= FILE argument with a clear, named
+  reason rather than attempt to execute it (§6.2).  =load='ing a =.elc= with
+  real host Emacs directly, not through this command, is the supported way
+  to run one.
 
 ** 4.3 Inspect
 
@@ -396,6 +428,34 @@ Long-term bytecode compatibility target.
   provided features as usual.
 - Must not reuse the current NeLisp private text =.elc= magic header
   =nelisp-bytecode-elc-v1= as the public artifact format.
+- *Compile execution boundary*: =--kind elc= compilation runs through a real
+  host Emacs subprocess in every runtime that offers it.  When the caller
+  already is host Emacs, it relaunches itself.  When the caller is the
+  standalone =target/nelisp= binary, =nelisp-artifact--standalone-host-
+  helper-mode= requires that same host-Emacs helper (found via
+  =NELISP_HOST_EMACS=/=EMACS=/PATH) rather than attempting compilation
+  natively -- the standalone runtime has no GNU Emacs byte-compiler of its
+  own.  With no host Emacs reachable, compilation fails with the named
+  diagnostic =host-helper required for --kind elc ...=, never a crash and
+  never a silent fallback to a different format.
+- *Load/exec execution boundary*: =exec-elisp-artifact=/=eval-elisp-
+  artifact= on a =.elc= artifact are HOST-EMACS-ONLY -- load and run one
+  with real Emacs directly (=emacs -Q --batch --load FILE.elc=).  The
+  standalone runtime has no GNU Emacs bytecode VM (it does not parse
+  =#[...]= bytecode-object literals at all), so its own =exec-elisp-
+  artifact=/=eval-elisp-artifact= reject a =.elc= FILE argument up front
+  with that stated reason instead of attempting it.  =inspect-elisp-
+  artifact= (metadata only, no execution) works on =.elc= from either
+  runtime, since it only reads the sibling manifest.
+- *Measured by* =nelisp-standalone--reader-elc-smoke=
+  (=scripts/nelisp-standalone-build.el=), wired into the
+  =standalone-reader-test= dolist and run by =make standalone-reader-test=
+  (see =tools/ai/gates.expected=): (a) compile produces a real =.elc= +
+  manifest; (b) stock host Emacs loads it and calls the compiled function;
+  (c) the standalone's own =eval-elisp-artifact= rejects it with the stated
+  reason instead of executing or crashing; (d) negative -- with the host
+  helper disabled (=NELISP_DISABLE_HOST_HELPER=1=), compilation fails with
+  the named diagnostic, not a crash.
 
 ** 6.3 No GNU Emacs =.eln= compatibility in Doc 142
 

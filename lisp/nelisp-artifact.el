@@ -75,7 +75,12 @@
        nelisp native-exec-elisp-artifact FILE.neln SYMBOL ARG...
        nelisp inspect-elisp-artifact FILE.nelc|FILE.neln|FILE.elc
   (.nelc = NeLisp bytecode module; .neln = bytecode + embedded native object;
-   .elc = genuine GNU Emacs byte-compiled module, Doc 142 §6.2)")
+   .elc = genuine GNU Emacs byte-compiled module, Doc 142 §6.2.
+   .elc is HOST-EMACS-ONLY for exec-elisp-artifact/eval-elisp-artifact: the
+   standalone runtime has no GNU Emacs bytecode VM and rejects a .elc FILE
+   there with a stated reason; load one with real Emacs instead
+   (emacs -Q --batch --load FILE.elc).  compile-elisp-artifact and
+   inspect-elisp-artifact both support .elc from either runtime.)")
 
 (defvar nelisp-artifact--loaded nil
   "Absolute `.nelc' paths already replayed in this process.")
@@ -4264,6 +4269,20 @@ one-line diagnostic -- so dropping this redundant, broken precondition loses
 no real safety."
   (and (nelisp-artifact--standalone-runtime-p)
        (cond
+        ;; `.elc' compilation (`nelisp-artifact-compile-elc-file' /
+        ;; `nelisp-artifact--byte-compile-to') reads `invocation-name' and
+        ;; `invocation-directory' to find "the currently running Emacs" and
+        ;; re-spawn it as a clean `batch-byte-compile' subprocess.  Both
+        ;; variables are host-Emacs-only (set by `emacs.c' at startup); the
+        ;; standalone substrate never binds them, on any OS -- so `elc' is
+        ;; `required' everywhere under the standalone runtime, not only on
+        ;; Windows (where the analogous gap for `nelc'/`neln' was already
+        ;; closed).  Before this arm existed, `--kind elc' on a non-Windows
+        ;; standalone build fell straight into `nelisp-artifact-compile-elc-
+        ;; file' unguarded and crashed with a void-variable `invocation-name'
+        ;; instead of routing through the host helper this file already
+        ;; implements for it (see the `elc' branch below).
+        ((eq kind 'elc) 'required)
         ((nelisp-artifact--standalone-windows-p) 'required)
         ((and (eq kind 'neln)
               (eq (plist-get opts :native-policy) 'required))

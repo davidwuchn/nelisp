@@ -286,6 +286,39 @@ emacs-parity
 # fixes in this sweep.  Named in full so a later reader can tell "measured and
 # green" from "nobody looked":
 #
+# 2026-08-22: a `nelisp-standalone--reader-elc-smoke' joined the dolist,
+# making it 15.  `docs/design/142-external-elisp-artifact-cache.org' (`#+
+# STATUS: SHIPPED') claimed at its section 6.2 that `compile-elisp-artifact
+# --kind elc' emits a genuine GNU-Emacs-readable `.elc' -- true of the code
+# path host Emacs takes, but nothing in any gate, smoke, or workflow ever
+# ran `--kind elc' on the STANDALONE `target/nelisp' binary itself.  It
+# crashed: `Symbol's value as variable is void: invocation-name' --
+# `nelisp-artifact--byte-compile-to' unconditionally reads that host-Emacs-
+# only variable to relaunch "itself" as a clean `batch-byte-compile'
+# subprocess, which only exists when the caller already is host Emacs.
+# `nelisp-artifact--standalone-host-helper-mode' already had a working
+# fallback for exactly this -- spawn a real host Emacs and run
+# `nelisp-artifact-compile-elc-file' inside it -- but gated it to Windows
+# only; `elc' on Linux/macOS standalone fell straight into the unguarded
+# native path.  Fixed by adding `elc' unconditionally to that gate's
+# `required' arm.  The smoke now measures the doc's actual three-part
+# contract instead of trusting the claim: (a) `compile-elisp-artifact
+# --kind elc' produces a real `.elc' + manifest; (b) stock host Emacs
+# `load's it and calls the compiled function (genuine bytecode, not a
+# private format wearing a `.elc' suffix); (c) the standalone's OWN
+# `eval-elisp-artifact'/`exec-elisp-artifact' do NOT execute it --
+# `nelisp-standalone-source-cache-load-artifact' has no GNU Emacs bytecode
+# VM (confirmed: the reader never parses `#[...]' literals) and previously
+# fell through to the unrelated "invalid artifact magic" error; it now
+# rejects `.elc' up front with a stated reason; (d) negative: with the host
+# helper disabled (`NELISP_DISABLE_HOST_HELPER=1'), `--kind elc' fails with
+# the named `host-helper required for --kind elc' diagnostic, not a crash.
+# `inspect-elisp-artifact' (metadata only, no execution) still works on a
+# `.elc' artifact and was left alone.  `docs/design/142-external-elisp-
+# artifact-cache.org' section 6.2 corrected to name this smoke and state
+# the execution boundary rather than imply a round trip that does not
+# exist.
+#
 #   standalone-reader-catch-throw-tag-smoke   standalone-reader-checked
 #   standalone-reader-checked-soak            standalone-reader-cond-let-shape-smoke
 #   standalone-reader-current-time-smoke      standalone-reader-declare-strip-smoke
