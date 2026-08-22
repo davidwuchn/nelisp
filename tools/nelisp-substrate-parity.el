@@ -526,10 +526,27 @@ reason as `nl-ns-write-accepted'."
 (defconst nelisp-substrate-parity--bare-arith-bug-indices '(9 11 13 14))
 
 (defun nelisp-substrate-parity--auto-note (finding)
-  (cl-destructuring-bind (idx substrate _baseline _actual) finding
+  (cl-destructuring-bind (idx substrate _baseline actual) finding
     (cond
-     ((equal substrate "source-fallback")
-      "KNOWN DEFECT (2026-08-22, NEW, found by this gate): eval-elisp-source's pure-source fallback path (no adjacent .neln artifact, cache-enable marker absent) does not share environment between its load step and its eval-forms step -- a function `defun'd by the loaded source file is void-function when a later FORM argument calls it. Every one of this corpus's 35 forms hits it the same way (the shim's own `probe-emit' goes void), so this reads as one failure repeated across the corpus, not 35 different ones. Reproduced in isolation outside this gate on a brand-new file that never had the cache enabled and never had an adjacent artifact, which rules out a stale-artifact leftover as the cause. `nelisp-performance-gate' does not catch this because it always pre-compiles an adjacent .neln before exercising the fallback path (see tools/nelisp-performance-gate.sh); this gate is the first to exercise pure source interpretation with nothing adjacent on disk. Not fixed here: this is inside `eval-elisp-source's own load/eval plumbing in lisp/nelisp-artifact.el and deserves its own targeted fix and regression test, not a patch guessed at from a parity gate.")
+     ;; FIXED 2026-08-22 (see src/nelisp-core-fileio.el and the commit that
+     ;; removed the matching keys from this ledger): the pure-source
+     ;; fallback's `nelisp-core-read-file-as-string' silently returned "" for
+     ;; every file -- `nl-syscall-read-file' (what it tried first) is a
+     ;; `declare-function' against a "nelisp-runtime" module this tree never
+     ;; implements, so it fell to a buffer-based read whose
+     ;; `buffer-substring-no-properties' is a `scripts/nelisp-stdlib-prelude.el'
+     ;; stub that always answers "" (no real buffer exists at that layer).
+     ;; `nelisp-load-file' therefore "loaded" zero forms, so every one of
+     ;; this corpus's 35 forms hit the SAME void-function on the shim's own
+     ;; `probe-emit', which read as one failure rather than 35.  That symptom
+     ;; is gone now that the file is actually read; this branch remains only
+     ;; to describe what a NEW, genuinely-different source-fallback finding
+     ;; means post-fix -- it is never the old symptom, since a regression of
+     ;; the old bug reproduces as void-function on the corpus's OWN shim
+     ;; function, not on a corpus-form primitive.
+     ((and (equal substrate "source-fallback")
+           (or (string-prefix-p "CRASH:void-function:" actual) (= idx 34)))
+      "KNOWN GAP (2026-08-22, exposed by the eval-elisp-source pure-source-fallback file-read fix -- see src/nelisp-core-fileio.el): source-fallback is the only substrate whose FORM arguments (and, now that the file-read is fixed, its loaded FILE's own top-level forms too) run through the self-hosted `nelisp-eval' rather than through the native evaluator every other substrate calls directly. `nelisp--primitive-symbols' (src/nelisp-eval.el) is the list `nelisp--install-primitives' bulk-copies from native `fboundp' cells into `nelisp-eval's own function table, and it omits `floor', `%', `unibyte-string', `match-data', and `nelisp--write-stdout-bytes' -- all present natively (every other substrate agrees on the corpus's intended value), void-function only where `nelisp-eval' has to look them up itself. Not fixed here: completing `nelisp--primitive-symbols' is a separate, broader prelude-parity sweep, not a defect in the file-loading mechanism this commit repairs.")
      ((and (equal substrate "host") (= idx 8))
       "ACCEPTED (by design, class ii): NeLisp strings are Rust UTF-8 internally, so a raw byte >= 128 written through `unibyte-string' round-trips through UTF-8 re-encoding -- `aref' does not return the original byte the way host Emacs's unibyte strings do. Documented in memory feedback_nelisp_standalone_utf8_raw_byte_block. Every NeLisp substrate agrees with every other NeLisp substrate here; only the comparison against host Emacs differs, which is exactly the documented limitation.")
      ((equal substrate "host")

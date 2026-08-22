@@ -541,17 +541,44 @@ gate-mutation
 #      bare-mode AOT driver's low-level arithmetic table and deserves its
 #      own targeted before/after measurement.
 #
-#   3. KNOWN DEFECT, NEW, the most severe finding: `eval-elisp-source's
-#      pure-source fallback path (cache marker absent, no adjacent `.neln'
-#      artifact on disk) does not share environment between its load step
-#      and its eval-forms step -- a function `defun'd by the loaded source
-#      is void-function when a later FORM argument calls it.  Reproduced in
-#      isolation on a brand-new file that never had the cache enabled and
-#      never had an adjacent artifact, ruling out a stale-artifact leftover.
-#      `nelisp-performance-gate' does not catch this because it always
-#      pre-compiles an adjacent `.neln' before exercising the fallback path
-#      (see `tools/nelisp-performance-gate.sh'); this is the first gate to
-#      exercise pure source interpretation with nothing adjacent.
+#   3. WAS RED, AND OPEN; NOW FIXED AND REQUIRED (2026-08-22).  The most
+#      severe finding at first run: `eval-elisp-source's pure-source fallback
+#      path (cache marker absent, no adjacent `.neln' artifact on disk)
+#      looked like it did not share environment between its load step and
+#      its eval-forms step -- a function `defun'd by the loaded source was
+#      void-function when a later FORM argument called it, on all 35 corpus
+#      forms alike (the shim's own `probe-emit' going void, so this read as
+#      one failure, not 35).  `nelisp-performance-gate' never caught it
+#      because it always pre-compiles an adjacent `.neln' before exercising
+#      the fallback path (see `tools/nelisp-performance-gate.sh'); this was
+#      the first gate to exercise pure source interpretation with nothing
+#      adjacent.  Root cause was narrower and lower than "environment loss":
+#      `nelisp-core-read-file-as-string' (src/nelisp-core-fileio.el) tries
+#      `nl-syscall-read-file' first, a `declare-function' against a
+#      "nelisp-runtime" module this tree never implements (never `fboundp'
+#      on any host), so every whole-file read fell to a buffer-based branch
+#      whose `buffer-substring-no-properties' is a
+#      `scripts/nelisp-stdlib-prelude.el' STUB that always answers "" (no
+#      real buffer exists at that minimal-boot layer) -- confirmed by a
+#      before-fix probe (`load-elisp-source' on a 3-form file returned `nil'
+#      instead of the last form's value: zero forms were ever read).  Fixed
+#      by trying the primitive the standalone runtime actually wires,
+#      `nelisp--syscall-read-file' (already used the same way by the
+#      artifact/source-cache readers in `scripts/nelisp-standalone-build.el'),
+#      before falling back to the buffer path -- a source-level fix, no
+#      generated file touched, no rebuild required for it to take effect
+#      (the standalone binary `load's this file from disk at CLI-invocation
+#      time).  Measured after: the same before-fix probe now returns the
+#      correct last-form value; the 35 accepted-ledger keys this finding
+#      collapsed to are gone (stale, per `substrate-parity-smoke'); fixing
+#      it exposed 15 new, unrelated, narrower findings (source-fallback is
+#      the only substrate whose FORM/loaded-file forms run through the
+#      self-hosted `nelisp-eval', whose own `nelisp--primitive-symbols'
+#      omits `floor'/`%'/`unibyte-string'/`match-data'/
+#      `nelisp--write-stdout-bytes' -- a separate, narrower, still-open
+#      prelude-parity gap, pinned with its own reason rather than fixed
+#      here) -- ledger now carries 117 keys (was 137), gate reports
+#      `checked=209 findings=0'.
 #
 #   4. KNOWN DEFECT, NEW: NeLisp's `string-match-p' mutates match-data on
 #      every substrate that can run it, unlike host Emacs, where it is
