@@ -211,7 +211,14 @@ ns-collision-divergent 122
 # prefix rule -- `print-length' and `print-level' are Emacs's names and
 # cannot carry a `nelisp--' prefix, and the two helpers do carry it but are
 # not the feature name itself, which is what this check asks for.
-ns-prefix-violation 853
+# 853 -> 854 on 2026-08-22: `nelisp-standalone-reader-malformed-input-test',
+# the standalone-reader input-hardening smoke's `;;;###autoload' entry
+# point.  Same shape as the existing `nelisp-standalone-reader-repl-test'
+# sibling already inside this count: public because `make standalone-
+# reader-malformed-input-smoke' calls it across the boundary via `-f', and
+# `nelisp-standalone--' would move it into ns-private-escape instead of
+# removing it.
+ns-prefix-violation 854
 # 611 -> 613 on 2026-08-20: `nelisp--check-string'/`--check-symbol' and the
 # other argument-check helpers are referenced from the lisp/ mirrors that
 # carry copies of the functions using them.  This is the kind this file
