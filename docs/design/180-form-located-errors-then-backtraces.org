@@ -1,0 +1,318 @@
+#+TITLE: Doc 180 — Form-located errors, then backtraces
+#+AUTHOR: nelisp (design: Claude Fable 5 + zawatton)
+#+DATE: 2026-08-22
+#+STATUS: DRAFT — Phase 1 (form-location threading) is a scoped 1-2 day
+#+STATUS: increment designed on top of fix/standalone-reader-input-hardening.
+#+STATUS: Phase 2 (a real frame-stack backtrace) is a multi-week sketch: the
+#+STATUS: reusable machinery exists but is dormant, undersized for the
+#+STATUS: interpreter's own recursion limit, and has a real pop/depth defect
+#+STATUS: that must be fixed before it is trustworthy.  Neither phase has
+#+STATUS: code yet.
+
+* §0 TL;DR
+
+The standalone's uncaught-error printer names the condition and the value
+and nothing else — not the file, not which top-level form, not a line.
+Phase 1 threads the position the reader already computes (a byte cursor)
+plus a form-index counter into that printer, cheaply and locally.  Phase 2
+asks whether the per-call GC-context stack already wired into
+=nelisp_eval_call= (Doc 152 §Stage 4a/4b, built for a mid-form GC
+safepoint, not for backtraces) can be repurposed as a real frame stack,
+and finds: yes in principle — the non-local-exit path is plain
+rc-propagation with no stack-skipping, so frames stay paired through a
+signal or throw — but only after fixing a live pop/depth-cap defect and
+paying an unmeasured always-on per-call cost that is currently avoided by
+being off by default.
+
+* §1 Problem: the printer has no location
+
+=nl_eval_source_print_error= (=scripts/nelisp-standalone-build.el=
+L13508-13560, emitted by
+=nelisp-standalone--eval-source-report-error-form=) is the sole place an
+uncaught top-level error is rendered.  Reading its body: it =m5_prin1='s
+the stashed TAG (arena offset 268435480) and VAL (268435512) from the M6
+signal stash, writes the literal prefix ~"nelisp: uncaught error: "~,
+then either ~"no-catch: (TAG VAL)"~ (flag==2, a =throw= that never found
+its =catch=) or ~"TAG: VAL"~ (flag==1, a real signal), and a newline.
+Nothing else.  No file, no form number, no byte or line offset — and
+nothing upstream of it carries one in either, since the M6 stash itself
+is only ever (tag . value), never a location (see the stash-region
+comment at L1191-1195).
+
+Concretely: =--load big-file.el= where the error is in the 40th top-level
+form prints exactly the same one line it would print if the error were in
+the 1st form.  There is no way to tell which form failed without a binary
+search over the file.
+
+The =fix/standalone-reader-input-hardening= branch (merge-base with this
+doc's own base commit, =06ed9bd3a5a0b91db86f99bebda5caf5d8bfd208=; sibling
+commits =ff01a44=, =54e9a078f=, =e7c3e73ab=) just closed the adjacent gap
+— a genuine reader parse failure (unterminated string, stray close paren,
+trailing garbage after a valid form) used to be silently treated as clean
+EOF; it now stashes a real =invalid-read-syntax= condition and reports it
+through the same =nl_eval_source_print_error= path.  That branch makes
+more errors reach the printer.  It does not change what the printer says
+once an error gets there — the location gap this doc addresses sits one
+layer downstream of that fix, on the same choke point
+(=nl_eval_source_all=), and Phase 1 is designed to land on top of it
+(read, not merged into this docs-only branch; the two land independently
+and compose without conflict since Phase 1 only touches the printer/driver
+signature, not the parse-error classification that branch adds).
+
+* §2 What the reader path already tracks
+
+=nelisp_reader_parse_one='s ABI (=lisp/nelisp-cc-reader-parser.el=
+L27-31): =CURSOR-SLOT= is a =*mut Sexp= holding =Sexp::Int(current-cursor)=
+— a single tagged (tag, value) pair, 16 bytes, where the value word is the
+current byte offset into the source buffer.  =nl_eval_source_all=
+(=scripts/nelisp-standalone-build.el= L13603 on) initializes it once
+(~(ptr-write-u64 cursor 0 2) (ptr-write-u64 cursor 8 0)~ — tag 2 = Int,
+value 0) and the reader advances the value word on every
+=nelisp_reader_parse_one= call.  So *the byte offset of "where we are in
+the source" is already live and already correct* at every iteration of
+the top-level loop; nothing has to be added to produce it, only read at
+the right moment (before calling =parse_one= for the form that is about
+to be evaluated, i.e. the start of that form, not its end).
+
+What does *not* exist today:
+
+- *A form-index counter.*  The loop's =more= flag toggles the =while=;
+  nothing increments a "this is form #N" counter anywhere in
+  =nl_eval_source_all=.
+- *A filename inside the loop.*  =nl_eval_source_all='s signature is
+  =(src cursor result pool out ctx builtin_sym report_errors)= — no file
+  name or pointer.  The callers *do* have one: the =--load= dispatch arm
+  (L17099) has the raw path pointer in =arg2= right before it calls
+  =(nl_eval_source_all src cursor result pool out ctx builtin_sym 1)=; it
+  is simply not threaded through.  =--eval= and the REPL have no
+  filename at all (conventionally =<eval>=/=<repl>= is the right stand-in,
+  matching how Emacs itself labels these).  =--embedded= always passes
+  =report_errors=0=, so it never prints and needs no name.
+
+* §3 Decided direction: two phases, and why they are sized this differently
+
+** §3.1 Phase 1 (1-2 days): thread form-index + byte offset (+ line, if cheap) into the printer
+
+Concretely, on top of the input-hardening tree:
+
+1. Add a =form_index= local (u64, starts at 0, incremented once per
+   successful =parse_one=) inside =nl_eval_source_all='s =while= loop.
+2. Snapshot the cursor's byte-offset word (word 8) *before* calling
+   =nelisp_reader_parse_one= for the form about to run — that is this
+   form's start offset, call it =form_start=.
+3. Thread a =(file_ptr file_len)= pair into =nl_eval_source_all='s
+   signature, supplied by each of its 3 real call sites: =--load= passes
+   its already-available =arg2= path pointer/length; =--eval= and the
+   REPL pass a static ~"<eval>"~/~"<repl>"~ literal (via the same
+   =nelisp-standalone--byte-write-forms= helper the printer itself
+   already uses for its own string literals); =--embedded= passes
+   whatever is convenient since =report_errors=0= means it is never read.
+4. Thread =(file_ptr file_len form_index form_start)= down through
+   =nl_eval_source_report_error=, =nl_eval_source_print_error=,
+   =nl_eval_source_report_bare_abort= and
+   =nl_eval_source_print_bare_abort= — 4 functions, all emitted from the
+   one =nelisp-standalone--eval-source-report-error-form= generator, all
+   in the same file, no Rust involved.
+5. Message shape: prepend ~"in FILE, top-level form #N (byte OFFSET"~,
+   optionally ~", line L"~, then ~"): "~ before the existing
+   ~"TAG: VAL"~/~"no-catch: (TAG VAL)"~ tail, which is left byte-for-byte
+   unchanged so nothing downstream (the shadow-differential corpus,
+   =emacs-parity=, any script that already greps for the tail) breaks.
+6. Line number is optional and *cheap only because it is on the error
+   path*: a linear scan of =src= counting ~\n~ bytes from offset 0 to
+   =form_start=.  This is O(offset), unbounded by file size in the
+   abstract, but it runs exactly once, only when an error is about to be
+   printed — never on the success path, never per-form.  Doc 170/Doc 152's
+   own cost discipline (measure before shipping a hot-path change) does
+   not apply here because this is explicitly a cold, rare path; the
+   discipline that *does* apply is: do not let a large source file make
+   error reporting itself pathological, so the design bounds the scan to
+   the current top-level form's own span (=form_start= back to the
+   *previous* form's start, which =nl_eval_source_all= already knows from
+   the previous iteration) rather than rescanning from byte 0 every time
+   — a form-relative line count within a running total, not a full
+   file rescan per error.
+7. Cost: an ABI change to =nl_eval_source_all= and the 4 printer
+   functions, all confined to =scripts/nelisp-standalone-build.el=.  The
+   input-hardening branch's own parse-error commit (=54e9a078f=, 405
+   lines in the same file, one working session) is a reasonable size
+   comparison for "how big is a change of this shape here" — Phase 1 is
+   narrower in scope (a signature + a message string, not a new
+   classification of failure), which is why 1-2 days is a defensible
+   estimate rather than a guess.
+
+** §3.2 Phase 2 (multi-week): a real frame stack, designed honestly
+
+The task this doc was asked to answer directly: is
+=nelisp_eval_call='s existing per-call push a usable backtrace source?
+The honest answer, after reading the machinery rather than assuming it:
+*conditionally yes, but not as-is.*
+
+*** What exists (=scripts/nelisp-standalone-build.el= L3349-3506, =nelisp-standalone--shim-source=)
+
+- =nl_gc_loop_ctx= is a fixed BSS region: a 64-byte control header
+  (depth@+0, *enable@+8*, ...) followed by up to =nl_gc_ctx_max_depth=
+  (L3406: *currently 1024*, not the 64 Doc 152 §Stage 4a originally shipped
+  with on 2026-06-17 — it has grown since; the source at this branch's
+  HEAD is the authority, not the older doc text) frames of 56 bytes each
+  (env/result/out/pool/src/cursor/bsym, 7 × 8 bytes).
+- =nelisp_eval_call= (L3497-3506) is gated: it only calls
+  =nl_gc_eval_ctx_push= (which stores =env=, =form_ptr= [passed as the
+  "result" parameter], =out=, and zeroes the remaining 4 fields) *when
+  =(ptr-read-u64 (data-addr nl_gc_loop_ctx) 8)= is 1* — i.e. only when
+  something has armed it via =(nelisp--debug-switch 5)=
+  (=bf_debug_switch= L4304-4307).  Default is 0: the cheap path
+  (=nelisp_eval_call_done=, just the recursion-depth bump) runs instead,
+  and per Doc 152's own Stage 4a note this dormant path is "byte-
+  identical" to the pre-instrumentation build — i.e. the cost when off is
+  a single branch, confirmed by that doc's own verification, not merely
+  claimed here.
+- So *every call, when armed*, really does push (env, form_ptr, out).
+  That is a genuine three-pointer trace of "what is being evaluated,
+  under what environment, writing where" at every live recursion depth —
+  which is close to what Emacs's own debugger shows (a form, not just a
+  function name).
+
+*** Why it is not simply "turn it on"
+
+1. *It exists for something else.*  Doc 152 §Stage 4a/4b built this stack
+   to support a mid-form GC safepoint (precise root marking so a
+   collection triggered mid-form does not need a conservative stack
+   scan) — not for backtraces.  Repurposing it is a legitimate second use
+   of the same data, but "the data is already there" is not the same
+   claim as "turning it on for every eval call everywhere has an
+   acceptable cost" — that has never been measured, because it has never
+   been the intended always-on state.  Doc 152's own numbers (dormant
+   500k-iteration =while= loop: 1331 MB RSS; armed: 414 MB, because the
+   arming also enables the mid-form *collector*, not just the push) are
+   about the collector's effect, not the push/pop overhead in isolation.
+   A backtrace-only use would arm the push without the collector, a
+   combination Doc 152 never measured because it never needed to.
+2. *A real depth-cap / pop-imbalance defect.*  =nl_gc_eval_ctx_push=
+   silently no-ops (returns 0, pushes nothing) once =depth >=
+   nl_gc_ctx_max_depth= (1024).  But =nelisp_eval_call_recorded_done=
+   calls =nl_gc_ctx_pop= *unconditionally*, regardless of whether the
+   matching push actually happened.  The interpreter's own recursion
+   guard (=rec_max=, env+104, default 2000 per Doc 137) is *larger* than
+   the ring's capacity — so ordinary deep-but-legal recursion (depth
+   1025-2000) will silently desync the depth counter: pushes stop
+   landing, pops keep firing, and depth undercounts for the remainder of
+   that top-level form's execution.  This is a real, source-confirmed
+   defect (not hypothetical) that must be fixed — pop only if the paired
+   push actually stored a frame, and either grow the ring past =rec_max=
+   or make it dynamic — before this stack can be trusted for anything,
+   backtraces included.
+3. *Unwinding is honestly fine, once (2) is fixed.*  The M6 catch/throw
+   unit's own comment is unambiguous and worth taking at face value
+   (L10909-10911): "rc=1 propagates up through every body-walker
+   (progn/if/let/...) exactly like an error — they all abort on rc!=0 —
+   naturally unwinding the whole native call stack with NO frame/landing
+   bookkeeping."  There is no C++-style exception that skips frames: every
+   nested =nelisp_eval_call= still runs to its own completion and its own
+   =nelisp_eval_call_recorded_done= (hence its own =nl_gc_ctx_pop=)
+   regardless of what its callee returned.  So frames stay correctly
+   paired through an error or a =throw= — the design does not need a
+   separate unwind-safety mechanism, only a *capture point before the
+   pops erase the stack*, since by the time
+   =nl_eval_source_print_error= runs at the top level the stack is back
+   to depth 0.
+4. *Frames carry pointers, not names.*  A legible line needs a per-frame
+   =prin1= of =form_ptr= (cheap, but only acceptable on the error path,
+   the same discipline as Phase 1's line-number scan).
+5. *Native-compiled code is entirely out of scope for this mechanism.*
+   Doc 171 §2.1/§2.2 establishes that AOT-compiled =defun=s lower to
+   direct native calls (intra-unit) or PLT-relocated =extern-call=s
+   (cross-unit) — *neither goes through =nelisp_eval_call= at all.*  So
+   even a fully-fixed, always-armed Phase 2 only produces backtraces for
+   code running through the interpreter path; a crash inside AOT-native
+   code remains exactly as blind as today.  State this as a hard scope
+   limit, not an oversight to paper over later.
+
+*** Full-version sketch
+
+Capture point: at the same sites that already write the M6 stash (the
+signal-stash site and =nl_ct_throw_after_val=, L10935-10942), also copy
+=frames[0..depth)= (post-fix-(2)) into a second side buffer *before* the
+propagating rc starts popping them away.  Extend
+=nl_eval_source_print_error= (Phase 1's already-extended version) to walk
+that side buffer, innermost-first, =prin1=-ing each frame's =form_ptr=
+capped at some bound (e.g. 20 innermost frames, matching Emacs's own
+=max-lisp-eval-depth= debugger's practical display habits) so a runaway
+recursion's backtrace print is itself bounded work.
+
+*** Costs (Phase 2, itemized)
+
+1. Fix the pop/depth-cap defect — independently valuable even without
+   backtraces, since it currently corrupts the mid-form GC's own root
+   count under deep recursion.
+2. Arm the push permanently (flip =nl_gc_loop_ctx+8= default) *without*
+   arming the mid-form collector — a combination Doc 152 never exercised;
+   measure isolated per-call overhead fresh (Doc 152's 1331→414 MB
+   numbers do not answer this).
+3. Grow or dynamicize the ring past =rec_max= (1024 < 2000 today).
+4. Implement the stash-time snapshot copy + the bounded render loop.
+5. Test matrix: recursion at/over the depth cap, =throw= unwinding across
+   N frames, nested =condition-case=, and an explicit native-vs-
+   interpreter split case demonstrating the native-path blind spot from
+   item 5 above is real and documented, not silently "fixed" by
+   omission.
+
+* §4 Verification design (DoD)
+
+** Phase 1
+- *Against-the-bug*: build =target/nelisp=; construct a 3-top-level-form
+  source where form #2 signals; assert the printed message names form #2
+  and a byte offset that, read back against the source text, lands at the
+  first non-whitespace byte of form #2.  A companion smoke does the same
+  for =--eval= (name = ~<eval>~) and for the REPL (name = ~<repl>~).
+- *Parity form*: none claimed.  Real Emacs's own line-position error
+  reporting is not byte-for-byte reproduced here (different internals,
+  different conventions) — Phase 1's red-proof is against this repo's own
+  regression corpus, not a differential against host Emacs.
+- *Mutation row*: add a =tools/gate-mutations.txt= row that corrupts the
+  form-index increment (e.g. hard-codes it to report form #1 always) and
+  confirms the new smoke goes red — following the same corpus-row
+  discipline =parity-coverage='s row already uses (a mutation the smoke
+  provably catches, not a mutation the smoke happens to be blind to).
+- *VERIFIED-BY*: left blank at DRAFT time; filled in with the shipping
+  commit SHA and the gate name once this reaches SHIPPED, per this
+  repo's existing convention (=tools/ai/gates.expected='s "Verified
+  red-then-green" entries, e.g. =binary-size-ratchet='s own).
+
+** Phase 2
+DoD is necessarily softer at design time, since it is a multi-week item
+with no code yet: name the milestone-level red-proof rather than a
+numeric threshold. The milestone gate is the test matrix in §3.2's Full-
+version sketch (depth-cap recursion, cross-frame throw, nested condition-
+case, native/interpreter split), each run once against a deliberately
+broken build (the unfixed pop-imbalance, specifically) to confirm the
+smoke that exercises it goes red before the fix and green after — the
+same red-then-green discipline as every other gate in this repository,
+deferred to implementation time rather than invented now against no code.
+
+* §5 Open questions
+
+1. Should the form-index in Phase 1 count *all* top-level forms
+   (including ones that silently no-op, e.g. comments-only reads that
+   return EOF) or only forms that actually reached =eval=?  The design
+   above counts only successful parses that were handed to eval, which
+   matches "form #N" as a human would count it when reading the file, but
+   this needs to be pinned down before the against-the-bug test is
+   written.
+2. Where does the REPL's own multi-line continuation state fit into the
+   byte-offset story?  =nl_eval_source_all='s cursor is over one
+   contiguous =src= buffer; the REPL's own line-buffering (=linebuf=)
+   feeds it incrementally.  Phase 1 as scoped reports the offset *within
+   whatever buffer was most recently fed to the reader*, which for the
+   REPL means "how far into this one input line", not "how far into this
+   session" — worth confirming that is the intended UX before shipping,
+   since it differs from the =--load= case where the offset is file-wide.
+3. Phase 2's frame-render bound (20 innermost frames) is arbitrary and
+   unmeasured; whether it should be configurable, and via what surface
+   (an env var the way =NELISP_ALLOC_CHECK= already works, or a
+   =debug-switch= code), is open.
+4. Whether Phase 2 is worth doing at all *before* the native path gets
+   its own, entirely different backtrace story (which this doc does not
+   design) — since a user hitting a crash in AOT-compiled code gets
+   nothing from Phase 2 either way — is a sequencing question for the
+   owner, not something this doc resolves.
