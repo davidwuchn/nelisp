@@ -236,11 +236,11 @@ emacs-parity
 # not run, so the defects sat.
 #
 # GREEN AND WIRED ABOVE: the reader smokes are covered by
-# `standalone-reader-test' (14 checks), which now includes the arm64
+# `standalone-reader-test' (15 checks), which now includes the arm64
 # byte-identity check, the `intern'/`intern-soft' "nil"/"t"
 # canonicalization check, the `defvaralias' four-direction/chain/
 # return-value check (added alongside the nl_sf_defvaralias implementation,
-# see "THE nelix GATES, PART 2" below), and, 2026-08-22, an
+# see "THE nelix GATES, PART 2" below), an
 # `extend-runtime-image' smoke (`nelisp-standalone--reader-extend-runtime-
 # image-smoke') -- the only one of the binary's 15 subcommands that had no
 # coverage anywhere in the tree.  Dumps a base image, extends it with both
@@ -259,7 +259,29 @@ emacs-parity
 # and silently wrote an OUT-IMAGE containing only the extension, not the
 # base.  Fixed by probing `file-readable-p' before calling `rdf', the same
 # pattern `bf_load' already uses.  Re-measured after: exit 1, no OUT-IMAGE
-# written, `GATE-COUNT checked=14 findings=0'.  Beside it stand 28 individual `standalone-reader-*'
+# written, `GATE-COUNT checked=14 findings=0' at the time.
+#
+# 2026-08-22 added a 15th: `nelisp-standalone--reader-malformed-input-
+# smoke', for the "read one form, then check nothing" defect class (a
+# single fix point, `nl_eval_source_all''s post-parse dispatch in
+# `scripts/nelisp-standalone-build.el', shared by --eval/--load/the REPL/
+# bare FILE) plus the missing-file three-way inconsistency between those
+# same four entry points, plus the reader's own unbounded recursion depth
+# (no guard existed; the CLI driver's fixed 32768-slot parse pool silently
+# overflowed past ~8190 levels of nesting, printing a plausible-looking
+# wrong value well before it, and eventually SIGSEGVing), plus its fixed
+# 2^22-byte read buffer (silently truncated past that many bytes, with no
+# signal anything was dropped).  Table-driven over: a stray close paren, an
+# unterminated string, a second form after a valid one, the same
+# missing-file failure through `--eval '(load ...)'', `--load' and a bare
+# FILE argument, nesting one past the reader's exact depth bound, and a
+# source at the read buffer's exact cap -- each asserting a nonzero exit
+# and a diagnostic naming the real problem -- plus well-formed controls
+# (including nesting one BELOW the bound) asserting the correct answer, so
+# a future change that makes this gate over-reject good input is caught
+# here too.  `GATE-COUNT checked=15 findings=0' after.
+#
+# Beside it stand 28 individual `standalone-reader-*'
 # targets, each measured green on 2026-08-21 -- two of them only after the
 # fixes in this sweep.  Named in full so a later reader can tell "measured and
 # green" from "nobody looked":

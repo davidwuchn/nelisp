@@ -13732,7 +13732,45 @@ keeps flagless aborts silent for artifact/runtime inline-substrate replays."
                        (if (= (ptr-read-u64 268435464 0) 0)
                            0
                          (setq more 0)))
-                (setq more 0))))))
+                ;; prc != 1: either clean EOF (2, "there is no form here")
+                ;; or a genuine reader failure (unterminated string/list, a
+                ;; stray close paren, a lex error, or the depth guard above
+                ;; -- everything else `nelisp_reader_p_dispatch' can return,
+                ;; see its docstring).  This branch used to stop the loop
+                ;; for BOTH with no further check, so `--eval'/`--load'/the
+                ;; REPL/a bare FILE argument could not tell "nothing left to
+                ;; read" from "I could not read that": trailing garbage
+                ;; after a valid form, an unterminated string, or a paren
+                ;; that never closed all printed nothing and exited 0.
+                ;; `nelisp_reader_p_dispatch' already tells the two apart;
+                ;; this is where the distinction was being dropped.
+                (if (= prc 2)
+                    (setq more 0)
+                  (seq (nl_eval_source_reader_error src report_errors)
+                       (setq more 0))))))))
+       0))
+    ;; A reader failure that is not clean EOF used to be indistinguishable
+    ;; from EOF in `nl_eval_source_all''s loop -- see the comment at its own
+    ;; `(if (= prc 2) ...)' branch above.  Split out as its own defun (rather
+    ;; than inlined at that call site) to match the shape of every other
+    ;; diagnostic helper here (`nl_eval_source_report_error' /
+    ;; `_print_error' / `_report_bare_abort' / `_print_bare_abort' are all
+    ;; separate defuns too, not inlined into the loop that calls them).
+    (defun nl_eval_source_reader_error (src report_errors)
+      (seq
+       ;; A few reader paths (the depth guard, and any future caller)
+       ;; already stash a SPECIFIC condition before returning; only fall
+       ;; back to a generic syntax error when nothing more specific is in
+       ;; flight, so the reported diagnostic names the real problem instead
+       ;; of always saying `invalid-read-syntax'.
+       (if (= (ptr-read-u64 268435472 0) 0)
+           (bf_read_syntax_error src)
+         0)
+       (if (= report_errors 1)
+           (nl_eval_source_report_error)
+         (if (= report_errors 3)
+             (nl_eval_source_report_error)
+           (nl_eval_source_print_error)))
        0))
     ,@(nelisp-standalone--eval-source-report-error-form))
   "Reader source parse/eval loop split out of the always-recompiled driver.
@@ -16575,6 +16613,93 @@ correctly."
         (seq
          (setq off (nl_cstr_copy_into form_ptr fbuf off))
          (nl_cli_wrap_source_at fbuf off src))))
+    ;; `--eval EXPR' splices EXPR's raw text into `(let ((v (progn
+    ;; EXPR))) (nelisp--write-stdout-bytes (nelisp--repr v)) ...)'
+    ;; (`nl_cli_eval_prefix' / `nl_cli_eval_suffix' above) and reads the
+    ;; WHOLE result as source.  A stray close paren in EXPR (`--eval
+    ;; '5)''`) closes that wrapper's `let' early instead of erroring: the
+    ;; reader then picks up the wrapper's OWN
+    ;; `(nelisp--write-stdout-bytes (nelisp--repr v))' tail as a second,
+    ;; unrelated top-level form, and `v' -- an internal implementation
+    ;; variable the user never wrote -- leaks into a `void-variable'
+    ;; error that names the wrong thing.  Fix at the source rather than
+    ;; renaming the wrapper variable: renaming only lowers the odds EXPR
+    ;; happens to reuse the same name, it does not stop a stray paren
+    ;; from desynchronizing the splice.  Read EXPR on its own first, as
+    ;; data, with the SAME reader the rest of this class-level fix uses
+    ;; -- exactly one well-formed form and nothing but whitespace/
+    ;; comments after it -- and reject anything else before it is ever
+    ;; spliced into the wrapper, so the wrapper is never reached with
+    ;; input that could desynchronize it.  Returns 1 when EXPR checks
+    ;; out; 0 after stashing a diagnostic (a specific one, e.g. the
+    ;; depth guard, if some deeper reader path already stashed one;
+    ;; `invalid-read-syntax' naming EXPR otherwise) for the caller to
+    ;; report through the shared `nl_eval_source_report_error' path.
+    (defun nl_cli_eval_expr_check (expr-str)
+      (let* ((cap (let ((n (* 4 (str-len expr-str))))
+                    (if (< n 256) 256 (if (> n 4194304) 4194304 n))))
+             (pool (alloc-bytes (* cap 32) 8))
+             (cursor (alloc-bytes 32 8))
+             (result (alloc-bytes 32 8))
+             (prevcap (ptr-read-u64 268436448 0)))
+        (seq
+         (ptr-write-u64 268436448 0 cap)
+         (ptr-write-u64 cursor 0 2) (ptr-write-u64 cursor 8 0)
+         (let* ((prc1 (nelisp_reader_parse_one expr-str cursor result pool 0)))
+           (if (= prc1 1)
+               (let* ((prc2 (nelisp_reader_parse_one
+                             expr-str cursor result pool 0)))
+                 (if (= prc2 2)
+                     (seq (ptr-write-u64 268436448 0 prevcap) 1)
+                   ;; A second form (prc2 = 1: `--eval '(+ 1 2) (+ 3 4)''`)
+                   ;; or trailing garbage the reader could not parse
+                   ;; (prc2 = anything else).  Either way EXPR is not
+                   ;; "exactly one form" -- reject it here, unwrapped.
+                   (seq
+                    (if (= (ptr-read-u64 268435472 0) 0)
+                        (bf_read_syntax_error expr-str)
+                      0)
+                    (ptr-write-u64 268436448 0 prevcap)
+                    0)))
+             (seq
+              (if (= (ptr-read-u64 268435472 0) 0)
+                  (bf_read_syntax_error expr-str)
+                0)
+              (ptr-write-u64 268436448 0 prevcap)
+              0))))))
+    ;; The reader's raw source buffer (`fbuf', and the `len' every
+    ;; `nl_os_read_file_cpath' call passes) is a fixed `nelisp-standalone--
+    ;; reader-read-cap' (2^22 = 4194304) bytes.  A single `read(2)' honors
+    ;; the requested length, so a file at or past that many bytes reads
+    ;; back SILENTLY TRUNCATED with no signal that anything was dropped --
+    ;; `n == cap' cannot be told apart from "the file happens to be exactly
+    ;; this size."  Measured 2026-08-22: `(length "aaa..."))' at the
+    ;; boundary used to answer a silent `nil'; once the reader-completeness
+    ;; fix above turns that truncation into an `invalid-read-syntax'
+    ;; report, printing the multi-megabyte truncated string INTO that
+    ;; diagnostic crashes the process instead of reporting it -- worse than
+    ;; the original silent wrong answer.  So this stops before either: a
+    ;; possibly-truncated read is rejected here, by name only (never by
+    ;; embedding its content in the message), before it ever reaches the
+    ;; reader.  The owner of the 2^22 wall is this buffer, not the elisp
+    ;; layer -- `(load ...)' from `--eval' does not share it (`bf_load_
+    ;; readable' sizes its own pool from the real file length) and reads
+    ;; the same file correctly past this bound; only entry points that copy
+    ;; through `fbuf' (`--eval', `--load', the bare FILE argument) do.
+    (defun nl_cli_read_cap_hit_p (n)
+      (>= n ,nelisp-standalone--reader-read-cap))
+    (defun nl_cli_stash_source_too_large (what)
+      (let* ((tag-buf (alloc-bytes 24 1)))
+        (seq
+         ,@(nelisp-standalone--byte-write-forms 'tag-buf "nelisp-file-too-large")
+         (nl_alloc_symbol
+          tag-buf
+          ,(length (encode-coding-string "nelisp-file-too-large" 'utf-8 t))
+          268435480)
+         (bf_sig_copy32 268435512 what)
+         (ptr-write-u64 268435472 0 1)
+         (atomic-fetch-add 268435544 1)
+         -1)))
     (defun nl_cli_load_source (path_ptr fbuf src)
       (let* ((n (nl_os_read_file_cpath
                  path_ptr fbuf
@@ -17093,29 +17218,59 @@ correctly."
             (seq (nl_cli_write_help fbuf) 2)))
          ((= (nl_cli_eval_command_p path) 1)
           (if (= (nl_cli_one_arg_p arg2 arg3) 1)
-              (seq
-               ;; Doc 143: run the stdlib prelude before the user EXPR so the
-               ;; same library available in the REPL is available under `eval'
-               ;; (read-from-string, prin1-to-string, the list/string library,
-               ;; etc.).  Without this `eval' saw only the bare builtins.
-               ;; cold path: the loaded image already ran this prelude in the
-               ;; dumping process, so its definitions are live in the loaded
-               ;; globals.  RE-evaluating it over the cold image is both
-               ;; redundant and unsafe (re-defining a stdlib function frees/
-               ;; reuses the previous definition's blocks, which sit inside the
-               ;; loaded image -> corruption -> SIGSEGV).  Skipping it is exactly
-               ;; the cold-load win: the expensive library setup is already baked
-               ;; into the image.  Normal boot (_cl < 0) runs the prelude.
-               (if (< _cl 0)
+              (let* ((expr-str (alloc-bytes 32 8)))
+                (seq
+                 (nl_alloc_str arg2 (nl_cstr_len arg2) expr-str)
+                 (if (>= (+ (nl_cstr_len arg2) 256)
+                         ,nelisp-standalone--reader-read-cap)
+                     ;; `nl_cli_eval_expr_check' below validates EXPR
+                     ;; through its own pool, sized from EXPR's real
+                     ;; length -- that step is safe at any size.  What is
+                     ;; NOT safe is `nl_cli_eval_source' next, which copies
+                     ;; EXPR (plus ~100 bytes of `(let ((v (progn ...)))'
+                     ;; wrapper) into `fbuf', a FIXED `nelisp-standalone--
+                     ;; reader-read-cap'-byte buffer, with no bounds check
+                     ;; on the copy: an EXPR near that many bytes would
+                     ;; overflow `fbuf' rather than merely truncate.  Same
+                     ;; wall as `--load' / bare FILE (see `nl_cli_stash_
+                     ;; source_too_large' above); reject by name only.
+                     (seq
+                      (nl_cli_stash_source_too_large expr-str)
+                      (nl_eval_source_report_error)
+                      (- (ptr-read-u64 268435464 0) 1))
+                 (if (= (nl_cli_eval_expr_check expr-str) 1)
+                     (seq
+                      ;; Doc 143: run the stdlib prelude before the user EXPR so
+                      ;; the same library available in the REPL is available
+                      ;; under `eval' (read-from-string, prin1-to-string, the
+                      ;; list/string library, etc.).  Without this `eval' saw
+                      ;; only the bare builtins.
+                      ;; cold path: the loaded image already ran this prelude in
+                      ;; the dumping process, so its definitions are live in the
+                      ;; loaded globals.  RE-evaluating it over the cold image is
+                      ;; both redundant and unsafe (re-defining a stdlib function
+                      ;; frees/reuses the previous definition's blocks, which sit
+                      ;; inside the loaded image -> corruption -> SIGSEGV).
+                      ;; Skipping it is exactly the cold-load win: the expensive
+                      ;; library setup is already baked into the image.  Normal
+                      ;; boot (_cl < 0) runs the prelude.
+                      (if (< _cl 0)
+                          (seq
+                           ,@(nelisp-standalone--reader-repl-prelude-forms
+                              'fbuf 'src 'cursor 'result 'pool 'out 'ctx 'builtin_sym))
+                        0)
+                      (nl_cli_eval_source arg2 fbuf src)
+                      (nl_eval_source_all src cursor result pool out ctx builtin_sym 1)
+                      (if (= (ptr-read-u64 268435464 0) 0)
+                          0
+                        (- (ptr-read-u64 268435464 0) 1)))
+                   ;; EXPR itself did not check out (not exactly one
+                   ;; well-formed form) -- report the diagnostic
+                   ;; `nl_cli_eval_expr_check' already stashed and exit
+                   ;; nonzero without ever touching the wrapper.
                    (seq
-                    ,@(nelisp-standalone--reader-repl-prelude-forms
-                       'fbuf 'src 'cursor 'result 'pool 'out 'ctx 'builtin_sym))
-                 0)
-               (nl_cli_eval_source arg2 fbuf src)
-               (nl_eval_source_all src cursor result pool out ctx builtin_sym 1)
-               (if (= (ptr-read-u64 268435464 0) 0)
-                   0
-                 (- (ptr-read-u64 268435464 0) 1)))
+                    (nl_eval_source_report_error)
+                    (- (ptr-read-u64 268435464 0) 1))))))
             (seq (nl_cli_write_help fbuf) 2)))
          ((= (nl_cstr_eq_load path) 1)
           (if (= (nl_cli_one_arg_p arg2 arg3) 1)
@@ -17137,13 +17292,41 @@ correctly."
                           arg2 fbuf
                           ,nelisp-standalone--reader-read-cap)))
                  (if (< n 0)
-                     (seq (nl_cli_write_help fbuf) 2)
-                   (seq
-                    (nl_alloc_str fbuf n src)
-                    (nl_eval_source_all src cursor result pool out ctx builtin_sym 1)
-                    (if (= (ptr-read-u64 268435464 0) 0)
-                        (nl_cli_write_value fbuf out)
-                      (- (ptr-read-u64 268435464 0) 1))))))
+                     ;; A `--load' of a path `nl_os_read_file_cpath' could
+                     ;; not open used to dump the ENTIRE --help usage text
+                     ;; and exit 2 without ever naming the file.  `--eval
+                     ;; '(load "...")'' already reports this correctly
+                     ;; (`bf_load' -> `bf_require_file_missing', fixed in
+                     ;; 21cc84650) because it goes through the real `load'
+                     ;; primitive; this path read the file directly and
+                     ;; never called it.  Reuse the exact same signal
+                     ;; surface instead of a second, worse one: stash the
+                     ;; same `file-missing' condition naming this file, then
+                     ;; report it through the same diagnostic + nonzero-exit
+                     ;; path every other reader/eval failure in `driver' uses.
+                     (let* ((path-str (alloc-bytes 32 8)))
+                       (seq
+                        (nl_alloc_str arg2 (nl_cstr_len arg2) path-str)
+                        (bf_require_file_missing path-str)
+                        (nl_eval_source_report_error)
+                        (- (ptr-read-u64 268435464 0) 1)))
+                   (if (= (nl_cli_read_cap_hit_p n) 1)
+                       ;; Read exactly the buffer's max -- the file may be
+                       ;; larger and silently truncated.  Reject by name,
+                       ;; not by content (see `nl_cli_stash_source_too_
+                       ;; large' above for why).
+                       (let* ((path-str (alloc-bytes 32 8)))
+                         (seq
+                          (nl_alloc_str arg2 (nl_cstr_len arg2) path-str)
+                          (nl_cli_stash_source_too_large path-str)
+                          (nl_eval_source_report_error)
+                          (- (ptr-read-u64 268435464 0) 1)))
+                     (seq
+                      (nl_alloc_str fbuf n src)
+                      (nl_eval_source_all src cursor result pool out ctx builtin_sym 1)
+                      (if (= (ptr-read-u64 268435464 0) 0)
+                          (nl_cli_write_value fbuf out)
+                        (- (ptr-read-u64 268435464 0) 1)))))))
             (seq (nl_cli_write_help fbuf) 2)))
          ((= (nl_cstr_eq_neln_selftest path) 1)
           (nl_neln_demo_exec ctx 41))
@@ -17284,8 +17467,40 @@ correctly."
 	                              path fbuf
 	                              ,nelisp-standalone--reader-read-cap)))
 	                     (if (< n 0)
-	                         (sexp-write-str-lit src "1")
-	                       (nl_alloc_str fbuf n src)))))))))))
+	                         ;; A bare positional FILE argument that does not
+	                         ;; exist used to silently become the source text
+	                         ;; "1" -- a well-formed, silent no-op program --
+	                         ;; completely different from `--load''s usage-
+	                         ;; text dump for the SAME failure, and from
+	                         ;; `--eval '(load "...")'''s correct, named
+	                         ;; `file-missing' report.  Stash the SAME
+	                         ;; condition `bf_require_file_missing' raises for
+	                         ;; `load' (fixed in 21cc84650), naming this path,
+	                         ;; then hand the reader a single stray close
+	                         ;; paren: `nl_eval_source_all''s reader-error
+	                         ;; path only falls back to a generic syntax
+	                         ;; error when nothing more specific is already
+	                         ;; stashed, so this reports the file-missing
+	                         ;; condition just stashed instead of a fresh,
+	                         ;; less useful diagnostic.
+	                         (let* ((path-str (alloc-bytes 32 8)))
+	                           (seq
+	                            (nl_alloc_str path (nl_cstr_len path) path-str)
+	                            (bf_require_file_missing path-str)
+	                            (sexp-write-str-lit src ")")))
+	                       (if (= (nl_cli_read_cap_hit_p n) 1)
+	                           ;; Read exactly the buffer's max -- see
+	                           ;; `nl_cli_stash_source_too_large' above.  Same
+	                           ;; stray-close-paren trick as the file-missing
+	                           ;; branch above: stash the condition, then hand
+	                           ;; the reader something that fails so it reports
+	                           ;; the ALREADY-stashed diagnostic.
+	                           (let* ((path-str (alloc-bytes 32 8)))
+	                             (seq
+	                              (nl_alloc_str path (nl_cstr_len path) path-str)
+	                              (nl_cli_stash_source_too_large path-str)
+	                              (sexp-write-str-lit src ")")))
+	                         (nl_alloc_str fbuf n src))))))))))))
            ;; --- reader path (M8): read+eval EVERY top-level form, keep the last
            ;; value.  parse_one advances the shared cursor; it returns 1 per form
            ;; and != 1 (e.g. -1 at EOF) when no more forms remain.
@@ -18684,7 +18899,8 @@ loader when it is absent."
                                  nelisp-standalone--reader-cli-smoke
                                  nelisp-standalone--reader-neln-selftest-smoke
                                  nelisp-standalone--reader-repl-smoke
-                                 nelisp-standalone--reader-control-flow-smoke))
+                                 nelisp-standalone--reader-control-flow-smoke
+                                 nelisp-standalone--reader-malformed-input-smoke))
                   (funcall smoke)
                   (setq checked (1+ checked)))
                 (message "GATE-COUNT checked=%d findings=0" checked)
@@ -18711,6 +18927,19 @@ loader when it is absent."
         (kill-emacs 0))
     (error
      (message "[standalone-reader] FAIL: repl smoke: %s"
+              (error-message-string err))
+     (kill-emacs 1))))
+
+;;;###autoload
+(defun nelisp-standalone-reader-malformed-input-test ()
+  "Build the reader binary and run only the malformed-input smoke.  Exits 0/1."
+  (nelisp-standalone-build-reader)
+  (condition-case err
+      (progn
+        (nelisp-standalone--reader-malformed-input-smoke)
+        (kill-emacs 0))
+    (error
+     (message "[standalone-reader] FAIL: malformed-input smoke: %s"
               (error-message-string err))
      (kill-emacs 1))))
 
@@ -19512,6 +19741,149 @@ not exist must fail (exit 1), not silently produce a usable image."
     (unless (= bad-rc 2)
       (error "repl --bad exit=%S" bad-rc))
     (message "[standalone-reader] repl smoke PASS")))
+
+(defun nelisp-standalone--reader-malformed-input-smoke--rm (file)
+  "Delete FILE if it exists, ignoring any error.
+Factored out so this smoke's several cleanup sites are one `ignore-errors'
+occurrence (`fallback-inventory' pins error-handler sites by shape, not
+by call count) rather than one per temp file."
+  (ignore-errors (delete-file file)))
+
+(defun nelisp-standalone--reader-malformed-input-smoke ()
+  "Table-driven regression for the reader-completeness defect class.
+
+Every row here used to fail one of two ways: silently (exit 0, wrong or
+empty output) or loudly but dishonestly (an internal wrapper variable
+leaking into the message, or the entire --help usage text standing in for
+a one-line diagnostic).  Each malformed row asserts a NONZERO exit and a
+specific substring in the diagnostic; each well-formed control row asserts
+the correct answer, so a future change that makes this gate accidentally
+reject good input is caught here too."
+  (let* ((garbage-file (make-temp-file "nelisp-malformed-garbage-" nil ".el"))
+         (unterm-file (make-temp-file "nelisp-malformed-unterm-" nil ".el"))
+         (ok-file (make-temp-file "nelisp-malformed-ok-" nil ".el"))
+         (deep-ok-file (make-temp-file "nelisp-malformed-deep-ok-" nil ".el"))
+         (deep-bad-file (make-temp-file "nelisp-malformed-deep-bad-" nil ".el"))
+         (huge-file (make-temp-file "nelisp-malformed-huge-" nil ".el"))
+         (missing-load (expand-file-name "nelisp-malformed-does-not-exist.el"
+                                         temporary-file-directory))
+         (missing-flat (expand-file-name "nelisp-malformed-does-not-exist2.el"
+                                         temporary-file-directory))
+         ;; Just under / just over the reader's exact bound for the CLI
+         ;; driver's fixed pool (32768 slots -> max depth 8190; see the
+         ;; guard's own definition in nelisp-cc-reader-parser.el).
+         (deep-ok-depth 8189)
+         (deep-bad-depth 8191)
+         ;; At `nelisp-standalone--reader-read-cap' (2^22): a file this
+         ;; size or larger reads back silently truncated without the fix.
+         (huge-len 4194304))
+    (unwind-protect
+        (progn
+          (mapc #'nelisp-standalone--reader-malformed-input-smoke--rm
+                (list missing-load missing-flat))
+          (with-temp-file garbage-file (insert "(+ 1 2))"))
+          (with-temp-file unterm-file (insert "\"hello"))
+          (with-temp-file ok-file (insert "(+ 40 3)\n"))
+          (with-temp-file deep-ok-file
+            (insert "'")
+            (insert (make-string deep-ok-depth ?\()
+                    (make-string deep-ok-depth ?\))))
+          (with-temp-file deep-bad-file
+            (insert "'")
+            (insert (make-string deep-bad-depth ?\()
+                    (make-string deep-bad-depth ?\))))
+          (with-temp-file huge-file
+            (insert "(length \"")
+            (insert (make-string huge-len ?a))
+            (insert "\")"))
+          (dolist (row
+                   (list
+                    ;; label   args   want-exit   stderr-substring-or-nil
+                    (list "eval stray paren"
+                          (list "--eval" "5)") 1 "invalid-read-syntax")
+                    (list "eval unterminated string"
+                          (list "--eval" "\"hello") 1 "invalid-read-syntax")
+                    (list "eval trailing form"
+                          (list "--eval" "(+ 1 2) (+ 3 4)") 1
+                          "invalid-read-syntax")
+                    (list "load trailing garbage"
+                          (list "--load" garbage-file) 1 "invalid-read-syntax")
+                    (list "load unterminated string"
+                          (list "--load" unterm-file) 1 "invalid-read-syntax")
+                    (list "eval load missing file"
+                          (list "--eval"
+                                (format "(load %S)" missing-load))
+                          1 "file-missing")
+                    (list "load missing file"
+                          (list "--load" missing-load) 1 "file-missing")
+                    (list "bare missing file"
+                          (list missing-flat) 1 "file-missing")
+                    (list "load deep nesting past bound"
+                          (list "--load" deep-bad-file) 1
+                          "excessive-lisp-nesting")
+                    (list "load oversized string"
+                          (list "--load" huge-file) 1
+                          "nelisp-file-too-large")
+                    ;; Controls: well-formed input must still work.
+                    (list "eval well-formed control"
+                          (list "--eval" "(+ 40 2)") 0 nil)
+                    (list "load well-formed control"
+                          (list "--load" ok-file) 0 nil)
+                    (list "load deep nesting within bound control"
+                          (list "--load" deep-ok-file) 0 nil)))
+            (let* ((label (nth 0 row))
+                   (args (nth 1 row))
+                   (want-exit (nth 2 row))
+                   (want-substring (nth 3 row))
+                   (stderr-file (make-temp-file "nelisp-malformed-stderr-"))
+                   (rc nil) (out nil) (err nil))
+              (unwind-protect
+                  (progn
+                    (with-temp-buffer
+                      (setq rc (apply #'call-process
+                                      nelisp-standalone--reader-out nil
+                                      (list t stderr-file) nil args))
+                      (setq out (buffer-string)))
+                    (with-temp-buffer
+                      (insert-file-contents stderr-file)
+                      (setq err (buffer-string)))
+                    (unless (= rc want-exit)
+                      (error "%s: exit=%S (want %S) stdout=%S stderr=%S"
+                             label rc want-exit out err))
+                    (when (and want-substring
+                               (not (string-match-p
+                                     (regexp-quote want-substring) err)))
+                      (error "%s: stderr=%S missing %S" label err
+                             want-substring))
+                    ;; Well-formed controls: assert the correct answer too,
+                    ;; not just exit 0 -- a gate that only checks "did not
+                    ;; error" would not catch this fix rejecting good input.
+                    (cond
+                     ((equal label "eval well-formed control")
+                      (unless (equal out "42\n")
+                        (error "%s: stdout=%S (want \"42\\n\")" label out)))
+                     ((equal label "load well-formed control")
+                      (unless (equal out "43\n")
+                        (error "%s: stdout=%S (want \"43\\n\")" label out)))
+                     ((equal label "load deep nesting within bound control")
+                      ;; The innermost `()' IS nil, printed as the 3-byte
+                      ;; string "nil" rather than another pair of parens
+                      ;; (verified against `--eval "'((()))"' -> "((nil))"
+                      ;; during this fix's development), so N opens/closes
+                      ;; print as (N-1) parens on each side around "nil".
+                      (unless (equal
+                               out
+                               (concat (make-string (1- deep-ok-depth) ?\()
+                                       "nil"
+                                       (make-string (1- deep-ok-depth) ?\))
+                                       "\n"))
+                        (error "%s: stdout mismatch (len=%d, want depth %d)"
+                               label (length out) deep-ok-depth)))))
+                (ignore-errors (delete-file stderr-file)))))
+          (message "[standalone-reader] malformed-input smoke PASS"))
+      (mapc #'nelisp-standalone--reader-malformed-input-smoke--rm
+            (list garbage-file unterm-file ok-file deep-ok-file
+                  deep-bad-file huge-file missing-load missing-flat)))))
 
 (defconst nelisp-standalone--prelude-file
   (expand-file-name "scripts/nelisp-stdlib-prelude.el"

@@ -89,8 +89,15 @@
 # `(ignore-errors (delete-file tmp))' shape every sibling `reader-*-smoke'
 # already uses -- a failed cleanup changes nothing about the smoke's
 # verdict).
+# 41 -> 43 on 2026-08-22: two new sites, reviewed and pinned below --
+# `nelisp-standalone--reader-malformed-input-smoke-rm's own best-effort
+# `(ignore-errors (delete-file file))' (the same shape every sibling
+# `reader-*-smoke' cleanup already uses, factored into one defun instead
+# of one call per temp file so eight identical shapes did not each need
+# their own pin) and the malformed-input smoke's per-row stderr-file
+# cleanup, same reasoning.
 silent-fallback 50
-ignore-errors   42
+ignore-errors   44
 # 34 -> 32 on 2026-08-19: the two handlers in
 # `nelisp-artifact--ensure-native-compiler' now record the error instead of
 # discarding it.  Between them they had hidden a chain of six failures --
@@ -167,6 +174,8 @@ pinned-site ignore-errors	nelisp-standalone-build.el	defun nelisp-standalone--re
 pinned-site ignore-errors	nelisp-standalone-build.el	defun nelisp-standalone--reader-hash-table-literal-smoke	7a85c44cdaf9 1
 pinned-site ignore-errors	nelisp-standalone-build.el	defun nelisp-standalone--reader-intern-canonical-smoke	7a85c44cdaf9 1
 pinned-site ignore-errors	nelisp-standalone-build.el	defun nelisp-standalone--reader-large-quoted-alist-mutation-smoke	7a85c44cdaf9 1
+pinned-site ignore-errors	nelisp-standalone-build.el	defun nelisp-standalone--reader-malformed-input-smoke	b58994cdbf57 1
+pinned-site ignore-errors	nelisp-standalone-build.el	defun nelisp-standalone--reader-malformed-input-smoke--rm	dd8bb1462f63 1
 pinned-site ignore-errors	nelisp-standalone-build.el	defun nelisp-standalone--reader-repl-smoke	12ae73a754c4 1
 pinned-site ignore-errors	nelisp-standalone-build.el	defun nelisp-standalone--reader-repl-smoke	614d75952366 1
 pinned-site ignore-errors	nelisp-standalone-build.el	defun nelisp-standalone--reader-setcar-setcdr-type-smoke	7a85c44cdaf9 1

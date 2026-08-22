@@ -126,6 +126,69 @@
     (defun nelisp_reader_p_slot (base n) (+ base (* n 32)))
 
     ;; ===========================================================
+    ;; Reader depth guard.  Mirrors `nelisp_eval_call_stash_excessive_
+    ;; lisp_nesting' (scripts/nelisp-standalone-build.el, the eval-side
+    ;; `rec_max' guard) for the recursive-descent parser above: every
+    ;; nesting level costs 4 slots starting at (3 + d*4) in SLOT-POOL,
+    ;; and nothing checked that against the pool's actual allocation
+    ;; before this fix.  Past the bound, `nelisp_reader_p_slot' keeps
+    ;; computing addresses that walk off the caller's `alloc-bytes'
+    ;; region into whatever the flat arena placed next -- silently, the
+    ;; same way an unchecked C buffer overrun would.  Measured
+    ;; 2026-08-22 on the CLI driver's fixed 32768-slot pool (see
+    ;; `driver' in nelisp-standalone-build.el, register @268436448):
+    ;; well past the bound (depth 100k-200k) the corruption reads back
+    ;; as a plausible-looking value (print truncated to ~8192 opens/
+    ;; closes -- the printer is not at fault, see the CLI driver's own
+    ;; comment); far enough past it (~2,000,000) the walk finally
+    ;; leaves mapped memory and the process SIGSEGVs.  The bound is
+    ;; read from the SAME register every parse-loop entry point
+    ;; (`bf_load_readable' / `bf_eval_source_string' /
+    ;; `bf_read_all_from_string_native' / the CLI driver) already
+    ;; writes ITS pool's slot capacity into before running a parse loop
+    ;; and restores afterward, so this guard is exact for whichever
+    ;; pool is live instead of one fixed number that would be wrong
+    ;; for most callers (their pools range from 256 to 4,194,304
+    ;; slots).  The -8 margin below covers the widest per-depth slot
+    ;; offset (`spare_idx' = 6 + d*4) plus one word of slack.
+    ;; ===========================================================
+
+    (defun nelisp_reader_p_pool_cap () (ptr-read-u64 268436448 0))
+    (defun nelisp_reader_p_max_depth ()
+      (/ (- (nelisp_reader_p_pool_cap) 8) 4))
+    ;; Arity 2 (even, with a `_pad'), matching `nelisp_eval_call_stash_
+    ;; excessive_lisp_nesting''s `(_env rec_max)' shape (scripts/nelisp-
+    ;; standalone-build.el) rather than the natural single-argument shape --
+    ;; this codebase's other "arity N (even)" comments document a SysV
+    ;; AMD64 stack-alignment requirement at static-emit call sites, and
+    ;; kept even here for the same reason.  `(not ...)' is the actual
+    ;; primitive this DSL does not support (0 hits inside any AOT `(seq
+    ;; ...)' blob in the whole tree, vs. host-Emacs generator code where it
+    ;; is common) -- an earlier draft calling `(not (nelisp_reader_p_depth_
+    ;; ok_p depth))' segfaulted even with `depth_ok_p''s body hardcoded to
+    ;; return 1 unconditionally, which is why the call site below compares
+    ;; the result to 0 explicitly instead.
+    (defun nelisp_reader_p_depth_ok_p (d _pad)
+      (< d (nelisp_reader_p_max_depth)))
+    (defun nelisp_reader_p_stash_excessive_nesting (max-depth _pad)
+      (let* ((tag-buf (alloc-bytes 24 1)))
+        (seq
+         ;; "excessive-lisp-nesting" (22 bytes) -- the same condition
+         ;; symbol the eval-side guard raises, so both land in one
+         ;; `(condition-case e (...) (error ...))' clause.
+         (ptr-write-u64 tag-buf 0 8532477908489566309)
+         (ptr-write-u64 (+ tag-buf 8) 0 7939125359116299621)
+         (ptr-write-u64 (+ tag-buf 16) 0 113723913302885)
+         (nl_alloc_symbol tag-buf 22 268435480)
+         (ptr-write-u64 268435512 0 2)
+         (ptr-write-u64 (+ 268435512 8) 0 max-depth)
+         (ptr-write-u64 (+ 268435512 16) 0 0)
+         (ptr-write-u64 (+ 268435512 24) 0 0)
+         (ptr-write-u64 268435472 0 1)
+         (atomic-fetch-add 268435544 1)
+         -1)))
+
+    ;; ===========================================================
     ;; ASCII digit predicate.
     ;; ===========================================================
 
@@ -588,6 +651,15 @@
     (defun nelisp_reader_p_dispatch
         (str-ptr cursor-slot result-slot slot-pool depth kind)
       (cond
+       ;; Depth guard FIRST, before `depth' is used to compute any
+       ;; slot-pool address at this level or deeper -- see the guard's
+       ;; definition above `nelisp_reader_p_slot' for why and how the
+       ;; bound is derived.  Every recursive path (list body, vector
+       ;; body, quote wrap) dispatches through here before touching a
+       ;; new depth level's slots, so one clause here covers all of them.
+       ((= (nelisp_reader_p_depth_ok_p depth 0) 0)
+        (nelisp_reader_p_stash_excessive_nesting
+         (nelisp_reader_p_max_depth) 0))
        ;; LParen
        ((= kind 1)
         (nelisp_reader_p_parse_list_step

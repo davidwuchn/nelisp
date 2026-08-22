@@ -33,5 +33,17 @@
 # Raise `size' only in the commit that explains the growth, and say what
 # the growth is (new manifest entry, new compiled unit, ...).  Lower it
 # whenever a change shrinks the binary and the gate says you can.
-size 6432608
+#
+# Raised 2026-08-22 (6432608 -> 6461752, +29144 bytes, +0.45%, well inside
+# the existing 2% slack -- raised anyway per this file's own rule above,
+# not left for slack to silently absorb) by the standalone-reader input-
+# hardening fix: `nelisp-cc-reader-parser.el' gained an explicit bounded-
+# depth guard (mirrors the eval-side `rec_max' guard) in the recursive-
+# descent parser, and `nelisp-standalone-build.el' gained the reader-
+# completeness fix in `nl_eval_source_all', the `--eval'-EXPR pre-
+# validation that stops the internal wrapper variable from leaking into
+# user-facing errors, the missing-file unification for `--load' and a
+# bare FILE argument (reusing `bf_require_file_missing'), the 2^22 read-
+# cap loud guard, and their new stash/check helper functions.
+size 6461752
 slack-pct 2

@@ -74,7 +74,16 @@
 # the whole content of the function: it asks the kernel for a path and
 # copies bytes.  $PWD was available and deliberately not used; being right
 # only sometimes is the worst thing a path source can be.
-unsafe-call 538
+# 538 -> 562 on 2026-08-22: the standalone-reader input-hardening fix, all
+# in `scripts/nelisp-standalone-build.el'.  The reader-completeness fix in
+# `nl_eval_source_all', the `--eval'-EXPR pre-validation, the missing-file
+# unification for `--load'/bare FILE, and the 2^22 read-cap guard all read
+# and write the same low-level arena state (`ptr-read-u64'/`ptr-write-u64'
+# on the M6 error-stash slots and the reader's live pool-cap register,
+# `alloc-bytes' for their scratch buffers) every sibling error path here
+# already uses -- no new kind of unsafe call, more call sites of the kinds
+# already present.
+unsafe-call 562
 
 # `pinned-kernel-call FILE COUNT' pins the per-file unquoted `unsafe-call'
 # count behind `total' above -- the three kernel files that actually carry
@@ -87,4 +96,4 @@ unsafe-call 538
 # Regenerate from a clean tree; do not hand-edit into drift from the scan.
 pinned-kernel-call lisp/nelisp-stdlib-os-int-helpers.el 18
 pinned-kernel-call scripts/nelisp-flat-arena-probe.el 6
-pinned-kernel-call scripts/nelisp-standalone-build.el 514
+pinned-kernel-call scripts/nelisp-standalone-build.el 538

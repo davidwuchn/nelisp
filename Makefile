@@ -550,6 +550,7 @@ STANDALONE_READER_SMOKES = \
   standalone-reader-intern-soft-loop-smoke \
   standalone-reader-intern-soft-smoke \
   standalone-reader-load-smoke \
+  standalone-reader-malformed-input-smoke \
   standalone-reader-match-data-smoke \
   standalone-reader-mod-float-smoke \
   standalone-reader-nested-backquote-macro-smoke \
@@ -1694,6 +1695,15 @@ standalone-reader-repl-smoke:
 	$(EMACS) --batch -Q -L lisp -L src -L scripts \
 	  --eval '(setq load-prefer-newer t)' \
 	  -l nelisp-standalone-build -f nelisp-standalone-reader-repl-test
+
+# Fast focused loop for the reader-completeness / missing-file-unification /
+# depth-guard defect class.  Builds/relinks target/nelisp with the
+# incremental unit cache, then runs only the table-driven malformed-input
+# smoke used by the full reader test.
+standalone-reader-malformed-input-smoke:
+	$(EMACS) --batch -Q -L lisp -L src -L scripts \
+	  --eval '(setq load-prefer-newer t)' \
+	  -l nelisp-standalone-build -f nelisp-standalone-reader-malformed-input-test
 
 # Prelude-load breadth test (Wave-1 (A)+(B)).  Builds the reader binary, then
 # runs it on  scripts/nelisp-stdlib-prelude.el  followed by a breadth test that
