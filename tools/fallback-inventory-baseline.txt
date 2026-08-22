@@ -75,15 +75,26 @@
 # Caught up to today's measurement in the same commit that pins identities,
 # same as `tools/parity-coverage-baseline.txt' raising its floor to the
 # measurement rather than leaving it stale.
-silent-fallback 49
-ignore-errors   38
+# 49 -> 50 and 38 -> 40 on 2026-08-22: the substrate-parity gate's own
+# corpus and driver introduced four new sites, all reviewed and pinned
+# below (`nelisp-substrate-parity-corpus.el' / `nelisp-substrate-parity.el').
+# None hide a real fall: the corpus's `error' handler is quoted DATA a
+# probe form tests condition-case/throw interaction with, never executed by
+# this scanner's own tree walk, and the driver's two `ignore-errors' are
+# best-effort temp-file/temp-dir cleanup after a probe subprocess, where a
+# failed `delete-file'/`delete-directory' changes nothing about the gate's
+# verdict.
+silent-fallback 50
+ignore-errors   40
 # 34 -> 32 on 2026-08-19: the two handlers in
 # `nelisp-artifact--ensure-native-compiler' now record the error instead of
 # discarding it.  Between them they had hidden a chain of six failures --
 # macroexp, seq, pcase, a reader defect, add-hook, load-file-name -- each of
 # which had to be found by bisecting a require by hand, while the manifest
 # said only "native compiler unavailable".
-bare-handler    33
+# 33 -> 34 on 2026-08-22: one new site, reviewed and pinned below (the
+# substrate-parity corpus's quoted condition-case/throw probe form).
+bare-handler    34
 
 # 0, and it should stay 0.  `nl_dbg_note' has no enable flag on purpose --
 # a flag has to be turned off by whoever turned it on, and forgetting is
@@ -133,6 +144,7 @@ pinned-site bare-handler	nelisp-stdlib-os.el	defun nelisp-os--windows-install-st
 pinned-site bare-handler	nelisp-stdlib-os.el	defun nelisp-os--windows-optional-std-handle	8d196dc75b36 1
 pinned-site bare-handler	nelisp-stdlib-prelude.el	unless	8902848073d4 1
 pinned-site bare-handler	nelisp-stdlib-prelude.el	unless	d03492c064ac 1
+pinned-site bare-handler	nelisp-substrate-parity-corpus.el	defconst nelisp-substrate-parity-corpus	53af565a5502 1
 pinned-site bare-handler	nl-check-gate.el	defun nl-check-gate--accepted	eca4e7b3e0da 1
 pinned-site bare-handler	nl-check-gate.el	defun nl-check-gate--findings	4935c20a3ddd 1
 pinned-site ignore-errors	anvil-standalone-db.el	defun anvil-standalone-db-worklog-add	8ef977e61185 1
@@ -171,6 +183,8 @@ pinned-site ignore-errors	nelisp-stdlib-os.el	defun nelisp-os-socket	fec207317a1
 pinned-site ignore-errors	nelisp-stdlib-os.el	defun nelisp-os-socketpair	0089694d0c6c 1
 pinned-site ignore-errors	nelisp-stdlib-os.el	defun nelisp-os-socketpair	f975ac8810dc 1
 pinned-site ignore-errors	nelisp-stdlib-prelude.el	unless	bf6af2a65684 1
+pinned-site ignore-errors	nelisp-substrate-parity.el	defun nelisp-substrate-parity--call	84d956268ccf 1
+pinned-site ignore-errors	nelisp-substrate-parity.el	defun nelisp-substrate-parity--run-all	099e9b232f57 1
 pinned-site silent-fallback	anvil-standalone-db.el	defun anvil-standalone-db-main	6cb9525e70b9 1
 pinned-site silent-fallback	compile-elisp-objects-meta.el	defun compile-elisp-objects-meta--compute-bitmask-chunks	de7bd2cc970f 1
 pinned-site silent-fallback	compile-elisp-objects-meta.el	defun compile-elisp-objects-meta--dispatch-loop-native	e3f2648caa3a 1
@@ -214,6 +228,7 @@ pinned-site silent-fallback	nelisp-stdlib-os.el	defun nelisp-os--windows-install
 pinned-site silent-fallback	nelisp-stdlib-os.el	defun nelisp-os--windows-optional-std-handle	3ab105d9b80f 1
 pinned-site silent-fallback	nelisp-stdlib-prelude.el	unless	e3f2648caa3a 1
 pinned-site silent-fallback	nelisp-stdlib-prelude.el	unless	f67d7d766899 1
+pinned-site silent-fallback	nelisp-substrate-parity-corpus.el	defconst nelisp-substrate-parity-corpus	ca691fe7a98a 1
 pinned-site silent-fallback	nl-check-gate.el	defun nl-check-gate--accepted	e3f2648caa3a 1
 pinned-site silent-fallback	nl-check-gate.el	defun nl-check-gate--findings	e3f2648caa3a 1
 pinned-site silent-fallback	recursion-guard-smoke.el	let	430eb4fc2af5 1

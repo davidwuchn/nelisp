@@ -200,7 +200,8 @@ cmd_extras() {
              standalone-selfhost-mt-test \
              standalone-eval-test \
              wasm-runtime-image-smoke \
-             nelisp-nelix-native-hot-gate; do
+             nelisp-nelix-native-hot-gate \
+             substrate-parity-smoke; do
         printf '\n=== %s ===\n' "$g"
         ( cmd_gate "$g" -- make "$g" ) || failures=$((failures + 1))
     done
