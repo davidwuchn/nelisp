@@ -12,6 +12,10 @@
 # Add a line here the moment a gate becomes load-bearing.  Removing a
 # line is a decision to stop caring about that gate — make it explicitly,
 # not by letting the gate quietly stop emitting.
+#
+# This file is also half of the Definition of Done AI.md describes: a
+# SHIPPED design doc must name one of the gates below (or a Makefile
+# target) in a #+VERIFIED-BY: line, enforced by `doc-claims' further down.
 
 compile
 ert-full
