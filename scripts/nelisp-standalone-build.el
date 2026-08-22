@@ -13138,6 +13138,15 @@ and the `string-match' family aliases over it."
             "    (when (or (< start 0) (> start (length s)))\n"
             "      (signal 'args-out-of-range (list s start))))\n"
             "  (nlre-string-match re s start))\n"
+            ;; string-match-p must not disturb match-data (that is the whole
+            ;; reason it exists over string-match): save/restore
+            ;; `nlre--last-caps' around the call rather than sharing
+            ;; `string-match''s body.  `save-match-data' (defined a few
+            ;; forms below) does the same save/restore, but is a macro
+            ;; used here before its own `defmacro' runs textually -- fine
+            ;; at call time once the whole prelude has loaded, but this
+            ;; inlines the identical let/unwind-protect so the fix does not
+            ;; depend on that ordering.
             "(defun string-match-p (re s &optional start)\n"
             "  (unless (stringp re) (signal 'wrong-type-argument (list 'stringp re)))\n"
             "  (unless (stringp s) (signal 'wrong-type-argument (list 'stringp s)))\n"
@@ -13146,7 +13155,9 @@ and the `string-match' family aliases over it."
             "      (signal 'wrong-type-argument (list 'fixnump start)))\n"
             "    (when (or (< start 0) (> start (length s)))\n"
             "      (signal 'args-out-of-range (list s start))))\n"
-            "  (nlre-string-match re s start))\n"
+            "  (let ((nlre--smd-saved nlre--last-caps))\n"
+            "    (unwind-protect (nlre-string-match re s start)\n"
+            "      (setq nlre--last-caps nlre--smd-saved))))\n"
             "(defun match-beginning (n) (nlre-match-beginning n))\n"
             "(defun match-end (n) (nlre-match-end n))\n"
             "(defun match-string (n &optional str)\n"
@@ -13880,6 +13891,9 @@ runtime cache does not replay source file loads on every command invocation."
    "      (when (or (< start 0) (> start (length s)))\n"
    "        (signal 'args-out-of-range (list s start))))\n"
    "    (nlre-string-match re s start)))\n"
+   ;; string-match-p must not disturb match-data -- save/restore
+   ;; `nlre--last-caps' around the call instead of sharing `string-match''s
+   ;; body (see the reader-repl-prelude copy above for the same fix).
    "(unless (fboundp 'string-match-p)\n"
    "  (defun string-match-p (re s &optional start)\n"
    "    (unless (stringp re) (signal 'wrong-type-argument (list 'stringp re)))\n"
@@ -13889,7 +13903,9 @@ runtime cache does not replay source file loads on every command invocation."
    "        (signal 'wrong-type-argument (list 'fixnump start)))\n"
    "      (when (or (< start 0) (> start (length s)))\n"
    "        (signal 'args-out-of-range (list s start))))\n"
-   "    (nlre-string-match re s start)))\n"
+   "    (let ((nlre--smd-saved nlre--last-caps))\n"
+   "      (unwind-protect (nlre-string-match re s start)\n"
+   "        (setq nlre--last-caps nlre--smd-saved)))))\n"
    "(unless (fboundp 'match-beginning)\n"
    "  (defun match-beginning (n) (nlre-match-beginning n)))\n"
    "(unless (fboundp 'match-end)\n"
@@ -14487,6 +14503,9 @@ artifact before wiring that artifact into the marker command path."
      "      (when (or (< start 0) (> start (length s)))\n"
      "        (signal 'args-out-of-range (list s start))))\n"
      "    (nlre-string-match re s start)))\n"
+     ;; string-match-p must not disturb match-data -- save/restore
+     ;; `nlre--last-caps' around the call instead of sharing `string-match''s
+     ;; body (see the reader-repl-prelude copy above for the same fix).
      "(unless (fboundp 'string-match-p)\n"
      "  (defun string-match-p (re s &optional start)\n"
      "    (unless (stringp re) (signal 'wrong-type-argument (list 'stringp re)))\n"
@@ -14496,7 +14515,9 @@ artifact before wiring that artifact into the marker command path."
      "        (signal 'wrong-type-argument (list 'fixnump start)))\n"
      "      (when (or (< start 0) (> start (length s)))\n"
      "        (signal 'args-out-of-range (list s start))))\n"
-     "    (nlre-string-match re s start)))\n"
+     "    (let ((nlre--smd-saved nlre--last-caps))\n"
+     "      (unwind-protect (nlre-string-match re s start)\n"
+     "        (setq nlre--last-caps nlre--smd-saved)))))\n"
      "(unless (fboundp 'match-beginning)\n"
      "  (defun match-beginning (n) (nlre-match-beginning n)))\n"
      "(unless (fboundp 'match-end)\n"

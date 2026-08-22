@@ -58,10 +58,13 @@
     (13 shared (if (and (= (floor 7 2) 3) (= (truncate 7 2) 3)) 1 0))
     (14 shared (if (and (= (floor -7 2) -4) (= (truncate -7 2) -3)) 1 0))
 
-    ;; -- match-data survival across an intervening string call.  This
-    ;; pins CURRENT behavior (the documented clobber trap), not a
-    ;; correctness claim -- the value that matters is that every
-    ;; substrate agrees on it.
+    ;; -- match-data survival across an intervening `string-match-p' call.
+    ;; Fixed 2026-08-22: `string-match-p' used to share `string-match''s
+    ;; body and clobber match-data, unlike host Emacs's documented
+    ;; contract that `-p' leaves it untouched.  This form pins the real
+    ;; correctness contract now -- md1 and md2 must be `equal' on every
+    ;; substrate, matching host Emacs, not merely agreeing with each
+    ;; other on a shared wrong answer.
     (15 shared (let (md1 md2)
                  (string-match "b" "abc")
                  (setq md1 (match-data))

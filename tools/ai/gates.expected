@@ -619,9 +619,54 @@ gate-mutation
 #      match every source-fallback finding, since all of them share this one
 #      root cause.
 #
-#   4. KNOWN DEFECT, NEW: NeLisp's `string-match-p' mutates match-data on
-#      every substrate that can run it, unlike host Emacs, where it is
-#      documented as leaving match-data untouched.
+#   4. WAS OPEN; NOW FIXED (2026-08-22, later the same day as #1/#2/#3).
+#      NeLisp's `string-match-p' shared `string-match''s body verbatim on
+#      every substrate that could run it, so it mutated `nlre--last-caps'
+#      (the vector `match-beginning'/`match-end'/`match-data' read) on
+#      every call, unlike host Emacs, whose documented contract for `-p'
+#      over `string-match' is that it "does not change the match data" --
+#      the entire reason the `-p' variant exists.  Corpus form 15 already
+#      probed exactly this (`string-match' then an intervening
+#      `string-match-p' then re-reading `match-data') but, before this fix,
+#      only pinned that every NeLisp substrate agreed with every other one
+#      on the SAME wrong (clobbered) answer -- it was never diffed for
+#      correctness against host, so the divergence surfaced only in the
+#      `host' column: `checked=209' found `form=15 substrate=host
+#      baseline=0 actual=1' (bare = clobbered = 0, host = preserved = 1),
+#      accepted in the ledger as a known gap alongside the unrelated
+#      `emacs-pid' one.  Three copies of `string-match-p' exist, generated
+#      as string literals in `scripts/nelisp-standalone-build.el' (one
+#      unconditional `defun' feeding `--load'/bare-file's reader-REPL
+#      prelude, two `unless (fboundp ...)'-guarded copies feeding the
+#      compiled-artifact command runtime and the `eval-elisp-source'
+#      source-cache/source-fallback runtime) -- all three called
+#      `nlre-string-match' directly.  Fixed by wrapping that call in each
+#      copy with a save/restore of `nlre--last-caps' (the same
+#      let/unwind-protect shape `save-match-data', defined later in the
+#      same generated block, already uses -- inlined rather than calling
+#      that macro, since two of the three copies define `string-match-p'
+#      textually before `save-match-data' exists and a forward macro
+#      reference should not be the thing this fix depends on), not by
+#      touching `nlre-string-match' itself.  Against-the-bug, rebuilt
+#      binary, `--load' and host Emacs: `(string-match "a" "xa")
+#      (string-match-p "b" "zzb") (match-beginning 0)' returned 2 on
+#      NeLisp before the fix (clobbered by the `-p' call) and 1 on host
+#      Emacs (preserved) both before and after; after the fix NeLisp
+#      returns 1, matching host, confirmed the same way across bare,
+#      `--load', `compile-elisp-artifact'+`exec-elisp-artifact', and
+#      `eval-elisp-source' with and without an adjacent `.neln' cache.
+#      Ledger: `checked=209 findings=0' before and after (the pre-fix
+#      divergence was already inside an accepted key, not a live
+#      finding); regenerating from the fixed tree with
+#      `NELISP_SUBSTRATE_PARITY_WRITE=1' dropped `"15 host 0 1"' (no
+#      longer diverges: bare and host both now answer 1) and re-keyed
+#      `"15 source-fallback 0 CRASH:void-function:match-data"' to
+#      `"15 source-fallback 1 CRASH:void-function:match-data"' (baseline
+#      moved from 0 to 1 with everything else; the crash itself is
+#      unrelated -- item #3's `nelisp-eval' primitive-symbols gap, still
+#      open, not touched by this fix), 21 keys -> 20.  Corpus form 15's
+#      comment was updated to say what it now actually pins: host parity,
+#      not merely cross-substrate agreement on a shared wrong answer.
 #
 #   5. ACCEPTED (by design, class ii): `aref' on a unibyte string holding a
 #      raw byte >= 128 does not return that byte on any NeLisp substrate,
