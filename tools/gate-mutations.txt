@@ -76,3 +76,12 @@ generated-source-parse|scripts/nelisp-standalone-build.el|s/"(defvar features ni
 #   exercising the interpreter.
 ert-full|src/nelisp-eval.el|s/^  (nelisp-eval-form form nil))$/  (progn (nelisp-eval-form form nil) nil))/|nelisp-eval always returns nil, corrupting every should that reads its value
 ert-full|tools/ai/nelisp-ai.sh|s/'nelisp-worker-soak-test\\\.el\$'/'.'/|test_files() output gets filtered to nothing regardless of what matched; "no test file matched" must still fail ert-full
+#
+# 2026-08-22 (this session): doc-claims, added the same session as the
+# Definition of Done it enforces.  Case (i) of its own verification (a
+# SHIPPED doc with no #+VERIFIED-BY, not in the baseline) is the natural
+# injection: renaming a compliant doc's #+VERIFIED-BY: line to anything
+# else reproduces exactly that shape without inventing a synthetic file.
+# Doc 160 (docs/design/160-stdlib-breadth.org) is chosen for the single,
+# short #+VERIFIED-BY: line the sed can match unambiguously.
+doc-claims|docs/design/160-stdlib-breadth.org|s/^#+VERIFIED-BY: reader-surface-audit$/#+VERIFIED-BY-REMOVED: reader-surface-audit/|a compliant SHIPPED doc loses its #+VERIFIED-BY: line and is not in the baseline

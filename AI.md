@@ -97,6 +97,37 @@ wrap them yet.
    was nearly shipped at 60% of its intended size because the real
    two-input recipe lived only in a session transcript.
 
+## Definition of Done
+
+A feature, fix, or gate ships with:
+
+- **Against-the-bug evidence.**  The check or fix shown red on the defect,
+  then green on the fix -- run, not asserted, and said in the commit that
+  lands it.
+- **A parity corpus form**, when the change touches cross-substrate
+  behavior.  `test/nelisp-shadow-differential-cases.el` feeds both
+  `emacs-parity` and `parity-coverage`; `tools/nelisp-substrate-parity-
+  corpus.el` feeds `substrate-parity-smoke`.  See `tools/ai/gates.expected`
+  for which gate reads which corpus.
+- **A mutation row** in `tools/gate-mutations.txt`, when the change adds a
+  new required gate.  A gate nobody has shown a real defect to is a claim
+  about a checker, not a checker -- see that file's header and the
+  "gate-mutation" entry in `tools/ai/gates.expected` for why.
+- **A `#+VERIFIED-BY: gate-name ...` line**, on any `docs/design/*.org` the
+  change marks `#+STATUS: SHIPPED`, naming a gate that exists.  `make
+  doc-claims` enforces this mechanically; legacy docs are tolerated via
+  `tools/nelisp-doc-claims-baseline.txt` while they migrate.
+
+This exists because "SHIPPED" had come to mean "claimed," not "run."  Doc
+142 said SHIPPED for a `--kind elc` lane that crashed on
+`void-variable: invocation-name` the first time anything outside its own
+ERT fixture invoked it, and this file's own Inner-loop section (above)
+claimed a CI wiring that did not exist until the same session that found
+it wrong also fixed it.  Both were the same defect shape every rule in
+the previous section already names -- something read as done and
+silently was not.  The four requirements above are that lesson made
+structural rather than remembered.
+
 ## Where things are
 
 | path | what |

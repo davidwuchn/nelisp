@@ -534,6 +534,15 @@ pkg-load-order:
 	@$(EMACS) --batch -Q -L packages/nelisp-pkg/src \
 	  -l tools/nelisp-pkg-load-order.el
 
+# Every docs/design/*.org whose #+STATUS: line says SHIPPED must carry a
+# #+VERIFIED-BY: line naming a gate that exists (tools/nelisp-doc-claims.el).
+# Legacy SHIPPED docs predating the header are tolerated via
+# tools/nelisp-doc-claims-baseline.txt, the same pinned-baseline shape
+# unsafe-inventory/fallback-inventory/pkg-graph use.
+.PHONY: doc-claims
+doc-claims:
+	$(EMACS) --batch -Q -l tools/nelisp-doc-claims.el
+
 # Fails on a cross-file name collision that is not in the accepted set,
 # and on an accepted entry that no longer matches anything.  Reaching
 # zero findings is not the goal: the bootstrap prelude has to define
