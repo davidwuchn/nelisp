@@ -57,11 +57,21 @@
 # 8402 lines / 6.4MB before this change), not a duplicated unit or
 # debug section.
 #
-# integration/wave3 (this branch): both raises land on the same merged
-# tree along with five sibling branches' own source growth (reader
-# depth guard, elc lane, control-flow fixups, cl-macros/prelude
-# mirroring, ELF sizing).  Per this file's own rule the number below is
-# not the arithmetic sum of the two deltas above -- it is remeasured on
-# the actual merged, built binary in the integration-fixup commit.
-size 6650272
+# integration/wave3 (this branch): both raises above land on the same
+# merged tree along with five sibling branches' own source growth
+# (reader depth guard, elc lane, control-flow fixups, cl-macros/
+# prelude mirroring, ELF sizing) plus, in the final merge round, the
+# presence-sweep tooling and the doc-claims/DoD additions (neither
+# links into the binary; docs/design-* is doc-only).  Per this file's
+# own rule the number below is not the arithmetic sum of the deltas
+# above -- it is REMEASURED on the actual merged, built binary:
+#
+#   6432608 (base) -> 6741200, +308592 bytes, +4.8%, still inside the
+#   2% slack window measured against ITSELF (i.e. this raise, like
+#   every other one in this file, is the new pin, not a slack-absorbed
+#   jump) -- `stat -c %s target/nelisp' on integration/wave3 after all
+#   twelve branches (seven wave-3 branches + feat/native-observability,
+#   feat/dod-doc-claims, docs/design-{short,mid,long}-term) landed and
+#   `make standalone-reader-test' relinked target/nelisp from scratch.
+size 6741200
 slack-pct 2

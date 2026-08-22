@@ -564,21 +564,26 @@ reader-surface-audit:
 
 # ---- standalone-reader-smokes -------------------------------------------
 #
-# The 28 individual reader smokes, run as one gate.
+# The 29 individual reader smokes, run as one gate (28 -> 29 on
+# integration/wave3: fix/standalone-reader-input-hardening added
+# `standalone-reader-malformed-input-smoke').
 #
-# `standalone-reader-test' runs checks built into the build script; see the
-# integration-fixup commit for the count measured on the merged tree (each
-# of fix/control-flow-wrong-values, fix/standalone-reader-input-hardening,
-# fix/elc-artifact-void-invocation-name, and feat/stdlib-hooks-map-fixnum
-# added one).
-# These 28 are separate make targets testing separate things -- format
+# `standalone-reader-test' runs 18 checks built into the build script (13
+# base + 1 initial exit-code assertion, +4 from this integration: each of
+# fix/control-flow-wrong-values (`...-control-flow-smoke'),
+# fix/standalone-reader-input-hardening (`...-malformed-input-smoke'),
+# fix/elc-artifact-void-invocation-name (`...-elc-smoke'), and
+# feat/stdlib-hooks-map-fixnum (`...-stdlib-completion-smoke') added one to
+# the dolist -- measured with `GATE-COUNT checked=18 findings=0' on the
+# fully merged tree, all twelve integration/wave3 branches included).
+# These 29 are separate make targets testing separate things -- format
 # directives, getenv, TLS, processes, match-data, intern-soft, the FFI bridge
 # -- and until 2026-08-21 nothing ran them, which is how a `print-circle'
 # defect in the unit cache key and a wrong-signed `mod' both sat in the tree.
 #
-# One gate rather than 28 entries in gates.expected: 28 reports would demand 28
+# One gate rather than 29 entries in gates.expected: 29 reports would demand 29
 # freshness checks for one build's worth of evidence, and a ledger nobody can
-# keep current is a ledger nobody reads.  The count is the signal -- 28 checked
+# keep current is a ledger nobody reads.  The count is the signal -- 29 checked
 # is the claim, and a target that stops existing shows up as a smaller number.
 STANDALONE_READER_SMOKES = \
   standalone-reader-catch-throw-tag-smoke \

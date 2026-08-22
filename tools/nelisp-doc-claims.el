@@ -80,10 +80,19 @@ check is about existence, not about promotion."
     set))
 
 (defun nelisp-doc-claims--status-shipped-p (lines)
-  "Return non-nil when LINES contains a `#+STATUS:' line naming SHIPPED."
-  (cl-some (lambda (l) (and (string-prefix-p "#+STATUS:" l)
-                            (string-match-p "SHIPPED" l)))
-           lines))
+  "Return non-nil when LINES's first `#+STATUS:' line names SHIPPED.
+
+Only the FIRST `#+STATUS:' line is the doc's actual status token (see
+the file commentary: \"the `#+STATUS:' line\", singular).  A long status
+entry that wraps onto further `#+STATUS:'-prefixed continuation lines
+is still one logical entry, and those continuation lines are free-form
+prose -- e.g. Doc 189/192's own status is DRAFT, but a later
+continuation line mentions an unrelated ADJACENT package shipping the
+same week.  Scanning every `#+STATUS:'-prefixed line independently
+misreads that prose as this doc's own status."
+  (when-let ((first (seq-find (lambda (l) (string-prefix-p "#+STATUS:" l))
+                               lines)))
+    (string-match-p "SHIPPED" first)))
 
 (defun nelisp-doc-claims--verified-by (lines)
   "Return the gate names LINES's `#+VERIFIED-BY:' line(s) cite, or nil.
