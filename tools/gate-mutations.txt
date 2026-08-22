@@ -40,3 +40,39 @@ ns-inventory|lisp/nelisp-stdlib.el|s/^  (if (nelisp--num-lt2 x 0) (nelisp--sub2 
 fallback-inventory|lisp/nelisp-artifact.el|s/^               (error nil)))$/               (error (progn nil))))/|a pinned bare-handler site's exact shape drifts while its file and toplevel stay the same
 pkg-graph|src/nelisp-file-notify.el|s/(require 'filenotify)/(require 'ert-x)/|a hard host require is swapped for a different unresolved one, count unchanged
 generated-source-parse|scripts/nelisp-standalone-build.el|s/"(defvar features nil)\\n"/"(defvar features nil\\n"/|drops a closing paren inside a generated string literal, invisible to parens-check
+#
+# 2026-08-22 (this session): ert-full had never been mutation-proven --
+# `nelisp-ai.sh test' is not a raw `make' target, so it could not go
+# through this file's plain `make "$gate"' runner unmodified; fixed in
+# `tools/nelisp-gate-mutation.sh' with a small `ert-full'-specific branch
+# that calls `nelisp-ai.sh test' instead (see its comment for both rows'
+# routing and why each one's report is scratched to a throwaway
+# NELISP_GATE_DIR rather than overwriting the tree's real ert-full
+# report).  Two rows, the two cases named in the survey this session
+# closed gaps from:
+#
+#   the corrupted-helper row targets `nelisp-eval' (src/nelisp-eval.el),
+#   the single most widely-used repo-defined function in the whole test
+#   tree (the interpreter entry point nearly every `(should (equal
+#   (nelisp-eval FORM) ...))' assertion depends on) -- made to always
+#   return nil regardless of FORM.  Running the FULL suite to prove this
+#   costs about 75s per injection, too slow for `gate-mutation' inside
+#   `nelisp-ai.sh check''s fast lane; scoped via
+#   NELISP_GATE_MUTATION_TEST_FILES to `test/nelisp-eval-test.el' alone,
+#   which calls `nelisp-eval' directly and fails within a couple of
+#   seconds once corrupted -- the SAME `run_ert_gate' path `ert-full'
+#   uses for real, exercised on fewer files, not a different mechanism.
+#
+#   the empty-glob row targets `test_files()' itself
+#   (tools/ai/nelisp-ai.sh), the function `cmd_test' calls to build
+#   ert-full's file list -- corrupted so its output is filtered to
+#   nothing regardless of what matched, the same "glob defined no test"
+#   shape AI.md's rule 1 already documents.  This one must run UNSCOPED
+#   (no NELISP_GATE_MUTATION_TEST_FILES): scoping would skip the very
+#   line being tested.  `run_ert_gate' already had the guard that catches
+#   this -- an empty file list reports GATE-COUNT ran=0 failed=1 and
+#   exits 1 before spawning Emacs at all -- so this row is also the
+#   cheapest of the two, proving a pre-existing guard rather than
+#   exercising the interpreter.
+ert-full|src/nelisp-eval.el|s/^  (nelisp-eval-form form nil))$/  (progn (nelisp-eval-form form nil) nil))/|nelisp-eval always returns nil, corrupting every should that reads its value
+ert-full|tools/ai/nelisp-ai.sh|s/'nelisp-worker-soak-test\\\.el\$'/'.'/|test_files() output gets filtered to nothing regardless of what matched; "no test file matched" must still fail ert-full

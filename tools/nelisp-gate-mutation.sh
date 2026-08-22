@@ -16,6 +16,14 @@ rebuild_checked() {
   make standalone-reader >/dev/null 2>&1
 }
 
+# `ert-full' rows run a real (deliberately red) `nelisp-ai.sh test', which
+# writes a gate report into `NELISP_GATE_DIR' (default `target/gates').
+# Left alone that would overwrite the tree's real `ert-full' report with a
+# broken one on every `gate-mutation' run.  Scratch it into a throwaway
+# directory instead; nothing else reads this one.
+mutation_gate_dir="$(mktemp -d)"
+trap 'rm -rf "$mutation_gate_dir"' EXIT
+
 rows=$(grep -v '^#' tools/gate-mutations.txt | grep -v '^[[:space:]]*$')
 [ -z "$rows" ] && { echo "gate-mutation: FAIL (no mutations defined)"; exit 1; }
 total=0; bad=0
@@ -44,7 +52,29 @@ while IFS='|' read -r gate file expr what; do
       cp "$backup" "$file"; rm -f "$backup"; continue
     fi
   fi
-  if make "$gate" >/dev/null 2>&1; then
+  # `ert-full' is not a raw `make' target -- `nelisp-ai.sh test' owns it,
+  # wrapping ERT's own batch runner.  Both its rows route there instead of
+  # `make "$gate"'.  The corrupted-helper row (source: `src/nelisp-eval.el')
+  # is scoped to the one test file that calls the helper directly, via
+  # `NELISP_GATE_MUTATION_TEST_FILES' -- see the comment on `test_files()'
+  # in `tools/ai/nelisp-ai.sh' for why the full suite is too slow to carry
+  # here.  The empty-glob row corrupts `test_files()' ITSELF (source:
+  # `tools/ai/nelisp-ai.sh'), so it must run UNSCOPED: scoping would
+  # bypass the very line the row exists to test.
+  gate_ok=0
+  if [ "$gate" = "ert-full" ]; then
+    if [ "$file" = "tools/ai/nelisp-ai.sh" ]; then
+      NELISP_GATE_DIR="$mutation_gate_dir" \
+        tools/ai/nelisp-ai.sh test >/dev/null 2>&1 && gate_ok=1
+    else
+      NELISP_GATE_DIR="$mutation_gate_dir" \
+        NELISP_GATE_MUTATION_TEST_FILES=test/nelisp-eval-test.el \
+        tools/ai/nelisp-ai.sh test >/dev/null 2>&1 && gate_ok=1
+    fi
+  elif make "$gate" >/dev/null 2>&1; then
+    gate_ok=1
+  fi
+  if [ "$gate_ok" = 1 ]; then
     echo "  $gate: STAYED GREEN with a real defect in front of it ($what)"
     bad=$((bad+1))
   else

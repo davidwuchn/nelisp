@@ -31,6 +31,23 @@ test_files() {
     # sibling repository swept in driver scripts, the batch run died before
     # defining any test, and the suite reported an exit code instead of
     # "0 tests".
+    #
+    # NELISP_GATE_MUTATION_TEST_FILES, when set, replaces the glob below
+    # with an explicit list.  It exists only for
+    # `tools/nelisp-gate-mutation.sh': proving the `ert-full' gate goes red
+    # on a corrupted widely-used helper has to run tests through this same
+    # function and `run_ert_gate', but the full suite costs about 75s per
+    # injection — too slow to carry inside `nelisp-ai.sh check''s fast
+    # lane.  Scoping to the one file that calls the corrupted helper
+    # exercises the identical mechanism at a fraction of the cost; see
+    # `tools/gate-mutations.txt' and the `ert-full' note in
+    # `tools/ai/gates.expected'.  Every ordinary invocation of
+    # `nelisp-ai.sh test' / `check' / `verify' leaves this unset and gets
+    # the real, unscoped glob below.
+    if [ -n "${NELISP_GATE_MUTATION_TEST_FILES:-}" ]; then
+        printf '%s\n' "$NELISP_GATE_MUTATION_TEST_FILES"
+        return 0
+    fi
     ls test/nelisp*-test.el packages/*/test/nelisp*-test.el \
        packages/*/test/nl-*-test.el 2>/dev/null \
         | grep -v 'nelisp-worker-soak-test\.el$' || true

@@ -536,6 +536,39 @@ substrate-parity-smoke
 #
 # Each was verified red-then-green against the real swap before being
 # folded into the row below, not only against a plain addition.
+#
+# 2026-08-22 (this session): `ert-full' joined the set proven, 10/10 ->
+# 10 distinct gates covered by 12 rows.  It could not go through the
+# plain `make "$gate"' runner unmodified (`ert-full' is not a raw `make'
+# target), so `tools/nelisp-gate-mutation.sh' gained a small `ert-full'-
+# specific branch that calls `nelisp-ai.sh test' instead, with its report
+# scratched to a throwaway `NELISP_GATE_DIR' so a deliberately-red run
+# never overwrites the tree's real `ert-full' report.  Two rows:
+#
+#   a corrupted widely-used assertion helper -- `nelisp-eval'
+#   (src/nelisp-eval.el), the interpreter entry point nearly every
+#   `(should (equal (nelisp-eval FORM) ...))' in the suite depends on --
+#   made to always return nil.  The full suite costs about 75s per
+#   injection to prove this against, too slow for `gate-mutation' inside
+#   `nelisp-ai.sh check''s fast lane (44s -> 46s total with both new rows
+#   added, measured); scoped via `NELISP_GATE_MUTATION_TEST_FILES' (a
+#   knob added to `test_files()' in `tools/ai/nelisp-ai.sh', used only by
+#   this harness) to `test/nelisp-eval-test.el' alone, which calls
+#   `nelisp-eval' directly and goes red in about a second -- the SAME
+#   `run_ert_gate' path `ert-full' uses for real, over fewer files, not a
+#   different mechanism.  Control: the same scoped invocation against the
+#   clean tree passes 42/42, so the row is not vacuously red.
+#
+#   a test-file glob matching zero files -- `test_files()' itself
+#   (tools/ai/nelisp-ai.sh), corrupted so its output is filtered to
+#   nothing regardless of what matched, the exact defect shape AI.md's
+#   rule 1 documents.  Runs UNSCOPED on purpose: the scoping knob above
+#   would bypass the very line this row tests.  `run_ert_gate' already
+#   carried the guard that catches it -- an empty file list reports
+#   `ran=0 failed=1' and exits 1 before spawning Emacs -- so this row
+#   proves a pre-existing guard, at effectively zero cost (no Emacs
+#   process is even started).  Control: the clean tree's unscoped glob
+#   matches 166 files.
 gate-mutation
 #
 # WAS RED, AND OPEN; NOW FIXED AND REQUIRED: standalone-eval-test failed at
