@@ -612,6 +612,10 @@ signoff stated as pending — this doc's author is not the right owner to
 finalize that change unilaterally. Flagged for whoever owns Doc 33's next
 revision, same posture as Doc 184 §6.1 takes toward the same document.
 
+*Decided 2026-08-22*: owner approved this recommendation (via the
+coordinator) — see =docs/design/33-nelisp-v1x-architecture.org= §12
+amendment.
+
 ** §6.2 What actually blocks =nelisp-buffer.el= from loading standalone
 
 §1.1 confirmed it is *not currently loaded* by the standalone build but
