@@ -90,7 +90,7 @@
 # already uses -- a failed cleanup changes nothing about the smoke's
 # verdict).
 silent-fallback 50
-ignore-errors   41
+ignore-errors   42
 # 34 -> 32 on 2026-08-19: the two handlers in
 # `nelisp-artifact--ensure-native-compiler' now record the error instead of
 # discarding it.  Between them they had hidden a chain of six failures --
@@ -164,6 +164,7 @@ pinned-site ignore-errors	nelisp-standalone-build.el	defun nelisp-standalone--re
 pinned-site ignore-errors	nelisp-standalone-build.el	defun nelisp-standalone--reader-cli-smoke	cc69e60298bc 2
 pinned-site ignore-errors	nelisp-standalone-build.el	defun nelisp-standalone--reader-defvaralias-smoke	7a85c44cdaf9 1
 pinned-site ignore-errors	nelisp-standalone-build.el	defun nelisp-standalone--reader-hash-table-literal-smoke	7a85c44cdaf9 1
+pinned-site ignore-errors	nelisp-standalone-build.el	defun nelisp-standalone--reader-stdlib-completion-smoke	7a85c44cdaf9 1
 pinned-site ignore-errors	nelisp-standalone-build.el	defun nelisp-standalone--reader-intern-canonical-smoke	7a85c44cdaf9 1
 pinned-site ignore-errors	nelisp-standalone-build.el	defun nelisp-standalone--reader-large-quoted-alist-mutation-smoke	7a85c44cdaf9 1
 pinned-site ignore-errors	nelisp-standalone-build.el	defun nelisp-standalone--reader-repl-smoke	12ae73a754c4 1

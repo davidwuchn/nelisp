@@ -523,7 +523,7 @@ reader-surface-audit:
 #
 # The 28 individual reader smokes, run as one gate.
 #
-# `standalone-reader-test' runs eleven checks built into the build script.
+# `standalone-reader-test' runs fifteen checks built into the build script.
 # These 28 are separate make targets testing separate things -- format
 # directives, getenv, TLS, processes, match-data, intern-soft, the FFI bridge
 # -- and until 2026-08-21 nothing ran them, which is how a `print-circle'

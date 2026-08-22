@@ -33,5 +33,15 @@
 # Raise `size' only in the commit that explains the growth, and say what
 # the growth is (new manifest entry, new compiled unit, ...).  Lower it
 # whenever a change shrinks the binary and the gate says you can.
-size 6432608
+#
+# Raised 2026-08-22, +217664 bytes (6432608 -> 6650272): the hooks/
+# map.el/fixnum stdlib completion added ~380 lines of source text to
+# scripts/nelisp-stdlib-prelude.el (add-hook/remove-hook/run-hooks/
+# run-hook-with-args[-until-success/-until-failure], a map.el subset,
+# and the fixnum constants), which is embedded into the linked binary
+# as executable prelude source rather than compiled bytecode -- the
+# growth is proportional to the added source text (this prelude already
+# averages ~760 bytes of linked size per source line at 8402 lines /
+# 6.4MB before this change), not a duplicated unit or debug section.
+size 6650272
 slack-pct 2
