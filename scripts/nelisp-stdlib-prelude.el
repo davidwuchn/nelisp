@@ -7538,18 +7538,30 @@ and only running both says which."
 (unless (fboundp 'base64-encode-string)
   (defun base64-encode-string (string &optional _no-line-break)
   (nelisp--check-string string)
+    ;; `aref' answers the CHARACTER at a char index, decoding UTF-8 (Doc
+    ;; 161) -- correct for text, wrong here.  STRING is arbitrary bytes
+    ;; (this is the encoder `nelisp-artifact.el' calls on a compiled
+    ;; object's raw content), and a byte >= 128 does not stand alone as
+    ;; a valid UTF-8 sequence, so `aref' misreads both the byte value
+    ;; and the char/byte boundary -- and `length' undercounts the same
+    ;; string for the same reason (this is `nelisp-elf--byte-length's
+    ;; `length'-vs-`string-bytes' defect again, one caller upstream: a
+    ;; write-region call that now passes its own count check can still
+    ;; carry a corrupted `:object-base64' payload from here).  `string-
+    ;; byte' / `string-bytes' are the byte-clean pair: raw byte at a
+    ;; byte index, and a byte count that does not shrink for high bytes.
     (let ((alphabet "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/")
           (i 0)
-          (len (length string))
+          (len (string-bytes string))
           (chunks nil)
           (parts nil)
           (part-count 0))
       (while (< i len)
-        (let* ((a (aref string i))
+        (let* ((a (string-byte string i))
                (have-b (< (1+ i) len))
                (have-c (< (+ i 2) len))
-               (b (if have-b (aref string (1+ i)) 0))
-               (c (if have-c (aref string (+ i 2)) 0))
+               (b (if have-b (string-byte string (1+ i)) 0))
+               (c (if have-c (string-byte string (+ i 2)) 0))
                (triple (logior (ash a 16) (ash b 8) c))
                (c1 (aref alphabet (logand (ash triple -18) 63)))
                (c2 (aref alphabet (logand (ash triple -12) 63)))
