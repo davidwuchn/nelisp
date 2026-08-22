@@ -486,6 +486,25 @@ covered by P0-P4. Flagged rather than silently left out: whoever implements
 P1-P2 should decide whether to fold a division check into the same pass or
 explicitly scope it to a follow-up.
 
+** §6.4 =nelisp_jit_add2= has at least one non-arithmetic caller today
+
+§1.3 already argues layer 2 should stay opt-in partly because other callers
+may depend on =nelisp_jit_add2=/=mul2= staying raw-i64; that is not
+hypothetical. =lisp/nelisp-stdlib.el:55,70,87= uses
+=(nl-jit-call-i64-i64 "nelisp_jit_add2" 0 X)= as a *float-to-int truncation/
+coercion idiom* ("the =as_int= coerce idiom from =ash=", per that file's own
+comment at =:55-56=) inside =/='s all-integer result path — nothing about
+that call site is a user-visible addition, and a naive P4 that flips
+=nelisp_jit_add2= itself to checked would risk spuriously signalling
+=overflow-error= out of a coercion that has nothing to do with arithmetic
+overflow. This is exactly why §2 routes the checked path through a
+*separate* checked leaf (or through =--emit-arith= directly, §3.3) rather
+than redefining =nelisp_jit_add2= in place — but P4's implementer must
+audit every =nl-jit-call-i64-i64 "nelisp_jit_add2"=/="nelisp_jit_mul2"= call
+site (=lisp/nelisp-stdlib.el= has at least three, per the grep above) before
+touching the shared leaf, not just assume the opt-in flag alone protects
+them.
+
 * §7 References
 
 ** §7.1 Code (file:line)
@@ -510,6 +529,9 @@ explicitly scope it to a follow-up.
   identity) methodology used in §3.3/§4 P3.
 - =test/nelisp-aot-compiler-test.el:1692,1730= — existing arithmetic-
   trampoline ERT coverage that P4's flag-off path must not regress.
+- =lisp/nelisp-stdlib.el:55-87= — the =(nl-jit-call-i64-i64
+  "nelisp_jit_add2" 0 X)= truncation-coercion idiom flagged in §6.4 as
+  needing an audit before any layer-2 leaf becomes checked in place.
 
 ** §7.2 Docs
 - =docs/design/164-wasm-backend.org= — structural template for this doc.
@@ -520,3 +542,8 @@ explicitly scope it to a follow-up.
   path honestly instead of assuming interpreter-speed intuitions apply.
 - =feedback_stage_shipped_state_audit= — why §5.4 insists on a report path,
   not a restated claim, for SHIPPED status.
+- =feedback_nelisp_condition_case_eats_throw= — this runtime has shipped
+  =condition-case=/=signal= interaction bugs before; §5.1's against-the-bug
+  cases should wrap the overflow-triggering form in an explicit
+  =condition-case=, not only a bare =should-error=, so a future regression
+  in that interaction is caught by this doc's own gate too.
