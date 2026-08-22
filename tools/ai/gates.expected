@@ -36,6 +36,21 @@ pkg-load-lists
 fallback-inventory
 bootstrap-contract
 
+# parity-coverage (LEDGER STRAGGLER, closed 2026-08-22): mutation-proven
+# (tools/gate-mutations.txt) since 2026-08-19 -- corrupting one covered
+# name in the shadow-differential corpus turns it red -- but never listed
+# here and never wired into `nelisp-ai.sh check' at all, an oversight
+# this pass found while closing the survey's other gaps.  Its Makefile
+# recipe is `$(EMACS) --batch -Q -l tools/nelisp-parity-coverage.el', no
+# binary prerequisite, same "seconds" shape as `ns-inventory' and the
+# other tree-wide ratchets above it -- measured at 0.26s alone.  Added to
+# `cmd_check''s step list alongside them.  It ratchets a floor, not a
+# ceiling: `GATE-COUNT checked=424 findings=165' passing is expected --
+# `findings' here counts names still uncovered above the pinned floor of
+# 259 covered names (see the `ns-gate'/`parity-coverage' note further
+# down), not defects.
+parity-coverage
+
 # Developer-loop gates: useful, but not evidence about the whole tree.
 ert-focus?
 ns?
@@ -167,6 +182,44 @@ nelisp-native-artifact-gate
 # `check'.
 nelisp-performance-gate
 standalone-selfhost-test
+
+# binary-size-ratchet (2026-08-22): `binary_identity()' in
+# tools/ai/nelisp-ai.sh has computed target/nelisp's size since it was
+# written; nothing compared it to anything, so a jump had no gate to catch
+# it -- the binary grew +54KB earlier this session (bare-file init
+# unification) unmeasured against anything.  Pinned against
+# tools/nelisp-binary-size-baseline.txt (`size 6432608', 2% `slack-pct',
+# recorded 2026-08-22 from a build at this session's HEAD; the file
+# explains both numbers), the same identity-pinning shape unsafe-
+# inventory/fallback-inventory/pkg-graph use for their own baselines --
+# raise `size' in the commit that explains the growth, same discipline.
+# Wired into `nelisp-ai.sh standalone' alongside `standalone-reader-test',
+# consuming the binary that command just built rather than building its
+# own (its Makefile prerequisite is the same conditional
+# `$(wildcard target/nelisp target/nelisp.exe)' check `emacs-parity'
+# uses, so a bare `make binary-size-ratchet' still works standalone).
+# Linux x86_64 only, like several other gates measured on this host; a
+# differently-targeted build reports a reasoned GATE-SKIP rather than
+# comparing an ELF from a different linker against a number never
+# measured for it.  Verified red-then-green: a temporarily deflated
+# baseline (`size 1000000') turned it red at
+# "6432608 bytes, 5432608 over baseline 1000000 -- exceeds ceiling
+# 1020000", restoring the real baseline turned it green again at the
+# same `GATE-COUNT checked=1 findings=0' it reports now.
+binary-size-ratchet
+
+# emacs-parity (LEDGER STRAGGLER, closed 2026-08-22): differential vs the
+# host Emacs already on this machine over `test/nelisp-shadow-
+# differential-cases.el', mutation-proven (tools/gate-mutations.txt)
+# since 2026-08-19, CI-required since before that -- and yet never listed
+# here, and never reachable through `nelisp-ai.sh' at all until this
+# pass, an oversight this pass found while closing the survey's other
+# gaps.  Needs the binary `standalone-reader-test' already builds (same
+# conditional `$(wildcard target/nelisp target/nelisp.exe)' prerequisite
+# `binary-size-ratchet' uses), so it is out of `check' for the same
+# reason every other binary-tier gate is, and is wired into `nelisp-ai.sh
+# standalone' alongside the other two rather than given its own command.
+emacs-parity
 
 # ===================================================================
 # The 2026-08-21 sweep: every gate-like make target, measured

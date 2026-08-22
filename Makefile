@@ -407,6 +407,7 @@ bootstrap-contract:
 .PHONY: parity-fuzz
 .PHONY: inner
 .PHONY: emacs-parity
+.PHONY: binary-size-ratchet
 .PHONY: emacs-compat
 emacs-compat:
 	$(EMACS) --batch -Q -l tools/nelisp-emacs-compat.el
@@ -860,6 +861,51 @@ emacs-parity: $(if $(wildcard target/nelisp target/nelisp.exe),,standalone-reade
 	  fold -w100 target/emacs-parity-emacs.txt > target/emacs-parity-e.f; \
 	  fold -w100 target/emacs-parity-nelisp-head.txt > target/emacs-parity-n.f; \
 	  diff target/emacs-parity-e.f target/emacs-parity-n.f | head -40; \
+	  exit 1; \
+	fi
+
+# `binary_identity()' in tools/ai/nelisp-ai.sh has always computed
+# target/nelisp's size; nothing compared it to anything.  This is the
+# comparison, pinned against tools/nelisp-binary-size-baseline.txt the same
+# way unsafe-inventory/fallback-inventory/pkg-graph pin theirs -- raise
+# `size' in that file, in the commit that explains the growth.  Consumes
+# whichever binary is already in target/ (built here only if neither
+# target/nelisp nor target/nelisp.exe exists yet), the same conditional
+# prerequisite `emacs-parity' above uses, rather than forcing a fresh
+# build for a check that only needs to weigh what is already there.  The
+# baseline itself is Linux x86_64 only (like several other measured-here
+# gates); a differently-targeted build reports a reasoned GATE-SKIP
+# instead of comparing an ELF from a different linker against a number
+# that was never measured for it.
+binary-size-ratchet: $(if $(wildcard target/nelisp target/nelisp.exe),,standalone-reader)
+	@target="$(NELISP_STANDALONE_TARGET)$$NELISP_STANDALONE_TARGET"; \
+	if [ -n "$$target" ] && [ "$$target" != "linux-x86_64" ]; then \
+	  echo "GATE-SKIP baseline pinned to linux-x86_64 only, target=$$target"; \
+	  echo "[binary-size-ratchet] SKIP: not the pinned target"; \
+	  exit 0; \
+	fi; \
+	bin=./target/nelisp; \
+	if [ ! -f "$$bin" ]; then \
+	  echo "GATE-COUNT checked=0 findings=1"; \
+	  echo "[binary-size-ratchet] FAIL: $$bin not found"; \
+	  exit 1; \
+	fi; \
+	baseline=$$(awk '$$1=="size"{print $$2}' tools/nelisp-binary-size-baseline.txt); \
+	slack=$$(awk '$$1=="slack-pct"{print $$2}' tools/nelisp-binary-size-baseline.txt); \
+	if [ -z "$$baseline" ] || [ -z "$$slack" ]; then \
+	  echo "GATE-COUNT checked=0 findings=1"; \
+	  echo "[binary-size-ratchet] FAIL: tools/nelisp-binary-size-baseline.txt missing 'size' or 'slack-pct'"; \
+	  exit 1; \
+	fi; \
+	actual=$$(wc -c < "$$bin" | tr -d ' '); \
+	ceiling=$$(( baseline + baseline * slack / 100 )); \
+	if [ "$$actual" -le "$$ceiling" ]; then findings=0; else findings=1; fi; \
+	echo "GATE-COUNT checked=1 findings=$$findings"; \
+	if [ "$$findings" = 0 ]; then \
+	  echo "[binary-size-ratchet] PASS: $$bin is $$actual bytes (baseline $$baseline, ceiling $$ceiling, slack $$slack%)"; \
+	else \
+	  over=$$(( actual - baseline )); \
+	  echo "[binary-size-ratchet] FAIL: $$bin is $$actual bytes, $$over over baseline $$baseline -- exceeds ceiling $$ceiling ($$slack% slack).  If this growth is real and explained, raise 'size' in tools/nelisp-binary-size-baseline.txt in the same commit."; \
 	  exit 1; \
 	fi
 

@@ -82,7 +82,8 @@ usage: tools/ai/nelisp-ai.sh <command> [args]
   check               run the fast gates, then verify — the pre-commit command
   verify              aggregate gate reports and print one verdict
   test                run the full ERT suite as gate "ert-full"
-  standalone          build the binary and run gate "standalone-reader-test"
+  standalone          build the binary and run "standalone-reader-test",
+                      "binary-size-ratchet" and "emacs-parity"
   native-artifact     build the binary and run gate "nelisp-native-artifact-gate"
   selfhost            build the binary and run gate "standalone-selfhost-test"
   perf                build the binary and run gate "nelisp-performance-gate"
@@ -127,7 +128,8 @@ cmd_check() {
                 fallback-inventory bootstrap-contract \
                 wasm-dtw-skeleton-smoke \
                 unsafe-inventory ns-inventory \
-                reader-surface-audit pkg-graph pkg-load-lists ns; do
+                reader-surface-audit pkg-graph pkg-load-lists \
+                parity-coverage ns; do
         printf '\n=== %s ===\n' "$step"
         case "$step" in
             compile) ( cmd_compile ) || failures=$((failures + 1)) ;;
@@ -231,7 +233,27 @@ cmd_standalone() {
     # you to the last report and prints its age, so this is the command to
     # run when that column says the evidence is old.  On a host that cannot
     # run the target it reports a reasoned skip, not a pass.
-    cmd_gate standalone-reader-test -- make standalone-reader-test
+    failures=0
+    cmd_gate standalone-reader-test -- make standalone-reader-test \
+        || failures=$((failures + 1))
+    # binary-size-ratchet consumes the binary standalone-reader-test just
+    # built (its own prerequisite is conditional -- it does not build
+    # again).  Wired here rather than as its own command: every other
+    # binary-tier gate already has a `cmd_X' of its own, but this one has
+    # nothing to measure without a fresh build having just happened, and
+    # `nelisp-ai.sh standalone' is the command that makes that happen.
+    cmd_gate binary-size-ratchet -- make binary-size-ratchet \
+        || failures=$((failures + 1))
+    # emacs-parity: differential vs the host Emacs already on this
+    # machine, over `test/nelisp-shadow-differential-cases.el'.
+    # Mutation-proven (tools/gate-mutations.txt) since 2026-08-19 but
+    # never wired into `nelisp-ai.sh' at all until this pass -- it needs
+    # the same binary this command already built, and its own Makefile
+    # prerequisite is the identical conditional-build check
+    # `binary-size-ratchet' uses, so it costs nothing extra here.
+    cmd_gate emacs-parity -- make emacs-parity \
+        || failures=$((failures + 1))
+    [ "$failures" -eq 0 ]
 }
 
 cmd_test_one() {

@@ -1,0 +1,37 @@
+# Standalone `target/nelisp' binary-size ceiling (`make binary-size-ratchet').
+#
+# `binary_identity()' in tools/ai/nelisp-ai.sh has computed this number
+# since it was written; nothing compared it to anything.  The binary grew
+# +54KB earlier in this same session (bare-file init unification) with no
+# ratchet in place to say so out loud -- this file and the gate that reads
+# it are what closes that gap.
+#
+# Pinned 2026-08-22 from a build at this session's own HEAD, Linux x86_64,
+# AFTER the `extend-runtime-image' fix and its smoke landed (see the
+# `standalone-reader-test' note in tools/ai/gates.expected).  Measured
+# before and after that change: unchanged at this size -- the fix widens
+# an embedded command's source text by a few hundred bytes, but the
+# smoke that exercises it is host-side Elisp that shells out to the
+# already-built binary and is never linked in, and the source-text change
+# did not move the linked size either.  Not a stale or aspirational
+# number: this ratchet's job, same as unsafe-inventory / fallback-
+# inventory / pkg-graph, is to make the NEXT unexplained jump visible,
+# not to relitigate today's size.
+#
+# `slack-pct' is how far above `size' the binary may grow before this
+# gate fails, in whole percent.  2% (~129KB against ~6.4MB today) absorbs
+# ordinary linker/alignment noise between two builds of the SAME source
+# (the binary is unstripped and statically linked; measured byte-for-byte
+# identical across repeat builds in this session, so today's slack budget
+# is entirely headroom, not observed jitter) while still catching a
+# stray duplicated unit or an accidentally-unstripped debug section.  A
+# legitimate feature that grows the binary is expected to raise `size' in
+# the SAME commit that adds it, exactly like every other ratchet in this
+# directory -- the slack is not meant to silently absorb that kind of
+# growth, only to leave room for noise.
+#
+# Raise `size' only in the commit that explains the growth, and say what
+# the growth is (new manifest entry, new compiled unit, ...).  Lower it
+# whenever a change shrinks the binary and the gate says you can.
+size 6432608
+slack-pct 2
