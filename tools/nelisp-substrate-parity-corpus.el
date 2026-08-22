@@ -141,6 +141,23 @@
     ;; NeLisp-internal raw stdout primitive: host Emacs never has this
     ;; name, so it is standalone-only rather than diffed against (f).
     (34 standalone-only (if (fboundp 'nelisp--write-stdout-bytes) 1 0))
+
+    ;; -- defvaralias, all four directions plus the documented return
+    ;; value (THE nelix GATES, PART 2: `nelix-core.el:95' called this,
+    ;; ordinary idiomatic Elisp, and NeLisp's standalone runtime had never
+    ;; implemented it -- `void-function').  `shared': host Emacs aliases
+    ;; the same way for the value cell, which is everything this form
+    ;; checks; it never touches the function cell or plist, where
+    ;; NeLisp's record-sharing implementation intentionally diverges from
+    ;; host Emacs (see the `nl_sf_defvaralias' commentary in
+    ;; `scripts/nelisp-standalone-build.el' for that trade-off).
+    (35 shared (if (and (eq (defvaralias 'nelisp-parity-dva-a 'nelisp-parity-dva-b)
+                            'nelisp-parity-dva-b)
+                       (progn (setq nelisp-parity-dva-b 7)
+                              (eq (symbol-value 'nelisp-parity-dva-a) 7))
+                       (progn (setq nelisp-parity-dva-a 9)
+                              (eq (symbol-value 'nelisp-parity-dva-b) 9)))
+                  1 0))
     ))
 
 (provide 'nelisp-substrate-parity-corpus)

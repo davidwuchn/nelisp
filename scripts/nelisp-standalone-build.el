@@ -11415,6 +11415,147 @@ from the patched combiner-cons (see `nelisp-standalone--patch-combiner-cons').")
              1))
        1)))
 
+;; `defvaralias' for the reader's native evaluator.  THE nelix GATES,
+;; PART 2 (tools/ai/gates.expected): `nelix-core.el:95' calls ordinary,
+;; idiomatic `(defvaralias 'nelix-default-backend 'nelix-core-default-
+;; backend)' -- a ubiquitous Elisp language feature the standalone
+;; substrate never implemented, `void-function' on that line, blocking
+;; both nelix gates.  Semantics (Emacs's documented contract): after
+;; `(defvaralias NEW-ALIAS BASE-VARIABLE)', NEW-ALIAS and BASE-VARIABLE
+;; are the SAME variable in all four directions -- read either name,
+;; write either name, both observe the other's write -- plus aliasing
+;; chains resolve and the call returns BASE-VARIABLE.
+;;
+;; Implementation choice: NOT a copy-the-current-value stub (the
+;; stub-silent-downstream-breakage class of bug this repo has hit
+;; before -- a later `(setq alias v)' would silently diverge from
+;; `base' forever).  The mirror stores one `symbol-entry' record PER
+;; NAME in a name-keyed hash bucket (`lisp/nelisp-cc-mirror-lookup-
+;; entry.el' + friends); NOTHING in `symbol-value'/`setq'/`boundp'
+;; needs to change if NEW-ALIAS's name is made to resolve to the SAME
+;; symbol-entry record object BASE-VARIABLE already uses -- every read
+;; and write already goes through a fresh `nelisp_mirror_lookup_entry'
+;; by name.  `nelisp_mirror_bucket_prepend' (Doc 119 §119.A, already
+;; shipped) installs a caller-supplied ENTRY pointer under a given NAME
+;; without allocating a new record -- exactly the primitive this
+;; needs.  Because every insert in this substrate is a bucket PREPEND
+;; and every lookup walks head-first, re-aliasing an already-aliased
+;; name (chains) transparently resolves to the most-recently-installed
+;; (= most-canonical) shared entry, with no redirect/pointer-chasing
+;; logic of its own.
+;;
+;; Trade-off, stated plainly: this shares ALL FOUR symbol-entry slots
+;; (value / function / plist / constant) between NEW-ALIAS and BASE-
+;; VARIABLE, not just the value cell real Emacs aliases (its C
+;; `SYMBOL_VARALIAS' redirect only touches the value slot; the function
+;; cell and plist stay independent per-symbol).  The mirror's storage
+;; unit is one 4-slot record per name; splitting value-only forwarding
+;; out would mean teaching the native hot-path read/write units
+;; (`nelisp-cc-env-lookup-value.el' / `nelisp-cc-env-set-value.el') an
+;; indirection they do not have today, which is exactly the "writing a
+;; new compiled unit through the register-ABI / GC-arena-epoch
+;; pipeline" risk THE nelix GATES PART 2 flagged as too deep to guess
+;; right blind.  `nelix-core.el's usage (aliasing plain backend-name
+;; variables, never `fset' on either name) never observes the
+;; difference, and the four-direction value contract this exists to
+;; satisfy is unaffected -- recorded here rather than silently shipped.
+(defconst nelisp-standalone--sp-eq-defvaralias
+  '(defun nl_sp_eq_defvaralias (name_ptr)
+     (nl_sp_eq_lit name_ptr 11 7809648991760967012 7561577)))
+
+(defconst nelisp-standalone--sf-defvaralias
+  '((defun nl_sf_defvaralias_apply (alias-sym-ptr base-sym-ptr env out)
+      ;; ALIAS-SYM-PTR / BASE-SYM-PTR are already-evaluated Sexp
+      ;; pointers (normally Sexp::Symbol from a `(quote SYM)' arg).
+      ;; mirror-ptr / unbound-ptr: same `env+0' / `env+64' layout
+      ;; `nl_env_set_value' (evalport-env-leaves-bind.o) already relies
+      ;; on for every `setq'.
+      (let* ((mirror-ptr (+ env 0))
+             (unbound-ptr (+ env 64)))
+        (if (and (or (= (sexp-tag alias-sym-ptr) 4) (= (sexp-tag alias-sym-ptr) 5))
+                 (or (= (sexp-tag base-sym-ptr) 4) (= (sexp-tag base-sym-ptr) 5)))
+            (let* ((base-entry-hit
+                    (extern-call nelisp_mirror_lookup_entry mirror-ptr base-sym-ptr))
+                   (scratch (alloc-bytes 32 8)))
+              (let* ((base-entry
+                      (if (= base-entry-hit 0)
+                          ;; BASE-VARIABLE has no entry yet: auto-vivify one
+                          ;; with value=function=unbound (same default a
+                          ;; fresh `defvar' gets), reusing the already-hot
+                          ;; `nl_env_build_scratch' + `nelisp_mirror_set_
+                          ;; value_or_insert' pair instead of re-deriving
+                          ;; the alloc+bucket-prepend sequence.  The miss is
+                          ;; already established above, so `_or_insert's
+                          ;; hit-path overwrite (which would clobber an
+                          ;; EXISTING value) is never exercised here.
+                          (seq
+                           (extern-call nl_env_build_scratch unbound-ptr unbound-ptr scratch)
+                           (extern-call nelisp_mirror_set_value_or_insert
+                                        mirror-ptr base-sym-ptr scratch 0)
+                           (extern-call nelisp_mirror_lookup_entry mirror-ptr base-sym-ptr))
+                        base-entry-hit)))
+                (let* ((old-alias-entry
+                        (extern-call nelisp_mirror_lookup_entry mirror-ptr alias-sym-ptr)))
+                  (seq
+                   ;; Migration (Emacs's documented defvaralias behaviour):
+                   ;; if ALIAS already had its OWN bound value and BASE is
+                   ;; still unbound (freshly vivified above, or a pre-
+                   ;; existing-but-never-set global), ALIAS's old value
+                   ;; becomes BASE's initial value.  No-op in every other
+                   ;; shape (nothing to migrate, or BASE already has a
+                   ;; value of its own that must not be clobbered).
+                   (if (= old-alias-entry 0)
+                       0
+                     (if (= (symbol-eq (record-slot-ref-ptr old-alias-entry 0) unbound-ptr) 1)
+                         0
+                       (if (= (symbol-eq (record-slot-ref-ptr base-entry 0) unbound-ptr) 1)
+                           (record-slot-set base-entry 0
+                                            (record-slot-ref-ptr old-alias-entry 0))
+                         0)))
+                   ;; Install BASE's entry object under ALIAS's name too --
+                   ;; a bucket-prepend shadow, found first by every future
+                   ;; lookup of ALIAS (head-first walk).  ALIAS's own prior
+                   ;; entry (if any) is left in place, unreachable but
+                   ;; harmless, matching this substrate's append-only
+                   ;; mirror discipline everywhere else.
+                   (extern-call nl_env_build_scratch unbound-ptr unbound-ptr scratch)
+                   (extern-call nelisp_mirror_bucket_prepend
+                                mirror-ptr alias-sym-ptr base-entry scratch)
+                   (nl_sexp_clone_into base-sym-ptr out)
+                   0))))
+          1)))
+    (defun nl_sf_defvaralias (args env out _pad)
+      ;; (defvaralias NEW-ALIAS-FORM BASE-VARIABLE-FORM [DOCSTRING-FORM])
+      ;; Both NEW-ALIAS-FORM and BASE-VARIABLE-FORM are evaluated
+      ;; (normally `(quote SYM)' forms), matching the real `defvaralias'
+      ;; subr.  A trailing DOCSTRING-FORM is accepted -- never evaluated,
+      ;; this substrate has no per-variable docstring store -- and simply
+      ;; ignored; a caller passing one gets no error, matching the "a
+      ;; docstring third arg is accepted" contract.
+      (if (= (sexp-tag args) 7)
+          (let* ((alias-form (nl_cons_car_ptr args))
+                 (rest1 (nl_cons_cdr_ptr args)))
+            (if (= (sexp-tag rest1) 7)
+                (let* ((base-form (nl_cons_car_ptr rest1))
+                       (alias-slot (alloc-bytes 32 8))
+                       (base-slot (alloc-bytes 32 8)))
+                  (if (= (nelisp_eval_call alias-form env alias-slot) 0)
+                      (if (= (nelisp_eval_call base-form env base-slot) 0)
+                          (nl_sf_defvaralias_apply alias-slot base-slot env out)
+                        1)
+                    1))
+              1))
+        1)))
+  "AOT source for `defvaralias' (THE nelix GATES, PART 2).
+
+Record-sharing implementation: installs BASE-VARIABLE's existing
+`symbol-entry' record under NEW-ALIAS's name too via the already-
+shipped `nelisp_mirror_bucket_prepend' (Doc 119 §119.A), so every
+existing read/write primitive (`nelisp_mirror_lookup_entry' by name)
+needs no changes at all.  See the defconst commentary above this one
+for the full four-direction / chain / return-value contract and the
+stated value-vs-whole-record trade-off vs. real Emacs.")
+
 (defconst nelisp-standalone--sf-defmacro
   '(defun nl_sf_defmacro (args env out _pad)
      ;; (defmacro NAME ARGLIST BODY...) -> evaluate
@@ -11834,31 +11975,33 @@ if-chain intact."
                         (nl_sf_defmacro args_ptr env_ptr out 0)
                       (if (= (nl_sp_eq_defalias name_ptr) 1)
                           (nl_sf_defalias args_ptr env_ptr out 0)
-                        (if (= (nl_sp_eq_cl_defun name_ptr) 1)
-                            (nl_sf_cl_defun args_ptr env_ptr out 0)
-                          (if (= (nl_sp_eq_when name_ptr) 1)
-                              (nl_sf_when args_ptr env_ptr out 0)
-                            (if (= (nl_sp_eq_unless name_ptr) 1)
-                                (nl_sf_unless args_ptr env_ptr out 0)
-                              (if (= (nl_sp_eq_cond name_ptr) 1)
-                                  (nl_sf_cond args_ptr env_ptr out 0)
-                                (if (= (nl_sp_eq_and name_ptr) 1)
-                                    (nl_sf_and args_ptr env_ptr out 0)
-                                  (if (= (nl_sp_eq_or name_ptr) 1)
-                                      (nl_sf_or args_ptr env_ptr out 0)
-                                    (if (= (nl_sp_eq_prog1 name_ptr) 1)
-                                        (nl_sf_prog1 args_ptr env_ptr out 0)
-                                      (if (= (nl_sp_eq_prog2 name_ptr) 1)
-                                          (nl_sf_prog2 args_ptr env_ptr out 0)
-                                        (if (= (nl_sp_eq_dolist name_ptr) 1)
-                                            (nl_sf_dolist args_ptr env_ptr out 0)
-                                          (if (= (nl_sp_eq_dotimes name_ptr) 1)
-                                              (nl_sf_dotimes args_ptr env_ptr out 0)
-                                            (if (= (nl_sp_eq_catch name_ptr) 1)
-                                                (nl_sf_catch args_ptr env_ptr out 0)
-                                              (if (= (nl_sp_eq_throw name_ptr) 1)
-                                                  (nl_sf_throw args_ptr env_ptr out 0)
-                                                2))))))))))))))))))
+                        (if (= (nl_sp_eq_defvaralias name_ptr) 1)
+                            (nl_sf_defvaralias args_ptr env_ptr out 0)
+                          (if (= (nl_sp_eq_cl_defun name_ptr) 1)
+                              (nl_sf_cl_defun args_ptr env_ptr out 0)
+                            (if (= (nl_sp_eq_when name_ptr) 1)
+				(nl_sf_when args_ptr env_ptr out 0)
+                              (if (= (nl_sp_eq_unless name_ptr) 1)
+                                  (nl_sf_unless args_ptr env_ptr out 0)
+				(if (= (nl_sp_eq_cond name_ptr) 1)
+                                    (nl_sf_cond args_ptr env_ptr out 0)
+                                  (if (= (nl_sp_eq_and name_ptr) 1)
+                                      (nl_sf_and args_ptr env_ptr out 0)
+                                    (if (= (nl_sp_eq_or name_ptr) 1)
+					(nl_sf_or args_ptr env_ptr out 0)
+                                      (if (= (nl_sp_eq_prog1 name_ptr) 1)
+                                          (nl_sf_prog1 args_ptr env_ptr out 0)
+					(if (= (nl_sp_eq_prog2 name_ptr) 1)
+                                            (nl_sf_prog2 args_ptr env_ptr out 0)
+                                          (if (= (nl_sp_eq_dolist name_ptr) 1)
+                                              (nl_sf_dolist args_ptr env_ptr out 0)
+                                            (if (= (nl_sp_eq_dotimes name_ptr) 1)
+						(nl_sf_dotimes args_ptr env_ptr out 0)
+                                              (if (= (nl_sp_eq_catch name_ptr) 1)
+                                                  (nl_sf_catch args_ptr env_ptr out 0)
+						(if (= (nl_sp_eq_throw name_ptr) 1)
+                                                    (nl_sf_throw args_ptr env_ptr out 0)
+                                                  2)))))))))))))))))))
             ((consp node) (cons (rewrite (car node)) (rewrite (cdr node))))
             (t node))))
       (append (list 'defun name arglist) (mapcar #'rewrite body)))))
@@ -11886,10 +12029,13 @@ Keeps lisp/ pristine (mirrors `--patch-combiner-apply')."
                 (push nelisp-standalone--sf-defvar out)
                 (push nelisp-standalone--sf-defconst out)
                 (push nelisp-standalone--sp-eq-defalias out)
+                (push nelisp-standalone--sp-eq-defvaralias out)
                 (push nelisp-standalone--sp-eq-defmacro out)
                 (push nelisp-standalone--sp-eq-cl-defun out)
                 (push nelisp-standalone--sf-cl-defun out)
                 (push nelisp-standalone--sf-defalias out)
+                (dolist (helper nelisp-standalone--sf-defvaralias)
+                  (push helper out))
                 (push nelisp-standalone--sf-defmacro out)
                 (push nelisp-standalone--sp-eq-when out)
                 (push nelisp-standalone--sp-eq-unless out)
@@ -18483,6 +18629,7 @@ loader when it is absent."
               (let ((nelisp-standalone--reader-out out))
                 (dolist (smoke '(nelisp-standalone--reader-temp-name-uniqueness-smoke
                                  nelisp-standalone--reader-intern-canonical-smoke
+                                 nelisp-standalone--reader-defvaralias-smoke
                                  nelisp-standalone--reader-temp-outside-cwd-smoke
                                  nelisp-standalone--reader-asm-arm64-byte-identity-smoke
                                  nelisp-standalone--reader-hash-table-literal-smoke
@@ -18809,6 +18956,45 @@ every string-to-symbol path."
             (setq out (string-trim (buffer-string))))
           (unless (string= out "(t t t t t t t)")
             (error "intern canonicalization smoke -> %S (expected (t t t t t t t))" out)))
+      (ignore-errors (delete-file tmp)))))
+
+(defun nelisp-standalone--reader-defvaralias-smoke ()
+  "Assert `defvaralias' aliases a variable in all four directions.
+
+Red before the fix (THE nelix GATES, PART 2, tools/ai/gates.expected):
+`(defvaralias 'a 'b)' signalled `void-function' -- this substrate never
+implemented the special form at all.  Once implemented, a copy-the-
+current-value stub would still pass a naive single-direction probe
+while silently breaking every later `setq' on either name; this smoke
+checks all four directions (read A, read B, write A observed via B,
+write B observed via A), a two-hop alias CHAIN, and the documented
+return value (BASE-VARIABLE) together, matching the non-negotiable
+contract this feature was implemented against."
+  (let ((tmp (make-temp-file "nelisp-reader-defvaralias-" nil ".el"))
+        (out nil))
+    (unwind-protect
+        (progn
+          (with-temp-file tmp
+            (insert
+             "(defvaralias 'nelisp-dva-smoke-a 'nelisp-dva-smoke-b)\n"
+             "(setq nelisp-dva-smoke-b 1)\n"
+             "(defvar nelisp-dva-smoke-check1 (eq (symbol-value 'nelisp-dva-smoke-a) 1))\n"
+             "(setq nelisp-dva-smoke-a 2)\n"
+             "(defvar nelisp-dva-smoke-check2 (eq (symbol-value 'nelisp-dva-smoke-b) 2))\n"
+             "(setq nelisp-dva-smoke-b 3)\n"
+             "(defvar nelisp-dva-smoke-check3 (eq (symbol-value 'nelisp-dva-smoke-a) 3))\n"
+             "(defvar nelisp-dva-smoke-check4 (eq (defvaralias 'nelisp-dva-smoke-c 'nelisp-dva-smoke-a) 'nelisp-dva-smoke-a))\n"
+             "(setq nelisp-dva-smoke-c 4)\n"
+             "(defvar nelisp-dva-smoke-check5 (eq (symbol-value 'nelisp-dva-smoke-b) 4))\n"
+             "(defvar nelisp-dva-smoke-check6 (eq (symbol-value 'nelisp-dva-smoke-a) 4))\n"
+             "(defvar nelisp-dva-smoke-check7 (eq (defvaralias 'nelisp-dva-smoke-x 'nelisp-dva-smoke-y \"docstring\") 'nelisp-dva-smoke-y))\n"))
+          (with-temp-buffer
+            (call-process nelisp-standalone--reader-out nil t nil
+                          "eval-elisp-source" tmp
+                          "(list nelisp-dva-smoke-check1 nelisp-dva-smoke-check2 nelisp-dva-smoke-check3 nelisp-dva-smoke-check4 nelisp-dva-smoke-check5 nelisp-dva-smoke-check6 nelisp-dva-smoke-check7)")
+            (setq out (string-trim (buffer-string))))
+          (unless (string= out "(t t t t t t t)")
+            (error "defvaralias four-direction/chain/return-value smoke -> %S (expected (t t t t t t t))" out)))
       (ignore-errors (delete-file tmp)))))
 
 (defun nelisp-standalone--reader-hash-table-literal-smoke ()

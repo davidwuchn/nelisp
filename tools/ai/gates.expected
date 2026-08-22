@@ -183,9 +183,11 @@ standalone-selfhost-test
 # not run, so the defects sat.
 #
 # GREEN AND WIRED ABOVE: the reader smokes are covered by
-# `standalone-reader-test' (12 checks), which now includes the arm64
-# byte-identity check and the `intern'/`intern-soft' "nil"/"t"
-# canonicalization check.  Beside it stand 28 individual `standalone-reader-*'
+# `standalone-reader-test' (13 checks), which now includes the arm64
+# byte-identity check, the `intern'/`intern-soft' "nil"/"t"
+# canonicalization check, and the `defvaralias' four-direction/chain/
+# return-value check (added alongside the nl_sf_defvaralias implementation,
+# see "THE nelix GATES, PART 2" below).  Beside it stand 28 individual `standalone-reader-*'
 # targets, each measured green on 2026-08-21 -- two of them only after the
 # fixes in this sweep.  Named in full so a later reader can tell "measured and
 # green" from "nobody looked":
@@ -310,8 +312,9 @@ substrate-parity-smoke
 #     GATE-COUNT line", i.e. a failure by omission) -- see the sweep note
 #     below.
 #
-#   nelisp-nelix-command-gate / nelisp-nelix-operational-gate -- ONE defect
-#     fixed, a SECOND, DIFFERENT one is now the block; still red.  Baseline
+#   nelisp-nelix-command-gate / nelisp-nelix-operational-gate -- TWO defects
+#     fixed (see the 2026-08-22 update below the third), a THIRD, DIFFERENT
+#     one is now the block; still red.  Baseline
 #     matched the record: `file-missing: "nelix-compat.el"' from the first
 #     direct-runtime call (`nelisp_direct_list').  Root cause was in
 #     `dev/nelix', confirmed by tracing the actual signal (`file-missing',
@@ -370,6 +373,57 @@ substrate-parity-smoke
 #     `nelisp-nelix-command-gate' and `nelisp-nelix-operational-gate' stay
 #     unpromoted and unwired below until that gap has an owner.
 #
+#   UPDATE (2026-08-22, this pass): the SECOND defect above (`void-function:
+#     (defvaralias)') is fixed IN THIS REPO -- `defvaralias' is now a native
+#     special form (`nl_sp_eq_defvaralias' / `nl_sf_defvaralias' in
+#     `scripts/nelisp-standalone-build.el', wired into `nl_apply_special' via
+#     `nelisp-standalone--patch-apply-special' / `--patch-combiner-cons', the
+#     SAME dispatch mechanism `defalias' already sits on -- see that
+#     defconst's own preceding commentary for the implementation-point
+#     rationale and the stated value-vs-whole-record trade-off against real
+#     Emacs).  Re-measured from a clean rebuild (`make nelisp-nelix-command-
+#     gate` from this repo's root, `target/nelisp' rebuilt first): the
+#     `void-function: (defvaralias)' signal is GONE.  Confirmed independently
+#     of this gate too, red then green, same process, same minimal probe
+#     (`(defvaralias 'a 'b) (setq b 1) (symbol-value 'a)'): against a binary
+#     built from the pre-fix tree (`git stash` of this defvaralias change,
+#     rebuild) -- `nelisp: uncaught error: void-function: (defvaralias)',
+#     exit 1; against the post-fix rebuild, same probe -- `(1)', exit 0.
+#
+#     Past that point a THIRD, different defect is now reached and is still
+#     open: `file-missing: nelix-manifest', from the same `nelisp_direct_list'
+#     step (`bin/nelix --runtime nelisp list').  Root cause traced the same
+#     way as the first defect (reading the actual failing `require', not
+#     guessing): `bin/nelix:155-176' (`nelix_emit_nelisp_suite_source_files')
+#     builds, in order, the list of files the direct nelisp runtime preloads
+#     via `nelix-nelisp-smoke--load-suite-files'
+#     (`dev/nelix/scripts/nelix-nelisp-smoke.el:399-406', a plain sequential
+#     `(load (car cur))' over that list) -- and the list puts `nelix-dsl.el'
+#     at position 4 (`bin/nelix:162') BEFORE `nelix-manifest.el' at position
+#     12 (`bin/nelix:170').  `nelix-dsl.el:56' calls `(require
+#     'nelix-manifest)' at its own top level; NeLisp's `require' resolves
+#     that by searching `load-path' (unlike `load', which never does, per the
+#     first defect's own finding above) -- but `load-path' is never set
+#     anywhere in `bin/nelix's direct-nelisp runner (confirmed absent by
+#     grep: the only `load-path' hit in the whole file is the COMMENT at
+#     `bin/nelix:2219' documenting that `load' does not search it), so with
+#     `nelix-manifest.el' eight positions further down the SAME preload list,
+#     the `require' has nothing to find yet and signals `file-missing'.  Same
+#     class of bug as the FIRST defect this section fixed -- a file-
+#     resolution ordering gap in `../nelix's own bootstrap sequencing, not a
+#     NeLisp language-coverage gap -- so by the same ownership principle it
+#     belongs there, not here.  Not attempted: `../nelix' is a separate
+#     repository (its own git history) and out of scope for this pass, left
+#     on its own branch per instruction.  Nothing here should be "papered
+#     over" from the NeLisp side either (there is no NeLisp-side lever to
+#     pull -- the gap is a load ordering choice in `bin/nelix' itself).
+#
+#     `nelisp-nelix-command-gate' and `nelisp-nelix-operational-gate' stay
+#     unpromoted and unwired below -- still red, one defect further into the
+#     same script than the previous pass measured, ownership unchanged:
+#     fix belongs on the side that is actually wrong, and that side is
+#     `../nelix', not this repo.
+#
 # Both scripts are deliberately NOT given a GATE-SKIP for either defect:
 # skipping a gate that runs and finds a real defect is exactly how a check
 # starts passing by not running.
@@ -384,8 +438,10 @@ substrate-parity-smoke
 # it got instead of vanishing into "no GATE-COUNT line").  `nelisp-nelix-
 # command-gate' got the identical trap+counter treatment (22 checks) so a
 # fixed run reports honestly too, but it is not listed as required and not
-# wired into any tier below -- it is still red on the `defvaralias' defect
-# above, and requiring a gate whose green side nobody has seen is the same
+# wired into any tier below -- it is still red, now on the `nelix-manifest'
+# ordering defect above (the `defvaralias' defect that used to block it here
+# is fixed, see the 2026-08-22 update above), and requiring a gate whose
+# green side nobody has seen is the same
 # problem this file exists to prevent.  `nelisp-nelix-operational-gate' has
 # no script of its own (a Makefile dependency on the other two) and follows
 # whichever of them is weaker; it stays unrequired for the same reason.
