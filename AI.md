@@ -47,10 +47,19 @@ which `check` itself covers.  `check` deliberately does not run the
 full ERT suite; `verify` holds you to the last `ert-full` report and
 prints its age, so run `test` when that column says the evidence is
 stale.  CI wiring was added 2026-08-22 by running these exact commands
-locally and reading their exit codes and GATE-COUNT lines -- it has
-not yet been observed to pass on an actual GitHub Actions runner,
-whose toolchain (Emacs version, `node`, `cc`/`objcopy`) can differ
-from this checkout's.
+locally and reading their exit codes and GATE-COUNT lines; its first
+run on an actual GitHub Actions runner (run 32604739757, 2026-08-23)
+found one defect no local run could see -- `check`'s own trailing
+`verify` demanded reports from the binary-tier gates the same Linux
+lane produces AFTER `check` runs, so a runner where every check-tier
+gate had just passed still aborted the job right there, skipping every
+later step.  `check` now scopes that trailing verify to its own gate
+names (`check_tier_manifest` in `tools/ai/nelisp-ai.sh`; plain `verify`
+stays unscoped), and the Linux lane gained a final, unscoped `verify`
+step after every gate step, so "every required gate has a fresh report"
+is asserted exactly once, at the one point in the job where every gate
+has actually had a chance to run.  That fix has not itself been
+observed passing on a runner yet.
 
 `verify` is the only command whose exit code answers "is the tree good".
 Every other command reports on itself; `verify` also knows which gates

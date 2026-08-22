@@ -122,17 +122,18 @@ cmd_check() {
     # The full ERT suite is deliberately NOT here: it takes minutes, and
     # `verify' already holds you to the last ert-full report and prints
     # its age.  Run `test' when the age column says the evidence is old.
+    check_steps="compile parens-check generated-source-parse \
+prelude-toplevel-check partial-inventory gate-selfcheck \
+gate-mutation \
+ns-gate nl-check-gate fallback-inventory-selftest \
+fallback-inventory bootstrap-contract \
+wasm-dtw-skeleton-smoke \
+unsafe-inventory ns-inventory \
+reader-surface-audit pkg-graph pkg-load-lists \
+parity-coverage substrate-presence-corpus-check \
+doc-claims ns"
     failures=0
-    for step in compile parens-check generated-source-parse \
-                prelude-toplevel-check partial-inventory gate-selfcheck \
-                gate-mutation \
-                ns-gate nl-check-gate fallback-inventory-selftest \
-                fallback-inventory bootstrap-contract \
-                wasm-dtw-skeleton-smoke \
-                unsafe-inventory ns-inventory \
-                reader-surface-audit pkg-graph pkg-load-lists \
-                parity-coverage substrate-presence-corpus-check \
-                doc-claims ns; do
+    for step in $check_steps; do
         printf '\n=== %s ===\n' "$step"
         case "$step" in
             compile) ( cmd_compile ) || failures=$((failures + 1)) ;;
@@ -140,8 +141,73 @@ cmd_check() {
             *)       ( cmd_gate "$step" -- make "$step" ) || failures=$((failures + 1)) ;;
         esac
     done
-    printf '\n=== verify ===\n'
-    cmd_verify
+    # `check' only ran the steps above, so holding its trailing verify to
+    # every gate in `gates.expected' -- including the binary-tier gates
+    # `standalone'/`native-artifact'/`perf'/`extras'/`test' produce -- means
+    # it fails on gates that have not had a chance to run yet, not on gates
+    # this command actually exercised.  Measured on GitHub Actions run
+    # 32604739757 (2026-08-23): every check-tier gate passed
+    # (GATE-COUNT findings=0, gate-mutation 13/13) and the step still exited
+    # nonzero, because the CI lane runs the binary-tier steps AFTER `check',
+    # so their reports could not exist yet -- verify read that as
+    # "ert-full: no report (the gate never ran)" etc. and failed the job
+    # before it ever reached the steps that produce them.
+    #
+    # Scope the trailing verify to a manifest filtered to check's own gate
+    # names.  Each kept line is copied verbatim (including a trailing `?')
+    # from the real manifest, so a check-tier gate that IS missing or red
+    # still fails verify -- only the gates outside this tier drop out of
+    # scope, not the requiredness of the ones inside it.  Plain `verify',
+    # run directly with no `NELISP_GATE_MANIFEST' override, is unaffected:
+    # this only changes what `check' itself asks for at the end.
+    scoped_manifest=$(check_tier_manifest "$check_steps")
+    printf '\n=== verify (check-tier scope) ===\n'
+    set +e
+    NELISP_GATE_MANIFEST="$scoped_manifest" cmd_verify
+    verify_code=$?
+    set -e
+    rm -f "$scoped_manifest"
+    return "$verify_code"
+}
+
+check_tier_manifest() {
+    # Build a `gates.expected'-shaped file containing only the gate names
+    # `cmd_check' produces reports for, each copied verbatim (trailing `?'
+    # and all) from the real manifest -- see `cmd_check' above for why.
+    # Reads from `NELISP_GATE_MANIFEST' when the caller already pointed it
+    # somewhere else, so a caller's own manifest stays the source of truth
+    # for which of check's gates are required vs. optional.
+    #
+    # `ns' is the one step whose reported gate name differs from the step
+    # name: `cmd_ns' called with no FILE arguments (as `check' calls it)
+    # reports as `ns-recipes', not `ns' -- see `cmd_ns' below.
+    #
+    # A step name with no matching manifest line is not silently dropped:
+    # that is `check' and `gates.expected' having drifted apart, the exact
+    # shape of silent failure this whole harness exists to catch, so it is
+    # a loud error here instead.
+    steps=$1
+    src=${NELISP_GATE_MANIFEST:-$here/gates.expected}
+    out=$(mktemp)
+    missing=""
+    for s in $steps; do
+        case "$s" in
+            ns) name=ns-recipes ;;
+            *)  name=$s ;;
+        esac
+        line=$(grep -E "^${name}\\??\$" "$src" | head -1 || true)
+        if [ -z "$line" ]; then
+            missing="$missing $name"
+        else
+            printf '%s\n' "$line" >> "$out"
+        fi
+    done
+    if [ -n "$missing" ]; then
+        rm -f "$out"
+        printf 'nelisp-ai.sh check: gate(s)%s run by `check'"'"' are not in %s -- the check step list and gates.expected have drifted\n' "$missing" "$src" >&2
+        exit 1
+    fi
+    printf '%s' "$out"
 }
 
 cmd_verify() {

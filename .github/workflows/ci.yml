@@ -131,10 +131,17 @@ jobs:
       # compares it against the stock Emacs already installed on the runner,
       # which is the only check here that can see both halves being wrong the
       # same way.
+      # Wrapped through `nelisp-ai.sh gate' (rather than bare `make
+      # emacs-parity', as before) so this step also writes
+      # target/gates/emacs-parity.json -- `emacs-parity' is a required
+      # gate in tools/ai/gates.expected, and until this pass nothing in
+      # this workflow produced a report for it at all: the full,
+      # unscoped `verify' at the end of this lane would have called it
+      # MISSING despite this step having just run and passed it.
       - name: "Emacs parity (differential vs stock Emacs; Linux x86_64)"
         if: runner.os == 'Linux'
         shell: bash
-        run: make emacs-parity
+        run: bash tools/ai/nelisp-ai.sh gate emacs-parity -- make emacs-parity
 
       # Checks on the checks: every gate must report how much it looked at,
       # and a name that ignores an argument Emacs defines must say so.
@@ -176,9 +183,20 @@ jobs:
         shell: bash
         run: make macho-acceptance-test
 
+      # `make test' alone (as this ran before) never writes a gate report;
+      # only `nelisp-ai.sh test' does, as gate "ert-full" -- a required
+      # gate with no other producer anywhere in this workflow.  `make
+      # clean' first reproduces `test: clean''s own prerequisite (the
+      # `nelisp-ai.sh test' path skips it, to stay usable as a fast TDD
+      # loop): the root Makefile's own `compile' target (run bare, by the
+      # "Byte-compile" step above) leaves .elc files behind rather than
+      # deleting them the way `nelisp-ai.sh compile' does, and stale
+      # byte-compiled `nelisp-eval.el' trips `max-lisp-eval-depth' inside
+      # the self-host probes -- see `test: clean' and the comment above
+      # `all: test' in the Makefile.
       - name: Run smoke tests
         shell: bash
-        run: make test
+        run: make clean && bash tools/ai/nelisp-ai.sh test
       # `nelisp-jit-enabled' is nil by default and the only bindings of
       # it were two of the JIT's own tests, so the translation path was
       # exercised by the tests written for it and by nothing that uses
@@ -199,10 +217,15 @@ jobs:
       - name: Run smoke tests with the JIT disabled
         shell: bash
         run: make test-nojit
+      # Wrapped through `nelisp-ai.sh gate' (rather than bare `make
+      # standalone-reader-test') so this step writes
+      # target/gates/standalone-reader-test.json -- a required gate that,
+      # like `emacs-parity' above, had no report producer anywhere in
+      # this workflow before this pass.
       - name: Standalone NeLisp reader->eval (text -> AOT reader, zero Rust; x86_64 Linux)
         if: runner.os == 'Linux'
         shell: bash
-        run: make standalone-reader-test
+        run: bash tools/ai/nelisp-ai.sh gate standalone-reader-test -- make standalone-reader-test
       # target/nelisp already exists from the step above (its own
       # Makefile prerequisite is conditional, same as `emacs-parity'
       # further up, so this does not rebuild it).
@@ -210,10 +233,15 @@ jobs:
         if: runner.os == 'Linux'
         shell: bash
         run: bash tools/ai/nelisp-ai.sh gate binary-size-ratchet -- make binary-size-ratchet
+      # Wrapped through `nelisp-ai.sh gate' (rather than bare `make
+      # standalone-selfhost-test'; equivalent to `nelisp-ai.sh selfhost')
+      # so this step writes target/gates/standalone-selfhost-test.json --
+      # a required gate with no report producer anywhere in this workflow
+      # before this pass.
       - name: Standalone NeLisp SELF-HOST (interpreter compiles recursive fact -> native ELF, zero emacs; x86_64 Linux)
         if: runner.os == 'Linux'
         shell: bash
-        run: make standalone-selfhost-test
+        run: bash tools/ai/nelisp-ai.sh gate standalone-selfhost-test -- make standalone-selfhost-test
       # Three of `nelisp-ai.sh''s binary-tier gates were in no CI lane at
       # all before this pass: nelisp-native-artifact-gate,
       # nelisp-performance-gate, standalone-reader-smokes (the 28
@@ -247,4 +275,22 @@ jobs:
         if: runner.os == 'Linux'
         shell: bash
         run: bash tools/ai/nelisp-ai.sh extras
+
+      # `check', earlier in this lane, scopes its own trailing verify to
+      # only the gates it produces reports for (see `check_tier_manifest'
+      # in tools/ai/nelisp-ai.sh) -- on a fresh runner the binary-tier
+      # gates below it in this same job have not run yet when `check'
+      # executes, so a report demand of the full manifest at that point
+      # fails on ordering, not on a real defect (this is what broke
+      # GitHub Actions run 32604739757 on 2026-08-23: every check-tier
+      # gate passed and the job still aborted there, skipping every step
+      # below).  By this point every gate step in the Linux lane has run,
+      # so the full, unscoped `verify' is the first point in the lane
+      # where "every required gate produced a fresh green report, or a
+      # reasoned skip" is actually assertable on a runner, rather than
+      # only ever checked on a developer's own machine.
+      - name: "AI toolchain verify (all tiers); Linux x86_64"
+        if: runner.os == 'Linux'
+        shell: bash
+        run: bash tools/ai/nelisp-ai.sh verify
 
