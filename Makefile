@@ -608,6 +608,16 @@ nelisp-runtime-image-cache-gate:
 nelisp-source-command-substrate-gate:
 	./tools/nelisp-source-command-substrate-gate.sh
 
+# One probe corpus (tools/nelisp-substrate-parity-corpus.el), every entry
+# point (bare-file, --load, runtime-image, compiled artifact, source-cache,
+# source-fallback, and host Emacs for the shared part), diffed line by line
+# against the bare-file baseline.  See tools/nelisp-substrate-parity.el's
+# header for why: this branch's costliest misdiagnosis was a primitive
+# probed in one substrate and generalized to another.
+.PHONY: substrate-parity-smoke
+substrate-parity-smoke:
+	./tools/nelisp-substrate-parity-smoke.sh
+
 # Fast focused loop for CLI load work.  Builds/relinks target/nelisp using the
 # incremental unit cache, then checks only `--load' output instead of running
 # the full reader CLI/runtime-image/REPL smoke.
