@@ -129,7 +129,7 @@ cmd_check() {
                 wasm-dtw-skeleton-smoke \
                 unsafe-inventory ns-inventory \
                 reader-surface-audit pkg-graph pkg-load-lists \
-                parity-coverage ns; do
+                parity-coverage doc-claims ns; do
         printf '\n=== %s ===\n' "$step"
         case "$step" in
             compile) ( cmd_compile ) || failures=$((failures + 1)) ;;

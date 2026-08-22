@@ -40,6 +40,29 @@ pkg-load-lists
 fallback-inventory
 bootstrap-contract
 
+# doc-claims (2026-08-22): the Definition of Done's mechanical half -- see
+# AI.md's DoD section.  Every docs/design/*.org whose #+STATUS: line says
+# SHIPPED must carry a #+VERIFIED-BY: line naming a gate that actually
+# exists (a line here, or a Makefile target); tools/nelisp-doc-claims.el
+# checks existence only, not freshness, which `verify' already owns. 13
+# docs currently say SHIPPED; 6 (Docs 142, 149, 151, 154, 160, 163) got a
+# real line -- Doc 142 because this session re-measured its "--kind elc"
+# claim and found the fix not yet on this branch (its own gates 1-9
+# evidence, ert-full + the standalone-reader-smokes realrt-smoke it names
+# in prose, is real and cited instead), the other five because they
+# already named a live gate in their own verification prose and only
+# needed the machine-readable line added. The remaining 7 predate the
+# header and are tolerated via tools/nelisp-doc-claims-baseline.txt, the
+# same pinned-baseline shape unsafe-inventory/fallback-inventory/pkg-graph
+# use -- `findings' below is that baseline count, a floor of known debt
+# like parity-coverage's, not a ceiling. Verified red-then-green three
+# ways: a synthetic SHIPPED doc with no #+VERIFIED-BY and not in the
+# baseline goes red naming it; one whose #+VERIFIED-BY names a gate that
+# does not exist goes red naming both; the clean tree is green with
+# `GATE-COUNT checked=13 findings=7'. Mutation-proven
+# (tools/gate-mutations.txt) the same session.
+doc-claims
+
 # parity-coverage (LEDGER STRAGGLER, closed 2026-08-22): mutation-proven
 # (tools/gate-mutations.txt) since 2026-08-19 -- corrupting one covered
 # name in the shadow-differential corpus turns it red -- but never listed
