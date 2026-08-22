@@ -89,6 +89,8 @@ usage: tools/ai/nelisp-ai.sh <command> [args]
   perf                build the binary and run gate "nelisp-performance-gate"
   smokes              run the 28 individual reader smokes as one gate
   extras              run the remaining binary-building gates, one report each
+  presence            build the binary and run gate "substrate-presence-sweep"
+                      (~354-name fboundp sweep, own tier: too slow for extras)
   test-one FILE...    run selected test files as gate "ert-focus"
   compile             byte-compile with error-on-warn as gate "compile"
   ns [FILE...]        namespace check (defaults to the recipe skeletons)
@@ -129,7 +131,7 @@ cmd_check() {
                 wasm-dtw-skeleton-smoke \
                 unsafe-inventory ns-inventory \
                 reader-surface-audit pkg-graph pkg-load-lists \
-                parity-coverage ns; do
+                parity-coverage substrate-presence-corpus-check ns; do
         printf '\n=== %s ===\n' "$step"
         case "$step" in
             compile) ( cmd_compile ) || failures=$((failures + 1)) ;;
@@ -205,6 +207,17 @@ cmd_smokes() {
     # processes, match-data, intern-soft, the FFI bridge -- and until the
     # 2026-08-21 sweep nothing ran them.
     cmd_gate standalone-reader-smokes -- make standalone-reader-smokes
+}
+
+cmd_presence() {
+    # Task A: the definable-name surface (~354 names), one `fboundp' probe
+    # each, across every substrate.  Its own command rather than folded
+    # into `extras': measured at ~2400 process launches (vs. ~250 for
+    # `substrate-parity-smoke'), too slow for that tier's per-gate budget
+    # -- see tools/ai/gates.expected's substrate-presence-sweep entry for
+    # the measurement.  Builds a binary, so it is out of `check' with the
+    # other standalone gates.
+    cmd_gate substrate-presence-sweep -- make substrate-presence-sweep
 }
 
 cmd_extras() {
@@ -565,6 +578,7 @@ case "$command" in
     perf)           cmd_perf ;;
     smokes)         cmd_smokes ;;
     extras)         cmd_extras ;;
+    presence)       cmd_presence ;;
     test-one)       cmd_test_one "$@" ;;
     compile)        cmd_compile ;;
     gate)           cmd_gate "$@" ;;

@@ -658,6 +658,35 @@ nelisp-source-command-substrate-gate:
 substrate-parity-smoke:
 	./tools/nelisp-substrate-parity-smoke.sh
 
+# Task A (presence sweep): the definable-name surface (~354 names --
+# scripts/nelisp-stdlib-prelude.el's top-level functions union
+# nelisp--primitive-symbols in src/nelisp-eval.el, see
+# tools/nelisp-substrate-presence-gen.el), one `fboundp' probe per name,
+# through the exact same corpus/diff/ledger machinery as
+# substrate-parity-smoke above but as a second corpus and a second ledger
+# (tools/substrate-presence-accepted.el) so the two finding counts never
+# conflate.  Its own gate, not folded into `nelisp-ai.sh extras': ~2400
+# process launches, measured too slow for that tier's budget.
+.PHONY: substrate-presence-sweep
+substrate-presence-sweep:
+	./tools/nelisp-substrate-presence-sweep.sh
+
+# The corpus above is GENERATED and checked in; this is its drift check,
+# same shape as ns-inventory's checked-in baseline except an exact content
+# comparison rather than a ratcheted count, because the corpus is fully
+# deterministic.  Seconds, no binary -- lives in `check', unlike the sweep
+# itself.
+.PHONY: substrate-presence-corpus-check
+substrate-presence-corpus-check:
+	$(EMACS) --batch -Q -L packages/nl-prelude/src -L packages/nl-ns/src \
+	  -l tools/nelisp-substrate-presence-gen.el \
+	  --eval '(kill-emacs (nelisp-substrate-presence-gen-check))'
+
+.PHONY: substrate-presence-corpus-regen
+substrate-presence-corpus-regen:
+	NELISP_SUBSTRATE_PRESENCE_GEN_WRITE=1 $(EMACS) --batch -Q -L packages/nl-prelude/src -L packages/nl-ns/src \
+	  -l tools/nelisp-substrate-presence-gen.el
+
 # Fast focused loop for CLI load work.  Builds/relinks target/nelisp using the
 # incremental unit cache, then checks only `--load' output instead of running
 # the full reader CLI/runtime-image/REPL smoke.

@@ -51,6 +51,25 @@ bootstrap-contract
 # down), not defects.
 parity-coverage
 
+# substrate-presence-corpus-check (Task A, added alongside
+# substrate-presence-sweep below): the presence sweep's corpus
+# (tools/nelisp-substrate-presence-corpus.el, ~354 `fboundp' probes) is
+# GENERATED and checked in, by
+# `tools/nelisp-substrate-presence-gen.el' from `scripts/nelisp-stdlib-
+# prelude.el's top-level functions union `nelisp--primitive-symbols' in
+# `src/nelisp-eval.el'.  This gate regenerates it into memory and compares
+# byte-for-byte against the checked-in copy, the same "checked-in
+# reference, live re-derivation, fail on drift" shape `ns-inventory' uses
+# for its baseline, except an exact match rather than a ratcheted count,
+# because the corpus is fully deterministic.  Seconds, no binary --
+# `$(EMACS) --batch -Q -L packages/nl-prelude/src -L packages/nl-ns/src -l
+# tools/nelisp-substrate-presence-gen.el --eval "(kill-emacs
+# (nelisp-substrate-presence-gen-check))"'.  Verified red-then-green: a
+# name temporarily removed from the checked-in corpus turned it red at
+# `GATE-COUNT checked=1 findings=1', naming the corpus file as stale;
+# restoring it turned the gate green again at `findings=0'.
+substrate-presence-corpus-check
+
 # Developer-loop gates: useful, but not evidence about the whole tree.
 ert-focus?
 ns?
@@ -380,10 +399,11 @@ nelisp-nelix-native-hot-gate
 #
 # substrate-parity-smoke: promoted 2026-08-22, see "SUBSTRATE PARITY" at the
 # end of this file -- also `nelisp-ai.sh extras' (needs target/nelisp built,
-# does not build it).  Green with 21 recorded findings (137 at promotion,
-# 117 after the eval-elisp-source file-read fix, 21 after the bare-file
-# prelude-unification fix), not zero findings; read that section before
-# assuming clean means nothing was found.
+# does not build it).  Green with 3 recorded findings as of the TASK A/B/C
+# ADDENDUM later in "SUBSTRATE PARITY" (was 21 at promotion, 137/117 before
+# that -- see the addendum for the corpus growing to 39 forms and the
+# `nelisp--primitive-symbols' fix that dropped 18 of the 21), not zero
+# findings; read that section before assuming clean means nothing was found.
 substrate-parity-smoke
 #
 # nl-condition/nl-safe standalone smokes: promoted 2026-08-22, also
@@ -403,6 +423,20 @@ substrate-parity-smoke
 nl-condition-standalone-smoke
 nl-safe-standalone-smoke
 nl-resource-standalone-smoke
+#
+# substrate-presence-sweep (Task A, added same day as the addendum above):
+# own tier, `nelisp-ai.sh presence', not `extras' (see "SUBSTRATE PARITY"'s
+# addendum for the ~15-17 minute measurement).  OPTIONAL, not yet promoted
+# to required: green-with-203-recorded-findings is expected against the
+# freshly-built `tools/substrate-presence-accepted.el' by construction (the
+# ledger's 203 keys are exactly the second run's 203 finding keys), but
+# that specific claim has not been independently re-observed by an actual
+# gate re-run -- a third ~15-17 minute full sweep sharing target/nelisp and
+# its marker file with other in-flight work was skipped this session.
+# Promote to required once a `substrate-presence-sweep' report actually
+# prints `GATE-COUNT checked=2091 findings=0' (0 unaccepted/stale against
+# the ledger) and that report is read here rather than assumed.
+substrate-presence-sweep?
 #
 # CANNOT RUN HERE, AND NOW SAY SO: three of these exit 0 with a GATE-SKIP line
 # and a reason, which `verify' accepts for a required gate.  They are not
@@ -930,6 +964,177 @@ gate-mutation
 # with the same `checked=209 findings=0' it reports now.  See
 # `tools/nelisp-substrate-parity.el' for the corpus/diff/ledger design and
 # `tools/nelisp-substrate-parity-smoke.sh' for the GATE-SKIP predicate.
+#
+# TASK A/B/C ADDENDUM (2026-08-22, same day, later pass): the presence
+# sweep (Task A), the source-fallback primitive-table fix (Task B), and
+# three new unwind-protect behavioral forms (Task C).
+#
+# Task C first, since it changed `substrate-parity-smoke's own corpus size:
+# three new forms (36/37/38, `tools/nelisp-substrate-parity-corpus.el') --
+# cleanup runs on an escaping error before an enclosing `condition-case'
+# resumes, cleanup runs on a `throw' crossing to an outer `catch', and
+# nested unwind-protect cleanup order is LIFO.  Each verified individually
+# against host Emacs and, via `nelisp-substrate-parity--run-all' called
+# directly on a one-form corpus, against every NeLisp substrate BEFORE
+# being added -- 36 forms -> 39, `checked=209' -> `checked=233' (39 forms:
+# 38 `shared' x 5 non-host substrates + 38 host = 233; form 34 stays
+# `standalone-only').  Zero findings introduced by these three alone.
+#
+# Task B: the presence sweep (below) found source-fallback missing
+# `prin1'/`intern-soft'/`read-from-string'/`match-data'/`read'/
+# `make-temp-name'/`floor'/`%'/`unibyte-string'/
+# `nelisp--write-stdout-bytes' -- the same ten names this file's #3 above
+# already named as a KNOWN GAP, now confirmed complete and fixed by
+# extending `nelisp--primitive-symbols' (src/nelisp-eval.el).  Two more
+# surfaced once the first ten stopped masking them: `string-bytes' (form
+# 7's SECOND call, previously unreached) and `defvaralias' (form 35).
+# Measured per name, not batch-assumed, against a rebuilt binary:
+#
+#   - 12 of 13 fixed `checked=233 findings=0' outright: adding the name
+#     to `nelisp--primitive-symbols' was sufficient because each is
+#     `fboundp' in source-fallback's ambient bootstrap environment before
+#     `nelisp--install-primitives' runs -- `nelisp--install-primitives'
+#     only ever copies a name that is BOTH listed AND already `fboundp'
+#     there, and these were `fboundp' but not listed.
+#   - `defvaralias' (form 35) is the exception: adding it FIXES the
+#     identical crash in the sibling source-cache substrate (marker file
+#     present) but NOT source-fallback (marker removed) -- verified
+#     directly with `eval-elisp-source', marker present vs. removed, both
+#     against the same rebuilt binary.  `(fboundp 'defvaralias)' is false
+#     in source-fallback's specific ambient bootstrap despite being a
+#     genuine plain host function (not the special form its call-site
+#     syntax suggests).  Root cause not isolated further; kept in the
+#     list (correct on principle, fixes source-cache) and left as a KNOWN
+#     GAP for source-fallback in `tools/substrate-parity-accepted.el'.
+#
+# Net ledger effect: 21 keys -> 3 keys, all three unchanged pre-existing
+# keys (0 new), 18 dropped as stale (12 of the 18 source-fallback keys
+# this file's #3 above named, plus six more the ten-name fix also
+# resolved that were not separately itemized there).  Remaining three:
+# `35 source-fallback ... defvaralias' (KNOWN GAP, above), `8 host ...'
+# (ACCEPTED, UTF-8 aref, unchanged since #5 above), `20 host ...
+# emacs-pid' (ACCEPTED, backlog vs. host, unchanged since #6 above).
+# `checked=233 findings=0' both before and after this fix, same
+# "unaccepted findings" invariant #1-4 above kept.
+#
+# Task A: the presence sweep, `tools/nelisp-substrate-presence-gen.el' +
+# `tools/nelisp-substrate-presence-corpus.el' + `tools/nelisp-substrate-
+# parity.el's generalized `nelisp-substrate-parity-presence-gate-run'.
+# One `fboundp' probe per name in the definable-name surface (`scripts/
+# nelisp-stdlib-prelude.el's top-level functions union `nelisp--
+# primitive-symbols', src/nelisp-eval.el) -- 363 names as of this commit
+# (169 more than the 36-form/354-name count first measured, both counts
+# moving because Task B's edits to `nelisp--primitive-symbols' feed the
+# SAME generator).  Same corpus/diff/ledger machinery as `substrate-
+# parity-smoke' above, a second corpus and a second ledger
+# (`tools/substrate-presence-accepted.el') so the two finding counts
+# never conflate, plus a host preamble
+# (`nelisp-substrate-parity--presence-host-preamble': `(require 'cl-lib)'
+# / `seq' / `subr-x' / `url-parse') so `cl-*' names and `url-parse's
+# `cl-defstruct' accessors test fairly against a bare `emacs -Q' host
+# instead of reading as false gaps.
+#
+# First run (pre-Task-B-fix baseline, 354 names, `checked=2069'): 233
+# divergences, all source-fallback (the same primitive-table class Task B
+# then fixed) or host.  Among the host findings, 31 were `nelisp-'-
+# namespace internal names (`nelisp-cl-macros--*', `nelisp-pcase--*',
+# `nelisp-format-hexfloat', `nelisp-seq--to-list', `nelisp-stdlib--*')
+# wrongly tagged `shared' instead of `standalone-only' -- the generator's
+# own tag rule checked only the `nelisp--' (double-hyphen) prefix, not
+# the whole `nelisp-' namespace, a generator bug fixed in
+# `tools/nelisp-substrate-presence-gen.el's `nlsp--tag' (regenerated
+# corpus: 361 names, that class of finding gone).  The other 34 host
+# findings are real, individually triaged: 25 are Layer-2 package
+# capabilities (`process-*'/`set-process-*'/`sqlite-*'/`url-*'/
+# `make-network-process' -- present on host, absent from NeLisp's
+# minimal core boot by architecture, ACCEPTED class ii) and 9 are a
+# genuine native-evaluator backlog (`char-or-string-p', `goto-char',
+# `line-number-at-pos', `point', `re-search-forward',
+# `read-from-minibuffer', `secure-hash', `send-string-to-terminal',
+# `user-error' -- listed in `nelisp--primitive-symbols' and working
+# through every self-hosted-eval substrate, but never implemented as a
+# native op in bare-file/--load/runtime-image, KNOWN DEFECT class iii,
+# not fixed this pass).
+#
+# Second run (post-Task-B-fix, generator tag fix, rebuilt binary, 363
+# names): `GATE-COUNT checked=2091 findings=203' -- all 203 recorded in
+# `tools/substrate-presence-accepted.el' (built directly from this run's
+# captured findings text via the driver's own key/note/write functions
+# with `NELISP_SUBSTRATE_PARITY_NO_AUTORUN=1', not a third full binary
+# sweep -- a concurrently-running sibling gate made a second live sweep
+# against the same target/nelisp/marker file unsafe mid-session; the
+# ledger content is identical to what a live `NELISP_SUBSTRATE_PRESENCE_
+# WRITE=1' run over these exact findings would produce, since the write
+# path only ever transforms an already-computed findings list).  Down
+# from the 233 pre-fix findings (mostly source-fallback, Task B's target)
+# to 203 -- NOT a clean sweep, because the fix only ever targeted the
+# twelve/thirteen names it named, and the presence sweep's much larger
+# net (363 names vs. 39 forms) caught a bigger, different-shaped class
+# behind it:
+#
+#   - 168 source-fallback: NOT the `nelisp--primitive-symbols' omission
+#     class Task B fixed.  Every one of these names is either a
+#     `scripts/nelisp-stdlib-prelude.el'-defined macro/function (`defun',
+#     `defmacro', `cond', `when', `push', `pop', `cl-*', the `nelisp--'-
+#     internal helpers, ...) or a native special form -- never something
+#     `nelisp--primitive-symbols' was meant to list ("host primitives
+#     borrowed wholesale", not user-level prelude code).
+#     `nelisp--builtin-fboundp' (src/nelisp-eval.el) only ever queries
+#     `nelisp-eval's own private `nelisp--functions'/`nelisp--macros'
+#     tables, never the ambient environment -- so it answers false for
+#     any name not registered in one of those two, regardless of whether
+#     the form is actually callable there.  KNOWN DEFECT, class iii, real
+#     but LARGER than Task B's fix: needs either a comprehensive registry
+#     of prelude macros/special forms in `nelisp-eval's own tables, or an
+#     ambient-environment fallback inside `nelisp--builtin-fboundp'
+#     itself.  Not undertaken this pass; see the per-key notes in
+#     `tools/substrate-presence-accepted.el' (168 entries, one shared
+#     root-cause explanation).
+#   - 35 host: 25 Layer-2 package capabilities (`process-*'/
+#     `set-process-*'/`sqlite-*'/`url-*'/`make-network-process', ACCEPTED
+#     class ii, same as the first run), 9 native-evaluator KNOWN DEFECT
+#     (`char-or-string-p'/`goto-char'/`line-number-at-pos'/`point'/
+#     `re-search-forward'/`read-from-minibuffer'/`secure-hash'/
+#     `send-string-to-terminal'/`user-error', same as the first run), and
+#     one new one the first run's corpus never separately named:
+#     `defvaralias' -- `fboundp' answers false on EVERY NeLisp substrate
+#     for it, bare-file included, even though calling it works
+#     everywhere (the 39-form corpus's form 35 passes on bare/--load/
+#     runtime-image/artifact) -- a native reader-level special form
+#     (`nl_sf_defvaralias') `fboundp' does not recognize as bound the way
+#     host Emacs's `fboundp' recognizes a genuine special form.  ACCEPTED
+#     (by-design-ish, real but tiny).
+#   - The 31-finding generator-tag-bug class the first run exposed is
+#     GONE (0 of that shape in this run): `nlsp--tag' (`tools/nelisp-
+#     substrate-presence-gen.el') now matches the whole `nelisp-'
+#     namespace, not just the `nelisp--' double-hyphen prefix.
+#
+# Green-with-recorded-findings, never red, BY CONSTRUCTION: the ledger's
+# 203 keys are exactly this run's 203 finding keys (same shape check
+# `nelisp-substrate-parity--finding-key' always uses), so a same-state
+# re-run of `substrate-presence-sweep' is expected to report `GATE-COUNT
+# checked=2091 findings=0' in the accepted-vs-total sense (0 unaccepted,
+# 0 stale) -- not independently re-measured after the ledger write (a
+# third ~15-17 minute full sweep against a shared binary and marker file
+# was skipped this session for the reason above), so read that specific
+# number as "expected, not yet re-observed" until the next `substrate-
+# presence-sweep' report confirms it.  The 203 `GATE-COUNT' this section
+# quotes IS independently measured (the second run's own printed line);
+# all 203 are recorded and reasoned in `tools/substrate-presence-
+# accepted.el', matching this file's own `parity-coverage' precedent of
+# a ratchet floor rather than a defect count.
+#
+# Own tier, not `nelisp-ai.sh extras': measured at ~2400 process launches
+# for ~354-363 names (vs. `substrate-parity-smoke's ~250 for 39 forms),
+# ~15-17 minutes wall time -- too slow for `extras' per-gate budget.
+# `tools/nelisp-substrate-presence-sweep.sh' / `make substrate-presence-
+# sweep' / `tools/ai/nelisp-ai.sh presence'.
+#
+# substrate-presence-corpus-check (already required, `check' tier, added
+# with Task A): the generated corpus's own drift check.  Verified
+# red-then-green: one name temporarily deleted from the checked-in file
+# turned it red at `GATE-COUNT checked=1 findings=1' naming the file
+# stale; restoring it turned it green at `findings=0'.
 #
 # NOT GATES, and listed so the absence is a decision rather than an oversight:
 # `test', `test-fast', `test-jit', `test-nojit', `test-one' and

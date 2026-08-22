@@ -811,7 +811,57 @@ as `(VAR DEFAULT [SUPPLIEDP])'."
     ;; Error plumbing — `error' / `signal' / `user-error' / `define-error'
     ;; all hook into the host condition system that `condition-case'
     ;; already knows how to catch.
-    error signal user-error define-error)
+    error signal user-error define-error
+    ;; substrate-parity presence sweep (2026-08-22): these ten names are
+    ;; the source-fallback KNOWN GAP entries in
+    ;; `tools/substrate-parity-accepted.el' -- `nelisp--install-
+    ;; primitives' only ever considers a name that is IN this list, so a
+    ;; name genuinely `fboundp' in the ambient substrate (a native
+    ;; primitive, or one of the wrapper `defun's
+    ;; `scripts/nelisp-standalone-build.el' installs before loading this
+    ;; file -- e.g. `match-data', alongside `string-match'/`string-
+    ;; match-p' just above it) was never copied into `nelisp-eval's own
+    ;; function table simply for being absent HERE, not for being
+    ;; missing.  Measured per name against a rebuilt binary before this
+    ;; comment was written (see the commit that added this block for the
+    ;; per-name GATE-COUNT evidence): all ten are `fboundp' in every
+    ;; substrate this table's own `(when (fboundp sym) ...)' guard runs
+    ;; under, `nelisp--write-stdout-bytes' included, even though it is a
+    ;; NeLisp-internal name rather than a borrowed host primitive like
+    ;; the rest of this list -- it needs the exact same copy-into-
+    ;; `nelisp--functions' treatment for `nelisp-eval's own `fboundp'
+    ;; check (used by this file's `probe-emit' shim, and by user code
+    ;; doing the same thing) to see it.
+    prin1 intern-soft read-from-string match-data read make-temp-name
+    floor % unibyte-string nelisp--write-stdout-bytes
+    ;; `string-bytes': unmasked by the fix above, not part of the
+    ;; original ten -- form 7 of the behavioral corpus
+    ;; (`(string-bytes (unibyte-string 233))') crashed on
+    ;; `void-function:unibyte-string' before that fix, which hid this
+    ;; second, independent gap behind it (the corpus form's SECOND call
+    ;; never ran).  Measured the same way: `fboundp' in every substrate
+    ;; this table's guard runs under.
+    string-bytes
+    ;; `defvaralias': the twelfth name tried against form 35's
+    ;; `void-function:defvaralias' -- MEASURED NOT TO FIX IT, unlike the
+    ;; eleven above.  Kept anyway: `defvaralias' is a genuine plain
+    ;; function in host Elisp (ordinary evaluated arguments, a real
+    ;; `symbol-function', despite reading like special-form syntax at a
+    ;; call site), so it belongs in a "host primitives borrowed
+    ;; wholesale" list on principle, and it DOES fix the same crash in
+    ;; the sibling source-CACHE substrate (marker file present) --
+    ;; verified directly with `eval-elisp-source' against a rebuilt
+    ;; binary, marker present vs. removed, both measured before this
+    ;; comment was written.  source-fallback specifically (marker
+    ;; removed, the pure re-interpreted-from-.el path) still answers
+    ;; void-function even with this name present in the list, meaning
+    ;; `(fboundp 'defvaralias)' is false in THAT bootstrap's ambient
+    ;; environment before `nelisp--install-primitives' ever runs its
+    ;; `(when (fboundp sym) ...)' guard -- unlike every other name in
+    ;; this block, which is fboundp in both.  Root cause not isolated
+    ;; further here; see `tools/substrate-parity-accepted.el's note on
+    ;; this key for the KNOWN GAP writeup.
+    defvaralias)
   "Host Elisp primitives borrowed wholesale by Phase 1 NeLisp.
 Each entry is copied by `symbol-function' at install time so the
 host's bytecode / subr implementation runs unchanged.")

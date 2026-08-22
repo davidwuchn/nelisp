@@ -158,6 +158,58 @@
                        (progn (setq nelisp-parity-dva-a 9)
                               (eq (symbol-value 'nelisp-parity-dva-b) 9)))
                   1 0))
+
+    ;; -- unwind-protect (Task C, the survey's gap #6): three behavioral
+    ;; forms, none of which the corpus exercised before.  All `shared' --
+    ;; unwind-protect/condition-case/catch/throw ordering is standard
+    ;; Elisp, pinned against host, not a NeLisp-only behavior.
+    ;;
+    ;; 36: cleanup runs on an error escaping the protected body, BEFORE the
+    ;; error reaches an enclosing `condition-case' handler -- the cleanup
+    ;; fires during unwind, not after the handler resumes normal flow.
+    ;; `log' ends up (caught cleanup): cleanup pushed first, caught second.
+    (36 shared (let ((log nil))
+                 (if (progn
+                       (condition-case nil
+                           (unwind-protect (error "boom")
+                             (setq log (cons 'cleanup log)))
+                         (error (setq log (cons 'caught log))))
+                       (equal log '(caught cleanup)))
+                     1 0)))
+
+    ;; 37: `throw' crossing an unwind-protect to an OUTER `catch' still
+    ;; runs the cleanup -- a throw-based non-local exit, not the
+    ;; error-based one form 36 and form 16 (condition-case vs. an
+    ;; enclosing catch) already cover.  `catch' must not see `thrown'
+    ;; before `cleanup' has run.
+    (37 shared (let ((log nil))
+                 (if (progn
+                       (catch 'outer
+                         (unwind-protect (throw 'outer 'thrown)
+                           (setq log (cons 'cleanup log))))
+                       (equal log '(cleanup)))
+                     1 0)))
+
+    ;; 38: nested unwind-protect cleanup order is LIFO -- the innermost
+    ;; frame's cleanup runs first, so `log' ends up (outer inner): `inner'
+    ;; pushed first (innermost cleanup, closest to the error), `outer'
+    ;; pushed second as unwinding continues outward.  `condition-case'
+    ;; here only swallows the error so the form reduces to 0/1; the
+    ;; primitive under test is unwind-protect ordering, not error
+    ;; handling, so `ignore-errors' is deliberately avoided -- it is a
+    ;; prelude macro, not a core primitive, and using it here would
+    ;; conflate "is ignore-errors defined" with "is nesting ordered
+    ;; right" in a single finding.
+    (38 shared (let ((log nil))
+                 (if (progn
+                       (condition-case nil
+                           (unwind-protect
+                               (unwind-protect (error "boom")
+                                 (setq log (cons 'inner log)))
+                             (setq log (cons 'outer log)))
+                         (error nil))
+                       (equal log '(outer inner)))
+                     1 0)))
     ))
 
 (provide 'nelisp-substrate-parity-corpus)
