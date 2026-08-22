@@ -18639,7 +18639,8 @@ loader when it is absent."
                                  nelisp-standalone--reader-extend-runtime-image-smoke
                                  nelisp-standalone--reader-cli-smoke
                                  nelisp-standalone--reader-neln-selftest-smoke
-                                 nelisp-standalone--reader-repl-smoke))
+                                 nelisp-standalone--reader-repl-smoke
+                                 nelisp-standalone--reader-control-flow-smoke))
                   (funcall smoke)
                   (setq checked (1+ checked)))
                 (message "GATE-COUNT checked=%d findings=0" checked)
@@ -18957,6 +18958,86 @@ every string-to-symbol path."
             (setq out (string-trim (buffer-string))))
           (unless (string= out "(t t t t t t t)")
             (error "intern canonicalization smoke -> %S (expected (t t t t t t t))" out)))
+      (ignore-errors (delete-file tmp)))))
+
+(defun nelisp-standalone--reader-control-flow-smoke ()
+  "Combined regression for four silent-wrong-value core control-flow defects
+fixed together (2026-08-22), each measured red against the unfixed binary:
+
+1. `cl-loop' numeric range (`for VAR from N to M') and `repeat N' clauses
+   parsed `collect'/`sum'/`count' but only ever wired DO-FORMS into the
+   generated code (lisp/nelisp-cl-macros.el, mirrored in the standalone
+   prelude's own copy in scripts/nelisp-stdlib-prelude.el) -- `(cl-loop for
+   i from 1 to 3 collect (* i i))' returned the bare accumulator-less loop's
+   value `4' instead of `(1 4 9)', and `repeat' had no dispatch arm at all
+   (`(cl-loop repeat 3 collect 9)' -> nil).  Fixed by a shared
+   `nelisp-cl-macros--loop-build-counted' helper so the counted (numeric /
+   repeat) iteration shapes honour an accumulator exactly like the existing
+   `for VAR in LIST' shapes already did -- checked here (2) alongside a
+   `for VAR in LIST' probe as a regression guard that path is untouched.
+
+3. `while' (lisp/nelisp-cc-sf-while.el, the AOT `nl_sf_while' driving loop)
+   left its `out' slot holding the LAST body form's value on a normal
+   multi-iteration exit instead of Elisp's mandated `nil' -- body-form
+   evaluation reuses `out' as scratch and nothing reset it afterwards.
+   Fixed with an `nl_sf_while_out_nil' tail write (same raw `ptr-write-u64'
+   zero-write `nl_sci_copy' uses for a bit-identical Nil clone).  The
+   already-correct zero-iteration case is checked alongside it as a
+   regression guard.
+
+4. `condition-case' (lisp/nelisp-cc-evalport-env-leaves-logic.el,
+   `nl_cc_clause_matches') matched a handler symbol against the signalled
+   condition by `eq' plus hardcoded `t'/`error' special cases only -- it
+   never walked the condition's `error-conditions' hierarchy, so a handler
+   for a PARENT condition (e.g. `file-error') never caught a more specific
+   child signal (e.g. `file-missing'), even though `(get 'file-missing
+   'error-conditions)' already correctly answers `(file-missing file-error
+   error)'.  Fixed by building `(get ACTUAL (quote error-conditions))' at
+   match time and walking the result with the existing `nl_cc_cons_any_matches'
+   membership check.  The 2026-08-19 throw-passthrough fix in this same
+   matcher is checked alongside it as a regression guard.
+
+5. Nested backquote (`nelisp--bq-expand'/`-expand-list', both in
+   lisp/nelisp-cl-macros.el and its standalone-prelude duplicate in
+   scripts/nelisp-stdlib-prelude.el) silently froze a nested `` `X'' as
+   `(list (quote form))' -- the WHOLE raw, unprocessed nested template,
+   comma markers and all -- instead of expanding it at the correct
+   quasiquote depth.  A single level of nesting happened to print
+   correctly by coincidence (there was nothing for the shortcut to get
+   wrong at that depth), but a `,,X' double-unquote -- which must cancel
+   two levels down to 0 and evaluate X immediately -- silently never
+   evaluated: `` `(a `(b ,,(+ 1 2))) '' kept `(+ 1 2)' as an inert
+   unevaluated form instead of reducing it to `3'.  Fixed by threading an
+   explicit LEVEL parameter through both functions (host Emacs
+   `backquote.el' depth semantics): a nested backquote increments it, a
+   comma decrements it and only fires at 0, and content preserved as inert
+   marker data above 0 is still recursively re-expanded at the new level so
+   a further comma can cancel it back down.  A plain single-level nest is
+   checked alongside it as a regression guard (must remain UNevaluated)."
+  (let ((tmp (make-temp-file "nelisp-reader-control-flow-" nil ".el"))
+        (out nil)
+        (expr (concat
+               "(list"
+               " (cl-loop for i from 1 to 3 collect (* i i))"
+               " (cl-loop for i from 1 to 3 sum i)"
+               " (cl-loop repeat 3 collect 9)"
+               " (cl-loop for x in (list 1 2 3) collect (* x x))"
+               " (let ((i 1)) (while (< i 5) (setq i (1+ i))))"
+               " (while nil 42)"
+               " (condition-case e (signal (quote file-missing) (list \"x\")) (file-error (car e)))"
+               " (catch (quote tag) (condition-case e (throw (quote tag) 42) (error (quote caught))))"
+               " `(a `(b ,(+ 1 2)))"
+               " `(a `(b ,,(+ 1 2))))")))
+    (unwind-protect
+        (progn
+          (with-temp-file tmp
+            (insert "(defvar nelisp-reader-control-flow-smoke t)\n"))
+          (with-temp-buffer
+            (call-process nelisp-standalone--reader-out nil t nil
+                          "eval-elisp-source" tmp expr)
+            (setq out (string-trim (buffer-string))))
+          (unless (string= out "((1 4 9) 6 (9 9 9) (1 4 9) nil nil file-missing 42 (a (backquote (b (comma (+ 1 2))))) (a (backquote (b (comma 3)))))")
+            (error "control-flow smoke -> %S" out)))
       (ignore-errors (delete-file tmp)))))
 
 (defun nelisp-standalone--reader-defvaralias-smoke ()
