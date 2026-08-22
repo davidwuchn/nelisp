@@ -1,0 +1,557 @@
+#+TITLE: Doc 187 — Arithmetic overflow consistency at the native layer
+#+AUTHOR: nelisp / nelisp-emacs (design: Claude Fable 5 + zawatton)
+#+DATE: 2026-08-22
+#+STATUS: DRAFT — design only, no implementation in this change.
+
+* §0 TL;DR
+
+The elisp-layer half of this fix already shipped, on a branch this doc's
+author does not own: =origin/feat/stdlib-hooks-map-fixnum= (commits
+=84950ad30= / =cfc3267f5=, not yet merged to =main= or to this doc's base,
+=feat/native-observability=) added =most-positive-fixnum= /
+=most-negative-fixnum= as real constants and made =nelisp--add2= /
+=nelisp--mul2= (=lisp/nelisp-jit-strategy.el=) overflow-check via the same
+division round-trip =expt= already uses. That branch's own commit message
+records, in detail, the limit of what it fixed: *the shipped
+=target/nelisp= standalone binary's top-level =+= and =*= are native subrs
+that do not go through =nelisp-jit-strategy.el= at all*, so none of it
+reaches the actual binary anyone runs. This doc designs the fix at the
+layer that branch explicitly declined to touch, closing the loop it left
+open, and re-verifies every number in this paragraph directly against a
+fresh build rather than trusting the commit message.
+
+*Measured, this session, against a clean build of this doc's own branch*
+(=target/nelisp=, linked from 108 units, =make standalone-reader=, ~20s):
+
+#+begin_example
+$ ./target/nelisp --load t3.el     ; t3.el defconsts the two bounds locally
+(-2305843009213693952               ; (+ most-positive-fixnum 1)
+ t                                  ; (= that most-negative-fixnum)
+ -2305843009213693952               ; (ash 1 61)  -- also wraps
+ 1152921504606846976                ; (ash 1 60)  -- does not
+ 1864712049423024128)               ; (* 100000000000 100000000000) -- wraps
+#+end_example
+
+*Decided direction*: fix the native dispatch arms directly (§3), not by
+redefining =+=/=*= wholesale — the checked path only has to run near the
+boundary, and a per-add branch that is almost-always-not-taken is cheap
+enough to leave on unconditionally (§5 bounds this, it does not merely
+assert it). The contract mirrors =expt='s existing one: *signal
+=overflow-error=, do not wrap, do not promote* (no bignums exist to promote
+into — that is Doc 190's decision, which this doc feeds but does not make).
+
+* §1 Problem — measured evidence
+
+** §1.1 The divergence is real and silent
+
+Emacs promotes a fixnum overflow to a bignum silently; NeLisp has no
+bignums, so the only two honest choices are silent-wrong-answer or a loud
+signal. Right now =+=/=*= on the shipped binary choose the first one
+without saying so anywhere a caller would see:
+
+#+begin_example
+$ ./target/nelisp --load t1.el
+(+ most-positive-fixnum 1)  =>  most-negative-fixnum   ; silently
+(* 100000000000 100000000000) => 1864712049423024128   ; silently
+#+end_example
+
+=expt= (=scripts/nelisp-stdlib-prelude.el:2026=, overflow check at
+=:2032-2033=) already decided the other way for the *same runtime, the same
+fixnum boundary*:
+
+#+begin_src elisp
+(let ((next (* r b)))
+  (when (and (/= b 0) (/= (/ next b) r))
+    (signal 'overflow-error nil))
+  (setq r next))
+#+end_src
+
+So the runtime today gives two different answers to the same question
+depending on which operator you used to ask it — =(expt 2 100)= signals,
+=(* (expt 2 50) (expt 2 50))= (the equivalent product, reached through
+=*=) wraps. That inconsistency, not the overflow itself, is what this doc
+is named for.
+
+** §1.2 Where the shipped binary's =+=/=*= actually come from
+
+=scripts/nelisp-standalone-build.el:3535= — =nelisp-standalone--applyfn-
+dispatch-table=, the const the reader's native builtin dispatch is built
+from. The =+=/=*= arms (:3536, :3555) call =wf_sum=/=wf_prod=
+(=:4729-4736=):
+
+#+begin_src elisp
+(defun wf_sum (list_ptr acc)
+  (if (= (ptr-read-u64 list_ptr 0) 7)
+      (let* ((car_ptr (nl_cons_car_ptr list_ptr)) (v (ptr-read-u64 car_ptr 8)))
+        (wf_sum (nl_cons_cdr_ptr list_ptr) (+ acc v))) acc))
+(defun wf_prod (list_ptr acc)
+  (if (= (ptr-read-u64 list_ptr 0) 7)
+      (let* ((car_ptr (nl_cons_car_ptr list_ptr)) (v (ptr-read-u64 car_ptr 8)))
+        (wf_prod (nl_cons_cdr_ptr list_ptr) (* acc v))) acc))
+#+end_src
+
+The =(+ acc v)=/=(* acc v)= inside these two definitions are themselves
+compiled by this file's own self-hosted bootstrap into raw native
+add/imul — there is no recursion into the dispatch table above; this
+*is* the floor. The result is boxed by =wf_write_int= (=:4137=), which
+writes tag =2= (Int) at offset 0 and the raw i64 at offset +8 — a plain,
+unshifted machine word at this call site.
+
+That raw value does not stay unshifted forever, though, which is the
+likely reason the wrap boundary lands at 2^61 rather than at the full
+int64 boundary: =scripts/nelisp-standalone-build.el:1500-1520= (Doc 146
+§3.0, "immediates-only tagged-word value helpers") documents an
+in-register encoding =Int(n) = (n<<2)|1= — an *i62* fixnum, two bits
+spent on the tag. =nl_imm_int= (=:1519=, =(+ (* n 4) 1)=) is exactly a
+left-shift-by-2 in elisp-multiplication clothing, and a shift that drops
+its top two bits is precisely a magnitude-2^61 wraparound. The Doc 146
+comment describes this scheme as "foundation, stage 1 — additive; no
+caller yet, so the runtime is unchanged" at the time it was written;
+=grep= today finds exactly one live caller of =nl_imm_int= (=:1539=,
+inside a slot→immediate conversion helper), so whether *this* is the
+literal code path =wf_sum='s accumulator round-trips through, or whether
+an equivalent 62-bit truncation happens elsewhere in the reader's
+decimal-literal parse, is not fully pinned down by this session's
+research — flagged honestly as §7.1, not asserted past what was checked.
+What *is* directly measured, independent of which internal path causes
+it: the wrap boundary is exactly Emacs's own 61-bit-magnitude fixnum
+range, bit for bit, on every input tried, including a literal
+(=9000000000000000000=, well past 2^61) that comes back negative before
+any addition happens at all — i.e. some part of the *literal read path*,
+not only the add, truncates at this boundary. §3's fix must re-confirm
+which of the two (or both) before implementation; this doc scopes and
+costs the arithmetic-op fix, and files the literal-parse question as
+open (§7.1) rather than silently assuming it is the same bug.
+
+** §1.3 Where the AOT hot path's =+=/=*= come from — the harder half
+
+=lisp/nelisp-aot-compiler.el:12091=, =--emit-arith=, is what any
+AOT-compiled Elisp =(+ a b)= actually becomes. For =x86_64=
+(=:12127-12130=):
+
+#+begin_src elisp
+((eq op '+) (nelisp-asm-x86_64-add-reg-reg buf 'rax 'r10))
+((eq op '-) (nelisp-asm-x86_64-sub-reg-reg buf 'rax 'r10))
+((eq op '*) (nelisp-aot-compiler--imul-reg-reg buf 'rax 'r10))
+#+end_src
+
+— a bare =add rax, r10= / =imul rax, r10=, no flag check, no branch,
+=(:12102-12111)= the same shape on =aarch64=. This is not incidental
+under-coverage: =lisp/nelisp-cc-jit-arith.el:52,63= builds the
+=nelisp_jit_add2=/=nelisp_jit_mul2= "trampolines"
+(=(defun nelisp_jit_add2 (a b) (+ a b))=, compiled through this exact
+=--emit-arith= path — a 3-byte =add= / 4-byte =imul= "wrapping i64" op by
+the file's own docstring) that the sibling branch's =nelisp--add2=/
+=nelisp--mul2= call into and check *after the fact*, at the elisp layer.
+This is why that branch's fix could not "extend the same treatment to
+=*=/=+= themselves" (its own commit message, quoted in §0): the
+elisp-layer wrapper is a shell around the real hot path, not upstream of
+it, and every function AOT-compiled through =--emit-arith= inlines the
+unchecked native op directly at the call site with no wrapper at all.
+
+Confirmed via the existing ERT coverage of this exact codegen:
+=test/nelisp-aot-compiler-test.el:1691= (=nelisp-aot-compiler/object-mode-
+aarch64-add2=) and :1758 (the "all 12 trampolines in one object" case)
+assert the *symbols* these bodies export, not their overflow behavior —
+there is no existing assertion anywhere that =(nelisp_jit_add2
+most-positive-fixnum 1)= signals or wraps. That gap is exactly what §6's
+verification design closes.
+
+** §1.4 No native overflow-signal path exists to reuse
+
+=scripts/nelisp-standalone-build.el:4933=, =bf_wrong_type_number_or_
+marker=, is the pattern for raising a Lisp error from inside this
+generated-dispatch layer: hand-pack the error symbol's name as byte-
+literal =u64=s (there is no string-literal support this low in the
+bootstrap), =nl_alloc_symbol= it, cons the offending value into a data
+list, write it to the current-error slot (=268435472=/=268435512=), bump
+the mutation epoch (=268435544=, =wf_dirty=, =:4725=), and return the
+error-indicator code. There is no existing =overflow-error= construction
+at this layer — =expt='s =signal= is ordinary elisp, reached only because
+=expt= is NOT itself a native subr in the shipped binary (confirmed by
+the sibling commit's own =symbol-function= check, and independently by
+the fact =expt= is defined at =scripts/nelisp-stdlib-prelude.el:2026= as
+a plain =defun=, unlike =+=/=*=). §3 designs the analogous native-layer
+construction for =overflow-error=, following this same pattern rather
+than inventing a second one.
+
+* §2 Decided direction
+
+*Fix at the two real hot-path layers, not by redefining =+=/=*= wholesale.*
+
+Three options were on the table; only one is proportionate to a bug that
+only bites within a few ULPs of a 2^61 boundary:
+
+| option | mechanism | verdict |
+|---|---|---|
+| Drop the =(unless (fboundp ...))= guard around the elisp =+=/=*= in the prelude, letting a checked elisp definition shadow the native subr | every fixnum add/multiply in the whole runtime — including tight interpreter loops that never approach the boundary — pays a full elisp dispatch instead of one inlined machine instruction | *rejected*: exactly the cost the sibling branch's own commit message already declined to pay, for the same reason |
+| Do nothing; document the wrap as an accepted, permanent divergence (like =expt='s pre-fix state, or the =run-at-time= REPEAT gap) | zero cost, zero risk | *rejected as the default, kept as the fallback (§4.4)*: unlike =run-at-time=, this is not "a feature nobody reached for yet" — =wf_sum=/=wf_prod= fold over *every* =+=/=*= call site in the shipped binary, and a silently-wrong arithmetic answer is a worse failure mode than a missing timer repeat, which at least fails by doing nothing rather than by lying |
+| Check at the two hot-path sites themselves: =wf_sum=/=wf_diff=/=wf_prod= (reader-native =+=/=-=/=*=) and =--emit-arith='s inlined ADD/SUB/IMUL (AOT-compiled =+=/=-=/=*=, and by extension =nelisp_jit_add2=/=sub2=/=mul2=, which are themselves compiled through the same path) | a few extra instructions per op: a sign/overflow-flag check plus a taken/not-taken branch to an out-of-line signal call | *accepted* — this is §3 |
+
+The contract, once fixed, matches =expt=: *=overflow-error=, not a wrong
+number, and not a promotion nothing here can perform.* This DIVERGES from
+host Emacs (documented, same shape as the hooks =LOCAL=-ignored divergence
+landed on the sibling branch) — a caller relying on Emacs's silent
+bignum promotion gets a loud, catchable error instead of a wrong answer,
+which is the same trade =expt= already made and nobody has filed against.
+
+* §3 Design
+
+** §3.1 Reader-native =+=/=-=/=*= (=wf_sum=/=wf_diff=/=wf_prod=)
+
+=wf_sum='s accumulator step becomes a sign-based check identical in
+shape to =nelisp-jit-strategy.el='s =nelisp--add2= (§0), inlined into the
+fold rather than wrapping it, since this generator has no exception
+mechanism above raw branches:
+
+#+begin_src elisp
+(defun wf_sum (list_ptr acc)
+  (if (= (ptr-read-u64 list_ptr 0) 7)
+      (let* ((car_ptr (nl_cons_car_ptr list_ptr)) (v (ptr-read-u64 car_ptr 8))
+             (sum (+ acc v)))
+        (if (or (and (>= acc 0) (>= v 0) (< sum 0))
+                (and (< acc 0) (< v 0) (>= sum 0)))
+            (bf_overflow_error)
+          (wf_sum (nl_cons_cdr_ptr list_ptr) sum)))
+    acc))
+#+end_src
+
+=wf_prod= gets the =expt=-style division round-trip (=(/= v 0) (/= (/
+sum v) acc)=). =wf_diff=/=wf_subtail= get the same sign check as =+=,
+mirrored for subtraction (operands of *opposite* sign, result sign
+matching the subtrahend, is the overflow condition — the AArch64/x86_64
+=SUB= overflow-flag rule, not re-derived here, taken directly from the
+ISA manuals' own definition since getting the sign predicate backwards
+silently reintroduces exactly this bug one operator over).
+
+=bf_overflow_error= is a new helper next to =bf_wrong_type_number_or_
+marker= (§1.4), same shape: byte-pack the symbol =overflow-error=, no
+data payload (matching elisp's own =(signal 'overflow-error nil)=), set
+the error slot, bump the mutation epoch, return the error-indicator code
+the dispatch table's callers already check.
+
+Where exactly this needs to also touch — the §1.2 open question about
+whether the *literal-parse* path shares this truncation independent of
+=wf_sum= — is scoped out of this arm and filed as §7.1; if confirmed
+live, it is a small, separate fix in the same family (bounds-check
+before encoding rather than after adding), not a redesign.
+
+** §3.2 AOT hot path (=--emit-arith=, =nelisp_jit_add2=/=mul2=)
+
+=nelisp-aot-compiler--emit-arith= (=:12091=) grows a checked variant of
+the =+=/=-=/=*= arms. Shape (x86_64, ADD shown; SUB/IMUL mirror it using
+each op's own overflow-flag semantics):
+
+1. =add rax, r10= (unchanged — the value is computed either way).
+2. =jo <overflow-label>= — x86_64's overflow flag is set by the =ADD=
+   that just ran; branching on it is one instruction, and the branch is
+   essentially always not-taken (§5 bounds the cost of the not-taken
+   case, which is what every real program pays).
+3. =<overflow-label>=: a call to a new runtime helper
+   (=nelisp_aot_signal_overflow=, sibling of whatever the AOT ABI already
+   uses to raise =wrong-type-argument= from compiled code — the codegen
+   for existing runtime error calls, e.g. division-by-zero or the
+   =wrong-type-argument= paths this same file already emits elsewhere,
+   is the template to reuse rather than invent a second calling
+   convention for one new error).
+4. AArch64: =adds x0, x0, x9= (the flag-setting form) + =b.vs
+   <overflow-label>=, same shape.
+
+This same emit path is what compiles =nelisp_jit_add2=/=mul2= themselves
+(§1.3), so fixing =--emit-arith= fixes both the AOT hot path for
+user-compiled Elisp *and* the trampolines the sibling branch's elisp
+wrapper calls into — closing the gap that branch's own commit message
+named as out of its reach, from the other end.
+
+** §3.3 Scope: =+=/=-=/=*= only, not the full arithmetic surface
+
+=/= (division) cannot silently overflow into a wrong-magnitude answer
+the way add/multiply can (integer division shrinks); it already traps
+correctly on divide-by-zero in hardware (per the existing comment at
+=scripts/nelisp-standalone-build.el:4736-4739= — "reading only the first
+two arguments answered 20" is a different, already-fixed bug, and is
+noted here only to establish =/= is not silently in scope for *this*
+one). =1+=/=1-= reduce to the same =+=/=-= arms via whatever they lower
+through and inherit the fix for free once §3.1/§3.2 land — verified,
+not assumed, as part of §6's parity-form set. =logand=/=logior=/=logxor=/
+=ash= do not have a "wrong answer" mode in the same sense (bitwise ops
+and shifts are well-defined at every bit pattern); they are explicitly
+out of scope.
+
+* §4 Phased plan with costs
+
+Effort estimates are engineer-days for an implementer following this
+doc, on the pattern of Doc 164 §6.
+
+** P0 — =bf_overflow_error= helper + wire =wf_sum=/=wf_prod=  (0.5–1 d)
+- Add the helper next to =bf_wrong_type_number_or_marker=
+  (=:4933=), matching its byte-packing convention exactly.
+- Wire the sign-check / division-round-trip into =wf_sum=/=wf_prod=
+  only (leave =wf_diff=/=wf_subtail= for P1, so the riskier "which sign
+  predicate for subtraction" work is isolated in its own commit).
+- *Exit*: =./target/nelisp --load t.el= where =t.el= computes =(+
+  most-positive-fixnum 1)= reports =overflow-error=, not
+  =most-negative-fixnum=; =make standalone-reader-process-smoke= and the
+  existing full reader-smokes suite stay green (nothing else touches
+  this dispatch table entry).
+
+** P1 — =wf_diff=/=wf_subtail= + reader-side regression suite  (0.5 d)
+- Mirror the sign check for subtraction; add the corresponding ERT/smoke
+  cases (§6).
+- *Exit*: =(- most-negative-fixnum 1)= signals; a small table of
+  boundary values (§6.2) round-trips correctly for every non-overflowing
+  case (the check must not become a false positive at the boundary
+  itself — =(+ most-positive-fixnum 0)= must NOT signal).
+
+** P2 — AOT =--emit-arith= checked codegen, x86_64  (1.5–2.5 d)
+- The =jo=/call-out shape from §3.2, plus the AOT-side error-raising
+  convention audit (find and reuse whatever existing compiled-code error
+  path this file already has, rather than inventing a new one — this is
+  the part of the estimate with the most slack, since it depends on how
+  reusable that existing path turns out to be).
+- *Exit*: an AOT-compiled =(defun f (a b) (+ a b))= called with
+  boundary-crossing arguments signals =overflow-error= through the
+  compiled path, verified by actually running the compiled object
+  (=nelisp-aot-compile-to-object= + execute), not only by inspecting
+  emitted bytes.
+
+** P3 — AOT =--emit-arith= checked codegen, aarch64  (1–1.5 d)
+- =adds=/=b.vs= mirror of P2. Costed separately because the existing ERT
+  suite's aarch64 coverage (=test/nelisp-aot-compiler-test.el:1691=) only
+  runs the ET_REL emit shape, not execution (no aarch64 execution rig in
+  this repo per that file's own gating) — the exit criterion is
+  therefore weaker than P2's and should say so rather than claim
+  execution parity it cannot measure here.
+- *Exit*: emitted bytes match the checked x86_64 shape's semantics
+  (=adds= + =b.vs= present, target label correct); execution proof
+  deferred to whatever aarch64 runner this repo eventually gains
+  (tracked as an open question, §7.3, not silently assumed away).
+
+** P4 — cost validation on the AOT hot path  (0.5–1 d)
+- A two-arm bench in the shape of =bench/nelisp-aot-tco-bench.el=
+  (compile the same tight arithmetic loop with the checked and
+  unchecked emit arms, side by side, as two =.neln= modules; time both
+  through the existing native-exec proof path; report the ratio, not a
+  raw number, per =tools/ai/bench-compare.sh='s slope/drift/identity
+  guards).
+- *Exit*: reports a real, guarded ratio (§5), not an assertion; a ratio
+  that fails the bound in §5 is a finding this phase reports honestly,
+  not a target it is instructed to hit.
+
+** P4.5 — literal-parse boundary audit (§1.2/§7.1)  (0.5 d, may fold into P0)
+- Confirm or refute whether the decimal-literal read path shares the
+  62-bit truncation independent of the add/multiply fix. If confirmed,
+  scope a follow-up (own phase, not folded silently into P0-P3, since it
+  is a different code path with its own risk).
+- *Exit*: a written finding (probe transcript) either way, filed against
+  this doc before it moves past DRAFT.
+
+* §5 Cost of the checked add on the hot path — bounded, not merely asserted
+
+The claim "a not-taken branch is cheap" is exactly the kind of claim this
+repository's own rules (=AI.md= rule 3: "a measurement is invalid unless
+its baseline is") require measuring rather than asserting. §4's P4 is
+the mechanism; the bound this doc commits to *validating* (not
+assuming) is:
+
+- Per Doc 171's own precedent (=bench/nelisp-aot-tco-bench.el=, "the
+  TCO-rewritten defun may be at most ~5% slower... pass = ratio >= 0.95"
+  for a change to the SAME =--emit-*= family this doc touches), a
+  single-instruction not-taken conditional branch after an =ADD=/=IMUL=
+  that was going to execute anyway is expected in the same low-single-
+  digit-percent range on a tight arithmetic loop — modern x86_64/aarch64
+  branch predictors treat an almost-never-taken =jo=/=b.vs= as
+  effectively free once warmed, and no extra register pressure or
+  allocation is introduced (§3.2's shape reads only flags the =ADD=
+  already set).
+- This is an *expectation to validate*, not a number to report as fact
+  before P4 runs. If P4 measures materially worse than that (branch
+  mispredict penalties are real when a loop's overflow branches actually
+  alternate, which a pathological adversarial input could force), §4.4
+  (documented wrap, unconditionally on by default, opt-in checked mode)
+  is the recorded fallback — decided in P4's own report, not pre-decided
+  here.
+
+* §6 Verification design
+
+** §6.1 Against-the-bug
+
+A test that encodes exactly the measured bug from §1.1/§1.2, written to
+fail on the current tree and pass after §3.1/§3.2 land:
+
+#+begin_src elisp
+;; test/nelisp-arith-overflow-test.el (new)
+(ert-deftest nelisp-arith-overflow/add-signals-not-wraps ()
+  (should-error (nelisp-reader-eval '(+ most-positive-fixnum 1))
+                :type 'overflow-error))
+(ert-deftest nelisp-arith-overflow/mul-signals-not-wraps ()
+  (should-error (nelisp-reader-eval '(* 100000000000 100000000000))
+                :type 'overflow-error))
+#+end_src
+
+— plus the standalone-binary-level smoke (this bug is specifically about
+the *shipped binary's native subrs*, so an ERT case that only exercises
+a host-loaded =.el= copy would not have caught it; §1.1's probe already
+demonstrated the divergence lives in the linked binary, not the source):
+
+#+begin_src makefile
+# Makefile, alongside standalone-reader-process-smoke
+standalone-reader-arith-overflow-smoke: standalone-reader
+	@printf '%s\n' '(condition-case e (+ most-positive-fixnum 1) (overflow-error (quote ok)))' \
+	  > target/standalone-reader-arith-overflow-smoke.el
+	@out="$$(./target/nelisp --load target/standalone-reader-arith-overflow-smoke.el)"; \
+	if [ "$$out" = 'ok' ]; then echo PASS; else echo "FAIL: $$out"; exit 1; fi
+#+end_src
+
+** §6.2 Parity forms — documented divergence, not Emacs agreement
+
+This is the one case in this doc's scope where "parity" cannot mean
+"matches host Emacs" — Emacs promotes to a bignum, NeLisp has none. The
+parity-form set instead pins the *chosen* contract against itself
+(internal consistency, per §1.1's complaint) and against boundary
+values, run through the =nelisp-parity-probe= tool with divergence
+EXPECTED and asserted, not silently accepted:
+
+| form | Emacs | NeLisp (post-fix) | note |
+|---|---|---|---|
+| =(+ most-positive-fixnum 1)= | bignum =2305843009213693952= | =overflow-error= | documented divergence |
+| =(* (expt 2 40) (expt 2 40))= | bignum | =overflow-error= | =expt='s own overflow path composes correctly with the new =*= check |
+| =(+ most-positive-fixnum 0)= | =most-positive-fixnum= | =most-positive-fixnum= | boundary itself must NOT false-positive |
+| =(+ most-negative-fixnum -1)= | bignum | =overflow-error= | symmetric case, §3.1's sign predicate |
+| =(expt 2 100)= | bignum | =overflow-error= (already true pre-fix) | anchor: confirms the new checks did not change =expt='s existing, already-correct behavior |
+
+** §6.3 Mutation rows for new gates
+
+Per =tools/gate-mutations.txt='s own rule ("a gate that stays green with
+a real defect in front of it is not a gate"), the new
+=standalone-reader-arith-overflow-smoke= gate needs a row proving it
+actually catches the bug it exists for:
+
+#+begin_example
+standalone-reader-arith-overflow-smoke|scripts/nelisp-standalone-build.el|s/(if (or (and (>= acc 0) (>= v 0) (< sum 0))\n.*(and (< acc 0) (< v 0) (>= sum 0)))\n.*(bf_overflow_error)/(if nil (bf_overflow_error)/|the overflow check never fires, silent wrap returns
+#+end_example
+
+(the real sed expression will need to match the actual landed
+single-line form, per =tools/gate-mutations.txt='s own note that a
+weak/stale injection "teaches nothing except to delete the row" — this
+entry is a placeholder for the shape, not the literal text to land,
+since §3.1's exact formatting is not fixed until implemented). A second
+row targets the AOT path: flip the =jo=/=b.vs= to its inverse condition
+(branches on NOT overflow) so the checked codegen silently never
+signals — proving the gate is exercising the branch direction, not just
+its presence.
+
+** §6.4 VERIFIED-BY at SHIPPED
+
+When a phase in §4 ships, this doc's status line and the corresponding
+phase header record =VERIFIED-BY: <commit-sha> (<gate-name> report,
+<date>)= — the gate report path (=target/gates/<name>.json=, per
+=tools/ai/README.md='s report contract) is the source of truth the
+=VERIFIED-BY= line points at, not a hand-written claim in this doc. A
+phase without a =VERIFIED-BY= entry is not SHIPPED regardless of what
+its prose says, matching this repository's own STATUS-generation rule
+("do not accept a claim about this tree that is not in it or in a gate
+report", =AI.md=).
+
+* §7 Open questions
+
+** §7.1 Which code path actually truncates at 62 bits
+
+§1.2 found a plausible mechanism (Doc 146 §3.0's =(n<<2)|1= immediate
+encoding, one live caller found) but did not trace it end-to-end through
+=wf_sum='s accumulator to confirm it is THE path rather than A path.
+Filed as P4.5. Getting this wrong would mean §3.1's fix is correctly
+shaped (the overflow condition is right regardless of the underlying
+representation) but incompletely wired if a second, independent
+truncation point exists in the literal-read path.
+
+** §7.2 Reusable AOT error-raising convention
+
+§3.2 assumes the AOT compiler already has a runtime-error-from-compiled-
+code convention (used today for, at minimum, division by zero and
+wrong-type-argument in compiled code) that =nelisp_aot_signal_overflow=
+can reuse. This doc did not locate and cite that exact call site during
+this session's research; P2's estimate range (1.5–2.5d) already prices
+in the risk that no such reusable convention exists and one has to be
+built alongside the overflow check itself.
+
+** §7.3 aarch64 execution proof
+
+P3's exit criterion is weaker than P2's (bytes match, execution
+unverified) because no aarch64 execution rig was found in this repo
+during this session (=test/nelisp-aot-compiler-test.el:1691='s own
+aarch64 cases only assert emitted ET_REL symbol shape). Whether that gap
+is acceptable for a MID-TERM design doc, or whether P3 should block on
+Doc 151's arm64 target work landing an execution path first, is left to
+whoever schedules this doc's phases against Doc 151's.
+
+** §7.4 Interaction with Doc 190 (bignums)
+
+This doc's contract (=overflow-error=, loud, no promotion) is explicitly
+the *pre-bignum* answer. If Doc 190 (owned by a sibling agent, not read
+during this doc's drafting — filed here as a forward reference, not a
+claim about its content) decides bignums are worth building, every
+=overflow-error= site this doc adds becomes a promotion site instead,
+and the checked-add shape (§3) is exactly the detection point a bignum
+path would need anyway — this doc's work is not wasted under that
+outcome, only extended.
+
+* §8 References
+
+** §8.1 Code (file:line)
+- =scripts/nelisp-standalone-build.el:3535= — =nelisp-standalone--
+  applyfn-dispatch-table=, the =+=/=-=/=*= dispatch arms (:3536 =+=,
+  :3548 =-=, :3555 =*=).
+- =scripts/nelisp-standalone-build.el:4729-4771= — =wf_sum=/=wf_prod=/
+  =wf_subtail=/=wf_diff=, the unchecked fold implementations.
+- =scripts/nelisp-standalone-build.el:4137= — =wf_write_int=, the
+  tag/value boxing convention.
+- =scripts/nelisp-standalone-build.el:1500-1520= — Doc 146 §3.0
+  immediate-word encoding, =nl_imm_int= =(n<<2)|1=, the likely 62-bit
+  truncation source (§1.2, §7.1).
+- =scripts/nelisp-standalone-build.el:4933= — =bf_wrong_type_number_or_
+  marker=, the native error-construction pattern §3.1 reuses.
+- =scripts/nelisp-stdlib-prelude.el:2026-2033= — =expt=, the existing
+  loud-overflow precedent (division round-trip).
+- =lisp/nelisp-aot-compiler.el:12091-12145= — =--emit-arith=, the AOT
+  hot path (x86_64 :12127-12130, aarch64 :12102-12111).
+- =lisp/nelisp-cc-jit-arith.el:52,63= — =nelisp_jit_add2=/=mul2=
+  trampoline sources, compiled through =--emit-arith=.
+- =scripts/compile-elisp-objects.el:333,339= — where the trampolines
+  become linked =.o= files.
+- =test/nelisp-aot-compiler-test.el:1691,1730-1758= — existing ERT
+  coverage of the trampolines' emitted symbols (not their overflow
+  behavior).
+- =bench/nelisp-aot-tco-bench.el= — the two-arm compiled-code timing
+  harness §4's P4 and §5 are modeled on (ratio-based pass rule, not a
+  raw number).
+- =tools/ai/bench-compare.sh= — slope/drift/identity guards for the P4
+  measurement.
+- =tools/gate-mutations.txt=, =tools/nelisp-gate-mutation.sh= — the
+  mutation-row convention §6.3 follows.
+- =tools/ai/README.md= — gate report contract (=target/gates/<name>.json=)
+  §6.4's =VERIFIED-BY= points at.
+- =Makefile:1647-1668= — =standalone-reader-process-smoke=, the smoke
+  pattern §6.1's new gate follows.
+
+** §8.2 Branches / commits
+- =origin/feat/stdlib-hooks-map-fixnum= (=84950ad30=, =cfc3267f5=) — the
+  elisp-layer half of this fix; not merged to =main= or to this doc's
+  base as of this session. §0 quotes its commit message's own stated
+  limit directly.
+
+** §8.3 Docs
+- =docs/design/164-wasm-backend.org= — structural template (TL;DR,
+  file:line-cited architecture, phased plan with per-phase exit
+  criteria, risks/open questions, references split by kind).
+- =docs/design/171-aot-tail-call-optimization.org= — precedent for a
+  transparent =--emit-*=-family AOT pass with a "byte-identical when
+  disabled" / ratio-gated performance discipline (§5's bound is modeled
+  on this doc's G4).
+- =AI.md= — rules 1 ("a gate that executed zero cases is not green") and
+  3 ("a measurement is invalid unless its baseline is"), both load-
+  bearing for §5/§6.
+
+** §8.4 Sibling docs (forward references, not read during drafting)
+- Doc 190 — bignums; this doc's §7.4 notes the handoff without claiming
+  its content.
