@@ -18909,6 +18909,7 @@ loader when it is absent."
                 (dolist (smoke '(nelisp-standalone--reader-temp-name-uniqueness-smoke
                                  nelisp-standalone--reader-elc-smoke
                                  nelisp-standalone--reader-intern-canonical-smoke
+                                 nelisp-standalone--reader-stdlib-completion-smoke
                                  nelisp-standalone--reader-defvaralias-smoke
                                  nelisp-standalone--reader-temp-outside-cwd-smoke
                                  nelisp-standalone--reader-asm-arm64-byte-identity-smoke
@@ -19427,6 +19428,69 @@ fixed together (2026-08-22), each measured red against the unfixed binary:
             (setq out (string-trim (buffer-string))))
           (unless (string= out "((1 4 9) 6 (9 9 9) (1 4 9) nil nil file-missing 42 (a (backquote (b (comma (+ 1 2))))) (a (backquote (b (comma 3)))))")
             (error "control-flow smoke -> %S" out)))
+      (ignore-errors (delete-file tmp)))))
+
+(defun nelisp-standalone--reader-stdlib-completion-smoke ()
+  "Assert the three stdlib completions: hooks, map.el, fixnum overflow.
+
+Hooks: `add-hook' DEPTH ordering (a positive/negative/default-depth mix
+sorts ascending by depth: -50, 0, 95), `run-hook-with-args-until-
+success' short-circuits on the first non-nil return without calling
+the function after it, and `run-hooks' on an unbound hook variable is
+a no-op rather than a `void-variable' signal.
+
+map.el: `map-elt' over an alist / a plist / a hash-table; `map-put!'
+mutates an EXISTING alist key in place (`setcdr') and returns the
+VALUE argument, not the map; `map-put!' on a NEW alist key signals
+`map-not-inplace' (it would need to replace the list head, which a
+bare function cannot do to its caller's variable -- see the block
+comment in lisp/nelisp-stdlib-misc.el); `map-keys' over a plist.
+
+Fixnum: `most-positive-fixnum' / `most-negative-fixnum' hold the
+measured values (2305843009213693951 / -2305843009213693952, Emacs's
+own on a 64-bit host); `(+ most-positive-fixnum 1)' wraps to EXACTLY
+`most-negative-fixnum' (the documented, still-silent behavior of the
+shipped binary's native `+' -- see the long comment above
+`nelisp--add2' in lisp/nelisp-jit-strategy.el for why `*'/`+'
+themselves could not be made to signal here without redefining native
+subrs system-wide); `expt' still signals `overflow-error' the way it
+did before this change, unaffected by any of the above."
+  (let ((tmp (make-temp-file "nelisp-reader-stdlib-completion-" nil ".el"))
+        (out nil))
+    (unwind-protect
+        (progn
+          (with-temp-file tmp
+            (insert
+             "(defvar nelisp-src-hook nil)\n"
+             "(add-hook 'nelisp-src-hook (lambda () 'a))\n"
+             "(add-hook 'nelisp-src-hook (lambda () 'b) 95)\n"
+             "(add-hook 'nelisp-src-hook (lambda () 'c) -50)\n"
+             "(defvar nelisp-src-check1 (equal (mapcar #'funcall nelisp-src-hook) '(c a b)))\n"
+             "(defvar nelisp-src-succ (list (lambda (x) nil) (lambda (x) 'found) (lambda (x) (error \"must not run\"))))\n"
+             "(defvar nelisp-src-check2 (eq (run-hook-with-args-until-success 'nelisp-src-succ 1) 'found))\n"
+             "(defvar nelisp-src-check3 (eq (run-hooks 'nelisp-src-hook-unbound) nil))\n"
+             "(defvar nelisp-src-al (list (cons 'a 1) (cons 'b 2)))\n"
+             "(defvar nelisp-src-pl (list :a 1 :b 2))\n"
+             "(defvar nelisp-src-ht (make-hash-table))\n"
+             "(puthash 'k 'v nelisp-src-ht)\n"
+             "(defvar nelisp-src-check4 (and (= (map-elt nelisp-src-al 'a) 1) (= (map-elt nelisp-src-pl :b) 2) (eq (map-elt nelisp-src-ht 'k) 'v)))\n"
+             "(defvar nelisp-src-check5 (= (map-put! nelisp-src-al 'a 99) 99))\n"
+             "(defvar nelisp-src-check6 (= (cdr (assoc 'a nelisp-src-al)) 99))\n"
+             "(defvar nelisp-src-not-inplace (condition-case nil (progn (map-put! nelisp-src-al 'z 1) 'no-signal) (map-not-inplace 'signalled)))\n"
+             "(defvar nelisp-src-check7 (eq nelisp-src-not-inplace 'signalled))\n"
+             "(defvar nelisp-src-check8 (equal (sort (map-keys nelisp-src-pl) (lambda (a b) (string< (symbol-name a) (symbol-name b)))) '(:a :b)))\n"
+             "(defvar nelisp-src-check9 (= most-positive-fixnum 2305843009213693951))\n"
+             "(defvar nelisp-src-check10 (= most-negative-fixnum -2305843009213693952))\n"
+             "(defvar nelisp-src-check11 (= (+ most-positive-fixnum 1) most-negative-fixnum))\n"
+             "(defvar nelisp-src-expt-overflow (condition-case nil (progn (expt 2 100) 'no-signal) (overflow-error 'signalled)))\n"
+             "(defvar nelisp-src-check12 (eq nelisp-src-expt-overflow 'signalled))\n"))
+          (with-temp-buffer
+            (call-process nelisp-standalone--reader-out nil t nil
+                          "eval-elisp-source" tmp
+                          "(list nelisp-src-check1 nelisp-src-check2 nelisp-src-check3 nelisp-src-check4 nelisp-src-check5 nelisp-src-check6 nelisp-src-check7 nelisp-src-check8 nelisp-src-check9 nelisp-src-check10 nelisp-src-check11 nelisp-src-check12)")
+            (setq out (string-trim (buffer-string))))
+          (unless (string= out "(t t t t t t t t t t t t)")
+            (error "stdlib-completion smoke -> %S (expected (t t t t t t t t t t t t))" out)))
       (ignore-errors (delete-file tmp)))))
 
 (defun nelisp-standalone--reader-defvaralias-smoke ()

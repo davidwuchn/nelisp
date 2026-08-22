@@ -348,6 +348,28 @@ leading `(declare ...)' forms are treated as declarations."
         ;; what negating gives.  Zero has no sign to carry and stays 0.
         (if (and (< b 0) (/= r 0)) (+ r b) r)))))
 
+;; `most-positive-fixnum' / `most-negative-fixnum' were unbound (a latent
+;; `void-variable' crash: src/nelisp-bytecode.el:1207 already reads
+;; `most-positive-fixnum' live, as the "no upper bound" sentinel for a
+;; bytecode function's &rest arg count, and would have signalled the
+;; moment any compiled function with a &rest parameter was actually
+;; called).  MEASURED (2026-08-22), not assumed: `(ash 1 61)' on the
+;; standalone wraps to a NEGATIVE value (-2305843009213693952) while
+;; `(ash 1 60)' does not, and the exact boundary
+;; `(+ (ash 1 60) (- (ash 1 60) 1))' round-trips to 2305843009213693951 --
+;; i.e. this runtime's fixnums are Emacs's own 61-bit-magnitude, 62-bit-
+;; signed range on a 64-bit host, bit for bit.  Confirmed against Emacs
+;; 30.1 directly: `most-positive-fixnum' there is the same
+;; 2305843009213693951.
+(unless (boundp 'most-positive-fixnum)
+  (defconst most-positive-fixnum 2305843009213693951
+    "Largest value that is a valid fixnum in this runtime.  See the
+comment above this definition for how that value was measured."))
+(unless (boundp 'most-negative-fixnum)
+  (defconst most-negative-fixnum -2305843009213693952
+    "Smallest value that is a valid fixnum in this runtime.  See
+`most-positive-fixnum'."))
+
 ;; Rust-min batch 6j (2026-05-06): variadic bitwise fold via 2-arg
 ;; primitives `nelisp--logior2' / -logand2 / -logxor2.  Elisp
 ;; folds over INTS with the identity element of each operation

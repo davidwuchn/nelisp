@@ -847,3 +847,385 @@ No-ops on substrates without `nelisp--syscall-path-int' (the historic stub)."
     (unless (integerp end)
       (signal 'wrong-type-argument (list 'integer-or-marker-p end)))
     ""))
+
+
+;; ---------------------------------------------------------------------
+;; Hooks: add-hook / remove-hook / run-hooks / run-hook-with-args /
+;; run-hook-with-args-until-success / run-hook-with-args-until-failure.
+;;
+;; Emacs 30 semantics over ordinary symbol values, measured against
+;; Emacs 30.1 (2026-08-22).  There are no buffers in this runtime, so a
+;; hook variable cannot have a value distinct per buffer: `add-hook' and
+;; `remove-hook' accept LOCAL and IGNORE it.  This is a DOCUMENTED
+;; DIVERGENCE from Emacs, not an oversight -- a silent no-op is the
+;; honest choice precisely because the local/global split LOCAL exists
+;; to select cannot exist here at all.  Emacs would instead call
+;; `make-local-variable' on HOOK and splice a `t' marker into the new
+;; buffer-local value (that marker is still handled below, because a
+;; hand-built hook list can contain one even without buffer-locals).
+;;
+;; DEPTH ordering (`add-hook'): default depth 0; a plain (non-`t', non-
+;; integer) DEPTH argument is Emacs's documented backward-compatibility
+;; case and means 90.  Insertion keeps the hook's list sorted ascending
+;; by depth; a NEW function at the same depth as an existing one goes
+;; AFTER it when DEPTH is strictly positive and BEFORE it otherwise
+;; (Emacs's own wording) -- which is why two `(add-hook 'h f)' calls at
+;; the shared default depth 0 leave the most-recently-added function
+;; FIRST.  Emacs does not store per-function depths in the hook's own
+;; list value (there is no room: the list holds functions and, DEPTH-
+;; blind, the `t' marker) -- they live in a private table, and neither
+;; does this runtime: `nelisp--hook-depths' maps HOOK to an alist of
+;; (FUNCTION . DEPTH).  A function already present in the hook's value
+;; with no recorded depth (spliced in by hand, not via `add-hook') is
+;; treated as depth 0, Emacs's own documented default.  Re-adding a
+;; function that is already a member is a no-op -- notably, it does NOT
+;; move the function to a newly-requested depth; `add-hook' checks
+;; membership before it ever looks at DEPTH (measured: adding a function
+;; at depth -10, then again at depth 50, leaves it exactly where the
+;; first call put it).
+;;
+;; The `t' element (Emacs: "run the global value here too") is honored
+;; even though it can only ever mean "run this same value again": with
+;; no buffer-local/global split, a hook's own value doubles as its own
+;; "global value".  Measured against Emacs 30.1 with a plain (non-
+;; buffer-local) hook list containing `t': the first pass runs the list
+;; once; each `t' met on the first pass triggers ONE re-run of the
+;; WHOLE value from its start (fetched once and cached, then re-walked
+;; -- not re-fetched -- on every subsequent `t'), and any `t' met DURING
+;; that re-run is skipped rather than triggering a further expansion (or
+;; this would never terminate).  `(fn1 t fn2 t)' therefore calls fn1
+;; three times and fn2 three times, in the order fn1 fn1 fn2 fn2 fn1
+;; fn2 -- reproduced exactly by `nelisp--run-hook-value' below.
+(unless (boundp 'nelisp--hook-depths)
+  (defvar nelisp--hook-depths (make-hash-table :test 'eq)
+    "HOOK symbol -> alist of (FUNCTION . DEPTH), for `add-hook' ordering."))
+
+(unless (fboundp 'nelisp--hook-list-p)
+  (defun nelisp--hook-list-p (val)
+    "Return non-nil if VAL is a \"list of hook functions\" shape.
+A hook value is instead a SINGLE function to call directly when it
+satisfies `functionp' (this is what keeps a raw lambda form or closure
+-- itself a cons -- from being walked as a list of functions) or is not
+a cons at all (typically a symbol naming a function)."
+    (and (consp val) (not (functionp val)))))
+
+(unless (fboundp 'add-hook)
+  (defun add-hook (hook function &optional depth local)
+    "Add to the value of HOOK the function FUNCTION.
+FUNCTION is not added if already present (`equal').  See Emacs's
+`add-hook' for DEPTH; LOCAL is accepted and ignored -- see the block
+comment above this definition for why that is the honest behavior here.
+
+(fn HOOK FUNCTION &optional DEPTH LOCAL)"
+    (ignore local)
+    (let ((d (cond ((null depth) 0) ((integerp depth) depth) (t 90))))
+      (unless (boundp hook) (set hook nil))
+      (let ((val (symbol-value hook)))
+        (when (and val (not (nelisp--hook-list-p val)))
+          (setq val (list val)))
+        (unless (member function val)
+          (let ((depths (gethash hook nelisp--hook-depths))
+                (before nil) (cur val) (done nil))
+            (while (and cur (not done))
+              (let ((fd (or (cdr (assoc (car cur) depths)) 0)))
+                (if (or (> fd d) (and (= fd d) (<= d 0)))
+                    (setq done t)
+                  (push (car cur) before)
+                  (setq cur (cdr cur)))))
+            (setq val (append (nreverse before) (list function) cur))
+            (puthash hook (cons (cons function d) depths) nelisp--hook-depths))
+          (set hook val))))
+    nil))
+
+(unless (fboundp 'remove-hook)
+  (defun remove-hook (hook function &optional local)
+    "Remove from the value of HOOK the function FUNCTION.
+LOCAL is accepted and ignored; see `add-hook'.
+
+(fn HOOK FUNCTION &optional LOCAL)"
+    (ignore local)
+    (when (boundp hook)
+      (let ((val (symbol-value hook)))
+        (if (not (nelisp--hook-list-p val))
+            (when (equal val function) (set hook nil))
+          (when (member function val)
+            (let (acc)
+              (dolist (f val) (unless (equal f function) (push f acc)))
+              (set hook (nreverse acc)))
+            (let ((depths (gethash hook nelisp--hook-depths)))
+              (when depths
+                (let (kept)
+                  (dolist (pair depths)
+                    (unless (equal (car pair) function) (push pair kept)))
+                  (puthash hook (nreverse kept) nelisp--hook-depths))))))))
+    nil))
+
+(unless (fboundp 'nelisp--run-hook-call)
+  (defun nelisp--run-hook-call (fn args mode)
+    "Call FN with ARGS; for MODE `until-success'/`until-failure', `throw'
+to the `nelisp--run-hook' tag with the short-circuit result once FN's
+return value decides the outcome.  Always returns nil (the caller reads
+outcomes only through the throw or the final return of the walk)."
+    (let ((r (apply fn args)))
+      (cond
+       ((eq mode 'until-success) (when r (throw 'nelisp--run-hook r)))
+       ((eq mode 'until-failure) (unless r (throw 'nelisp--run-hook nil)))))
+    nil))
+
+(unless (fboundp 'nelisp--run-hook-value)
+  (defun nelisp--run-hook-value (val args mode)
+    "Run hook value VAL against ARGS per MODE (`all' / `until-success' /
+`until-failure') and return the MODE-appropriate result.  See the block
+comment above `add-hook' for the `t'-element algorithm this reproduces."
+    (catch 'nelisp--run-hook
+      (cond
+       ((null val) (if (eq mode 'until-failure) t nil))
+       ((not (nelisp--hook-list-p val))
+        (nelisp--run-hook-call val args mode)
+        nil)
+       (t
+        (let ((global nil) (have-global nil) (cur val))
+          (while cur
+            (let ((elt (car cur)))
+              (if (eq elt t)
+                  (progn
+                    (unless have-global
+                      (setq have-global t)
+                      (setq global (if (nelisp--hook-list-p val) val (list val))))
+                    (let ((gcur global))
+                      (while gcur
+                        (unless (eq (car gcur) t)
+                          (nelisp--run-hook-call (car gcur) args mode))
+                        (setq gcur (cdr gcur)))))
+                (nelisp--run-hook-call elt args mode)))
+            (setq cur (cdr cur)))
+          (if (eq mode 'until-failure) t nil)))))))
+
+(unless (fboundp 'run-hooks)
+  (defun run-hooks (&rest hooks)
+    "Run each hook in HOOKS.  Each argument should be a symbol, a hook
+variable; a void hook variable is treated as nil (a no-op), not an
+error.  See `add-hook' for what a hook's value may be.
+
+(fn &rest HOOKS)"
+    (dolist (hook hooks)
+      (nelisp--run-hook-value (if (boundp hook) (symbol-value hook) nil) nil 'all))
+    nil))
+
+(unless (fboundp 'run-hook-with-args)
+  (defun run-hook-with-args (hook &rest args)
+    "Run HOOK with the specified arguments ARGS.  The final return value
+is unspecified, matching Emacs.  A void HOOK is a no-op.
+
+(fn HOOK &rest ARGS)"
+    (nelisp--run-hook-value (if (boundp hook) (symbol-value hook) nil) args 'all)
+    nil))
+
+(unless (fboundp 'run-hook-with-args-until-success)
+  (defun run-hook-with-args-until-success (hook &rest args)
+    "Run HOOK with ARGS, stopping at the first function that returns
+non-nil, and return that value.  Return nil if all functions return
+nil, if there are none to call, or if HOOK is void.
+
+(fn HOOK &rest ARGS)"
+    (nelisp--run-hook-value (if (boundp hook) (symbol-value hook) nil) args 'until-success)))
+
+(unless (fboundp 'run-hook-with-args-until-failure)
+  (defun run-hook-with-args-until-failure (hook &rest args)
+    "Run HOOK with ARGS, stopping at the first function that returns
+nil, and return nil.  Otherwise (all functions return non-nil, there
+are none to call, or HOOK is void) return non-nil.
+
+(fn HOOK &rest ARGS)"
+    (nelisp--run-hook-value (if (boundp hook) (symbol-value hook) nil) args 'until-failure)))
+
+;; ---------------------------------------------------------------------
+;; map.el subset: map-elt / map-put! / map-delete / map-keys / map-values
+;; / map-pairs / map-length / map-do / mapp, over alists, plists (Emacs
+;; 27+ rule: a cons whose car is not itself a cons, i.e. not an alist
+;; pair, is treated as a plist) and hash-tables.
+;;
+;; `map-put!' is the one place Emacs's own contract is NOT "always
+;; mutate": measured against Emacs 30.1, `map-put!' on a PLAIN alist
+;; VALUE (not a place `setf' can reassign) mutates in place -- via
+;; `setcdr' on the matching pair -- only when KEY is already present.
+;; Adding a NEW key to an alist means consing a new pair onto the
+;; FRONT, which needs to replace the list's head; a bare function
+;; cannot do that to its caller's variable, so Emacs signals
+;; `map-not-inplace' rather than silently doing nothing (Emacs's own
+;; docstring: "If it cannot [modify MAP in place], it signals the
+;; `map-not-inplace' error.  To insert an element without modifying
+;; MAP, use `map-insert'.").  A PLIST is different: a new key/value
+;; pair can be NCONC'd onto the END of the existing cons chain, which
+;; mutates the last cons's cdr and needs no new head -- so `map-put!'
+;; on a plist never signals for a new key.  A hash-table always mutates
+;; via `puthash' and never signals.  `map-put!' returns VALUE (the
+;; third argument) in every non-signaling case -- not the map -- this
+;; is Emacs's own documented return, not a shortcut taken here.
+;;
+;; `map-delete' is documented by Emacs itself as NOT reliably
+;; destructive for a list-backed map: "if MAP is a list ... and you're
+;; deleting the [element that empties it, e.g. the sole/first element],
+;; the list isn't actually destructively modified ... So if you're
+;; using this on a list, you have to say (setq map (map-delete map
+;; key))".  This implementation takes Emacs at its documented word
+;; instead of chasing the partial, position-dependent in-place splicing
+;; its C-free `defun' does for other cases: alist/plist deletion here
+;; always returns a new list and never mutates the original cons chain.
+;; Every well-behaved caller was already going to reassign from the
+;; return value per Emacs's own advice, so this is a documented
+;; narrowing, not a functional gap.  Hash-table deletion mutates via
+;; `remhash' and returns the (same) table, matching Emacs exactly.
+(unless (get 'map-not-inplace 'error-conditions)
+  (define-error 'map-not-inplace "Cannot modify map in-place"))
+
+(unless (fboundp 'nelisp--plist-p)
+  (defun nelisp--plist-p (val)
+    "Return non-nil if VAL looks like a plist rather than an alist.
+Emacs 27+'s map.el rule: a non-empty list is a plist when its first
+element is not itself a cons (an alist's elements are (KEY . VALUE)
+pairs, so an alist's CAR is always a cons)."
+    (and (consp val) (not (consp (car val))))))
+
+(unless (fboundp 'mapp)
+  (defun mapp (map)
+    "Return non-nil if MAP is a map (alist/plist, hash-table, array, ...).
+
+(fn MAP)"
+    (or (listp map) (hash-table-p map) (arrayp map))))
+
+(unless (fboundp 'map-elt)
+  (defun map-elt (map key &optional default testfn)
+    "Look up KEY in MAP and return its associated value, or DEFAULT.
+MAP is an alist, a plist, or a hash-table.  TESTFN, if non-nil, is used
+in place of `equal' to compare KEY against an alist's/plist's keys (a
+hash-table always uses its own `:test').
+
+(fn MAP KEY &optional DEFAULT TESTFN)"
+    (cond
+     ((hash-table-p map) (gethash key map default))
+     ((nelisp--plist-p map)
+      (let ((cur map) (found nil) (result default))
+        (while (and cur (not found))
+          (if (funcall (or testfn #'eq) (car cur) key)
+              (progn (setq result (cadr cur)) (setq found t))
+            (setq cur (cddr cur))))
+        result))
+     (t
+      (let ((cur map) (found nil) (result default))
+        (while (and cur (not found))
+          (if (funcall (or testfn #'equal) (caar cur) key)
+              (progn (setq result (cdar cur)) (setq found t))
+            (setq cur (cdr cur))))
+        result)))))
+
+(unless (fboundp 'map-put!)
+  (defun map-put! (map key value &optional testfn)
+    "Associate KEY with VALUE in MAP, modifying MAP in place, and return
+VALUE.  Signals `map-not-inplace' when MAP is an alist and KEY is not
+already present -- see the block comment above this section.
+
+(fn MAP KEY VALUE &optional TESTFN)"
+    (cond
+     ((hash-table-p map) (puthash key value map))
+     ((nelisp--plist-p map)
+      (let ((cur map) (found nil))
+        (while (and cur (not found))
+          (if (funcall (or testfn #'eq) (car cur) key)
+              (progn (setcar (cdr cur) value) (setq found t))
+            (setq cur (cddr cur))))
+        (unless found
+          (let ((last map))
+            (while (cddr last) (setq last (cddr last)))
+            (setcdr (cdr last) (list key value))))))
+     (t
+      (let ((cur map) (found nil))
+        (while (and cur (not found))
+          (if (funcall (or testfn #'equal) (caar cur) key)
+              (progn (setcdr (car cur) value) (setq found t))
+            (setq cur (cdr cur))))
+        (unless found (signal 'map-not-inplace (list map))))))
+    value))
+
+(unless (fboundp 'map-delete)
+  (defun map-delete (map key &optional testfn)
+    "Delete KEY from MAP and return the resulting map.
+For a hash-table this mutates MAP (via `remhash') and returns MAP
+itself.  For an alist/plist this ALWAYS returns a new list -- see the
+block comment above this section for why that, not partial in-place
+splicing, is the honest match for Emacs's own documented contract.
+
+(fn MAP KEY &optional TESTFN)"
+    (cond
+     ((hash-table-p map) (remhash key map) map)
+     ((nelisp--plist-p map)
+      (let (acc (cur map))
+        (while cur
+          (if (funcall (or testfn #'eq) (car cur) key)
+              (setq cur (cddr cur))
+            (push (car cur) acc) (push (cadr cur) acc) (setq cur (cddr cur))))
+        (nreverse acc)))
+     (t
+      (let (acc)
+        (dolist (pair map)
+          (unless (funcall (or testfn #'equal) (car pair) key) (push pair acc)))
+        (nreverse acc))))))
+
+(unless (fboundp 'map-keys)
+  (defun map-keys (map)
+    "Return the list of keys in MAP.
+
+(fn MAP)"
+    (cond
+     ((hash-table-p map) (let (ks) (maphash (lambda (k _v) (push k ks)) map) (nreverse ks)))
+     ((nelisp--plist-p map)
+      (let (ks (cur map)) (while cur (push (car cur) ks) (setq cur (cddr cur))) (nreverse ks)))
+     (t (mapcar #'car map)))))
+
+(unless (fboundp 'map-values)
+  (defun map-values (map)
+    "Return the list of values in MAP.
+
+(fn MAP)"
+    (cond
+     ((hash-table-p map) (let (vs) (maphash (lambda (_k v) (push v vs)) map) (nreverse vs)))
+     ((nelisp--plist-p map)
+      (let (vs (cur map)) (while cur (push (cadr cur) vs) (setq cur (cddr cur))) (nreverse vs)))
+     (t (mapcar #'cdr map)))))
+
+(unless (fboundp 'map-pairs)
+  (defun map-pairs (map)
+    "Return the elements of MAP as a list of (KEY . VALUE) pairs.
+
+(fn MAP)"
+    (cond
+     ((hash-table-p map)
+      (let (ps) (maphash (lambda (k v) (push (cons k v) ps)) map) (nreverse ps)))
+     ((nelisp--plist-p map)
+      (let (ps (cur map))
+        (while cur (push (cons (car cur) (cadr cur)) ps) (setq cur (cddr cur)))
+        (nreverse ps)))
+     (t (copy-sequence map)))))
+
+(unless (fboundp 'map-length)
+  (defun map-length (map)
+    "Return the number of elements in MAP.
+
+(fn MAP)"
+    (cond
+     ((hash-table-p map) (hash-table-count map))
+     ((nelisp--plist-p map) (/ (length map) 2))
+     (t (length map)))))
+
+(unless (fboundp 'map-do)
+  (defun map-do (function map)
+    "Call FUNCTION with two arguments KEY and VALUE for each element in MAP.
+
+(fn FUNCTION MAP)"
+    (cond
+     ((hash-table-p map) (maphash function map))
+     ((nelisp--plist-p map)
+      (let ((cur map))
+        (while cur (funcall function (car cur) (cadr cur)) (setq cur (cddr cur)))))
+     (t (dolist (pair map) (funcall function (car pair) (cdr pair)))))
+    nil))
