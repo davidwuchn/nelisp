@@ -183,11 +183,30 @@ standalone-selfhost-test
 # not run, so the defects sat.
 #
 # GREEN AND WIRED ABOVE: the reader smokes are covered by
-# `standalone-reader-test' (13 checks), which now includes the arm64
+# `standalone-reader-test' (14 checks), which now includes the arm64
 # byte-identity check, the `intern'/`intern-soft' "nil"/"t"
-# canonicalization check, and the `defvaralias' four-direction/chain/
+# canonicalization check, the `defvaralias' four-direction/chain/
 # return-value check (added alongside the nl_sf_defvaralias implementation,
-# see "THE nelix GATES, PART 2" below).  Beside it stand 28 individual `standalone-reader-*'
+# see "THE nelix GATES, PART 2" below), and, 2026-08-22, an
+# `extend-runtime-image' smoke (`nelisp-standalone--reader-extend-runtime-
+# image-smoke') -- the only one of the binary's 15 subcommands that had no
+# coverage anywhere in the tree.  Dumps a base image, extends it with both
+# a `--load' file and an inline FORM, evals a form against the OUT-IMAGE
+# that can only be 42 if the base binding, the `--load' definition and the
+# extension's own `setq' all landed, plus a negative: extending from a
+# BASE-IMAGE path that does not exist.  The negative case caught a real
+# defect on first run, not a synthetic one -- `nelisp-runtime-image--read-
+# file' (`lisp/nelisp-runtime-image.el') trusted `rdf' to distinguish a
+# missing file from an empty one, and `rdf'/`nl_bi_read_file' hands back an
+# EMPTY STRING for a file it could not open (documented in `scripts/nelisp-
+# standalone-build.el' next to `bf_load'/`bf_require', which already work
+# around the identical defect class at the primitive's other call sites:
+# "load reported success for a path that does not exist").  Measured
+# before the fix: `extend-runtime-image' on a missing BASE-IMAGE exited 0
+# and silently wrote an OUT-IMAGE containing only the extension, not the
+# base.  Fixed by probing `file-readable-p' before calling `rdf', the same
+# pattern `bf_load' already uses.  Re-measured after: exit 1, no OUT-IMAGE
+# written, `GATE-COUNT checked=14 findings=0'.  Beside it stand 28 individual `standalone-reader-*'
 # targets, each measured green on 2026-08-21 -- two of them only after the
 # fixes in this sweep.  Named in full so a later reader can tell "measured and
 # green" from "nobody looked":

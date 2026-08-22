@@ -18636,6 +18636,7 @@ loader when it is absent."
                                  nelisp-standalone--reader-large-quoted-alist-mutation-smoke
                                  nelisp-standalone--reader-setcar-setcdr-type-smoke
                                  nelisp-standalone--reader-runtime-image-smoke
+                                 nelisp-standalone--reader-extend-runtime-image-smoke
                                  nelisp-standalone--reader-cli-smoke
                                  nelisp-standalone--reader-neln-selftest-smoke
                                  nelisp-standalone--reader-repl-smoke))
@@ -19167,6 +19168,82 @@ guards the slot-pool floor directly without loading the full vendor file."
         (delete-file tmp-src))
       (when (file-exists-p tmp-load)
         (delete-file tmp-load)))))
+
+(defun nelisp-standalone--reader-extend-runtime-image-smoke ()
+  "Assert `extend-runtime-image' semantics.
+`extend-runtime-image' is one of the binary's 15 subcommands and, unlike
+`dump-runtime-image'/`eval-runtime-image'/`exec-runtime-image' just above,
+had no coverage anywhere in the tree until this smoke: dump a base image,
+extend it with both a `--load' file and an inline FORM, eval a form against
+the extended image that can only be 42 if the base bindings, the `--load'
+definition and the extension's own inline `setq' all landed in the written
+OUT-IMAGE -- plus a negative: extending from a base image path that does
+not exist must fail (exit 1), not silently produce a usable image."
+  (let ((base (make-temp-file "nelisp-runtime-smoke-ext-base-" nil ".nlri"))
+        (load-src (make-temp-file "nelisp-runtime-smoke-ext-load-" nil ".el"))
+        (out (make-temp-file "nelisp-runtime-smoke-ext-out-" nil ".nlri"))
+        (missing-base (make-temp-file "nelisp-runtime-smoke-ext-missing-" nil ".nlri"))
+        (missing-out (make-temp-file "nelisp-runtime-smoke-ext-missing-out-" nil ".nlri"))
+        (dump-rc nil)
+        (extend-rc nil)
+        (eval-rc nil)
+        (eval-out nil)
+        (missing-extend-rc nil))
+    ;; `make-temp-file' creates the file it names.  Both of these must
+    ;; start out NOT existing -- `missing-base' is the negative case's
+    ;; input (a base image that is not there), `missing-out' is what a
+    ;; correctly-failing `extend-runtime-image' must never create -- so
+    ;; delete both once, right after allocating their (collision-free)
+    ;; names, before either is used.
+    (delete-file missing-base)
+    (delete-file missing-out)
+    (unwind-protect
+        (progn
+          (with-temp-buffer
+            (setq dump-rc
+                  (call-process nelisp-standalone--reader-out nil t nil
+                                "dump-runtime-image" base "(setq ext-base 10)")))
+          (unless (= dump-rc 0)
+            (error "dump-runtime-image (extend base) exit=%S" dump-rc))
+          (with-temp-file load-src
+            (insert "(defun ext-loaded-hot () 5)\n"))
+          (with-temp-buffer
+            (setq extend-rc
+                  (call-process nelisp-standalone--reader-out nil t nil
+                                "extend-runtime-image" base out
+                                "--load" load-src
+                                "(setq ext-add 27)")))
+          (unless (= extend-rc 0)
+            (error "extend-runtime-image exit=%S" extend-rc))
+          (with-temp-buffer
+            (setq eval-rc
+                  (call-process nelisp-standalone--reader-out nil t nil
+                                "eval-runtime-image" out
+                                "(+ ext-base ext-add (ext-loaded-hot))"))
+            (setq eval-out (buffer-string)))
+          (unless (and (= eval-rc 0) (equal eval-out "42\n"))
+            (error "eval-runtime-image (extended) exit=%S stdout=%S"
+                   eval-rc eval-out))
+          (with-temp-buffer
+            (setq missing-extend-rc
+                  (call-process nelisp-standalone--reader-out nil t nil
+                                "extend-runtime-image" missing-base missing-out
+                                "(setq unreachable 1)")))
+          (unless (= missing-extend-rc 1)
+            (error "extend-runtime-image missing-base exit=%S (expected 1)"
+                   missing-extend-rc))
+          (when (file-exists-p missing-out)
+            (error "extend-runtime-image missing-base wrote OUT-IMAGE anyway: %S"
+                   missing-out))
+          (message "[standalone-reader] extend-runtime-image smoke PASS"))
+      (when (file-exists-p base)
+        (delete-file base))
+      (when (file-exists-p load-src)
+        (delete-file load-src))
+      (when (file-exists-p out)
+        (delete-file out))
+      (when (file-exists-p missing-out)
+        (delete-file missing-out)))))
 
 (defun nelisp-standalone--reader-neln-selftest-smoke ()
   "Assert `--neln-selftest' executes the embedded in-process native demo."
