@@ -523,6 +523,18 @@ reason as `nl-ns-write-accepted'."
 ;; of landing with 100+ silent, unreasoned keys nobody reviewed.
 ;; ---------------------------------------------------------------------
 
+;; FIXED 2026-08-22 (scripts/nelisp-standalone-build.el, the `t' cond clause's
+;; source-selection dispatcher for a bare positional FILE argument): unified
+;; with `--load' by running the same `_cl'-gated `nelisp-standalone--reader-repl-prelude-forms'
+;; call before reading the file, instead of falling straight to
+;; `nl_os_read_file_cpath' with no prelude at all.  Bare-file was the only
+;; entry point skipping it.  Kept below as two defensive classifiers -- both
+;; unreachable against the current findings set (measured: `checked=209
+;; findings=0' with `mod'/`%%'/`floor'/`truncate' and the 11-primitive gap
+;; gone from every substrate but source-fallback, whose gap is a different,
+;; still-open root cause, see the top branch) -- so a regression of either
+;; bare-file symptom still gets its OWN accurate note on the next
+;; regeneration instead of falling through to a generic one.
 (defconst nelisp-substrate-parity--bare-arith-bug-indices '(9 11 13 14))
 
 (defun nelisp-substrate-parity--auto-note (finding)
@@ -544,17 +556,29 @@ reason as `nl-ns-write-accepted'."
      ;; means post-fix -- it is never the old symptom, since a regression of
      ;; the old bug reproduces as void-function on the corpus's OWN shim
      ;; function, not on a corpus-form primitive.
-     ((and (equal substrate "source-fallback")
-           (or (string-prefix-p "CRASH:void-function:" actual) (= idx 34)))
-      "KNOWN GAP (2026-08-22, exposed by the eval-elisp-source pure-source-fallback file-read fix -- see src/nelisp-core-fileio.el): source-fallback is the only substrate whose FORM arguments (and, now that the file-read is fixed, its loaded FILE's own top-level forms too) run through the self-hosted `nelisp-eval' rather than through the native evaluator every other substrate calls directly. `nelisp--primitive-symbols' (src/nelisp-eval.el) is the list `nelisp--install-primitives' bulk-copies from native `fboundp' cells into `nelisp-eval's own function table, and it omits `floor', `%', `unibyte-string', `match-data', and `nelisp--write-stdout-bytes' -- all present natively (every other substrate agrees on the corpus's intended value), void-function only where `nelisp-eval' has to look them up itself. Not fixed here: completing `nelisp--primitive-symbols' is a separate, broader prelude-parity sweep, not a defect in the file-loading mechanism this commit repairs.")
+     ;;
+     ;; UPDATED 2026-08-22 (bare-file prelude-unification commit): matches
+     ;; every source-fallback finding, not just a CRASH result or form 34 --
+     ;; six of these (25/27/28/32's `fboundp' checks, plus what a raw call
+     ;; would have hit on 2/3/4/5/15/19/22's own symbols) were previously
+     ;; invisible because the OLD, bug-having bare baseline crashed on the
+     ;; SAME primitive with the SAME classification, so bare and
+     ;; source-fallback agreed (no diff, no ledger entry) for the wrong
+     ;; reason.  Fixing bare's baseline exposed them as real, independent
+     ;; source-fallback gaps.  Omitted-primitive list measured complete by
+     ;; this run (`checked=209' against the fixed bare baseline): `floor',
+     ;; `%', `unibyte-string', `match-data', `nelisp--write-stdout-bytes',
+     ;; `intern-soft', `read-from-string', `read', `make-temp-name', `prin1'.
+     ((equal substrate "source-fallback")
+      "KNOWN GAP (2026-08-22, exposed by the eval-elisp-source pure-source-fallback file-read fix -- see src/nelisp-core-fileio.el -- and, for six of these forms, by the separate bare-file prelude-unification fix that stopped masking them behind a matching bare-side crash): source-fallback is the only substrate whose FORM arguments (and its loaded FILE's own top-level forms) run through the self-hosted `nelisp-eval' rather than through the native evaluator every other substrate calls directly. `nelisp--primitive-symbols' (src/nelisp-eval.el) is the list `nelisp--install-primitives' bulk-copies from native `fboundp' cells into `nelisp-eval's own function table, and it omits `floor', `%', `unibyte-string', `match-data', `nelisp--write-stdout-bytes', `intern-soft', `read-from-string', `read', `make-temp-name', and `prin1' -- all present natively (every other substrate agrees on the corpus's intended value), void-function (or `fboundp'-false) only where `nelisp-eval' has to look them up itself. Not fixed here: completing `nelisp--primitive-symbols' is a separate, broader prelude-parity sweep, not a defect in either the file-loading mechanism or the bare-file entry point this tree's two prelude fixes repair.")
      ((and (equal substrate "host") (= idx 8))
       "ACCEPTED (by design, class ii): NeLisp strings are Rust UTF-8 internally, so a raw byte >= 128 written through `unibyte-string' round-trips through UTF-8 re-encoding -- `aref' does not return the original byte the way host Emacs's unibyte strings do. Documented in memory feedback_nelisp_standalone_utf8_raw_byte_block. Every NeLisp substrate agrees with every other NeLisp substrate here; only the comparison against host Emacs differs, which is exactly the documented limitation.")
      ((equal substrate "host")
       "GAP vs host Emacs, consistent across every NeLisp substrate that can run this form -- not a cross-substrate NeLisp divergence. Form 20 (`emacs-pid') in particular is void-function in EVERY NeLisp substrate alike (bare, --load, runtime-image, artifact, source-cache), so it is a missing-primitive backlog item versus host Emacs, not a parity defect between NeLisp entry points.")
      ((memq idx nelisp-substrate-parity--bare-arith-bug-indices)
-      "KNOWN DEFECT (2026-08-22, NEW, found by this gate): the bare-file substrate's `mod'/`%%' compute a C-style truncating remainder (sign follows the dividend) instead of Elisp's floor-based `mod' (sign follows the divisor), and `floor'/`truncate' silently ignore a 2-argument divisor and return the dividend unchanged -- a silent wrong answer, not a crash. Confirmed by direct exit-code probes outside this gate: bare `(mod 7 -3)' returns 1, not -2; bare `(floor 7 2)' returns 7, not 3. Every other substrate, including host Emacs, agrees and is correct. Not fixed here: the wrong dispatch lives in the bare-mode AOT driver's low-level arithmetic table (scripts/nelisp-standalone-build.el) and a mechanical fix deserves its own targeted before/after measurement rather than a patch guessed at from this gate.")
+      "FIXED 2026-08-22 (scripts/nelisp-standalone-build.el: the bare-file source-selection dispatcher now runs the same prelude `--load' does, which is where `floor'/`mod'/`%'/`truncate' get their Elisp-semantics overrides installed over the native C-style builtins -- see the \"A1 floor\" cold-path comment near `nl_cold_overwrite_globals'). Was: the bare-file substrate's `mod'/`%%' computed a C-style truncating remainder (sign follows the dividend) instead of Elisp's floor-based `mod' (sign follows the divisor), and `floor'/`truncate' silently ignored a 2-argument divisor and returned the dividend unchanged -- a silent wrong answer, not a crash. Verified fixed by this gate (`checked=209 findings=0' with no idx-9/11/13/14 finding on any substrate but source-fallback, whose idx-13/14 gap is the unrelated, still-open `nelisp-eval' primitive-symbols gap named in the top branch above) and by direct exit-code probes: bare `(mod 7 -3)' now returns -2, `(floor 7 2)' now returns 3, matching `--load' exactly. This branch is unreachable against the current findings set; kept so a regression reproduces with its own accurate note rather than the generic one below.")
      (t
-      "KNOWN DEFECT (2026-08-22): the bare positional FILE argument init path boots a smaller prelude than every other NeLisp entry point (--load, runtime-image, artifact, eval-elisp-source). Measured missing there and present everywhere else: intern-soft, read-from-string, princ, prin1, message, match-data, string-match, nreverse, read, random, make-temp-name. Extends the ADDENDA's pre-existing intern-soft finding (agent 1); this gate is what measured the full list. Deliberately not fixed here, per the ADDENDA's own scoping -- resolving it is a policy call (does bare-file mode gain a richer prelude, or does --load become the documented minimum) for whoever owns that entry point."))))
+      "FIXED 2026-08-22 (scripts/nelisp-standalone-build.el: the bare-file source-selection dispatcher, reached via the `t' cond clause's final `nl_os_read_file_cpath' fallback, now runs `nelisp-standalone--reader-repl-prelude-forms' under the same `_cl < 0' gate `--load' uses, guarded off for runtime-image/artifact commands via `nl_runtime_image_command_p'/`nl_artifact_command_p' since those already carry their own prelude). Was: the bare positional FILE argument init path booted a smaller prelude than every other NeLisp entry point (--load, runtime-image, artifact, eval-elisp-source). Measured missing there and present everywhere else: intern-soft, read-from-string, princ, prin1, message, match-data, string-match, nreverse, read, random, make-temp-name. Extended the ADDENDA's pre-existing intern-soft finding (agent 1). Verified fixed by this gate (`checked=209 findings=0' with none of these 20 form/substrate pairs -- indices 2/3/4/5/15/18/19/21/22/24/25/26/27/28/32/33 against load/runtime-image/artifact/source-cache/host -- appearing as a finding any more) and by direct fboundp probes against the rebuilt binary. This branch is unreachable against the current findings set; kept so a regression of either the missing-prelude symptom in general, or of any ONE primitive from this list specifically, still gets a note naming the right root cause instead of a generic fallback."))))
 
 (defun nelisp-substrate-parity--notes-for (findings previous-notes)
   "Notes for FINDINGS: a note carried over from PREVIOUS-NOTES (hand-edited,

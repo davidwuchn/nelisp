@@ -17005,7 +17005,39 @@ correctly."
                  (seq
                   ,@(nelisp-standalone--reader-repl-prelude-forms
                      'fbuf 'src 'cursor 'result 'pool 'out 'ctx 'builtin_sym)))
-             0)
+             ;; Bare positional FILE argument (`target/nelisp FILE'; no
+             ;; recognized subcommand name matched, and this is neither a
+             ;; runtime-image nor an artifact command -- see the two
+             ;; predicates below) is otherwise the ONE entry point that
+             ;; fell all the way through to `nl_os_read_file_cpath' below
+             ;; without ever running the stdlib prelude, unlike every
+             ;; sibling command (`--load' just above in this `cond', plus
+             ;; --eval/--repl/--cold-load-from earlier).  Measured effect
+             ;; (`tools/nelisp-substrate-parity.el', bare vs. --load):
+             ;; `princ'/`prin1'/`intern-soft'/`read-from-string'/`message'/
+             ;; `match-data'/`string-match'/`nreverse'/`read'/`random'/
+             ;; `make-temp-name' void-function, and -- because the prelude
+             ;; is also where the native `floor'/`mod'/`%'/`truncate'
+             ;; builtins get their Elisp-semantics overrides installed (see
+             ;; the "A1 floor" cold-path comment above, near
+             ;; `nl_cold_overwrite_globals') -- `mod'/`%' silently computing
+             ;; a C-style truncating remainder and `floor'/`truncate'
+             ;; silently ignoring their divisor argument.  Unify with
+             ;; `--load' by running the identical `_cl'-gated prelude here.
+             ;; Runtime-image and artifact-family commands are excluded
+             ;; (`nl_runtime_image_command_p' / `nl_artifact_command_p'):
+             ;; each already carries its own prelude -- baked into a dumped
+             ;; image or into the compiled artifact -- and re-running it
+             ;; over that would be the same redefinition-over-already-loaded
+             ;; hazard the `_cl' cold-path comments above describe, not a
+             ;; bare-file-shaped gap this fix is about.
+             (if (and (< _cl 0)
+                      (= (nl_runtime_image_command_p path) 0)
+                      (= (nl_artifact_command_p path) 0))
+                 (seq
+                  ,@(nelisp-standalone--reader-repl-prelude-forms
+                     'fbuf 'src 'cursor 'result 'pool 'out 'ctx 'builtin_sym))
+               0))
            ;; --- source selection: embedded vs. file (M7 dual mode) ---
            (if (and (= (nl_runtime_image_eval_exec_command_p path) 1)
                     (= (nl_runtime_image_cache_eval_p sp0 argc) 1))
