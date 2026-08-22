@@ -89,8 +89,16 @@
 # `(ignore-errors (delete-file tmp))' shape every sibling `reader-*-smoke'
 # already uses -- a failed cleanup changes nothing about the smoke's
 # verdict).
-silent-fallback 50
-ignore-errors   41
+# 50 -> 53 on 2026-08-23: three new sites, reviewed and pinned below (Task
+# C's two unwind-protect corpus forms each wrap a deliberately-injected
+# test error and discard it after observing cleanup order, plus the
+# presence-sweep generator's end-of-file read-loop terminator).
+silent-fallback 53
+# 41 -> 42 on 2026-08-23: one new site, reviewed and pinned below (the
+# presence-sweep auto-note's defensive shape-extraction for a report-only
+# string, falls back to "?" on a malformed corpus form -- never on a
+# correctness path).
+ignore-errors   42
 # 34 -> 32 on 2026-08-19: the two handlers in
 # `nelisp-artifact--ensure-native-compiler' now record the error instead of
 # discarding it.  Between them they had hidden a chain of six failures --
@@ -99,7 +107,10 @@ ignore-errors   41
 # said only "native compiler unavailable".
 # 33 -> 34 on 2026-08-22: one new site, reviewed and pinned below (the
 # substrate-parity corpus's quoted condition-case/throw probe form).
-bare-handler    34
+# 34 -> 37 on 2026-08-23: three new sites, reviewed and pinned below (Task
+# C's two unwind-protect corpus forms' condition-case wrappers, plus the
+# presence-sweep generator's standard "read forms until end-of-file" loop).
+bare-handler    37
 
 # 0, and it should stay 0.  `nl_dbg_note' has no enable flag on purpose --
 # a flag has to be turned off by whoever turned it on, and forgetting is
@@ -238,3 +249,27 @@ pinned-site silent-fallback	nelisp-substrate-parity-corpus.el	defconst nelisp-su
 pinned-site silent-fallback	nl-check-gate.el	defun nl-check-gate--accepted	e3f2648caa3a 1
 pinned-site silent-fallback	nl-check-gate.el	defun nl-check-gate--findings	e3f2648caa3a 1
 pinned-site silent-fallback	recursion-guard-smoke.el	let	430eb4fc2af5 1
+
+# 2026-08-22/23, Task A/B/C (substrate-presence sweep + Task C unwind-
+# protect corpus forms): seven new sites, all deliberate probes/standard
+# idioms, none silencing a real error path.
+#   nelisp-substrate-parity-corpus.el, corpus forms 36 and 38 (Task C):
+#     each wraps a DELIBERATELY-injected test error in a `condition-case'
+#     to observe unwind-protect cleanup ordering, then discards the error
+#     object -- the same shape the pre-existing form-16 pin
+#     (ca691fe7a98a) already covers for condition-case-vs-throw; two more
+#     distinct handler shapes, same rationale.
+#   nelisp-substrate-presence-gen.el, `nlsp--primitive-symbols': the
+#     standard "read every form from a buffer, `end-of-file' means done"
+#     idiom -- the same pattern already used elsewhere in this tree.
+#   nelisp-substrate-parity.el, `nelisp-substrate-presence--name-for':
+#     defensive shape-extraction for a REPORT-ONLY note string (falls
+#     back to "?" in the message on a malformed corpus form) -- never on
+#     a correctness path.
+pinned-site bare-handler	nelisp-substrate-parity-corpus.el	defconst nelisp-substrate-parity-corpus	1c4e9466c879 1
+pinned-site bare-handler	nelisp-substrate-parity-corpus.el	defconst nelisp-substrate-parity-corpus	5a4d267b7460 1
+pinned-site bare-handler	nelisp-substrate-presence-gen.el	defun nlsp--primitive-symbols	b89877e993be 1
+pinned-site ignore-errors	nelisp-substrate-parity.el	defun nelisp-substrate-presence--name-for	4c1820b0e4f7 1
+pinned-site silent-fallback	nelisp-substrate-parity-corpus.el	defconst nelisp-substrate-parity-corpus	704c53a5d34a 1
+pinned-site silent-fallback	nelisp-substrate-parity-corpus.el	defconst nelisp-substrate-parity-corpus	e3f2648caa3a 1
+pinned-site silent-fallback	nelisp-substrate-presence-gen.el	defun nlsp--primitive-symbols	09db60440f5b 1

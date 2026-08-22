@@ -30,6 +30,7 @@ tools/ai/nelisp-ai.sh ns FILE...                         # namespace boundaries 
 tools/ai/nelisp-ai.sh gate NAME -- make TARGET            # wrap an existing check
 tools/ai/nelisp-ai.sh test                               # full ERT suite
 tools/ai/nelisp-ai.sh verify                             # the verdict
+tools/ai/nelisp-ai.sh presence                           # ~354-name fboundp sweep, minutes
 ```
 
 `check` runs as one step of the CI Linux lane
