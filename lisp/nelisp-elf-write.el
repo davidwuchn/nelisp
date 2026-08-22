@@ -1481,10 +1481,13 @@ emitted only when :relocs is non-empty.  When :data and/or :bss-size
 is present, the loader image is split into an RX PT_LOAD (= .text +
 .rodata) and a separate page-aligned RW PT_LOAD (= .data + .bss) per
 Doc 91 §91.c."
-  (let* ((text     (or (plist-get plist :text)
-                       (error "nelisp-elf: :text is required")))
-         (rodata   (plist-get plist :rodata))
-         (data     (plist-get plist :data))
+  (let* ((text     (nelisp-elf--coerce-unibyte
+                    (or (plist-get plist :text)
+                        (error "nelisp-elf: :text is required"))))
+         (rodata-raw (plist-get plist :rodata))
+         (rodata     (and rodata-raw (nelisp-elf--coerce-unibyte rodata-raw)))
+         (data-raw   (plist-get plist :data))
+         (data       (and data-raw (nelisp-elf--coerce-unibyte data-raw)))
          (bss-size (or (plist-get plist :bss-size) 0))
          (symbols  (plist-get plist :symbols))
          (relocs   (plist-get plist :relocs))
@@ -1501,14 +1504,31 @@ Doc 91 §91.c."
             nelisp-elf--em-aarch64)
            ((integerp machine-arg) machine-arg)
            (t (error "nelisp-elf: invalid :machine %S" machine-arg))))
-         (have-rodata (and rodata (> (length rodata) 0)))
-         (have-data   (and data (> (length data) 0)))
+         ;; `text'/`rodata'/`data' are now unibyte above (= coerced at
+         ;; binding time, matching the ET_REL sibling `nelisp-elf--build-
+         ;; rel'), so `nelisp-elf--byte-length' (= `string-bytes') and
+         ;; `length' agree here -- but only because of that coercion.
+         ;; Measure the RAW plist value instead (as this used to) and the
+         ;; two diverge in both directions: on host Emacs, `(make-string N
+         ;; #x90)' is multibyte, and `string-bytes' on the *uncoerced*
+         ;; string double-counts every byte >= 128 (each one a 2-byte UTF-8
+         ;; encoding of a codepoint, not yet folded down to one raw byte) --
+         ;; `nelisp-elf-write-cbuf-large-rich-correct-bytes' catches exactly
+         ;; that.  On the standalone runtime, raw bytes built via
+         ;; `unibyte-string' have no multibyte flag to coerce away, and
+         ;; `length' *undercounts* the same bytes by UTF-8-decoding them
+         ;; (Doc 161) -- the AOT compiler's own object write hits this one.
+         ;; `nelisp-elf--byte-length' is only the right answer once the
+         ;; value it measures is unibyte; coercing at binding time is what
+         ;; makes it the right answer on both runtimes at once.
+         (have-rodata (and rodata (> (nelisp-elf--byte-length rodata) 0)))
+         (have-data   (and data (> (nelisp-elf--byte-length data) 0)))
          (have-bss    (> bss-size 0))
          (have-rw     (or have-data have-bss))
          (have-rela   (and relocs (> (length relocs) 0)))
-         (text-size   (length text))
-         (rodata-size (if have-rodata (length rodata) 0))
-         (data-size   (if have-data (length data) 0))
+         (text-size   (nelisp-elf--byte-length text))
+         (rodata-size (if have-rodata (nelisp-elf--byte-length rodata) 0))
+         (data-size   (if have-data (nelisp-elf--byte-length data) 0))
          (vaddr-base  nelisp-elf--minimal-vaddr-base)
          (page-size   #x1000)
          ;; ---- RX segment layout (= Ehdr + Phdrs + .text + .rodata).
@@ -2275,8 +2295,16 @@ treated as section-relative offsets (= no vaddr-base addition)."
             nelisp-elf--em-aarch64)
            ((integerp machine-arg) machine-arg)
            (t (error "nelisp-elf: invalid :machine %S" machine-arg))))
-         (have-rodata (and rodata (> (length rodata) 0)))
-         (have-data   (and data (> (length data) 0)))
+         ;; See the matching comment in `nelisp-elf--build-rich': `text' /
+         ;; `rodata' / `data' are raw compiled-object bytes, and `length'
+         ;; undercounts them (Doc 161 UTF-8 char decode) whenever a byte is
+         ;; >= 128.  This is the AOT compiler's own object write -- the
+         ;; caller `compile-elisp-artifact' hits precisely because ordinary
+         ;; machine code is full of such bytes -- so every section size and
+         ;; offset below must be built from `nelisp-elf--byte-length', not
+         ;; `length'.
+         (have-rodata (and rodata (> (nelisp-elf--byte-length rodata) 0)))
+         (have-data   (and data (> (nelisp-elf--byte-length data) 0)))
          (have-bss    (> bss-size 0))
          ;; Relocs are split by the section they patch: `.rela.text'
          ;; (default) vs `.rela.data' (a pointer baked into a `.data' blob,
@@ -2291,9 +2319,9 @@ treated as section-relative offsets (= no vaddr-base addition)."
                (nreverse a)))
          (have-rela   (and text-relocs (> (length text-relocs) 0)))
          (have-rela-data (and data-relocs (> (length data-relocs) 0)))
-         (text-size   (length text))
-         (rodata-size (if have-rodata (length rodata) 0))
-         (data-size   (if have-data (length data) 0))
+         (text-size   (nelisp-elf--byte-length text))
+         (rodata-size (if have-rodata (nelisp-elf--byte-length rodata) 0))
+         (data-size   (if have-data (nelisp-elf--byte-length data) 0))
          ;; ---- File layout (= no Phdrs, sections start after Ehdr).
          (text-off    nelisp-elf--ehdr-size)
          (rodata-off  (+ text-off text-size))
