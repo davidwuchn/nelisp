@@ -194,6 +194,34 @@ jobs:
           mkdir -p verification-logs
           ./scripts/verify-cross-platform.sh --parallel-jobs 2 --include-tarball 2>&1 | tee verification-logs/macos-x86_64.log
 
+      # 2026-08-22 survey gap #5: nelisp-standalone--target-runnable-on-host-p
+      # (scripts/nelisp-standalone-build.el) did not recognize this runner as
+      # able to run a macos-x86_64 binary, so every binary-building
+      # correctness gate silently reported "not runnable" here -- note the
+      # step above never builds one either: verify-cross-platform.sh's Darwin
+      # branch hardcodes `--target macos-aarch64' regardless of host arch, so
+      # today this job builds (and, now that the predicate can see it, will
+      # correctly skip running) an Apple Silicon binary on Intel hardware.
+      # This step is the first thing in this repository that actually asks
+      # for a macos-x86_64 build.
+      #
+      # It is expected to fail on first run, NOT because of anything the
+      # predicate gets wrong: `nelisp-standalone--target-abi'/`-arch'/`-os'
+      # in nelisp-standalone-build.el have no macos-x86_64 clause at all (only
+      # the lower-level lisp/nelisp-mach-o-write.el Mach-O writer and
+      # lisp/nelisp-asm-x86_64.el assembler support the pieces in isolation),
+      # so this should die immediately with a loud
+      # "standalone: unsupported target macos-x86_64" `error' rather than
+      # silently skipping or hanging.  Wiring that orchestration is real
+      # follow-up work outside this gap's scope (see the predicate's
+      # docstring); continue-on-error keeps that known, diagnosed gap from
+      # blocking this job while the failure stays fully visible in the logs.
+      - name: Standalone reader correctness gate (macos-x86_64, first real run)
+        continue-on-error: true
+        env:
+          NELISP_STANDALONE_TARGET: macos-x86_64
+        run: make standalone-reader-test
+
       - name: Upload macOS Intel verification log
         if: always()
         uses: actions/upload-artifact@v4

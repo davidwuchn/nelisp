@@ -100,6 +100,32 @@ jobs:
       - name: Verify checksum
         run: cd dist && sha256sum --check stage-d-v2.0-linux-arm64.tar.gz.sha256
 
+      # 2026-08-22 survey gap #5: nelisp-standalone--target-runnable-on-host-p
+      # (scripts/nelisp-standalone-build.el) did not recognize this runner as
+      # able to run a linux-aarch64 binary, so every binary-building
+      # correctness gate silently reported "not runnable" here and this
+      # artifact was validated only by checksum, never executed.  The
+      # `linux-arm64' PLATFORM arg above only names the release tarball; the
+      # `Build release artifact' step calls `make standalone-reader' with no
+      # NELISP_STANDALONE_TARGET, which defaults to linux-x86_64 -- so
+      # target/nelisp there is NOT the binary this step exercises.  These
+      # steps set NELISP_STANDALONE_TARGET=linux-aarch64 explicitly and build
+      # to target/nelisp-aarch64 (arch-suffixed so it never collides with the
+      # x86_64 one above), a genuinely separate, real ARM64 build+run.  This
+      # is the FIRST time this code path has ever executed on real hardware;
+      # see the predicate's docstring for what is and is not exercised
+      # elsewhere already.
+      - name: Standalone reader correctness gate (linux-aarch64, first real run)
+        env:
+          NELISP_STANDALONE_TARGET: linux-aarch64
+        run: make standalone-reader-test
+
+      - name: Native artifact correctness gate (linux-aarch64, first real run)
+        env:
+          NELISP_STANDALONE_TARGET: linux-aarch64
+          NELISP: target/nelisp-aarch64
+        run: make nelisp-native-artifact-gate
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
