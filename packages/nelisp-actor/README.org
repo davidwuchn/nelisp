@@ -43,6 +43,27 @@ packages/nelisp-actor/
 - Elisp dependencies declared by the library: =cl-lib=, =generator=,
   =nelisp-gc=
 
+* Portability, measured (2026-08-22, target/nelisp built from 06ed9bd3a)
+
+This package makes no standalone-portability claim in its own docs
+(unlike =nl-condition=/=nl-safe=, which document a standalone Testing
+path); =docs/design/10-phase4-actor.org= never mentions =target/nelisp=
+either.  Measured anyway, since the question comes up:
+
+- Host Emacs: 41/41 =nelisp-actor-test.el= ERT cases pass (part of
+  `ert-full'), plus the new 3-case =examples/nelisp-actor/
+  two-actor-exchange.el= demo (`nelisp-actor-example-test.el', also
+  part of `ert-full' via the `packages/*/test/nelisp*-test.el' glob).
+- Standalone: FALSE, measured, fails loudly rather than silently.
+  =(load "packages/nelisp-actor/src/nelisp-actor.el")= against
+  =target/nelisp= signals =(file-missing . generator)= at the
+  =(require 'generator)= on line 40 -- =generator.el= is not vendored
+  for the standalone binary (no =generator.el= exists anywhere in this
+  repository tree; =lisp/nelisp-stdlib.el= mentions `iter-defun' only
+  in a docstring, no macro of that name is defined).  Nothing past
+  that require was reachable to test.  No standalone smoke exists for
+  this package, and none is added -- there is nothing for it to run.
+
 * Dependents
 
 - Source dependents: =src/nelisp-process-pool.el=,

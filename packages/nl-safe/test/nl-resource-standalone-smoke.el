@@ -86,6 +86,10 @@ KEYS supports `:type SYMBOL' for condition matching like ert."
          (setq failures
                (cons (format "%s: %S" (car test) err) failures)))))
     (setq tests (cdr tests)))
+  ;; `tools/ai/nelisp-ai.sh gate NAME -- ...' requires this exact line to
+  ;; report what the gate checked; its absence is itself a hard failure
+  ;; there (see tools/ai/nelisp-ai.sh's `cmd_gate').
+  (princ (format "GATE-COUNT checked=%d findings=%d\n" ran (length failures)))
   (when failures
     (let ((all failures))
       (while all
