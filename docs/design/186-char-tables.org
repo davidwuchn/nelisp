@@ -34,25 +34,42 @@ stdlib-eval-special.el:207=), =standard-case-table=/=current-case-table=.
 None of these twelve names is =fboundp= on this branch's =target/nelisp=
 (confirmed by direct probe, §1.1).
 
-*Measured consumer priority (§1.4, contradicting the task background's
-guess)*: =upcase=/=downcase= do NOT need char-tables — they already work,
-correctly and Unicode-aware, via a hardcoded range predicate
-(=nelisp--case-up-char=/=-down-char=, =scripts/nelisp-stdlib-prelude.el:
-874-975=) with zero dependency on any case-table. The real, currently
-broken consumer is the *regex engine's* =\sC= syntax-class escape
-(=lisp/nelisp-stdlib-regexp.el:315-320=), which the file's own comment
-admits is wrong in a stated direction ("every =\\sC= behaved as =\\s-=")
-because syntax-class parsing has nowhere to look anything up. =\w=/=\b=
-work today only because a hardcoded ASCII word-constituent predicate
-happens to match Emacs's *default* standard syntax table for ASCII input
-— it cannot be customized and is silently wrong for anything a real
-syntax table would classify differently.
+*Measured consumer priority (§1.4, contradicting both the task background's
+guess AND this doc's own first-draft claim — caught by re-probing before
+committing, not asserted from a stale comment)*: =upcase=/=downcase= do NOT
+need char-tables — they already work, correctly and Unicode-aware, via a
+hardcoded range predicate (=nelisp--case-up-char=/=-down-char=,
+=scripts/nelisp-stdlib-prelude.el:874-975=) with zero dependency on any
+case-table. The regex engine's =\sC= syntax-class escape
+(=lisp/nelisp-stdlib-regexp.el:304-332=) carries a comment claiming "the
+class character was parsed and thrown away, so every =\\sC= behaved as
+=\\s-="; that comment is *stale*. =nlre--syntax-p= (=:321-332=), directly
+below the comment, already =cond=-dispatches on eight real classes (word,
+symbol, whitespace, punctuation, open/close-paren, string-quote, escape).
+Probed directly against this doc's own build: =(string-match "\\sw" "a")=
+=> =0=, =(string-match "\\Sw" "a")= => =nil=, =(string-match "\\s_" "_")=
+=> =0= — all three already match Emacs. *There is no currently-broken
+regex consumer either.* Both of the task background's candidate
+consumers turn out to already work without a char-table, by hardcoding
+Emacs's global default classification as code instead of data.
+
+That hardcoding is itself the real, narrower gap §1.4 lands on: nothing
+can *customize* the classification, because =modify-syntax-entry= does not
+exist anywhere in this tree (confirmed by grep) and nothing outside
+=nelisp-stdlib-regexp.el= even references =nlre--word-p=/=-syntax-p=. A
+consumer that needs =_= counted as word-constituent (many programming-
+language major modes do) or a custom string-quote character has no
+data structure to ask for that change today — not because the current
+classification is wrong, but because it cannot be told to be different.
 
 *Decided direction*: expose the existing native char-table as a thin
-Elisp API (§3), accept the entry-array's O(n) lookup for now rather than
-building real range compression (§3.3 bounds why), and let =\sC= (§3.4)
-be the first real consumer — ahead of =syntax-table=/=case-table= objects,
-which need buffer/point machinery this doc does not own (Doc 188).
+Elisp API (§3) regardless of this correction — the representation
+question (§2) does not depend on which consumer motivates it — and let a
+real, data-backed =nlre--syntax-table= (§3.4) replace the hardcoded
+predicates as the first consumer, so the *customization* seam exists even
+though the *classification* was already correct. This is weaker
+motivation than "fixes an active bug," and this doc says so plainly rather
+than keeping the more dramatic, disproven framing.
 
 * §1 Problem — measured evidence
 
@@ -155,11 +172,11 @@ package is ever wired in, calling its decode path today hits a
 void-function error at =make-char-table=, but nothing currently reaches
 that path.
 
-** §1.4 The real, currently broken consumer: regex =\sC=, not case ops
+** §1.4 Neither candidate consumer is actually broken — the real gap is customization
 
 =upcase=/=downcase= (=scripts/nelisp-stdlib-prelude.el:911,950=, plus
 =upcase-initials= at :929) implement Unicode case mapping via
-=nelisp--case-up-char=/=-down-char=ta hardcoded ladder of range
+=nelisp--case-up-char=/=-down-char=, a hardcoded ladder of range
 comparisons (ASCII, Latin-1 supplement, and the Cyrillic-extended
 =#x4D0-#x4FF= pair range at minimum — read in full at
 =scripts/nelisp-stdlib-prelude.el:850-906=), including the one-to-many
@@ -171,8 +188,9 @@ contradicts the task background's framing, and is the kind of
 divergence a design doc re-verifying its own premises is supposed to
 catch rather than propagate.
 
-The regex engine, by contrast, is honest about being wrong today,
-specifically because there is nowhere to look up a real syntax class:
+The regex engine's =\sC=/=\SC= syntax-class escape looked like the other
+candidate, on the strength of a comment sitting right above its
+implementation:
 
 #+begin_src elisp
 ;; lisp/nelisp-stdlib-regexp.el:296-320
@@ -186,18 +204,38 @@ specifically because there is nowhere to look up a real syntax class:
 ;; in a stated direction rather than in an arbitrary one.
 #+end_src
 
-=nlre--word-p= is a closed-form ASCII predicate that happens to agree with
-Emacs's *default global* standard syntax table (where =_= is a symbol,
-not word, constituent — the adjacent comment at :306-309 documents this
-was gotten right on purpose, via a real regression:
-=(string-match "\\bx" "_x")= previously answered nil where Emacs answers
-1). It cannot be customized per major mode and has no path to
-=modify-syntax-entry=. =\sC=/=\SC= have no implementation to fall back on
-at all — every class is currently misread as whitespace/non-whitespace.
-This is the first place a real syntax-table object would change an
-observable, already-documented-as-wrong answer, and it needs no buffer,
-no point, and no markers — only a syntax-table VALUE and a character, both
-in scope for this doc.
+*This comment is stale, and taking it at face value was this doc's own
+first-draft mistake — corrected here before committing rather than left
+to be found later.* =nlre--syntax-p= (=:321-332=, the function this
+comment sits directly above) already =cond=-dispatches the class
+character across eight real syntax classes — word, symbol (=_=),
+whitespace, punctuation, open-paren, close-paren, string-quote, escape —
+not a single collapsed "whitespace or not" test. Probed directly against
+this doc's own build: =(string-match "\\sw" "a")= => =0=,
+=(string-match "\\Sw" "a")= => =nil=, =(string-match "\\s_" "_")= =>
+=0= — all three already match Emacs (contradicting the comment's own
+claimed counter-example for =\\Sw=, which this session could not
+reproduce). Git history (=876eb0a35=, =3efc2ae0b=) shows this file has
+already been through at least one real "thirteen answers that differed
+from Emacs" fix pass; the comment almost certainly predates that fix and
+was never updated once =nlre--syntax-p= replaced whatever it used to
+describe.
+
+What IS still true, and is this doc's actual §1.4 finding: =nlre--word-p=/
+=-syntax-p= are closed-form ASCII predicates that happen to agree with
+Emacs's *default global* standard syntax table (=_= correctly read as
+symbol- not word-constituent, per the adjacent :306-309 comment and its
+own cited regression, =(string-match "\\bx" "_x")=). Nothing can
+*customize* that classification — =modify-syntax-entry= does not exist
+anywhere in this tree (confirmed by grep across =*.el=), and no code
+outside =nelisp-stdlib-regexp.el= references =nlre--word-p=/=-syntax-p=
+at all, meaning no consumer has ever needed to ask for a different
+classification, let alone been unable to. This is the real, narrower gap:
+a data-backed syntax table would let =_= become word-constituent for a
+consumer that wants that (many programming-mode syntax tables do), or a
+custom string-quote character be registered — not fix a wrong answer
+today, but remove a customization ceiling nothing has hit yet because
+nothing could ask.
 
 ** §1.5 =with-syntax-table= is a full stub
 
@@ -290,22 +328,25 @@ scheme, short of Emacs's full sub-char-table structure) is filed as
 §7.2, not designed here, because no consumer measured in this doc needs
 it yet.
 
-** §3.4 First real consumer: regex =\sC=/=\SC=
+** §3.4 First real consumer: making syntax classification data instead of code
 
-Once §3.1-§3.2 land, =lisp/nelisp-stdlib-regexp.el='s =\sC= handling
-(§1.4) gains a real implementation: a module-level =nlre--syntax-table=
-char-table (populated at load time with Emacs's standard-syntax-table
-defaults for ASCII — word/symbol/whitespace/punctuation classes, the
-same four classes =nlre--word-p=/=-symbol-p=/=-space-p= already encode by
-hand) replaces the "parsed and thrown away" class byte with a real
-=(aref nlre--syntax-table c)= lookup. This is the FIRST place this doc's
-new API is load-bearing for something other than its own tests, and is
-scoped narrowly: no per-buffer/per-mode syntax table yet (that needs
-=current-buffer=, Doc 188's territory), just a single global default
-table replacing four hand-written predicates with one data-driven one —
-a refactor that is also a strict correctness improvement (=\sC=/=\SC= for
-classes beyond whitespace start working; §1.4's documented divergence
-closes).
+Once §3.1-§3.2 land, =lisp/nelisp-stdlib-regexp.el='s =\sC= handling gets a
+real backing store: a module-level =nlre--syntax-table= char-table
+(populated at load time with Emacs's standard-syntax-table defaults for
+ASCII, mirroring the eight classes =nlre--syntax-p= already encodes by
+hand — §1.4) replaces the hand-written =cond= with a real
+=(aref nlre--syntax-table c)= lookup. Per §1.4, this is *not* a
+correctness fix — every case this doc probed already answers the same as
+Emacs before and after — it is what makes classification *data a caller
+could eventually rewrite* instead of code baked into the regex engine.
+This is the FIRST place this doc's new API is load-bearing for something
+other than its own tests, and is scoped narrowly: no per-buffer/per-mode
+syntax table yet (that needs =current-buffer=, Doc 188's territory), no
+=modify-syntax-entry= (out of scope, §7.4), just a single global default
+table replacing eight hand-written =cond= arms with one data-driven
+lookup, verified byte-for-byte equivalent to the predicates it replaces
+before this phase is considered done (§6.1's regression cases exist
+specifically to catch a refactor that is not, in fact, behavior-preserving).
 
 ** §3.5 =standard-syntax-table=/=with-syntax-table=/case-table objects — named, not built here
 
@@ -357,14 +398,17 @@ on the pattern of Doc 164 §6.
   entries correctly; a range exceeding the ceiling signals the new error
   symbol rather than silently truncating or silently accepting.
 
-** P3 — regex =\sC=/=\SC= real implementation  (1–2 d)
+** P3 — regex =\sC=/=\SC= data-backed rewrite  (1–2 d)
 - The =nlre--syntax-table= default table (§3.4) and the class-lookup
-  rewrite in =lisp/nelisp-stdlib-regexp.el=.
-- *Exit*: =(string-match "\\sw" "a")= and =(string-match "\\s_" "_")= both
-  match (currently both misclassify per §1.4); =(string-match "\\Sw" "a")=
-  is =nil= (currently a false match) — all three added to the
-  =emacs-parity= cases file (§6.2) so the fix is pinned against a real
-  Emacs comparison, not only an internal assertion.
+  rewrite in =lisp/nelisp-stdlib-regexp.el=, replacing =nlre--syntax-p='s
+  =cond= with a table lookup.
+- *Exit*: =(string-match "\\sw" "a")=, =(string-match "\\s_" "_")=, and
+  =(string-match "\\Sw" "a")= all answer *exactly what they already
+  answer today* (§1.4 confirmed these already match Emacs) — this phase's
+  bar is regression-free equivalence, not a behavior fix, and all three
+  join the =emacs-parity= cases file (§6.2) specifically so a future
+  change to the table cannot silently regress classification that
+  already works.
 
 ** P4 — dead-code correction: =packages/nelisp-base64=  (0.25 d, optional)
 - Now that =make-char-table= exists, =nelisp-base64--ensure-decode-table=
@@ -413,14 +457,17 @@ rather than assumed negligible.
 #+end_src
 
 Each case is red today (=void-function make-char-table=) and green once
-P0/P1 land. The regex divergence from §1.4 gets its own case, run against
-BOTH the current (wrong) and post-P3 behavior:
+P0/P1 land. There is no analogous against-the-bug case for the P3 regex
+rewrite (§1.4 established =\sC=/=\SC= already answer correctly, so the
+correct verification shape is a *regression* case, not a bug-reproduction
+one — see §6.2's parity table, which pins today's already-correct answers
+so P3's refactor cannot silently change them):
 
 #+begin_src elisp
 (ert-deftest nelisp-regex-syntax-class/sw-matches-word-char ()
-  (should (string-match "\\sw" "a")))       ; currently answers nil (bug)
+  (should (string-match "\\sw" "a")))       ; already matches; must stay this way through P3
 (ert-deftest nelisp-regex-syntax-class/Sw-rejects-word-char ()
-  (should-not (string-match "\\Sw" "a")))   ; currently answers 0 (bug)
+  (should-not (string-match "\\Sw" "a")))   ; already nil; must stay this way through P3
 #+end_src
 
 ** §6.2 Parity forms
@@ -431,12 +478,12 @@ standalone per =Makefile:840=):
 
 | form | Emacs | NeLisp (post-fix) |
 |---|---|---|
-| =(char-table-p (make-char-table 'test))= | =t= | =t= |
-| =(aref (make-char-table 'test 'D) ?a)= | =D= | =D= |
-| =(string-match "\\sw" "a")= | =0= | =0= (was =nil=) |
-| =(string-match "\\Sw" "a")= | =nil= | =nil= (was =0=) |
-| =(string-match "\\s_" "_")= | =0= | =0= (was =nil=, per §1.4's =\s-= misclassification) |
-| =(upcase ?\N{U+00DF})= | =#x1E9E= | =#x1E9E= (already correct — anchor, confirms §1.4's "case ops need no char-table" claim stays true after this doc lands, i.e. this doc must not regress it) |
+| =(char-table-p (make-char-table 'test))= | =t= | =t= (new after P0; =void-function= before) |
+| =(aref (make-char-table 'test 'D) ?a)= | =D= | =D= (new after P0/P1) |
+| =(string-match "\\sw" "a")= | =0= | =0= (already =0= before P3 too — §1.4; P3 must not regress it) |
+| =(string-match "\\Sw" "a")= | =nil= | =nil= (already =nil= before P3 too) |
+| =(string-match "\\s_" "_")= | =0= | =0= (already =0= before P3 too) |
+| =(upcase ?\N{U+00DF})= | =#x1E9E= | =#x1E9E= (already correct, no char-table involved — anchor, confirms §1.4's "case ops need no char-table" claim stays true after this doc lands) |
 
 ** §6.3 Mutation rows for new gates
 
@@ -492,16 +539,21 @@ sibling doc in this same batch) should confirm it is willing to own that
 handoff — this doc's author has not read Doc 188 and cites it only as a
 forward reference, per the convention Doc 187 §7.4 sets.
 
-** §7.4 Whether =\s-=-class default coverage is complete enough for P3
+** §7.4 Whether eight-class coverage is complete enough for P3
 
-§3.4 sketches four syntax classes (word/symbol/whitespace/punctuation)
-because those are what =nlre--word-p=/=-symbol-p=/=-space-p= already
-distinguish. Emacs's standard syntax table has more classes
-(open/close-parenthesis, string-quote, escape, comment-start/end, ...).
-Whether P3 needs the fuller set to be a real correctness win, or whether
-the four-class subset is sufficient for every =\sC= form actually reached
-by anything in this tree's test corpus, is not measured in this session
-and should be checked before P3 is scoped as "done."
+=nlre--syntax-p= (§1.4) already handles eight of Emacs's syntax classes:
+word, symbol, whitespace, punctuation, open-paren, close-paren,
+string-quote, escape. Emacs's standard syntax table has a few more this
+doc did not find handled anywhere in this tree — comment-start/end,
+generic-comment, generic-string, expression-prefix. Since §1.4 refuted
+this doc's own first-draft claim that =\sC= was broken, the honest
+framing is: P3 is a data-representation change for eight already-correct
+classes, and whether the remaining handful are worth adding (either as
+part of P3 or a follow-up) depends on whether anything in this tree's
+test corpus or real target packages (Magit/Org-grade code, per Doc 188)
+actually reaches them — not measured this session, and should be checked
+before P3 is scoped as "done," same as the original open question, just
+for a materially smaller gap than first assumed.
 
 * §8 References
 
@@ -525,8 +577,10 @@ and should be checked before P3 is scoped as "done."
 - =packages/nelisp-base64/src/nelisp-base64.el:31= — the one, unreached,
   =make-char-table= call site (§1.3).
 - =lisp/nelisp-stdlib-eval-special.el:207-209= — =with-syntax-table= stub.
-- =lisp/nelisp-stdlib-regexp.el:296-320= — =nlre--word-p=/=-symbol-p=/
-  =-space-p= and the =\sC=/=\SC= "parsed and thrown away" comment.
+- =lisp/nelisp-stdlib-regexp.el:296-332= — =nlre--word-p=/=-symbol-p=/
+  =-space-p=/=-syntax-p=; the stale "parsed and thrown away" comment
+  sits at =:316-320=, directly above the working eight-class =cond= at
+  =:321-332= it no longer describes (§1.4).
 - =scripts/nelisp-stdlib-prelude.el:850-975= — =nelisp--case-up-char=/
   =-down-char=, =upcase=/=downcase=/=upcase-initials=, no char-table
   dependency.
