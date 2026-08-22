@@ -147,6 +147,28 @@ jobs:
           make parity-coverage
           make gate-selfcheck
 
+      # `nelisp-ai.sh check' is the ~18-gate fast lane AI.md documents as
+      # the pre-commit command; most of its individual steps were already
+      # scattered above as their own `make TARGET' steps (this workflow
+      # predates AI.md and `tools/ai/'), but seven were not in ANY CI lane
+      # at all: bootstrap-contract, fallback-inventory,
+      # fallback-inventory-selftest, gate-mutation, generated-source-parse,
+      # ns-gate, wasm-dtw-skeleton-smoke.  Running the whole tier here
+      # (rather than hand-picking just the seven) makes `nelisp-ai.sh
+      # check' itself, not a second hand-maintained step list, the source
+      # of truth for what the fast lane is -- the two were already able to
+      # drift (gates.expected grew past this file's own count without
+      # anyone noticing, which is the gap this step closes).  The
+      # overlap with the individual steps above costs real time (measured
+      # locally at 85s for the whole tier) but changes nothing about their
+      # own results.  Linux-only: `gate-mutation''s emacs-parity row
+      # rebuilds target/nelisp through the same cc + objcopy native-exec
+      # toolchain `bench-aot-tco' above notes is Linux-only.
+      - name: "AI toolchain check-tier gates (tools/ai/nelisp-ai.sh check); Linux x86_64"
+        if: runner.os == 'Linux'
+        shell: bash
+        run: bash tools/ai/nelisp-ai.sh check
+
       # Placed before the ERT suite so a pre-existing test failure does
       # not skip the Mach-O toolchain-acceptance signal.
       - name: Mach-O acceptance (NeLisp-emitted arm64 exec + MH_OBJECT vs codesign/clang/ld64; macOS)
@@ -177,24 +199,52 @@ jobs:
       - name: Run smoke tests with the JIT disabled
         shell: bash
         run: make test-nojit
-      - name: Standalone NeLisp eval (pure-elisp AOT, zero Rust; x86_64 Linux)
-        if: runner.os == 'Linux'
-        shell: bash
-        run: make standalone-eval-test
       - name: Standalone NeLisp reader->eval (text -> AOT reader, zero Rust; x86_64 Linux)
         if: runner.os == 'Linux'
         shell: bash
         run: make standalone-reader-test
+      # target/nelisp already exists from the step above (its own
+      # Makefile prerequisite is conditional, same as `emacs-parity'
+      # further up, so this does not rebuild it).
+      - name: "Binary-size ratchet (target/nelisp vs pinned baseline, tools/nelisp-binary-size-baseline.txt; Linux x86_64)"
+        if: runner.os == 'Linux'
+        shell: bash
+        run: bash tools/ai/nelisp-ai.sh gate binary-size-ratchet -- make binary-size-ratchet
       - name: Standalone NeLisp SELF-HOST (interpreter compiles recursive fact -> native ELF, zero emacs; x86_64 Linux)
         if: runner.os == 'Linux'
         shell: bash
         run: make standalone-selfhost-test
-      - name: Standalone NeLisp MULTI-THREADED self-host (clone(2)+atomics, 3 parallel threads, zero emacs; x86_64 Linux)
+      # Three of `nelisp-ai.sh''s binary-tier gates were in no CI lane at
+      # all before this pass: nelisp-native-artifact-gate,
+      # nelisp-performance-gate, standalone-reader-smokes (the 28
+      # individual `standalone-reader-*' targets as one gate).  Each
+      # builds target/nelisp itself if it is not already there, the same
+      # way `standalone-selfhost-test' above does.
+      - name: "AI toolchain binary-tier gate: native artifact (tools/ai/nelisp-ai.sh native-artifact); Linux x86_64"
         if: runner.os == 'Linux'
         shell: bash
-        run: make standalone-selfhost-mt-test
-      - name: Standalone NeLisp PARALLEL BUILD (4 units compiled concurrently via fork(2), zero emacs; x86_64 Linux)
+        run: bash tools/ai/nelisp-ai.sh native-artifact
+      - name: "AI toolchain binary-tier gate: performance (tools/ai/nelisp-ai.sh perf); Linux x86_64"
         if: runner.os == 'Linux'
         shell: bash
-        run: make standalone-parallel-compile-test
+        run: bash tools/ai/nelisp-ai.sh perf
+      - name: "AI toolchain binary-tier gate: reader smokes (tools/ai/nelisp-ai.sh smokes, 28 standalone-reader-* targets); Linux x86_64"
+        if: runner.os == 'Linux'
+        shell: bash
+        run: bash tools/ai/nelisp-ai.sh smokes
+      # `nelisp-ai.sh extras' bundles six more binary-tier gates that were
+      # in no CI lane at all: nelisp-runtime-image-cache-gate,
+      # nelisp-source-command-substrate-gate, standalone-chunk-growth-test,
+      # wasm-runtime-image-smoke, nelisp-nelix-native-hot-gate (needs
+      # ../nelix; GATE-SKIPs gracefully when the checkout is absent, which
+      # it is on a fresh CI checkout), substrate-parity-smoke.  It also
+      # covers standalone-eval-test, standalone-selfhost-mt-test and
+      # standalone-parallel-compile-test, which used to be their own
+      # steps immediately below this one -- folded in here instead of run
+      # twice; extras needs target/nelisp already built, which the
+      # `standalone-reader-test' step above provides.
+      - name: "AI toolchain binary-tier gates: extras (tools/ai/nelisp-ai.sh extras); Linux x86_64"
+        if: runner.os == 'Linux'
+        shell: bash
+        run: bash tools/ai/nelisp-ai.sh extras
 

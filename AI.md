@@ -32,11 +32,24 @@ tools/ai/nelisp-ai.sh test                               # full ERT suite
 tools/ai/nelisp-ai.sh verify                             # the verdict
 ```
 
-`check` runs the same fast gates as the CI lane and then verifies, so
-"what will CI say" is answerable before pushing rather than after.  It
-deliberately does not run the full ERT suite; `verify` holds you to the
-last `ert-full` report and prints its age, so run `test` when that
-column says the evidence is stale.
+`check` runs as one step of the CI Linux lane
+(`.github/workflows/ci.yml`, "AI toolchain check-tier gates") and then
+verifies, so "what will CI say" about that tier is answerable before
+pushing rather than after.  The same Linux lane separately runs the
+binary-tier gates this file's inner loop lists as their own commands
+(`native-artifact`, `perf`, `smokes`, `extras`, plus `standalone-
+reader-test`/`emacs-parity`/`binary-size-ratchet` individually rather
+than through `standalone`, to avoid running `emacs-parity` twice), the
+ERT suite (both JIT settings), and several checks `nelisp-ai.sh` does
+not model at all (`bench-aot-tco`, `macho-acceptance-test`) -- none of
+which `check` itself covers.  `check` deliberately does not run the
+full ERT suite; `verify` holds you to the last `ert-full` report and
+prints its age, so run `test` when that column says the evidence is
+stale.  CI wiring was added 2026-08-22 by running these exact commands
+locally and reading their exit codes and GATE-COUNT lines -- it has
+not yet been observed to pass on an actual GitHub Actions runner,
+whose toolchain (Emacs version, `node`, `cc`/`objcopy`) can differ
+from this checkout's.
 
 `verify` is the only command whose exit code answers "is the tree good".
 Every other command reports on itself; `verify` also knows which gates
