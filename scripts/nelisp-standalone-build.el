@@ -14942,7 +14942,27 @@ artifact before wiring that artifact into the marker command path."
      "         (prefix-len nil)\n"
      "         (features nil)\n"
      "         (last nil)\n"
-     "         (module-result nil))\n"
+     "         (module-result nil)\n"
+     "         (path-len (length artifact-path)))\n"
+     ;; Doc 142 section 6.2: a `.elc' artifact is genuine GNU Emacs
+     ;; bytecode (`#[...]' compiled-function objects behind a `;ELC'
+     ;; header) produced for host Emacs to `load'.  This loader below is
+     ;; the standalone runtime's own private-format replay path -- it has
+     ;; no GNU Emacs bytecode VM and never did; before this check, handing
+     ;; it a real `.elc' fell through to `--validate-payload' and failed
+     ;; with the generic, unrelated \"invalid artifact magic\" (it does not
+     ;; start with the private NeLisp artifact prefix).  Reject up front
+     ;; with the real reason instead of that misleading diagnostic.
+     "    (if (and (>= path-len 4)\n"
+     "             (equal (substring artifact-path (- path-len 4) path-len)\n"
+     "                    \".elc\"))\n"
+     "        (error (concat \"eval-elisp-artifact/exec-elisp-artifact: '.elc' \"\n"
+     "                       \"artifacts are host-Emacs-only (Doc 142 section \"\n"
+     "                       \"6.2) -- the standalone runtime has no GNU Emacs \"\n"
+     "                       \"bytecode VM and cannot execute one; load it with \"\n"
+     "                       \"real Emacs instead: emacs -Q --batch --load \"\n"
+     "                       artifact-path))\n"
+     "      nil)\n"
      "    (nelisp-standalone-source-cache--stats \"artifact-before-read\")\n"
      "    (setq content (nelisp-standalone-source-cache--read-file artifact-path))\n"
      "    (nelisp-standalone-source-cache--stats \"artifact-after-read\")\n"
@@ -18628,6 +18648,7 @@ loader when it is absent."
           (condition-case err
               (let ((nelisp-standalone--reader-out out))
                 (dolist (smoke '(nelisp-standalone--reader-temp-name-uniqueness-smoke
+                                 nelisp-standalone--reader-elc-smoke
                                  nelisp-standalone--reader-intern-canonical-smoke
                                  nelisp-standalone--reader-defvaralias-smoke
                                  nelisp-standalone--reader-temp-outside-cwd-smoke
@@ -18925,6 +18946,101 @@ the defect was live -- which is why this spends a second binary invocation."
           (when (string= first second)
             (error "temp-name smoke: two processes both answered %S" first)))
       (ignore-errors (delete-file tmp)))))
+
+(defun nelisp-standalone--reader-elc-smoke ()
+  "Assert the Doc 142 section 6.2 `.elc' lane's full three-part contract.
+
+Before the fix landed alongside this smoke, `compile-elisp-artifact --kind
+elc' on this (non-Windows) standalone binary crashed with `Symbol's value
+as variable is void: invocation-name': `nelisp-artifact--byte-compile-to'
+unconditionally reads that host-Emacs-only variable (set by `emacs.c' at
+startup) to relaunch `the currently running Emacs' as a clean
+`batch-byte-compile' subprocess, which only makes sense when the caller
+already IS host Emacs.  `nelisp-artifact--standalone-host-helper-mode'
+gated the existing, already-working host-helper path (which spawns a real
+host Emacs and calls `nelisp-artifact-compile-elc-file' from inside it) to
+Windows only; this smoke measures the fixed elc lane's full contract on
+this platform:
+
+  (a) compile-elisp-artifact --kind elc produces a real `.elc' + manifest;
+  (b) stock host Emacs `load's it and calls the compiled function, i.e. it
+      is genuine GNU Emacs bytecode, not a NeLisp private format wearing
+      a `.elc' suffix;
+  (c) the standalone's OWN eval-elisp-artifact/exec-elisp-artifact do NOT
+      execute it -- `nelisp-standalone-source-cache-load-artifact' has no
+      GNU Emacs bytecode VM (confirmed: the reader never parses `#[...]'
+      literals) and now rejects `.elc' up front with a stated reason
+      instead of the old, unrelated `invalid artifact magic' error;
+  (d) negative: with the host helper disabled, --kind elc fails with a
+      named diagnostic (`host-helper required for --kind elc'), not a
+      crash and not a silent native fallback."
+  (let ((src (make-temp-file "nelisp-reader-elc-" nil ".el"))
+        (out (make-temp-file "nelisp-reader-elc-" nil ".elc"))
+        (rc nil)
+        (compile-out nil)
+        (host-out nil)
+        (reject-out nil)
+        (disabled-out nil))
+    (ignore-errors (delete-file out))
+    (unwind-protect
+        (progn
+          (with-temp-file src
+            (insert "(defun nelisp-reader-elc-smoke-fn (x) (+ x 1))\n"))
+          ;; (a) produce a real .elc + sibling manifest.
+          (with-temp-buffer
+            (setq rc (call-process nelisp-standalone--reader-out nil t nil
+                                   "compile-elisp-artifact"
+                                   "--kind" "elc"
+                                   "--input" src
+                                   "--output" out))
+            (setq compile-out (buffer-string)))
+          (unless (and (= rc 0)
+                       (file-exists-p out)
+                       (file-exists-p (concat out ".manifest.el")))
+            (error "compile-elisp-artifact --kind elc exit=%S stdout=%S out=%S"
+                   rc compile-out out))
+          ;; (b) stock host Emacs loads it and calls the real function.
+          (with-temp-buffer
+            (setq rc (call-process "emacs" nil t nil "-Q" "--batch"
+                                   "--load" out
+                                   "--eval"
+                                   "(princ (nelisp-reader-elc-smoke-fn 41))"))
+            (setq host-out (string-trim (buffer-string))))
+          (unless (and (= rc 0) (string= host-out "42"))
+            (error "host Emacs --load of the compiled .elc exit=%S stdout=%S"
+                   rc host-out))
+          ;; (c) the standalone's own eval-elisp-artifact must NOT execute
+          ;; it -- assert a clear, named rejection, not a crash and not a
+          ;; silent (wrong) success.
+          (with-temp-buffer
+            (setq rc (call-process nelisp-standalone--reader-out nil t nil
+                                   "eval-elisp-artifact" out
+                                   "(nelisp-reader-elc-smoke-fn 41)"))
+            (setq reject-out (buffer-string)))
+          (when (= rc 0)
+            (error "eval-elisp-artifact executed a .elc artifact (rc=0); expected a clear rejection, got %S"
+                   reject-out))
+          (unless (string-match-p "host-Emacs-only" reject-out)
+            (error "eval-elisp-artifact .elc rejection lost its stated reason: %S"
+                   reject-out))
+          ;; (d) negative: host helper disabled -> named diagnostic.
+          (with-temp-buffer
+            (let ((process-environment
+                   (cons "NELISP_DISABLE_HOST_HELPER=1" process-environment)))
+              (setq rc (call-process nelisp-standalone--reader-out nil t nil
+                                     "compile-elisp-artifact"
+                                     "--kind" "elc"
+                                     "--input" src
+                                     "--output" out)))
+            (setq disabled-out (buffer-string)))
+          (when (= rc 0)
+            (error "compile-elisp-artifact --kind elc ran with the host helper disabled"))
+          (unless (string-match-p "host-helper required for --kind elc" disabled-out)
+            (error "disabled-host-helper diagnostic lost its stated reason: %S"
+                   disabled-out)))
+      (ignore-errors (delete-file src))
+      (ignore-errors (delete-file out))
+      (ignore-errors (delete-file (concat out ".manifest.el"))))))
 
 (defun nelisp-standalone--reader-intern-canonical-smoke ()
   "Assert `intern' / `intern-soft' canonicalize the names \"nil\" and \"t\".
