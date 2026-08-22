@@ -83,6 +83,48 @@ targets the nearest *unnamed* block (= NAME = nil), matching CL."
           (cons (nelisp-cl-macros--loop-destructure-bindings pattern item)
                 forms))))
 
+(defun nelisp-cl-macros--loop-build-counted
+    (step-init step-test step-incr collect-form sum-form count-form
+     do-forms with-bindings)
+  "Shared codegen for a counted `while'-driven cl-loop iteration.
+STEP-INIT is the counter's `let' binding (VAR INIT-FORM), STEP-TEST the
+loop continuation test, STEP-INCR the per-iteration counter update.
+Used by both the numeric `for VAR from N {to,below} M' clause and the
+`repeat N' clause -- the two counted (non `for...in...') iteration
+shapes -- so a `collect'/`sum'/`count' clause is honoured the same way
+the `for VAR in LIST' clauses already honour it, instead of only ever
+wiring DO-FORMS."
+  (let ((rev nil))
+    (while do-forms (setq rev (cons (car do-forms) rev))
+           (setq do-forms (cdr do-forms)))
+    (cond
+     (collect-form
+      (let ((acc-sym (make-symbol "--loop-acc--")))
+        (list 'let (cons (list acc-sym nil) (cons step-init with-bindings))
+              (list 'while step-test
+                    (list 'setq acc-sym (list 'cons collect-form acc-sym))
+                    step-incr)
+              (list 'nreverse acc-sym))))
+     (sum-form
+      (let ((acc-sym (make-symbol "--loop-sum--")))
+        (list 'let (cons (list acc-sym 0) (cons step-init with-bindings))
+              (list 'while step-test
+                    (list 'setq acc-sym (list '+ acc-sym sum-form))
+                    step-incr)
+              acc-sym)))
+     (count-form
+      (let ((acc-sym (make-symbol "--loop-count--")))
+        (list 'let (cons (list acc-sym 0) (cons step-init with-bindings))
+              (list 'while step-test
+                    (list 'when count-form (list 'setq acc-sym (list '+ acc-sym 1)))
+                    step-incr)
+              acc-sym)))
+     (t
+      (list 'let (cons step-init with-bindings)
+            (list 'while step-test
+                  (cons 'progn rev)
+                  step-incr))))))
+
 (defun nelisp-cl-macros--loop-build (clauses)
   "Build expansion for `cl-loop' CLAUSES.
 
@@ -95,6 +137,7 @@ expansion rather than a runtime error)."
         (when-do-cond nil) (when-do-forms nil)
         (when-collect-cond nil) (when-collect-form nil)
         (numeric-from nil) (numeric-to nil) (numeric-below nil)
+        (repeat-count nil)
         (while-cond nil) (until-cond nil)
         (bodyless-forms nil)
         (cur clauses) (recognised t))
@@ -129,6 +172,9 @@ expansion rather than a runtime error)."
                 (setq cur (cdr (cdr (cdr (cdr (cdr (cdr cur))))))))
                (t (setq recognised nil)))))
            (t (setq recognised nil))))
+         ((eq kw 'repeat)
+          (setq repeat-count (car (cdr cur)))
+          (setq cur (cdr (cdr cur))))
          ((eq kw 'do)
           (setq do-forms (cons (car (cdr cur)) do-forms))
           (setq cur (cdr (cdr cur))))
@@ -193,17 +239,22 @@ expansion rather than a runtime error)."
       (list 'cl-block nil
             (cons 'while
                   (cons t bodyless-forms))))
-     ;; Numeric `for VAR from N {to,below} M' [do FORM ...]
+     ;; Numeric `for VAR from N {to,below} M' [do/collect/sum/count FORM ...]
      ((and numeric-from (or numeric-to numeric-below))
       (let ((cmp (if numeric-to '<= '<))
-            (limit (or numeric-to numeric-below))
-            (rev nil))
-        (while do-forms (setq rev (cons (car do-forms) rev))
-               (setq do-forms (cdr do-forms)))
-        (list 'let (cons (list var numeric-from) with-bindings)
-              (list 'while (list cmp var limit)
-                    (cons 'progn rev)
-                    (list 'setq var (list '1+ var))))))
+            (limit (or numeric-to numeric-below)))
+        (nelisp-cl-macros--loop-build-counted
+         (list var numeric-from) (list cmp var limit)
+         (list 'setq var (list '1+ var))
+         collect-form sum-form count-form do-forms with-bindings)))
+     ;; `repeat N' [do/collect/sum/count FORM ...] -- unconditional count,
+     ;; no loop variable.
+     (repeat-count
+      (let ((n-sym (make-symbol "--loop-n--")))
+        (nelisp-cl-macros--loop-build-counted
+         (list n-sym repeat-count) (list '> n-sym 0)
+         (list 'setq n-sym (list '1- n-sym))
+         collect-form sum-form count-form do-forms with-bindings)))
      ;; While / until plain loops (= no iterator).
      (while-cond
       (let ((rev nil))
@@ -804,30 +855,55 @@ byte-compiler so defsubst is a strict synonym for `defun'."
 ;;   `(A ,@X B)         =>  (append (list 'A) X (list 'B))
 ;;   `(A . ,X)          =>  (cons 'A X)
 ;;   `(A . X)           =>  (cons 'A 'X)
-;; Unsupported (signal):  nested ``X, vector quasi `[A ,X B].
+;;
+;; Nested backquote (Doc <handoff> 2026-08-22 fix): a nested `` `X''
+;; increments the quasiquote LEVEL for its own content; a `,'/`,@'
+;; decrements it.  A comma only fires (evaluates its argument now) when
+;; the level reaches 0 -- i.e. it is balanced by exactly as many commas
+;; as enclosing backquotes.  While the level stays above 0 the marker is
+;; rebuilt as inert `(comma ...)'/`(comma-at ...)'/`(backquote ...)' data
+;; (its own content still recursively expanded at the adjusted level, so
+;; a `,,X' double-unquote still cancels back down to 0 and evaluates X).
+;; This matches host Emacs's own `backquote.el' depth semantics.
+;; Still unsupported (signal):  vector quasi `[A ,X B].
 ;; ---------------------------------------------------------------------------
 
-(defun nelisp--bq-expand (form)
-  "Return the expansion of FORM under `backquote'."
-  (cond
-   ((vectorp form)
-    (signal 'error (list "nelisp-bq: vector quasi not supported")))
-   ((not (consp form))
-    (list 'quote form))
-   ((eq (car form) 'comma) (cadr form))
-   ((eq (car form) 'comma-at)
-    (signal 'error (list "nelisp-bq: top-level ,@ not allowed")))
-   ((eq (car form) 'backquote)
-    ;; Preserve nested backquote forms for the inner macro expansion
-    ;; pass.  This is enough for local macros such as generator.el's
-    ;; `(cl-macrolet ... `(cps-internal-yield ,value))' body.
-    (list 'quote form))
-   (t (nelisp--bq-expand-list form))))
+(defun nelisp--bq-expand (form &optional level)
+  "Return the expansion of FORM under `backquote' at nesting LEVEL.
+LEVEL defaults to 1 (directly inside one backquote).  A `,'/`,@' at
+LEVEL 1 fires immediately (its argument is evaluated at macro-expanded
+runtime); above LEVEL 1 it is preserved as inert marker data one level
+shallower, so a matching further `,' can still cancel it down to 0."
+  (let ((level (or level 1)))
+    (cond
+     ((vectorp form)
+      (signal 'error (list "nelisp-bq: vector quasi not supported")))
+     ((not (consp form))
+      (list 'quote form))
+     ((eq (car form) 'comma)
+      (if (= level 1)
+          (cadr form)
+        (list 'list (list 'quote 'comma)
+              (nelisp--bq-expand (cadr form) (1- level)))))
+     ((eq (car form) 'comma-at)
+      (if (= level 1)
+          (signal 'error (list "nelisp-bq: top-level ,@ not allowed"))
+        (list 'list (list 'quote 'comma-at)
+              (nelisp--bq-expand (cadr form) (1- level)))))
+     ((eq (car form) 'backquote)
+      ;; A nested backquote increments the level for its own content and
+      ;; is itself rebuilt as inert `(backquote ...)' data -- it is only
+      ;; ever "consumed" by a comma at the matching depth, never by
+      ;; simply appearing inside an outer backquote.
+      (list 'list (list 'quote 'backquote)
+            (nelisp--bq-expand (cadr form) (1+ level))))
+     (t (nelisp--bq-expand-list form level)))))
 
-(defun nelisp--bq-expand-list (form)
-  "Walk list FORM, producing the expansion.
+(defun nelisp--bq-expand-list (form level)
+  "Walk list FORM at nesting LEVEL, producing the expansion.
 Recognises both (... ,X ...) interior unquote and (... . ,X) dotted
-unquote / (... . ,@X) dotted splice patterns."
+unquote / (... . ,@X) dotted splice patterns, at any LEVEL (see
+`nelisp--bq-expand')."
   (let ((parts nil)        ; alist entries (KIND . EXPR) where KIND = list|splice
         (cur form)
         (tail-expr nil)
@@ -838,23 +914,39 @@ unquote / (... . ,@X) dotted splice patterns."
         (cond
          ;; cdr-position bare `comma' → source had `. ,X'.
          ((eq head 'comma)
-          (setq tail-expr (cadr cur))
+          (if (= level 1)
+              (setq tail-expr (cadr cur))
+            (setq tail-expr (list 'list (list 'quote 'comma)
+                                   (nelisp--bq-expand (cadr cur) (1- level)))))
           (setq done t))
          ;; cdr-position bare `comma-at' → source had `. ,@X'.
          ((eq head 'comma-at)
-          (setq tail-expr (cadr cur))
-          (setq has-splice t)
+          (if (= level 1)
+              (progn (setq tail-expr (cadr cur)) (setq has-splice t))
+            (setq tail-expr (list 'list (list 'quote 'comma-at)
+                                   (nelisp--bq-expand (cadr cur) (1- level)))))
           (setq done t))
          (t
           (let ((elem head))
             (cond
              ((and (consp elem) (eq (car elem) 'comma-at))
-              (setq has-splice t)
-              (push (cons 'splice (cadr elem)) parts))
+              (if (= level 1)
+                  (progn
+                    (setq has-splice t)
+                    (push (cons 'splice (cadr elem)) parts))
+                (push (cons 'list
+                             (list 'list (list 'quote 'comma-at)
+                                   (nelisp--bq-expand (cadr elem) (1- level))))
+                      parts)))
              ((and (consp elem) (eq (car elem) 'comma))
-              (push (cons 'list (cadr elem)) parts))
+              (if (= level 1)
+                  (push (cons 'list (cadr elem)) parts)
+                (push (cons 'list
+                             (list 'list (list 'quote 'comma)
+                                   (nelisp--bq-expand (cadr elem) (1- level))))
+                      parts)))
              (t
-              (push (cons 'list (nelisp--bq-expand elem)) parts))))
+              (push (cons 'list (nelisp--bq-expand elem level)) parts))))
           (setq cur (cdr cur))))))
     (when (and (not done) (not (null cur)) (not (consp cur)))
       (setq tail-expr (list 'quote cur)))

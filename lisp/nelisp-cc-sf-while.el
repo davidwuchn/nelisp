@@ -137,14 +137,36 @@
     (defun nl_sf_while_midform_collect (_a _b _c _d)
       (extern-call nl_gc_midform_collect))
 
+    ;;--- Result fixup: `while' is a statement -- it always yields Nil ---
+
+    ;; nl_sf_while_body_eval reuses `out' as scratch for each body form's
+    ;; nelisp_eval_call, so on normal loop exit `out' is left holding the
+    ;; LAST body form's value instead of Nil (real Elisp: `while' always
+    ;; returns nil, unconditionally, on every non-error exit -- including
+    ;; after 1+ iterations, not just the already-correct zero-iteration
+    ;; case where `out' is simply never touched).  This does the same
+    ;; raw 4-word zero-write `nl_sci_copy' (nelisp-cc-sexp-clone-into.el)
+    ;; uses for a bit-identical Sexp clone: tag 0 (Nil) with an all-zero
+    ;; payload is a valid Nil slot, so no source pointer / clone call is
+    ;; needed, just the same `ptr-write-u64' primitive.  Arity 4 (even);
+    ;; no extern-call inside, so no alignment concern.
+    (defun nl_sf_while_out_nil (out _b _c _d)
+      (and (ptr-write-u64 out 0  0)
+           (ptr-write-u64 out 8  0)
+           (ptr-write-u64 out 16 0)
+           (ptr-write-u64 out 24 0)
+           0))
+
     ;;--- Public entry: host-iterate the steps (O(1) iteration-count stack) ---
 
     ;; args: *const Sexp = (TEST BODY...).  env: *mut c_void.
-    ;; out:  *mut Sexp (body forms write here; on normal exit holds the last
-    ;;       body form's value, matching the CPS version).
+    ;; out:  *mut Sexp.  On a normal (non-error) exit this is reset to Nil
+    ;;       just before returning -- see `nl_sf_while_out_nil' above --
+    ;;       regardless of what the last body form's value was.
     ;; _pad: alignment pad (arity 4 = even).  Returns 0=Ok, 1=Err.
-    ;; Empty args (Nil) -> 0.  `status' is the sole across-call local (like
-    ;; `hdr' in the GC sweep `while').
+    ;; Empty args (Nil) -> 0 (out untouched, already Nil per caller convention).
+    ;; `status' is the sole across-call local (like `hdr' in the GC sweep
+    ;; `while').
     (defun nl_sf_while (args env out _pad)
       (if (= (sexp-tag args) 0)
           0
@@ -160,7 +182,9 @@
               (if (= status 0)
                   (nl_sf_while_midform_collect 0 0 0 0)
                 0)))
-           (if (= status 1) 1 0)))))
+           (if (= status 1)
+               1
+             (nl_sf_while_out_nil out 0 0 0))))))
     nil)
 
   "AOT source for `nl_sf_while' (eval/special_forms.rs sf_while -> elisp).
