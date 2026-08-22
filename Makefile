@@ -11,7 +11,8 @@
         alloc-check-collect standalone-reader-checked-soak standalone-reader-shadow-smoke standalone-reader-elt-smoke \
         nelisp-performance-gate nelisp-nelix-command-gate nelisp-native-artifact-gate nelisp-nelix-native-hot-gate \
         nelisp-nelix-operational-gate \
-        nelisp-runtime-image-cache-gate nelisp-source-command-substrate-gate
+        nelisp-runtime-image-cache-gate nelisp-source-command-substrate-gate \
+        nl-condition-standalone-smoke nl-safe-standalone-smoke nl-resource-standalone-smoke
 
 EMACS ?= emacs
 
@@ -336,6 +337,39 @@ standalone-reader:
 	NELISP_STANDALONE_TARGET=$(STANDALONE_GATE_TARGET) $(EMACS) --batch -Q -L lisp -L src -L scripts \
 	  --eval '(setq load-prefer-newer t)' \
 	  -l nelisp-standalone-build -f nelisp-standalone-build-reader
+
+# Doc 169/170 language-extension standalone reality.  `nl-condition' and
+# `nl-safe' both claim (README.org "Testing") to run unchanged on
+# target/nelisp; `make test'/`ert-full' only proves the host-Emacs half
+# of that.  These three run the exact ERT bodies (`packages/*/test/*
+# -standalone-smoke.el', a mini `ert-deftest'/`should' shim over the
+# same test files -- see nl-condition-standalone-smoke.el's Commentary)
+# on the binary itself, each package's own examples/ demo included.
+# Conditional prerequisite matches `binary-size-ratchet' above: build
+# only if neither target/nelisp nor target/nelisp.exe exists yet.
+nl-condition-standalone-smoke: $(if $(wildcard target/nelisp target/nelisp.exe),,standalone-reader)
+	@bin=./target/nelisp; [ -f "$$bin" ] || bin=./target/nelisp.exe; \
+	if [ ! -f "$$bin" ]; then \
+	  echo "GATE-SKIP no nelisp binary in target/ after build attempt"; \
+	  exit 0; \
+	fi; \
+	"$$bin" --load packages/nl-condition/test/nl-condition-standalone-smoke.el
+
+nl-safe-standalone-smoke: $(if $(wildcard target/nelisp target/nelisp.exe),,standalone-reader)
+	@bin=./target/nelisp; [ -f "$$bin" ] || bin=./target/nelisp.exe; \
+	if [ ! -f "$$bin" ]; then \
+	  echo "GATE-SKIP no nelisp binary in target/ after build attempt"; \
+	  exit 0; \
+	fi; \
+	"$$bin" --load packages/nl-safe/test/nl-safe-standalone-smoke.el
+
+nl-resource-standalone-smoke: $(if $(wildcard target/nelisp target/nelisp.exe),,standalone-reader)
+	@bin=./target/nelisp; [ -f "$$bin" ] || bin=./target/nelisp.exe; \
+	if [ ! -f "$$bin" ]; then \
+	  echo "GATE-SKIP no nelisp binary in target/ after build attempt"; \
+	  exit 0; \
+	fi; \
+	"$$bin" --load packages/nl-safe/test/nl-resource-standalone-smoke.el
 
 # fboundp-liar audit: every name in the reader's builtin fboundp list must
 # have a dispatch arm (or be combiner-handled), so `fboundp' never lies the

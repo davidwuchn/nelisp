@@ -331,6 +331,24 @@ nelisp-nelix-native-hot-gate
 # assuming clean means nothing was found.
 substrate-parity-smoke
 #
+# nl-condition/nl-safe standalone smokes: promoted 2026-08-22, also
+# `nelisp-ai.sh extras' (needs target/nelisp built, does not build it).
+# `packages/nl-condition/README.org' and `packages/nl-safe/README.org'
+# both claim (Testing section) that the ERT suite runs unchanged on
+# target/nelisp -- `ert-full' only exercises the host-Emacs half of
+# that claim, since these packages' `*-standalone-smoke.el' files (a
+# mini `ert-deftest'/`should' shim over the exact same test bodies,
+# run through the binary itself) do not match its `-test.el' glob.
+# Each also runs its package's examples/ demo, so the restart-resume
+# and borrow-violation examples cannot rot on this substrate either.
+# Red-proven 2026-08-22 by nulling `nl--handler-stack' in `nl-signal'
+# (packages/nl-condition/src/nl-condition.el): the gate went from
+# `GATE-COUNT checked=33 findings=0' to `checked=15 findings=18',
+# reverted after confirming the failure.
+nl-condition-standalone-smoke
+nl-safe-standalone-smoke
+nl-resource-standalone-smoke
+#
 # CANNOT RUN HERE, AND NOW SAY SO: three of these exit 0 with a GATE-SKIP line
 # and a reason, which `verify' accepts for a required gate.  They are not
 # listed as required yet only because nothing has run their success path --

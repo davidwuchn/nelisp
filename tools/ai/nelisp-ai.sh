@@ -220,7 +220,10 @@ cmd_extras() {
              standalone-eval-test \
              wasm-runtime-image-smoke \
              nelisp-nelix-native-hot-gate \
-             substrate-parity-smoke; do
+             substrate-parity-smoke \
+             nl-condition-standalone-smoke \
+             nl-safe-standalone-smoke \
+             nl-resource-standalone-smoke; do
         printf '\n=== %s ===\n' "$g"
         ( cmd_gate "$g" -- make "$g" ) || failures=$((failures + 1))
     done
