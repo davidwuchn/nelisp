@@ -354,7 +354,23 @@ ns-collision-divergent 126
 # interim ceiling adds this branch's own +7 (861-854) on top of the
 # merge-7/9 interim: 866 + 7 = 873.  To be reconciled to the measured
 # count in the battery.
-ns-prefix-violation 873
+#
+# 873 -> 874 on 2026-08-23 (docs/design/189-nl-ns-enforced-namespaces.org
+# Phase 0): `src/nelisp-read.el' gained one new public name,
+# `nelisp-read-namespace-resolve' (the opt-in reader-time resolution
+# hook, default nil).  This file's inferred namespace is `nelisp-read--'
+# (a majority of its definitions are already `--'-private), so its
+# existing PUBLIC API -- `nelisp-read', `nelisp-read-all', `nelisp-read-
+# error', `nelisp-read-from-string' -- already accounts for 4 of the
+# pre-existing 873; this is a 5th instance of that same, already-
+# conceded pattern, not a new one.  It cannot be renamed private: a
+# `nelisp-read--'-prefixed variable is exactly what `ns-private-escape'
+# below would then flag the moment `packages/nl-ns/src/nl-ns-reader.el'
+# (a different file, by design -- Doc 189 §1 Extends) binds it, which
+# is the whole point of the hook existing.  +1, not +0: this is a
+# tracked, explained instance, per this file's own rule, not left for
+# the count to silently absorb.
+ns-prefix-violation 874
 # 611 -> 613 on 2026-08-20: `nelisp--check-string'/`--check-symbol' and the
 # other argument-check helpers are referenced from the lisp/ mirrors that
 # carry copies of the functions using them.  This is the kind this file

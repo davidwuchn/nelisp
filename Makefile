@@ -13,6 +13,7 @@
         nelisp-nelix-operational-gate \
         nelisp-runtime-image-cache-gate nelisp-source-command-substrate-gate \
         nl-condition-standalone-smoke nl-safe-standalone-smoke nl-resource-standalone-smoke \
+        nl-ns-reader-standalone-smoke \
         standalone-reader-buffer-smoke \
         nl-actor-standalone-smoke nelisp-actor-cps-baseline nelisp-actor-cps-parity
 
@@ -382,6 +383,20 @@ nl-safe-standalone-smoke: $(if $(wildcard target/nelisp target/nelisp.exe),,stan
 	  exit 0; \
 	fi; \
 	"$$bin" --load packages/nl-safe/test/nl-safe-standalone-smoke.el
+
+# Doc 189 Phase 0 (reader-time namespace resolution): runs the exact
+# ERT bodies of `packages/nl-ns/test/nl-ns-reader-test.el' on
+# `target/nelisp' itself -- proving the `nelisp-read-namespace-resolve'
+# hook `src/nelisp-read.el' gained is real on the compiled substrate,
+# not only under the development host's own Emacs.  Same conditional-
+# build / shim pattern as `nl-condition-standalone-smoke' above.
+nl-ns-reader-standalone-smoke: $(if $(wildcard target/nelisp target/nelisp.exe),,standalone-reader)
+	@bin=./target/nelisp; [ -f "$$bin" ] || bin=./target/nelisp.exe; \
+	if [ ! -f "$$bin" ]; then \
+	  echo "GATE-SKIP no nelisp binary in target/ after build attempt"; \
+	  exit 0; \
+	fi; \
+	"$$bin" --load packages/nl-ns/test/nl-ns-reader-standalone-smoke.el
 
 nl-resource-standalone-smoke: $(if $(wildcard target/nelisp target/nelisp.exe),,standalone-reader)
 	@bin=./target/nelisp; [ -f "$$bin" ] || bin=./target/nelisp.exe; \

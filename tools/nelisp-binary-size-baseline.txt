@@ -165,5 +165,18 @@
 # arithmetic, none of which was accounted for by summing only the first
 # three branches' own deltas -- this measurement supersedes all of the
 # interim arithmetic above, as intended.
-size 7247592
+#
+# Raised 2026-08-23 (7247592 -> 7251688, +4096 bytes, +0.06%, well
+# inside the 2% slack -- raised anyway per this file's own rule above)
+# by docs/design/189-nl-ns-enforced-namespaces.org Phase 0
+# (reader-time namespace resolution, opt-in): `src/nelisp-read.el'
+# gained one new `defvar' (`nelisp-read-namespace-resolve', default
+# nil) and one new `cond' clause in `nelisp-read--atom' consulting it
+# before falling through to `intern' -- both compile into the linked
+# binary since `nelisp-read.el' is one of the AOT-compiled reader
+# units, unlike the opt-in `packages/nl-ns/src/nl-ns-reader.el' layer
+# above it, which is loaded at runtime and does not link in at all.
+# Measured with `stat -c %s target/nelisp' after a clean `make
+# standalone-reader' on this change alone, base 670ddd885.
+size 7251688
 slack-pct 2
