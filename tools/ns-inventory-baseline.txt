@@ -218,7 +218,19 @@ ns-collision-divergent 124
 # reader-malformed-input-smoke' calls it across the boundary via `-f', and
 # `nelisp-standalone--' would move it into ns-private-escape instead of
 # removing it.
-ns-prefix-violation 854
+# 854 -> 858 on 2026-08-23: Doc 193 §3's `nl-condition' rewrite of
+# `nelisp-native-function-call' (lisp/nelisp-artifact.el) added four
+# private helpers named `nelisp-native--*'
+# (`nelisp-native--tier-call'/`-ensure-condition'/
+# `-condition-root-candidates'/`-condition-loaded'), matching the
+# `nelisp-native-*' family the un-renamed `nelisp-native-function-call'
+# already established in this same file -- the check wants
+# `nelisp-artifact--' here since that is the file's own feature name,
+# but the ladder's whole naming family (also `nelisp-native-function-p'
+# in src/nelisp-eval.el) predates this commit and stayed self-
+# consistent on purpose rather than mixing two prefixes across one
+# cohesive subsystem.
+ns-prefix-violation 858
 # 611 -> 613 on 2026-08-20: `nelisp--check-string'/`--check-symbol' and the
 # other argument-check helpers are referenced from the lisp/ mirrors that
 # carry copies of the functions using them.  This is the kind this file

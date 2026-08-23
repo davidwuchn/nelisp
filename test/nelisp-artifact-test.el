@@ -976,6 +976,58 @@ integers -- the fast tier is attempted, not skipped."
     (should (= fast-count 1))
     (should (= general-count 0))))
 
+;;;; Doc 193 §3 (post-rewrite): the ladder's `nl-restart-case' shape is
+;;;; introspectable, not just "produces the same output" -- this is the
+;;;; thing the hand-nested `condition-case' version could never offer.
+;;;; `nl-find-restart'/`nl-compute-restarts' only see something real
+;;;; once the ladder is rewritten onto `nl-restart-case', so these
+;;;; tests exercise the restart machinery itself, not just its result.
+
+(ert-deftest nelisp-artifact/ladder-establishes-general-native-restart-during-fast-tier ()
+  "While the fast tier runs, `general-native' is an established restart
+\(and `interpreted-fallback', the outer one, is visible too\); neither
+is established once the call has returned."
+  (let (seen-inside)
+    (cl-letf (((symbol-function 'nelisp-artifact-native-exec-fast-simple)
+               (lambda (&rest _)
+                 (setq seen-inside (nl-compute-restarts))
+                 :fast))
+              ((symbol-function 'nelisp-artifact-native-exec-general)
+               (lambda (&rest _) (error "must not run"))))
+      (let ((fn (nelisp-artifact-test--native-fn 'ladder-restarts-fast 'ignored)))
+        (should (eq (nelisp-native-function-call fn '(1)) :fast))))
+    (should (equal seen-inside '(general-native interpreted-fallback)))
+    (should (null (nl-compute-restarts)))))
+
+(ert-deftest nelisp-artifact/ladder-general-native-restart-invisible-once-general-runs-directly ()
+  "Not fast-eligible: only `interpreted-fallback' is established while
+general runs directly -- there is no `general-native' restart to fall
+back into from there, matching the original code having no inner
+`condition-case' on this branch."
+  (let (seen-inside)
+    (cl-letf (((symbol-function 'nelisp-artifact-native-exec-general)
+               (lambda (&rest _)
+                 (setq seen-inside (nl-compute-restarts))
+                 :general)))
+      (let ((fn (nelisp-artifact-test--native-fn
+                 'ladder-restarts-general-direct 'ignored '(:param-class boxed))))
+        (should (eq (nelisp-native-function-call fn '(1)) :general))))
+    (should (equal seen-inside '(interpreted-fallback)))))
+
+(ert-deftest nelisp-artifact/ladder-invoke-restart-general-native-explicitly ()
+  "A handler is free to invoke `general-native' by name (not just via
+the ladder's own default error handler) -- the restart is a real,
+independently invocable one, not an implementation detail masquerading
+as one."
+  (let ((general-count 0))
+    (cl-letf (((symbol-function 'nelisp-artifact-native-exec-fast-simple)
+               (lambda (&rest _) (nl-invoke-restart 'general-native)))
+              ((symbol-function 'nelisp-artifact-native-exec-general)
+               (lambda (&rest _) (cl-incf general-count) :general)))
+      (let ((fn (nelisp-artifact-test--native-fn 'ladder-explicit-invoke 'ignored)))
+        (should (eq (nelisp-native-function-call fn '(1)) :general))))
+    (should (= general-count 1))))
+
 (ert-deftest nelisp-artifact/native-exec-cli-skips-fast-simple-for-extern-artifact ()
   "CLI native exec routes extern-bearing artifacts to the general trampoline.
 The whole linked object can contain unresolved externs even when the requested

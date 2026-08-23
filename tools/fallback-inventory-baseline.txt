@@ -100,7 +100,7 @@
 # C's two unwind-protect corpus forms each wrap a deliberately-injected
 # test error and discard it after observing cleanup order, plus the
 # presence-sweep generator's end-of-file read-loop terminator).
-silent-fallback 53
+silent-fallback 52
 # 41 -> 42 on 2026-08-23: one new site, reviewed and pinned below (the
 # presence-sweep auto-note's defensive shape-extraction for a report-only
 # string, falls back to "?" on a malformed corpus form -- never on a
@@ -239,7 +239,6 @@ pinned-site silent-fallback	nelisp-artifact.el	defun nelisp-artifact-load-file	7
 pinned-site silent-fallback	nelisp-artifact.el	defun nelisp-artifact-load-or-compile-source-file	e3f2648caa3a 1
 pinned-site silent-fallback	nelisp-artifact.el	defun nelisp-artifact-load-source-file	7cbdc7443659 1
 pinned-site silent-fallback	nelisp-artifact.el	defun nelisp-artifact-load-source-file	7f54f729f3d7 1
-pinned-site silent-fallback	nelisp-artifact.el	defun nelisp-native-function-call	e4ff0801545c 1
 pinned-site silent-fallback	nelisp-cli.el	defun nelisp--cli-batch-ensure-host	e3f2648caa3a 1
 pinned-site silent-fallback	nelisp-cli.el	defun nelisp--cli-read-file	e3f2648caa3a 1
 pinned-site silent-fallback	nelisp-fallback-inventory.el	defun nelisp-fallback-inventory--scan-file	2329cc908971 1

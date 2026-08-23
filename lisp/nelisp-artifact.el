@@ -19,6 +19,45 @@
 ;; unsupported top-level effects fall back to `nelisp-eval' replay.
 (require 'nelisp-bytecode)
 (require 'nelisp-eval)
+
+;; Doc 193 §3: `nelisp-native-function-call' (defined below) is
+;; `nl-condition's (Doc 168/169) flagship internal consumer, rewritten
+;; onto `nl-restart-case'/`nl-handler-bind'.  This is a real, non-soft
+;; dependency (unlike the `nl-check' require further down, which stays
+;; optional because Doc 170 §10 says nothing may depend on it) -- but
+;; it is NOT required here at file top level.  `require' needs
+;; `packages/nl-prelude/src'/`packages/nl-condition/src' on `load-path',
+;; and not every caller loads this file with those on `-L' (the
+;; standalone build scripts under `scripts/nelisp-standalone-build.el'
+;; pass `-L lisp -L src -L scripts' only) -- so, following
+;; `src/nelisp-bootstrap.el's `nelisp-bootstrap--add-package-paths',
+;; locating them needs a repo root.  Unlike that module (host-Emacs-
+;; only), THIS file's `require' also has to succeed when the standalone
+;; runtime interprets its OWN source (`nelisp-native-function-call' is
+;; on the every-native-call hot path, so it runs both under host Emacs
+;; AND self-hosted on `target/nelisp'), and `load-file-name'/
+;; `buffer-file-name' are exactly the kind of host-Emacs-only
+;; convenience that breaks there: under the standalone runtime they
+;; resolve to NeLisp's OWN "value absent" sentinel rather than nil or a
+;; `void-variable' signal, so `(or load-file-name buffer-file-name)'
+;; silently hands `file-name-directory' a symbol instead of a string
+;; (measured: `wrong-type-argument: (stringp nelisp--unbound-marker)',
+;; reproduced with plain `target/nelisp --load lisp/nelisp-artifact.el').
+;; `nelisp-artifact--native-compiler-candidates' below already solved
+;; this exact problem for locating `lisp/nelisp-aot-compiler.el'
+;; standalone: `nelisp-artifact-standalone-repo-root' (baked in by the
+;; standalone build) / `NELISP_ROOT' / `default-directory', never
+;; `load-file-name'.  `nelisp-native--ensure-condition' (defined next
+;; to the call site, near `nelisp-native-function-call') mirrors that
+;; same root list, and -- also unlike the top-level `require' this
+;; replaces -- runs LAZILY, on first call, not at file load time: this
+;; file's own `defun' bodies are not macroexpanded until they run (the
+;; same repro above still loads cleanly with dangling
+;; `nl-restart-case'/`nl-handler-bind' references, proving the
+;; standalone loader treats them as inert until called), so the
+;; dependency only needs to resolve by the time the ladder actually
+;; dispatches, which is also the earliest point `default-directory' is
+;; guaranteed to mean anything.
 ;; Loaded lazily by the §6.4 native lane; declared so the bytecode/nelc
 ;; path does not pull the (heavy) AOT compiler at require time.
 (declare-function nelisp-aot-compile-to-object "nelisp-aot-compiler"
@@ -1136,40 +1175,123 @@ coverage when a native executor rejects the call."
            :skipped skipped))
     installed))
 
+(defvar nelisp-native--condition-loaded nil
+  "Non-nil once `nl-condition' has been located and required.
+See the Doc 193 §3 commentary above `nelisp-artifact--magic' for why
+this is a lazy, call-time check rather than a file-top-level `require'.")
+
+(defun nelisp-native--condition-root-candidates ()
+  "Return candidate repo roots for locating `packages/nl-{prelude,condition}/src'.
+Same three sources `nelisp-artifact--native-compiler-candidates' already
+trusts standalone, in the same order -- deliberately NOT `load-file-name'/
+`buffer-file-name' (host-Emacs-only; see the commentary this mirrors)."
+  (let ((roots nil))
+    (when (and (boundp 'nelisp-artifact-standalone-repo-root)
+               nelisp-artifact-standalone-repo-root
+               (stringp nelisp-artifact-standalone-repo-root)
+               (> (length nelisp-artifact-standalone-repo-root) 0))
+      (setq roots (append roots (list nelisp-artifact-standalone-repo-root))))
+    (let ((env-root (and (fboundp 'getenv) (getenv "NELISP_ROOT"))))
+      (when (and env-root (stringp env-root) (> (length env-root) 0))
+        (setq roots (append roots (list env-root)))))
+    (when (and (boundp 'default-directory) (stringp default-directory))
+      (setq roots (append roots (list default-directory))))
+    roots))
+
+(defun nelisp-native--ensure-condition ()
+  "Ensure `nl-condition' (and its `nl-prelude' dependency) are on `load-path'
+and required, trying `load-path' as-is first (the common case: `make test'
+et al already put `packages/*/src' on it via `PACKAGE_SRC_LOADS') before
+walking `nelisp-native--condition-root-candidates'.  Idempotent; the ladder
+calls this once per dispatch, so it short-circuits after the first success."
+  (unless nelisp-native--condition-loaded
+    (unless (require 'nl-condition nil t)
+      (let ((roots (nelisp-native--condition-root-candidates))
+            (found nil))
+        (while (and roots (not found))
+          (let* ((root (car roots))
+                 (prelude-src (expand-file-name "packages/nl-prelude/src" root))
+                 (condition-src (expand-file-name "packages/nl-condition/src" root)))
+            (when (and (file-directory-p prelude-src) (file-directory-p condition-src))
+              (add-to-list 'load-path prelude-src)
+              (add-to-list 'load-path condition-src)
+              (setq found t)))
+          (setq roots (cdr roots)))
+        (require 'nl-condition)))
+    (setq nelisp-native--condition-loaded t)))
+
+(defun nelisp-native--tier-call (tier-fn artifact symbol args)
+  "Call TIER-FN (a native exec tier) with ARTIFACT SYMBOL ARGS.
+TIER-FN is one of the two native exec tiers
+(`nelisp-artifact-native-exec-fast-simple' /
+`nelisp-artifact-native-exec-general'), which signal an ordinary
+`error' the same way any other Elisp code does.  `nl-handler-bind'
+(Doc 169) only ever sees conditions raised through `nl-signal', so
+this is the scoped, call-site-local translation Doc 168's own
+non-invasiveness rule requires for adopting `nl-condition' here:
+TIER-FN itself stays a plain `error' signaller, unmodified; only
+`nelisp-native-function-call', at its own call site, routes the
+condition on to `nl-signal' so its `nl-handler-bind' frames can act
+on it pre-unwind."
+  (condition-case err
+      (funcall tier-fn artifact symbol args)
+    (error (nl-signal (car err) (cdr err)))))
+
 (defun nelisp-native-function-call (fn args)
-  "Call native wrapper FN with ARGS, falling back when native cannot run."
+  "Call native wrapper FN with ARGS, falling back when native cannot run.
+
+Doc 193 §3: this is `nl-condition's flagship internal consumer.  The
+three tiers (fast integer ABI, general native, interpreted/bytecode
+fallback) are the SAME named restarts the docstring for `nl-condition'
+uses as its own motivating example -- `fast-simple-abi' is tried
+implicitly as the protected form, `general-native' recovers from its
+failure, `interpreted-fallback' recovers from either native tier
+failing.  Dispatch-report bookkeeping (`nelisp-artifact--note-native-
+dispatch') is a side effect of which branch actually returns a value,
+not hand-threaded through three nested `condition-case' arms as it was
+before this rewrite -- see the differential corpus in
+`test/nelisp-artifact-test.el' (\"ladder-*\" tests) for the behavioral
+equivalence proof this rewrite is held to."
   (let ((artifact (nelisp-artifact--native-function-artifact fn))
         (symbol (symbol-name (nelisp-artifact--native-function-symbol fn)))
         (fallback (nelisp-artifact--native-function-fallback fn))
         (meta (nelisp-artifact--native-function-meta fn)))
     (if (not nelisp-artifact-native-dispatch-enabled)
         (nelisp--apply fallback args)
-      (condition-case native-err
+      (nelisp-native--ensure-condition)
+      (nl-restart-case
           (let ((result
-                 (if (and (nelisp-artifact--all-integers-p args)
-                          (nelisp-artifact--native-simple-integer-abi-p meta))
-                     (condition-case _fast-err
-                         (nelisp-artifact-native-exec-fast-simple
-                          artifact symbol args)
-                       (error
-                        (nelisp-artifact-native-exec-general
-                         artifact symbol args)))
-                   (nelisp-artifact-native-exec-general
-                    artifact symbol args))))
+                 (nl-handler-bind
+                     ((error (lambda (c) (nl-invoke-restart 'interpreted-fallback c))))
+                   (if (and (nelisp-artifact--all-integers-p args)
+                            (nelisp-artifact--native-simple-integer-abi-p meta))
+                       (nl-restart-case
+                           (nl-handler-bind
+                               ((error (lambda (_c) (nl-invoke-restart 'general-native))))
+                             (nelisp-native--tier-call
+                              #'nelisp-artifact-native-exec-fast-simple
+                              artifact symbol args))
+                         (general-native ()
+                           (nelisp-native--tier-call
+                            #'nelisp-artifact-native-exec-general
+                            artifact symbol args)))
+                     (nelisp-native--tier-call
+                      #'nelisp-artifact-native-exec-general
+                      artifact symbol args)))))
             (nelisp-artifact--note-native-dispatch
              (list :event 'call
                    :symbol (intern symbol)
                    :mode 'native
                    :argc (length args)))
             result)
-        (error
-         (nelisp-artifact--note-native-dispatch
-          (list :event 'call
-                :symbol (intern symbol)
-                :mode 'fallback
-                :argc (length args)
-                :reason (error-message-string native-err)))
-         (nelisp--apply fallback args))))))
+        (interpreted-fallback (c)
+          (nelisp-artifact--note-native-dispatch
+           (list :event 'call
+                 :symbol (intern symbol)
+                 :mode 'fallback
+                 :argc (length args)
+                 :reason (error-message-string c)))
+          (nelisp--apply fallback args))))))
 
 (defun nelisp-artifact--native-defun-forms (forms)
   "Return top-level defun forms in FORMS that have a symbol name."
