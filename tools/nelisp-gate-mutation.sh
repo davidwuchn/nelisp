@@ -24,6 +24,32 @@ rebuild_checked() {
 mutation_gate_dir="$(mktemp -d)"
 trap 'rm -rf "$mutation_gate_dir"' EXIT
 
+# Run the gate for the current row, on whatever content `$file' currently
+# holds, capturing its combined output to `$2'.  `ert-full' is not a raw
+# `make' target -- `nelisp-ai.sh test' owns it, wrapping ERT's own batch
+# runner -- so it routes there instead of `make "$gate"'.  The corrupted-
+# helper row (source: `src/nelisp-eval.el') is scoped to the one test file
+# that calls the helper directly, via `NELISP_GATE_MUTATION_TEST_FILES' --
+# see the comment on `test_files()' in `tools/ai/nelisp-ai.sh' for why the
+# full suite is too slow to carry here.  The empty-glob row corrupts
+# `test_files()' ITSELF (source: `tools/ai/nelisp-ai.sh'), so it must run
+# UNSCOPED: scoping would bypass the very line the row exists to test.
+run_gate() {
+  local g="$1" f="$2" log="$3"
+  if [ "$g" = "ert-full" ]; then
+    if [ "$f" = "tools/ai/nelisp-ai.sh" ]; then
+      NELISP_GATE_DIR="$mutation_gate_dir" \
+        tools/ai/nelisp-ai.sh test >"$log" 2>&1
+    else
+      NELISP_GATE_DIR="$mutation_gate_dir" \
+        NELISP_GATE_MUTATION_TEST_FILES=test/nelisp-eval-test.el \
+        tools/ai/nelisp-ai.sh test >"$log" 2>&1
+    fi
+  else
+    make "$g" >"$log" 2>&1
+  fi
+}
+
 rows=$(grep -v '^#' tools/gate-mutations.txt | grep -v '^[[:space:]]*$')
 [ -z "$rows" ] && { echo "gate-mutation: FAIL (no mutations defined)"; exit 1; }
 total=0; bad=0
@@ -52,27 +78,50 @@ while IFS='|' read -r gate file expr what; do
       cp "$backup" "$file"; rm -f "$backup"; continue
     fi
   fi
-  # `ert-full' is not a raw `make' target -- `nelisp-ai.sh test' owns it,
-  # wrapping ERT's own batch runner.  Both its rows route there instead of
-  # `make "$gate"'.  The corrupted-helper row (source: `src/nelisp-eval.el')
-  # is scoped to the one test file that calls the helper directly, via
-  # `NELISP_GATE_MUTATION_TEST_FILES' -- see the comment on `test_files()'
-  # in `tools/ai/nelisp-ai.sh' for why the full suite is too slow to carry
-  # here.  The empty-glob row corrupts `test_files()' ITSELF (source:
-  # `tools/ai/nelisp-ai.sh'), so it must run UNSCOPED: scoping would
-  # bypass the very line the row exists to test.
-  gate_ok=0
-  if [ "$gate" = "ert-full" ]; then
-    if [ "$file" = "tools/ai/nelisp-ai.sh" ]; then
-      NELISP_GATE_DIR="$mutation_gate_dir" \
-        tools/ai/nelisp-ai.sh test >/dev/null 2>&1 && gate_ok=1
+  gate_log="$(mktemp)"
+  run_gate "$gate" "$file" "$gate_log"
+  gate_rc=$?
+  gate_ok=0; [ "$gate_rc" -eq 0 ] && gate_ok=1
+  # Same precedence `tools/ai/nelisp-ai.sh cmd_gate' and `gate-selfcheck'
+  # (tools/nelisp-gate-selfcheck.el) use for these two lines: a reasoned
+  # `GATE-SKIP REASON' is checked before anything else, because a gate that
+  # explains why it did not run does not also owe a verdict.  Before this,
+  # a row whose gate legitimately skips (emacs-parity, outside its pinned
+  # Emacs 30.x major) exited 0 with no defect ever exercised, and this
+  # harness read that exit code the same as a real pass: "STAYED GREEN with
+  # a real defect in front of it" -- a gate that never ran cannot have
+  # stayed anything.  Measured via `NELISP_EMACS_PARITY_HOST_VERSION=29.4
+  # make gate-mutation' (mocks a host outside 30.x; CI's ubuntu/29.4 lane
+  # hits this for real): emacs-parity's row failed the whole harness on a
+  # host where the gate cannot run at all, independent of any real defect.
+  skip_after=$(grep -E '^GATE-SKIP ' "$gate_log" | tail -1 | sed 's/^GATE-SKIP //' || true)
+  rm -f "$gate_log"
+  if [ -n "$skip_after" ]; then
+    # A row can only prove anything on a host where its gate actually runs;
+    # a skip is "not provable here", not a pass -- UNLESS the injected
+    # defect is what caused the skip, in which case the defect hid itself
+    # behind a skip path instead of being caught, which is exactly the
+    # "STAYED GREEN" failure this harness exists to catch, just via a
+    # different exit than a plain 0.  Tell the two apart by asking the SAME
+    # question of the clean tree: `gates.expected' documents three outcomes
+    # (runnable / the predicate said no / the predicate could not be asked)
+    # and only a skip that repeats UNCHANGED on clean code is "said no" --
+    # a skip that appears only once the defect lands is the defect itself,
+    # dressed as "could not be asked".
+    cp "$backup" "$file"
+    if [ "$gate" = "emacs-parity" ]; then rebuild_checked || true; fi
+    baseline_log="$(mktemp)"
+    run_gate "$gate" "$file" "$baseline_log"
+    skip_before=$(grep -E '^GATE-SKIP ' "$baseline_log" | tail -1 | sed 's/^GATE-SKIP //' || true)
+    rm -f "$baseline_log"
+    if [ -n "$skip_before" ]; then
+      echo "  $gate: SKIP (gate not runnable on this host: $skip_after)"
     else
-      NELISP_GATE_DIR="$mutation_gate_dir" \
-        NELISP_GATE_MUTATION_TEST_FILES=test/nelisp-eval-test.el \
-        tools/ai/nelisp-ai.sh test >/dev/null 2>&1 && gate_ok=1
+      echo "  $gate: STAYED GREEN BY SKIPPING once the defect landed -- the clean tree does not skip for the same reason, so the injection itself trips the skip path and hides behind it ($what)"
+      bad=$((bad+1))
     fi
-  elif make "$gate" >/dev/null 2>&1; then
-    gate_ok=1
+    rm -f "$backup"
+    continue
   fi
   if [ "$gate_ok" = 1 ]; then
     echo "  $gate: STAYED GREEN with a real defect in front of it ($what)"
