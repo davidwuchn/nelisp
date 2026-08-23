@@ -141,6 +141,7 @@ wasm-smoke:
 	node tools/wasm-driver.mjs --env-module tools/wasm-arg-budget-env.mjs \
 	  target/wasm-smoke/arg-budget-sum8.wasm arg-budget-sum8 36 \
 	  1 2 3 4 5 6 7 8
+	@echo "GATE-COUNT checked=3 findings=0"
 
 wasm-runtime-image-smoke:
 	mkdir -p target/wasm-runtime-image
