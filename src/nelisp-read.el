@@ -82,6 +82,35 @@ the depth=1 restriction so `` `(a `(b ,x)) '' parses; comma
 propagation (`,,x', `,@,y') is still out of scope and would require
 the full qbq-comma dance.")
 
+(defvar nelisp-read-namespace-resolve nil
+  "Doc 189 Phase 0 hook: reader-time short-name resolution, opt-in.
+
+nil (the default, and the value everywhere in this tree today) means
+exactly today's behaviour -- every plain-symbol atom token interns
+under its own literal name, unchanged.  Nothing in this file, or
+anywhere else in the tree at the time this variable was added, ever
+binds it to a non-nil value; it exists to be bound by an opt-in caller
+outside this file (see `packages/nl-ns/src/nl-ns-reader.el'), never by
+this reader on its own.
+
+When bound non-nil, it must be a hash table (`equal' test, string
+keys) mapping a short member name to the already-interned qualified
+symbol it should resolve to instead -- see `nl-ns-define''s `:members'
+in `packages/nl-ns/src/nl-ns-in.el', which is the only producer of
+such a table.  The table is consulted after `nelisp-read--atom' has
+already tokenized a plain identifier and before that token is ever
+handed to `intern', so a resolved short name is never itself interned
+-- only its qualified form is.  A miss (token absent from the table)
+falls through to `intern' on the literal token, identical to the nil
+case.
+
+Bind this dynamically around a read, never `setq' it globally: nested
+reads (e.g. a `load' triggered from inside a read) must restore the
+caller's binding, not leak the callee's.  See docs/design/189-nl-ns-
+enforced-namespaces.org §3/§4 Phase 0 for the design this hook
+implements and why the consultation point sits here, above `intern',
+rather than inside the single shared intern table itself.")
+
 ;; Symbols used to mark nested backquote / comma / splice as literal
 ;; data when expanding depth >= 2 forms.  Interned via `intern' so
 ;; the source stays parseable by NeLisp's reader, which does not
@@ -169,6 +198,16 @@ Return (VALUE . NEW-POS)."
             ;; exactly like the one that would have been fine.
             (cond ((string= tok "nil") nil)
                   ((string= tok "t") t)
+                  ;; Doc 189 Phase 0: consult the opt-in resolution table,
+                  ;; when one is bound, before this token ever reaches
+                  ;; `intern'.  A hit interns the qualified name instead of
+                  ;; the short one; a miss (or the table being nil, which
+                  ;; is every call site in this tree except the opt-in
+                  ;; wrapper in nl-ns-reader.el) falls through to `intern'
+                  ;; on the literal token -- byte-identical to the code
+                  ;; before this hook existed.
+                  ((and nelisp-read-namespace-resolve
+                        (gethash tok nelisp-read-namespace-resolve)))
                   (t (intern tok))))
           end)))
 

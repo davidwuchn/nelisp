@@ -1,19 +1,25 @@
 #+TITLE: Doc 189 — nl-ns, advisory to enforced: what a real namespace would cost the reader
 #+AUTHOR: Claude (design), zawatton (direction)
 #+DATE: 2026-08-22
-#+STATUS: DRAFT — design only, no implementation.  Written against nl-ns as
-#+STATUS: shipped this week (packages/nl-ns/, checker + nl-ns-in.el writer,
-#+STATUS: both zero-runtime-effect) and against the intern mechanism the
-#+STATUS: nil/t-canonicalization fix (342d098cc) exercised the same week.
-#+STATUS: Phase 0 of any enforced design must be opt-in per file/package with
-#+STATUS: zero effect on unannotated code — see §5.1.
+#+STATUS: PARTIALLY IMPLEMENTED (2026-08-23) — Phase 0 (§4) landed: an
+#+STATUS: opt-in reader-time resolution hook in =src/nelisp-read.el=
+#+STATUS: (=nelisp-read-namespace-resolve=, default nil) plus a new,
+#+STATUS: separate package file, =packages/nl-ns/src/nl-ns-reader.el=,
+#+STATUS: that binds it from =nl-ns-define='s existing =:members=/
+#+STATUS: =:prefix= registry.  Neither =nl-ns.el= nor =nl-ns-in.el= was
+#+STATUS: touched, per the =Extends= row below.  Zero-effect on
+#+STATUS: unannotated code verified by construction (the hook is never
+#+STATUS: bound outside the new opt-in entry points) and by an
+#+STATUS: unmodified full battery (see §7).  Phase 1 (§4, declaration-
+#+STATUS: time collision refusal) is deliberately NOT implemented this
+#+STATUS: pass — recorded, not attempted; see §7.
 
 * Status
 
 | item     | value                                                         |
 |----------+----------------------------------------------------------------|
 | Doc #    | 189                                                            |
-| State    | DRAFT                                                         |
+| State    | PARTIALLY IMPLEMENTED — Phase 0 landed 2026-08-23, Phase 1 recorded (not attempted) |
 | Parent   | Doc 168 §2 (extension libraries, non-goals), Doc 90 (Doc 168 sent the real fix here) |
 | Sibling  | Doc 169 (nl-prelude/nl-condition), Doc 170 (nl-safe/nl-contract/nl-check), Doc 187 (checked-arithmetic bridge, does not overlap) |
 | Extends  | packages/nl-ns/ (nl-ns.el checker, nl-ns-in.el writer) — this doc does not touch that package's code, only proposes what would sit beside it |
@@ -441,3 +447,220 @@ terminal scrollback):
   stages — token resolution here, arithmetic lowering there — but this
   has not been checked against Doc 187's actual text, which was not
   available on this branch at time of writing).
+
+* 7. Implementation record (Phase 0, 2026-08-23)
+
+Base: =feat/native-observability= at =670ddd885=.  Branch
+=feat/nl-ns-enforce-p0=.
+
+** 7.1 Hook point chosen, and why
+
+=nelisp-read--atom= in =src/nelisp-read.el= is the single place every
+production reader entry point funnels through before a plain-identifier
+token becomes a symbol: =nelisp-read=, =nelisp-read-from-string= and
+=nelisp-read-all= all bottom out in =nelisp-read--sexp= ->
+=nelisp-read--atom=, and =src/nelisp.el=, =nelisp-eval.el=,
+=nelisp-load.el= and =nelisp-bootstrap.el= all =require= this file (not
+=src/nelisp-reader.el=, an unrelated Phase 7+A parser whose only caller
+is its own test — checked by grepping every caller of both files'
+public entry points before touching either). =nelisp-read--atom= already
+special-cases the two immediate-value tokens, =nil= and =t=, checked
+*before* calling =intern= — the exact byte-pattern check
+=nl_alloc_symbol_pos=/=nl_intern_lookup_pos= do at the table layer
+(§1.1). The new hook sits in the same =cond=, as a clause between those
+two and the =(t (intern tok))= fallback, consulting a dynamically-bound
+hash table (short name string -> qualified symbol) and returning its
+value on a hit, never reaching =intern= for that token at all. This
+matches §3's decided direction exactly: resolution happens *above* the
+one shared intern table (§1.1's "beside" option), not by threading a
+second table into =nl_alloc_symbol_pos= itself, which this change does
+not touch.
+
+** 7.2 Annotation syntax landed
+
+Not a reader-syntax change (no new punctuation, no colon — §2.1's colon
+risk does not apply).  Reuses =nl-ns-define='s existing =:members=/
+=:prefix= registry as-is.  A new package file,
+=packages/nl-ns/src/nl-ns-reader.el= (does not modify =nl-ns.el= or
+=nl-ns-in.el=, per the =Extends= row), adds:
+
+- =nelisp-read-namespace-resolve= (in =src/nelisp-read.el=): the hook
+  variable itself, default nil, documented as opt-in/dynamic-only.
+- =nl-ns-read-with-resolution= (macro, NAME unquoted like =nl-ns-in=):
+  ~(nl-ns-read-with-resolution tns (nelisp-read "wrap"))~ => the symbol
+  ~tns-wrap~.
+- =nl-ns-read-eval-in=, =nl-ns-read-in=, =nl-ns-read-from-string-in=,
+  =nl-ns-read-all-in=: NAME-evaluated counterparts of
+  =nelisp-read=/=nelisp-read-from-string=/=nelisp-read-all=, for a
+  caller (e.g. a future loader) choosing a namespace at run time.
+
+Granularity landed is **per call to one of these entry points**, not
+per file directive and not a reader-recognized =(nl-ns-in NAME ...)=
+sub-form — the smaller, safer of the two shapes §4 Phase 0 named ("a
+file, or an =nl-ns-in=-equivalent block"). Wiring an opted-in *file*
+into the production loader (=nelisp-load.el=, =require=) is explicitly
+out of scope for this pass; see §7.5.
+
+** 7.3 Zero-effect proof
+
+By construction: =nelisp-read-namespace-resolve= defaults to nil, and
+the only place in the tree that ever binds it non-nil is
+=nl-ns-read-eval-in= (called only by the four entry points above, in
+the one new package file). No existing call site — =nelisp-read=,
+=nelisp-read-from-string=, =nelisp-read-all=, =nelisp-load=,
+=nelisp-bootstrap=, the standalone runtime's own =--load=/=--eval=/REPL
+paths — was touched, so none of them can reach a non-nil binding. The
+=(and nelisp-read-namespace-resolve ...)= clause is a no-op (short-
+circuits on nil) on every one of those paths — this is the same "no
+table, no guess" shape as the nil-default host-shadow findings in
+=nl-ns.el= already follow, not a new pattern.
+
+Measured, not only argued:
+
+- Full battery re-run on the patched tree, base =670ddd885= unchanged
+  otherwise: =check= tier 22/22 gates PASS (=compile= 101, =parens-
+  check= 430, =ns-gate= 2051/0, =ns-inventory= 354 files/PASS,
+  =doc-claims= 20/7-tolerated, all unaffected by this change beyond the
+  file-count deltas this change itself adds); =ert-full= 5140 tests,
+  4989 as expected, *0 unexpected*, 151 skipped; =standalone-reader-
+  test= 22 checked/0 findings; =standalone-reader-smokes= 33/0;
+  =substrate-parity-smoke= 257 checked/0 findings (unchanged from the
+  =defvaralias= commit's own 257/0 measurement this doc's header
+  cites); =binary-size-ratchet= 7247592 -> 7251688 bytes (+4096,
+  +0.06%, same-commit-raised per this repo's own ratchet convention,
+  not left for slack).
+- The two divergent-collision entries the =ns-gate= accepted-findings
+  ledger needed (=scripts/nl-ns-accepted.el=, regenerated with
+  =NL_NS_GATE_WRITE=1=) are the new smoke file's own local
+  =ert-deftest=/=should=/=should-not=/=should-error= shim macros
+  joining the eight other standalone-smoke files that already define
+  the identical shim — mechanical, reviewed, not a behavioural finding.
+- =ns-prefix-violation= baseline raised 873 -> 874:
+  =nelisp-read-namespace-resolve= is a 5th public name in a file whose
+  inferred namespace is =nelisp-read--= (the pre-existing 873 already
+  counts =nelisp-read=/=nelisp-read-all=/=nelisp-read-error=
+  /=nelisp-read-from-string= on the same grounds); it cannot be renamed
+  private without breaking the whole point of the hook (a different
+  file has to bind it).
+
+None of the numbers above needed a second, "before" run for comparison
+— the resolution table is unbound on every path except the four new
+entry points nothing else calls, so the "before" state is the current
+run itself wherever an annotation is absent, which is everywhere except
+this doc's own new test file.
+
+** 7.4 Opt-in behaviour: red before, green after
+
+Verified as an actual red/green transition, not only reasoned about:
+with the working tree's changes stashed (=git stash=, base
+=670ddd885= plus nothing), running
+
+#+begin_src emacs-lisp
+(nl-ns-read-in 'tns "wrap")
+#+end_src
+
+against a fixture declaring =(nl-ns-define tns :members (wrap))=
+signals =file-missing= (=nl-ns-reader.el= does not exist yet) — RED.
+=git stash pop= restores the patch; the identical call now returns the
+symbol =tns-wrap=, =eq= to =(nl-ns-qualify 'tns 'wrap)= — GREEN. The
+short name =wrap= is never interned as a side effect of resolving it
+(=packages/nl-ns/test/nl-ns-reader-test.el='s
+=nl-ns-reader-read-in-does-not-intern-the-short-name=, isolated from
+the declaration's own unavoidable intern via =unintern= on a namespace/
+member name unique in the tree, to stay safe under the shared-obarray,
+single-process =make test= run — see that test's own commentary for
+why a shared short name like =wrap=/=tns= would have been unsafe there).
+
+14 ERT cases in =nl-ns-reader-test.el= cover both directions: 9
+resolution-direction cases (member resolves, non-member passes through,
+=nl-ns-read-all-in=/=-from-string-in=/=-with-resolution=/=-eval-in= all
+resolve, two namespaces do not leak into each other, undeclared
+namespace signals) and 5 zero-effect-direction cases (plain read before
+any resolution, plain read after resolution is restored — including
+under a signalled error, unwinding via ordinary dynamic-binding
+semantics with no explicit =unwind-protect= needed — hook variable
+default, nil/t canonicalization unaffected by an active resolution
+table). =packages/nl-ns/test/nl-ns-reader-standalone-smoke.el= replays
+the same 14 bodies against =target/nelisp= itself (13 run for real, 1
+loudly =GATE-SKIP=s: the standalone stdlib has no =unintern=, grepped
+absent from =scripts/nelisp-stdlib-prelude.el=, needed only by that one
+isolation test) — proving the hook is real on the compiled substrate
+the design is actually about, not only under the host Emacs used to
+develop it.
+
+** 7.5 Parity corpus
+
+Not applicable in the annotated direction: host Emacs has no namespace
+concept, so there is nothing to differentially compare an annotated
+=nl-ns-read-in= call against on the host side — this is NeLisp-only
+behaviour by design (§3), explicitly excluded from parity rather than
+silently absent from it. The *unannotated* direction is exactly what
+=substrate-parity-smoke= (257/0, §7.3) and =parity-coverage= (unaffected,
+part of the =check= tier) already cover, and this change does not
+change either corpus.
+
+** 7.6 Reader entry-point coverage (accepted gap)
+
+Per §5's "Reader entry-point coverage" verification design: every
+production reader entry point — =nelisp-read=, =nelisp-read-from-
+string=, =nelisp-read-all=, =nelisp-load=, =nelisp-bootstrap=, the
+standalone runtime's =--load=/=--eval=/REPL paths — does NOT thread the
+resolution context. This is an accepted gap, not an oversight: Phase 0's
+brief was the mechanism and its zero-effect contract, not production
+wiring, and leaving every existing entry point untouched is what makes
+the zero-effect proof (§7.3) hold by construction instead of by audit.
+Wiring an opted-in file into =nelisp-load.el= (so =require=-ing it
+resolves through the file's own declared namespace automatically) is
+the natural next increment, deferred to whichever phase actually needs
+a production consumer — nothing in the tree is one yet (§4 Phase 2's own
+grep found no multi-namespace adopters).
+
+** 7.7 Phase 1 decision: recorded, not attempted
+
+Phase 0 landed small and clean by every measure above: a 29-line net
+diff to =src/nelisp-read.el= (one =defvar=, one =cond= clause), one new
+~115-line package file, zero changes to =nl-ns.el=/=nl-ns-in.el=, full
+battery unchanged bar the explained, same-commit-raised deltas in
+§7.3. That said, Phase 1 (declaration-time collision refusal) is
+**deliberately not implemented this pass** — recorded here rather than
+attempted, for two reasons, not one:
+
+1. The task that produced this pass scoped explicitly to Phase 0 only.
+2. Phase 1 is not a small addition on top of Phase 0's mechanism: §4
+   describes it as needing a *new* runtime state (a qualified-symbol ->
+   owning-namespace table) and a behaviour change for opted-in code
+   (second =nl-ns-define= for an owned name signals) that necessarily
+   means editing =nl-ns-define= itself in =nl-ns-in.el= — the one file
+   this pass's =Extends= row commits to leaving untouched. That is a
+   second, separable feature with its own collision-refusal test
+   matrix (own-namespace redefinition vs. cross-namespace ownership
+   conflict vs. identical re-declaration) and its own standalone smoke,
+   not a follow-on edit to this pass's diff.
+
+Estimated shape for whoever picks Phase 1 up: a new hash table in
+=nl-ns-in.el= (qualified symbol -> owning namespace, populated inside
+=nl-ns-define='s macro expansion), a =nl-ns-collision-error= condition,
+and a standalone smoke mirroring
+=nelisp-standalone--reader-defvaralias-smoke=/=...-intern-canonical-
+smoke='s shape per §5's own citation — two =nl-ns-define= forms for the
+same qualified name, asserting the second signals. Whether it applies
+retroactively to nl-ns.el's existing 306 =ns-collision= findings is
+still an open question (§6) this pass does not resolve.
+
+** 7.8 Battery summary
+
+| gate                          | before (baseline capture) | after (this change) |
+|--------------------------------+----------------------------+----------------------|
+| =nelisp-ai.sh check=          | PASS (22 gates)            | PASS (22 gates)      |
+| =compile=                     | 100 units                  | 101 units            |
+| =parens-check=                | 427 files                  | 430 files            |
+| =ns-gate=                     | 2050 checked / 0 findings  | 2051 checked / 0 findings |
+| =ns-inventory=                | 353 files / PASS           | 354 files / PASS (=ns-prefix-violation= 873->874, explained) |
+| =standalone-reader-test=      | 22 checked / 0 findings    | 22 checked / 0 findings |
+| =standalone-reader-smokes=    | (not re-run pre-patch)     | 33 checked / 0 findings |
+| =nl-ns-reader-standalone-smoke= (new, optional) | n/a       | PASS (14 tests, 1 loud skip) |
+| =substrate-parity-smoke=      | 257 checked / 0 findings   | 257 checked / 0 findings |
+| =ert-full=                    | (not re-run pre-patch; CI-green at =670ddd885=) | 5140 tests, 4989 as expected, 0 unexpected, 151 skipped |
+| =binary-size-ratchet=         | 7247592 bytes               | 7251688 bytes (+4096, +0.06%, same-commit-raised) |
+
+#+VERIFIED-BY: compile ns-gate ns-inventory binary-size-ratchet substrate-parity-smoke standalone-reader-test standalone-reader-smokes nl-ns-reader-standalone-smoke ert-full

@@ -497,6 +497,19 @@ standalone-reader-buffer-smoke
 # tools/gate-mutations.txt's nl-actor-standalone-smoke row.
 nl-actor-standalone-smoke
 #
+# nl-ns-reader-standalone-smoke: added 2026-08-23, Doc 189 Phase 0
+# (reader-time namespace resolution, opt-in only).  Same shim/load-by-
+# path pattern as nl-condition-standalone-smoke above, proving the
+# `nelisp-read-namespace-resolve' hook `src/nelisp-read.el' gained is
+# real on `target/nelisp' itself, not only under the host Emacs used to
+# develop it.  Listed optional (not promoted to required, no
+# tools/gate-mutations.txt row yet): Phase 0 is a small, first-landing
+# proof-of-concept per docs/design/189-nl-ns-enforced-namespaces.org
+# §4, and its own zero-effect contract means no gate anywhere in this
+# tree depends on it running -- promote alongside Phase 1, or sooner if
+# a real defect surfaces here first.
+nl-ns-reader-standalone-smoke?
+#
 # substrate-presence-sweep (Task A, added same day as the addendum above):
 # own tier, `nelisp-ai.sh presence', not `extras' (see "SUBSTRATE PARITY"'s
 # addendum for the ~15-17 minute measurement).  OPTIONAL, not yet promoted
