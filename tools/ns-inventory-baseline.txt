@@ -218,7 +218,11 @@ ns-collision-divergent 124
 # reader-malformed-input-smoke' calls it across the boundary via `-f', and
 # `nelisp-standalone--' would move it into ns-private-escape instead of
 # removing it.
-ns-prefix-violation 854
+# 854 -> 855 on 2026-08-23: `nelisp-standalone-reader-form-location-test'
+# (Doc 180 Phase 1), same shape and same reason as the entry immediately
+# above -- `make standalone-reader-form-location-smoke' calls it across
+# the boundary via `-f'.
+ns-prefix-violation 855
 # 611 -> 613 on 2026-08-20: `nelisp--check-string'/`--check-symbol' and the
 # other argument-check helpers are referenced from the lisp/ mirrors that
 # carry copies of the functions using them.  This is the kind this file

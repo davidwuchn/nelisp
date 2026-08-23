@@ -105,7 +105,14 @@ silent-fallback 53
 # presence-sweep auto-note's defensive shape-extraction for a report-only
 # string, falls back to "?" on a malformed corpus form -- never on a
 # correctness path).
-ignore-errors   50
+# 50 -> 52 on 2026-08-23 (Doc 180 Phase 1): two new sites in
+# `nelisp-standalone--reader-form-location-smoke', pinned below -- its
+# per-row stderr-file cleanup (identical shape to, and hashing the same
+# as, the malformed-input smoke's own already-pinned one) and its REPL
+# companion's stderr-file cleanup, both best-effort temp-file deletion
+# after the assertion they guard has already run, same reasoning as every
+# sibling smoke's cleanup in this file.
+ignore-errors   52
 # 34 -> 32 on 2026-08-19: the two handlers in
 # `nelisp-artifact--ensure-native-compiler' now record the error instead of
 # discarding it.  Between them they had hidden a chain of six failures --
@@ -185,6 +192,8 @@ pinned-site ignore-errors	nelisp-standalone-build.el	defun nelisp-standalone--re
 pinned-site ignore-errors	nelisp-standalone-build.el	defun nelisp-standalone--reader-elc-smoke	793804bcbd55 1
 pinned-site ignore-errors	nelisp-standalone-build.el	defun nelisp-standalone--reader-elc-smoke	b4f48acca8de 1
 pinned-site ignore-errors	nelisp-standalone-build.el	defun nelisp-standalone--reader-defvaralias-smoke	7a85c44cdaf9 1
+pinned-site ignore-errors	nelisp-standalone-build.el	defun nelisp-standalone--reader-form-location-smoke	b58994cdbf57 1
+pinned-site ignore-errors	nelisp-standalone-build.el	defun nelisp-standalone--reader-form-location-smoke	3fb2f2281ec6 1
 pinned-site ignore-errors	nelisp-standalone-build.el	defun nelisp-standalone--reader-hash-table-literal-smoke	7a85c44cdaf9 1
 pinned-site ignore-errors	nelisp-standalone-build.el	defun nelisp-standalone--reader-stdlib-completion-smoke	7a85c44cdaf9 1
 pinned-site ignore-errors	nelisp-standalone-build.el	defun nelisp-standalone--reader-intern-canonical-smoke	7a85c44cdaf9 1

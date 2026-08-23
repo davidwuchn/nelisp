@@ -83,7 +83,21 @@
 # `alloc-bytes' for their scratch buffers) every sibling error path here
 # already uses -- no new kind of unsafe call, more call sites of the kinds
 # already present.
-unsafe-call 562
+# 562 -> 590 on 2026-08-23: Doc 180 Phase 1 (form-located errors), all in
+# `scripts/nelisp-standalone-build.el' (538 -> 566 for that file, measured
+# red/green against merge-base 71d5f17ef: `make unsafe-inventory' on the
+# unmodified tree reports 538/562 PASS, on this change 566/590).  The new
+# location-prefix renderer (`nelisp-standalone--eval-source-location-
+# prefix-forms') stashes three raw u64s (form-index/byte-offset/line) as
+# tagged Ints the same way the existing bare-abort printer already stashes
+# FORM_RC -- 12 `ptr-write-u64' across the three -- plus its own five
+# `alloc-bytes' scratch buffers and the new `nl_eval_source_all' cursor
+# snapshot/whitespace-skip/line-count helpers' `ptr-read-u8'/`ptr-read-u64'
+# reads of the reader's already-live cursor and source bytes.  Same shape
+# as the 538 -> 562 note above: no new kind of unsafe call, more sites of
+# the kinds already present, all on the same low-level arena/cursor state
+# every sibling diagnostic here already touches.
+unsafe-call 590
 
 # `pinned-kernel-call FILE COUNT' pins the per-file unquoted `unsafe-call'
 # count behind `total' above -- the three kernel files that actually carry
@@ -96,4 +110,4 @@ unsafe-call 562
 # Regenerate from a clean tree; do not hand-edit into drift from the scan.
 pinned-kernel-call lisp/nelisp-stdlib-os-int-helpers.el 18
 pinned-kernel-call scripts/nelisp-flat-arena-probe.el 6
-pinned-kernel-call scripts/nelisp-standalone-build.el 538
+pinned-kernel-call scripts/nelisp-standalone-build.el 566

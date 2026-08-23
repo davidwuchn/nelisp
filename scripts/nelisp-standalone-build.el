@@ -13414,14 +13414,23 @@ and the `string-match' family aliases over it."
 (defun nelisp-standalone--reader-repl-prelude-forms (fbuf src cursor result pool
                                                           out ctx builtin-sym)
   "Return Phase47 forms that prepare the standalone reader REPL environment."
-  `((let* ((n (nl_repl_prelude_source ,fbuf 0)))
-      (seq
-       (ptr-write-u64 268436216 0 0)
-       (nl_alloc_str ,fbuf n ,src)
-       ;; report_errors=0: this loads the trusted, build-time prelude, not
-       ;; user input -- keep prelude-priming tolerance exactly as before.
-       (nl_eval_source_all ,src ,cursor ,result ,pool ,out ,ctx ,builtin-sym 0)
-       (ptr-write-u64 268436216 0 1)))))
+  (let ((name-buf (make-symbol "prelude-name-buf")))
+    `((let* ((n (nl_repl_prelude_source ,fbuf 0))
+             (,name-buf (alloc-bytes 16 1)))
+        (seq
+         (ptr-write-u64 268436216 0 0)
+         (nl_alloc_str ,fbuf n ,src)
+         ;; report_errors=0: this loads the trusted, build-time prelude, not
+         ;; user input -- keep prelude-priming tolerance exactly as before.
+         ;; Doc 180 Phase 1: name it "<prelude>" for the rare case this
+         ;; trusted source itself signals -- `nl_eval_source_print_error'
+         ;; still fires for report_errors=0 when something is genuinely
+         ;; stashed (see the dispatch it falls through to), it just never
+         ;; forces a nonzero exit.
+         ,@(nelisp-standalone--byte-write-forms name-buf "<prelude>")
+         (nl_eval_source_all ,src ,cursor ,result ,pool ,out ,ctx ,builtin-sym 0
+                              ,name-buf ,(length (encode-coding-string "<prelude>" 'utf-8 t)))
+         (ptr-write-u64 268436216 0 1))))))
 
 (defun nelisp-standalone--reader-repl-eval-suffix ()
   "Return target-aware source appended to one standalone REPL input form.
@@ -13518,13 +13527,103 @@ word-packing (works for names/strings of any length, not just <=8 bytes)."
       (setq i (1+ i)))
     (nreverse forms)))
 
+(defun nelisp-standalone--eval-source-location-prefix-forms ()
+  "Return one Phase47 form writing \"in FILE, top-level form #N (byte OFFSET,
+line L): \" to stderr (Doc 180 Phase 1).  Spliced directly into a defun body
+that already binds FILE_PTR, FILE_LEN, FORM_INDEX, FORM_START and LINE_NO as
+its own formal parameters (see `nl_eval_source_print_error', the only
+caller in Phase 1) -- this helper reads those names as free variables of
+the surrounding form rather than taking symbol arguments of its own,
+matching how the sibling generator `nelisp-standalone--eval-source-report-
+error-form' already leaves `form_rc' free inside
+`nl_eval_source_print_bare_abort'.
+
+FORM_INDEX==0 is the sentinel for \"no top-level form context\": the four
+pre-read CLI validation failures (an oversized or malformed --eval EXPR, a
+--load FILE that could not be opened or was too large) report through this
+same printer before `nl_eval_source_all''s parse+eval loop ever starts, so
+they have no FILE/N/OFFSET to name -- they pass 0 for all five trailing
+arguments, this branch renders nothing, and the diagnostic is exactly what
+it was before Phase 1.  FILE_PTR/FILE_LEN are read only on the FORM_INDEX>0
+path, so a 0/0 pair is always a safe pass for a call that cannot reach it.
+
+Numbers render through the same \"stash a tagged Int, `m5_prin1' it\" idiom
+`nl_eval_source_print_bare_abort' already uses for FORM_RC (a raw native
+u64/i64 has no Lisp printed representation of its own here)."
+  (let ((in-buf (make-symbol "loc-in-buf"))
+        (form-buf (make-symbol "loc-form-buf"))
+        (byte-buf (make-symbol "loc-byte-buf"))
+        (line-buf (make-symbol "loc-line-buf"))
+        (tail-buf (make-symbol "loc-tail-buf"))
+        (num-slot (make-symbol "loc-num-slot"))
+        (num-ms (make-symbol "loc-num-ms"))
+        (num-repr (make-symbol "loc-num-repr")))
+    `((if (> form_index 0)
+          (let* ((,in-buf (alloc-bytes 8 1))
+                 (,form-buf (alloc-bytes 24 1))
+                 (,byte-buf (alloc-bytes 8 1))
+                 (,line-buf (alloc-bytes 8 1))
+                 (,tail-buf (alloc-bytes 8 1))
+                 (,num-slot (alloc-bytes 32 8))
+                 (,num-ms (alloc-bytes 32 8))
+                 (,num-repr (alloc-bytes 32 8)))
+            (seq
+             ,@(nelisp-standalone--byte-write-forms in-buf "in ")
+             (nl_os_write_stderr ,in-buf ,(length (encode-coding-string "in " 'utf-8 t)))
+             (nl_os_write_stderr file_ptr file_len)
+             ,@(nelisp-standalone--byte-write-forms form-buf ", top-level form #")
+             (nl_os_write_stderr ,form-buf ,(length (encode-coding-string ", top-level form #" 'utf-8 t)))
+             (ptr-write-u64 ,num-slot 0 2)
+             (ptr-write-u64 (+ ,num-slot 8) 0 form_index)
+             (ptr-write-u64 (+ ,num-slot 16) 0 0)
+             (ptr-write-u64 (+ ,num-slot 24) 0 0)
+             (mut-str-make-empty ,num-ms 32)
+             (m5_prin1 ,num-ms ,num-slot)
+             (mut-str-finalize ,num-ms ,num-repr)
+             (nl_os_write_stderr (nl_bi_strptr ,num-repr) (nl_bi_strlen ,num-repr))
+             ,@(nelisp-standalone--byte-write-forms byte-buf " (byte ")
+             (nl_os_write_stderr ,byte-buf ,(length (encode-coding-string " (byte " 'utf-8 t)))
+             (ptr-write-u64 ,num-slot 0 2)
+             (ptr-write-u64 (+ ,num-slot 8) 0 form_start)
+             (ptr-write-u64 (+ ,num-slot 16) 0 0)
+             (ptr-write-u64 (+ ,num-slot 24) 0 0)
+             (mut-str-make-empty ,num-ms 32)
+             (m5_prin1 ,num-ms ,num-slot)
+             (mut-str-finalize ,num-ms ,num-repr)
+             (nl_os_write_stderr (nl_bi_strptr ,num-repr) (nl_bi_strlen ,num-repr))
+             ,@(nelisp-standalone--byte-write-forms line-buf ", line ")
+             (nl_os_write_stderr ,line-buf ,(length (encode-coding-string ", line " 'utf-8 t)))
+             (ptr-write-u64 ,num-slot 0 2)
+             (ptr-write-u64 (+ ,num-slot 8) 0 line_no)
+             (ptr-write-u64 (+ ,num-slot 16) 0 0)
+             (ptr-write-u64 (+ ,num-slot 24) 0 0)
+             (mut-str-make-empty ,num-ms 32)
+             (m5_prin1 ,num-ms ,num-slot)
+             (mut-str-finalize ,num-ms ,num-repr)
+             (nl_os_write_stderr (nl_bi_strptr ,num-repr) (nl_bi_strlen ,num-repr))
+             ,@(nelisp-standalone--byte-write-forms tail-buf "): ")
+             (nl_os_write_stderr ,tail-buf ,(length (encode-coding-string "): " 'utf-8 t)))
+             0))
+        0))))
+
 (defun nelisp-standalone--eval-source-report-error-form ()
-  "Return error-diagnostic defun forms (Doc 152 DEFECT-2 + REPL visibility).
+  "Return error-diagnostic defun forms (Doc 152 DEFECT-2 + REPL visibility;
+Doc 180 Phase 1 form-location).
 `nl_eval_source_print_error' writes a short diagnostic for the top-level M6
 stash (FLAG @268435472, TAG @268435480, VAL @268435512 -- see the catch/throw
 unit's comment block for the stash contract) to stderr.  Uncaught throws
 report the condition class `no-catch' instead of using the catch tag as the
-error class.  `nl_eval_source_report_error' keeps
+error class.  Doc 180 Phase 1 adds five trailing parameters -- FILE_PTR,
+FILE_LEN (the source name: a real --load path, or a static \"<eval>\"/
+\"<repl>\"/\"<prelude>\"/\"<embedded>\" literal), FORM_INDEX (1-based,
+0 = no top-level form context), FORM_START (byte offset of that form's
+first byte) and LINE_NO (1-based, a form-relative running count -- see
+`nelisp-standalone--eval-source-location-prefix-forms') -- and prepends
+\"in FILE, top-level form #N (byte OFFSET, line L): \" before the existing
+tail whenever FORM_INDEX is nonzero, leaving that tail byte-for-byte
+unchanged so nothing downstream (the shadow-differential corpus,
+`emacs-parity', any script that already greps for it) breaks.
+`nl_eval_source_report_error' keeps
 the existing aborting --eval/--load behavior by printing that diagnostic and
 then arming QUIT_FLAG (268435464) so the `(if (= (ptr-read-u64 268435464 0)
 0) 0 (setq more 0))' check in `nl_eval_source_all' stops the top-level loop
@@ -13536,7 +13635,13 @@ form_rc!=0 / M6 flag==0 class.  Mode 0 stays silent only for documented
 internal inline-substrate/embedded transient rc paths; mode 2 prints but
 continues for REPL parity; mode 1 prints and exits nonzero for --eval/--load
 parity with other uncaught top-level aborts; mode 3 reports stashed errors but
-keeps flagless aborts silent for artifact/runtime inline-substrate replays."
+keeps flagless aborts silent for artifact/runtime inline-substrate replays.
+It also gains the same five trailing parameters, threaded from its own
+caller `nl_eval_source_all' for signature and future-Phase consistency, but
+does not render them in Phase 1: its message names an internal rc desync,
+not an uncaught user error, and Doc 180 Phase 1's message-shape design (its
+own §3.1 point 5) specifies the located form only for the uncaught-error/
+no-catch tail above, not this defensive path."
   (let ((prefix-buf (make-symbol "prefix-buf"))
         (bare-prefix-buf (make-symbol "bare-prefix-buf"))
         (sep-buf (make-symbol "sep-buf"))
@@ -13551,7 +13656,7 @@ keeps flagless aborts silent for artifact/runtime inline-substrate replays."
         (rc-slot (make-symbol "rc-slot"))
         (rc-ms (make-symbol "rc-ms"))
         (rc-repr (make-symbol "rc-repr")))
-    `((defun nl_eval_source_print_error ()
+    `((defun nl_eval_source_print_error (file_ptr file_len form_index form_start line_no)
         (let* ((,prefix-buf (alloc-bytes 32 1))
                (,sep-buf (alloc-bytes 8 1))
                (,nocatch-buf (alloc-bytes 16 1))
@@ -13567,6 +13672,7 @@ keeps flagless aborts silent for artifact/runtime inline-substrate replays."
            (nl_os_write_stderr ,prefix-buf
                                 ,(length (encode-coding-string
                                           "nelisp: uncaught error: " 'utf-8 t)))
+           ,@(nelisp-standalone--eval-source-location-prefix-forms)
            (mut-str-make-empty ,tag-ms 32)
            (m5_prin1 ,tag-ms 268435480)
            (mut-str-finalize ,tag-ms ,tag-repr)
@@ -13599,14 +13705,14 @@ keeps flagless aborts silent for artifact/runtime inline-substrate replays."
            (ptr-write-u8 ,nl-buf 0 10)
            (nl_os_write_stderr ,nl-buf 1)
            0)))
-      (defun nl_eval_source_report_error ()
+      (defun nl_eval_source_report_error (file_ptr file_len form_index form_start line_no)
         (seq
-         (nl_eval_source_print_error)
+         (nl_eval_source_print_error file_ptr file_len form_index form_start line_no)
          ;; QUIT_FLAG convention (see `nl_quit_flag_ptr'/explicit `exit'):
          ;; stored value is (exit-code + 1); 2 here -> exit code 1.
          (ptr-write-u64 268435464 0 2)
          0))
-      (defun nl_eval_source_print_bare_abort (form_rc)
+      (defun nl_eval_source_print_bare_abort (form_rc file_ptr file_len form_index form_start line_no)
         (let* ((,bare-prefix-buf (alloc-bytes 40 1))
                (,rparen-buf (alloc-bytes 1 1))
                (,nl-buf (alloc-bytes 1 1))
@@ -13634,9 +13740,9 @@ keeps flagless aborts silent for artifact/runtime inline-substrate replays."
            (ptr-write-u8 ,nl-buf 0 10)
            (nl_os_write_stderr ,nl-buf 1)
            0)))
-      (defun nl_eval_source_report_bare_abort (form_rc)
+      (defun nl_eval_source_report_bare_abort (form_rc file_ptr file_len form_index form_start line_no)
         (seq
-         (nl_eval_source_print_bare_abort form_rc)
+         (nl_eval_source_print_bare_abort form_rc file_ptr file_len form_index form_start line_no)
          ;; Bare aborts in --eval/--load are top-level evaluation failures,
          ;; so match the normal uncaught-error path and exit with status 1.
          (ptr-write-u64 268435464 0 2)
@@ -13644,11 +13750,60 @@ keeps flagless aborts silent for artifact/runtime inline-substrate replays."
 
 (defconst nelisp-standalone--reader-eval-source-source
   `(seq
-    (defun nl_eval_source_all (src cursor result pool out ctx builtin_sym report_errors)
+    (defun nl_count_newlines_range (src from to)
+      ;; Doc 180 Phase 1: cheap, error-path-only line count.  Counts \n
+      ;; bytes in [FROM, TO) so `nl_eval_source_all' can keep a running
+      ;; LINE_NO across forms (bump by this form's own span, never rescan
+      ;; from byte 0 on every error) -- see the design doc's §3.1 point 6
+      ;; cost discipline.  SRC is the reader's `*const Sexp' source
+      ;; argument (a Str/MutStr Sexp, per `nelisp_reader_parse_one''s ABI
+      ;; comment in lisp/nelisp-cc-reader-parser.el), not a raw byte
+      ;; pointer -- `nl_bi_strptr' is the same accessor
+      ;; `nl_bi_make_cpath' already uses to reach a Str's real bytes.
+      (let* ((p (nl_bi_strptr src)) (i from) (n 0))
+        (while (< i to)
+          (seq
+           (if (= (ptr-read-u8 p i) 10) (setq n (+ n 1)) 0)
+           (setq i (+ i 1))))
+        n))
+    (defun nl_skip_ws_bounded (src from to)
+      ;; Doc 180 Phase 1: advance FROM past ASCII whitespace (space, tab,
+      ;; newline, CR, form-feed) up to but not past TO, so FORM_START
+      ;; lands on the first non-whitespace byte of the form about to run
+      ;; (design doc §4's own DoD wording) rather than wherever the
+      ;; PREVIOUS form's read left the cursor -- `nelisp_reader_parse_one'
+      ;; stops right after the form it just read, not after also skipping
+      ;; the separator before the next one.  Bounded by TO (the cursor
+      ;; position after this attempt, success or failure) so a
+      ;; whitespace-only tail can never run past what was actually
+      ;; consumed.
+      (let* ((p (nl_bi_strptr src)) (i from))
+        (while (and (< i to)
+                    (let* ((c (ptr-read-u8 p i)))
+                      (if (= c 32) 1
+                        (if (= c 9) 1
+                          (if (= c 10) 1
+                            (if (= c 13) 1
+                              (if (= c 12) 1 0)))))))
+          (setq i (+ i 1)))
+        i))
+    (defun nl_eval_source_all (src cursor result pool out ctx builtin_sym report_errors file_ptr file_len)
       (seq
        (ptr-write-u64 cursor 0 2) (ptr-write-u64 cursor 8 0)
        (ptr-write-u64 out 0 0) (ptr-write-u64 out 8 0)
-       (let* ((more 1))
+       (let* ((more 1)
+              ;; Doc 180 Phase 1: FORM_INDEX is 1-based and counts every
+              ;; top-level read attempt that is not a clean EOF -- both a
+              ;; form successfully handed to `eval' AND a form whose own
+              ;; read failed (the `nl_eval_source_reader_error' branch
+              ;; below) get a number, since a human counting top-level
+              ;; forms while reading a file top to bottom would count the
+              ;; malformed one too.  PREV_START/LINE_NO carry the
+              ;; form-relative running newline count `nl_count_newlines_
+              ;; range' adds to on each iteration.
+              (form_index 0)
+              (prev_start 0)
+              (line_no 1))
          (while (= more 1)
            (seq
             ;; perf/macroexpansion-cache ROOT-CAUSE FIX #3: see
@@ -13656,12 +13811,35 @@ keeps flagless aborts silent for artifact/runtime inline-substrate replays."
             ;; for this driver's own `result' scratch slot).
             (nl_mxcache_evict result)
             (ptr-write-u64 result 0 0) (ptr-write-u64 result 8 0)
-            (let* ((mark_chunk (ptr-read-u64 268436168 0))
+            (let* (;; Doc 180 Phase 1: snapshot the cursor's byte-offset
+                   ;; word BEFORE `nelisp_reader_parse_one' runs -- this is
+                   ;; the start of the form about to be attempted, not its
+                   ;; end.  The reader path already tracks this word live
+                   ;; (design doc §2); nothing new is computed here, only
+                   ;; read at the right moment.
+                   (this_start (ptr-read-u64 cursor 8))
+                   (mark_chunk (ptr-read-u64 268436168 0))
                    (mark_cursor (nl_boundary_chunk_cursor mark_chunk))
                    (epoch0 (ptr-read-u64 268435544 0))
                    (prc (nelisp_reader_parse_one src cursor result pool 0)))
+              ;; Doc 180 Phase 1: refine THIS_START from "wherever the
+              ;; previous read stopped" to "the first non-whitespace byte
+              ;; of the form this iteration just attempted" -- see
+              ;; `nl_skip_ws_bounded'.  Bounded by the cursor's position
+              ;; now (after this attempt, whether it succeeded or not), so
+              ;; this is always a no-op when THIS_START already sits on
+              ;; real content (the common case after a previous form with
+              ;; no separator whitespace) and always safe.
+              (setq this_start (nl_skip_ws_bounded src this_start (ptr-read-u64 cursor 8)))
               (if (= prc 1)
                   (seq (ptr-write-u64 out 0 0) (ptr-write-u64 out 8 0)
+                       ;; Doc 180 Phase 1: this parse succeeded, so it is
+                       ;; being handed to `eval' below -- bump the location
+                       ;; state now so every error path this form can take
+                       ;; sees this form's own number/offset/line.
+                       (setq form_index (+ form_index 1))
+                       (setq line_no (+ line_no (nl_count_newlines_range src prev_start this_start)))
+                       (setq prev_start this_start)
                        ;; DEFECT-2 fix (artifact-cli-silent-noop): capture the
                        ;; per-form rc.  Previously this call's return value was
                        ;; discarded entirely, so an uncaught signal/throw from
@@ -13710,15 +13888,15 @@ keeps flagless aborts silent for artifact/runtime inline-substrate replays."
                                      ;; replay reaches its trailing success
                                      ;; marker -- it only makes the previously
                                      ;; silent case visible on stderr.
-                                     (nl_eval_source_print_bare_abort form_rc)
+                                     (nl_eval_source_print_bare_abort form_rc file_ptr file_len form_index this_start line_no)
                                    (if (= report_errors 1)
-                                       (nl_eval_source_report_bare_abort form_rc)
-                                     (nl_eval_source_print_bare_abort form_rc))))
+                                       (nl_eval_source_report_bare_abort form_rc file_ptr file_len form_index this_start line_no)
+                                     (nl_eval_source_print_bare_abort form_rc file_ptr file_len form_index this_start line_no))))
                              (if (= report_errors 1)
-                                 (nl_eval_source_report_error)
+                                 (nl_eval_source_report_error file_ptr file_len form_index this_start line_no)
                                (if (= report_errors 3)
-                                   (nl_eval_source_report_error)
-                                 (nl_eval_source_print_error))))))
+                                   (nl_eval_source_report_error file_ptr file_len form_index this_start line_no)
+                                 (nl_eval_source_print_error file_ptr file_len form_index this_start line_no))))))
                        (nl_boundary_maybe_reclaim mark_chunk mark_cursor epoch0 out)
                        ;; GC trigger on TOTAL chunk-bytes-reserved (268436184),
                        ;; not the chunk-0 bump offset.  See `bf_load_eval_loop'.
@@ -13746,8 +13924,17 @@ keeps flagless aborts silent for artifact/runtime inline-substrate replays."
                 ;; this is where the distinction was being dropped.
                 (if (= prc 2)
                     (setq more 0)
-                  (seq (nl_eval_source_reader_error src report_errors)
-                       (setq more 0))))))))
+                  (seq
+                   ;; Doc 180 Phase 1: a genuine parse failure is still a
+                   ;; top-level form as a human would count one (the Nth
+                   ;; thing in the file), just an invalid one -- bump the
+                   ;; same location state as the success path above so the
+                   ;; reader-error diagnostic below names it.
+                   (setq form_index (+ form_index 1))
+                   (setq line_no (+ line_no (nl_count_newlines_range src prev_start this_start)))
+                   (setq prev_start this_start)
+                   (nl_eval_source_reader_error src report_errors file_ptr file_len form_index this_start line_no)
+                   (setq more 0))))))))
        0))
     ;; A reader failure that is not clean EOF used to be indistinguishable
     ;; from EOF in `nl_eval_source_all''s loop -- see the comment at its own
@@ -13756,7 +13943,7 @@ keeps flagless aborts silent for artifact/runtime inline-substrate replays."
     ;; diagnostic helper here (`nl_eval_source_report_error' /
     ;; `_print_error' / `_report_bare_abort' / `_print_bare_abort' are all
     ;; separate defuns too, not inlined into the loop that calls them).
-    (defun nl_eval_source_reader_error (src report_errors)
+    (defun nl_eval_source_reader_error (src report_errors file_ptr file_len form_index form_start line_no)
       (seq
        ;; A few reader paths (the depth guard, and any future caller)
        ;; already stash a SPECIFIC condition before returning; only fall
@@ -13767,10 +13954,10 @@ keeps flagless aborts silent for artifact/runtime inline-substrate replays."
            (bf_read_syntax_error src)
          0)
        (if (= report_errors 1)
-           (nl_eval_source_report_error)
+           (nl_eval_source_report_error file_ptr file_len form_index form_start line_no)
          (if (= report_errors 3)
-             (nl_eval_source_report_error)
-           (nl_eval_source_print_error)))
+             (nl_eval_source_report_error file_ptr file_len form_index form_start line_no)
+           (nl_eval_source_print_error file_ptr file_len form_index form_start line_no)))
        0))
     ,@(nelisp-standalone--eval-source-report-error-form))
   "Reader source parse/eval loop split out of the always-recompiled driver.
@@ -16916,11 +17103,26 @@ correctly."
                   0
                 (seq
                  (nl_repl_make_source linebuf n fbuf src print_p)
-                 ;; report_errors=2: print form aborts but keep REPL session
-                 ;; semantics.  QUIT_FLAG below is still honored so explicit
-                 ;; (exit N)/(kill-emacs N) from REPL-evaluated code keeps
-                 ;; working unchanged.
-                 (nl_eval_source_all src cursor result pool out ctx builtin_sym 2)
+                 ;; Doc 180 Phase 1: "<repl>" is the source name this
+                 ;; line's own `nl_eval_source_all' call reports (design
+                 ;; doc §5 open question 2).  Allocated+written FRESH each
+                 ;; iteration, immediately before use -- an earlier version
+                 ;; built this once outside the loop and read back garbage
+                 ;; after the loop had run long enough to GC: nothing
+                 ;; protects a raw `alloc-bytes' buffer across a span that
+                 ;; evaluates arbitrary REPL input (form-boundary GC can
+                 ;; fire on any line), and every REPL line already runs one
+                 ;; regardless, so the extra alloc+write is unmeasurable
+                 ;; next to reading a line of terminal input.
+                 (let* ((repl-name-buf (alloc-bytes 8 1)))
+                   (seq
+                    ,@(nelisp-standalone--byte-write-forms 'repl-name-buf "<repl>")
+                    ;; report_errors=2: print form aborts but keep REPL session
+                    ;; semantics.  QUIT_FLAG below is still honored so explicit
+                    ;; (exit N)/(kill-emacs N) from REPL-evaluated code keeps
+                    ;; working unchanged.
+                    (nl_eval_source_all src cursor result pool out ctx builtin_sym 2
+                                         repl-name-buf ,(length (encode-coding-string "<repl>" 'utf-8 t)))))
                  (if (= (ptr-read-u64 268435464 0) 0) 0
                    (setq done 1)))))))
          0)))
@@ -17256,7 +17458,10 @@ correctly."
                      ;; source_too_large' above); reject by name only.
                      (seq
                       (nl_cli_stash_source_too_large expr-str)
-                      (nl_eval_source_report_error)
+                      ;; Pre-read failure -- no top-level form was ever
+                      ;; reached, so FILE/N/OFFSET/LINE are all the Doc 180
+                      ;; Phase 1 sentinel (0 = "no location").
+                      (nl_eval_source_report_error 0 0 0 0 0)
                       (- (ptr-read-u64 268435464 0) 1))
                  (if (= (nl_cli_eval_expr_check expr-str) 1)
                      (seq
@@ -17280,16 +17485,35 @@ correctly."
                               'fbuf 'src 'cursor 'result 'pool 'out 'ctx 'builtin_sym))
                         0)
                       (nl_cli_eval_source arg2 fbuf src)
-                      (nl_eval_source_all src cursor result pool out ctx builtin_sym 1)
+                      ;; Doc 180 Phase 1: allocate+write "<eval>" HERE, not
+                      ;; earlier -- the `if (< _cl 0) ...' prelude-priming
+                      ;; call just above runs a full top-level parse+eval
+                      ;; loop over hundreds of prelude forms (form-boundary
+                      ;; GC can fire between them), and a raw `alloc-bytes'
+                      ;; buffer written before that gap and read only after
+                      ;; it read back garbage in testing (a stray interned
+                      ;; symbol's name, not "<eval>") -- unlike a GC ROOT,
+                      ;; nothing protects it from reclaim/reuse across a
+                      ;; span that evaluates arbitrary code.  Every other
+                      ;; Phase 1 name literal (prelude-priming's own
+                      ;; "<prelude>", --embedded's "<embedded>") already
+                      ;; matches this shape: alloc, write, use, with no
+                      ;; evaluation in between.
+                      (let* ((eval-name-buf (alloc-bytes 8 1)))
+                        (seq
+                         ,@(nelisp-standalone--byte-write-forms 'eval-name-buf "<eval>")
+                         (nl_eval_source_all src cursor result pool out ctx builtin_sym 1
+                                              eval-name-buf ,(length (encode-coding-string "<eval>" 'utf-8 t)))))
                       (if (= (ptr-read-u64 268435464 0) 0)
                           0
                         (- (ptr-read-u64 268435464 0) 1)))
                    ;; EXPR itself did not check out (not exactly one
                    ;; well-formed form) -- report the diagnostic
                    ;; `nl_cli_eval_expr_check' already stashed and exit
-                   ;; nonzero without ever touching the wrapper.
+                   ;; nonzero without ever touching the wrapper.  Pre-read
+                   ;; failure, same Doc 180 Phase 1 sentinel as above.
                    (seq
-                    (nl_eval_source_report_error)
+                    (nl_eval_source_report_error 0 0 0 0 0)
                     (- (ptr-read-u64 268435464 0) 1))))))
             (seq (nl_cli_write_help fbuf) 2)))
          ((= (nl_cstr_eq_load path) 1)
@@ -17324,26 +17548,36 @@ correctly."
                      ;; same `file-missing' condition naming this file, then
                      ;; report it through the same diagnostic + nonzero-exit
                      ;; path every other reader/eval failure in `driver' uses.
+                     ;; Pre-read failure (file never opened) -- Doc 180
+                     ;; Phase 1 sentinel, same as the --eval reject-by-name
+                     ;; branches above.
                      (let* ((path-str (alloc-bytes 32 8)))
                        (seq
                         (nl_alloc_str arg2 (nl_cstr_len arg2) path-str)
                         (bf_require_file_missing path-str)
-                        (nl_eval_source_report_error)
+                        (nl_eval_source_report_error 0 0 0 0 0)
                         (- (ptr-read-u64 268435464 0) 1)))
                    (if (= (nl_cli_read_cap_hit_p n) 1)
                        ;; Read exactly the buffer's max -- the file may be
                        ;; larger and silently truncated.  Reject by name,
                        ;; not by content (see `nl_cli_stash_source_too_
-                       ;; large' above for why).
+                       ;; large' above for why).  Pre-read failure -- same
+                       ;; Doc 180 Phase 1 sentinel.
                        (let* ((path-str (alloc-bytes 32 8)))
                          (seq
                           (nl_alloc_str arg2 (nl_cstr_len arg2) path-str)
                           (nl_cli_stash_source_too_large path-str)
-                          (nl_eval_source_report_error)
+                          (nl_eval_source_report_error 0 0 0 0 0)
                           (- (ptr-read-u64 268435464 0) 1)))
                      (seq
                       (nl_alloc_str fbuf n src)
-                      (nl_eval_source_all src cursor result pool out ctx builtin_sym 1)
+                      ;; Doc 180 Phase 1: the file really was read, so
+                      ;; ARG2 (the raw C path pointer already on hand) and
+                      ;; its length are the real, dynamic FILE_PTR/FILE_LEN
+                      ;; -- no literal buffer needed, unlike --eval/--repl/
+                      ;; --embedded/prelude-priming's static names.
+                      (nl_eval_source_all src cursor result pool out ctx builtin_sym 1
+                                           arg2 (nl_cstr_len arg2))
                       (if (= (ptr-read-u64 268435464 0) 0)
                           (nl_cli_write_value fbuf out)
                         (- (ptr-read-u64 268435464 0) 1)))))))
@@ -17351,13 +17585,22 @@ correctly."
          ((= (nl_cstr_eq_neln_selftest path) 1)
           (nl_neln_demo_exec ctx 41))
          ((= (nl_cstr_eq_embedded path) 1)
-          (seq
-           ;; report_errors=0: `--embedded' backs `nelisp-standalone-reader-test'`s
-           ;; internal NELISP_SRC exit-code check (default "(+ 40 2)"), not a
-           ;; user-facing subcommand -- leave its numeric-exit contract as-is.
-           (sexp-write-str-lit src ,(nelisp-standalone--reader-src))
-           (nl_eval_source_all src cursor result pool out ctx builtin_sym 0)
-           (ptr-read-u64 out 8)))
+          (let* (;; Doc 180 Phase 1: "<embedded>" names this source for
+                 ;; the same rare-but-possible print_error fall-through as
+                 ;; prelude-priming (report_errors=0 still prints when
+                 ;; something is genuinely stashed; it only skips forcing
+                 ;; a nonzero exit) -- see `nl_eval_source_report_error''s
+                 ;; docstring.
+                 (embedded-name-buf (alloc-bytes 16 1)))
+            (seq
+             ;; report_errors=0: `--embedded' backs `nelisp-standalone-reader-test'`s
+             ;; internal NELISP_SRC exit-code check (default "(+ 40 2)"), not a
+             ;; user-facing subcommand -- leave its numeric-exit contract as-is.
+             ,@(nelisp-standalone--byte-write-forms 'embedded-name-buf "<embedded>")
+             (sexp-write-str-lit src ,(nelisp-standalone--reader-src))
+             (nl_eval_source_all src cursor result pool out ctx builtin_sym 0
+                                  embedded-name-buf ,(length (encode-coding-string "<embedded>" 'utf-8 t)))
+             (ptr-read-u64 out 8))))
          ((= (nl_cstr_eq_repl path) 1)
           (if (= (nl_repl_usage_error_p argc arg2 arg3) 1)
               (seq (nl_cli_write_help fbuf) 2)
@@ -17530,6 +17773,16 @@ correctly."
            ;; inline-substrate flagless transient remains silent.  The bare file
            ;; fallback is user source, so keep mode 1: flagless aborts report and
            ;; exit nonzero just like --load.
+           ;; Doc 180 Phase 1: PATH names this call's source in every
+           ;; sub-case here -- the real file path for the bare-FILE
+           ;; fallback (same idiom as --load's ARG2), and the subcommand
+           ;; name (e.g. "eval-runtime-image") for the artifact/runtime-
+           ;; image commands, which is an honest label even though it is
+           ;; not a filesystem path: this whole `cond' arm covers several
+           ;; subcommands Doc 180's original 3-call-site count did not
+           ;; enumerate (the tree grew after the doc was written), and a
+           ;; single uniform PATH/LEN pair here is Phase 1's intentionally
+           ;; narrow answer rather than a per-subcommand naming scheme.
            (nl_eval_source_all
             src cursor result pool out ctx builtin_sym
             (if (= (nl_runtime_image_command_p path) 1)
@@ -17540,7 +17793,8 @@ correctly."
                     3
                   (if (= (nl_cstr_eq_exec_elisp_artifact path) 1)
                       3
-                    1)))))
+                    1))))
+            path (nl_cstr_len path))
            (ptr-write-u64 268436216 0 1)
            (if (= (ptr-read-u64 268435464 0) 0)
                (ptr-read-u64 out 8)
@@ -18922,7 +19176,8 @@ loader when it is absent."
                                  nelisp-standalone--reader-neln-selftest-smoke
                                  nelisp-standalone--reader-repl-smoke
                                  nelisp-standalone--reader-control-flow-smoke
-                                 nelisp-standalone--reader-malformed-input-smoke))
+                                 nelisp-standalone--reader-malformed-input-smoke
+                                 nelisp-standalone--reader-form-location-smoke))
                   (funcall smoke)
                   (setq checked (1+ checked)))
                 (message "GATE-COUNT checked=%d findings=0" checked)
@@ -19855,7 +20110,16 @@ not exist must fail (exit 1), not silently produce a usable image."
                        (equal error-out "43\n")
                        (string-match-p
                         (regexp-quote
-                         "nelisp: uncaught error: void-function: (this-fn-does-not-exist)\n")
+                         ;; Doc 180 Phase 1: the location prefix is now
+                         ;; part of this line -- this is the first
+                         ;; top-level form of a fresh `--repl' invocation
+                         ;; (`nl_repl_loop' resets `cursor'/`form_index'
+                         ;; on every input line, so it is always "form #1,
+                         ;; byte 0" here, not a running session count; see
+                         ;; the design doc's §5 open question 2).  The tail
+                         ;; ("void-function: (this-fn-does-not-exist)") is
+                         ;; unchanged from before Phase 1.
+                         "nelisp: uncaught error: in <repl>, top-level form #1 (byte 0, line 1): void-function: (this-fn-does-not-exist)\n")
                         error-err))
             (error "repl error visibility exit=%S stdout=%S stderr=%S"
                    error-rc error-out error-err)))
@@ -20064,6 +20328,101 @@ reject good input is caught here too."
       (mapc #'nelisp-standalone--reader-malformed-input-smoke--rm
             (list garbage-file unterm-file ok-file deep-ok-file
                   deep-bad-file huge-file missing-load missing-flat)))))
+
+(defun nelisp-standalone--reader-form-location-smoke ()
+  "Doc 180 Phase 1: against-the-bug proof that the uncaught-error printer
+names FILE, top-level form #N and a byte/line offset.
+
+The load row's fixture has the error in its SECOND top-level form, so a
+printer that always reported form #1 (or the pre-Phase-1 printer, which
+reports no location at all) is caught here -- see this smoke's
+`tools/gate-mutations.txt' row, which corrupts the form-index increment
+the same way.  The expected byte offset is computed from the fixture text
+via `string-match' rather than hand-counted, so a future edit to the
+fixture cannot silently desync the assertion from what it actually
+covers (`nelisp-standalone--reader-malformed-input-smoke''s deep-nesting
+control row uses the same discipline).  --eval and --repl are separate
+`nl_eval_source_all' call sites (design doc §3.1 point 3) with their own
+name-buffer allocation, so each gets its own row rather than trusting
+--load's coverage to generalize -- REPL's in particular resets
+FORM_INDEX/the byte cursor on every input line (design doc §5 open
+question 2, resolved during Phase 1's landing: the offset is relative to
+the one line just read, not a running session count)."
+  (let* ((load-file (make-temp-file "nelisp-form-location-" nil ".el"))
+         (load-src "(+ 1 1)\n(error \"boom\")\n(+ 2 2)\n")
+         (load-byte (string-match "(error" load-src))
+         (load-line 2))
+    (unwind-protect
+        (progn
+          (with-temp-file load-file (insert load-src))
+          (dolist (row
+                   (list
+                    ;; label  args  want-exit  want-substring
+                    (list "load form #2 signals"
+                          (list "--load" load-file) 1
+                          (format "in %s, top-level form #2 (byte %d, line %d): "
+                                  load-file load-byte load-line))
+                    (list "eval names <eval>, form #1"
+                          (list "--eval" "(progn (+ 1 1) (error \"boom\"))") 1
+                          "in <eval>, top-level form #1 (byte 0, line 1): ")))
+            (let* ((label (nth 0 row))
+                   (args (nth 1 row))
+                   (want-exit (nth 2 row))
+                   (want-substring (nth 3 row))
+                   (stderr-file (make-temp-file "nelisp-form-location-stderr-"))
+                   (rc nil) (err nil))
+              (unwind-protect
+                  (progn
+                    (with-temp-buffer
+                      (setq rc (apply #'call-process
+                                      nelisp-standalone--reader-out nil
+                                      (list nil stderr-file) nil args)))
+                    (with-temp-buffer
+                      (insert-file-contents stderr-file)
+                      (setq err (buffer-string)))
+                    (unless (= rc want-exit)
+                      (error "%s: exit=%S (want %S) stderr=%S"
+                             label rc want-exit err))
+                    (unless (string-match-p (regexp-quote want-substring) err)
+                      (error "%s: stderr=%S missing %S" label err want-substring)))
+                (ignore-errors (delete-file stderr-file)))))
+          ;; REPL companion: `nl_repl_loop' is its own call site (a
+          ;; separate name-buffer allocation from --eval/--load), reached
+          ;; only over stdin, not argv -- see the docstring above.
+          (let ((repl-err-file (make-temp-file "nelisp-form-location-repl-err-"))
+                (repl-err nil))
+            (unwind-protect
+                (progn
+                  (with-temp-buffer
+                    (insert "(+ 1 1)\n(error \"boom\")\n")
+                    (call-process-region (point-min) (point-max)
+                                         nelisp-standalone--reader-out nil
+                                         (list nil repl-err-file) nil
+                                         "--repl" "--no-prompt"))
+                  (with-temp-buffer
+                    (insert-file-contents repl-err-file)
+                    (setq repl-err (buffer-string)))
+                  (unless (string-match-p
+                           (regexp-quote
+                            "in <repl>, top-level form #1 (byte 0, line 1): ")
+                           repl-err)
+                    (error "repl names <repl>, form #1: stderr=%S" repl-err)))
+              (ignore-errors (delete-file repl-err-file))))
+          (message "[standalone-reader] form-location smoke PASS"))
+      (nelisp-standalone--reader-malformed-input-smoke--rm load-file))))
+
+;;;###autoload
+(defun nelisp-standalone-reader-form-location-test ()
+  "Build the reader binary and run only the form-location smoke.  Exits 0/1."
+  (nelisp-standalone-build-reader)
+  (condition-case err
+      (progn
+        (nelisp-standalone--reader-form-location-smoke)
+        (kill-emacs 0))
+    (error
+     (message "[standalone-reader] FAIL: form-location smoke: %s"
+              (error-message-string err))
+     (kill-emacs 1))))
 
 (defconst nelisp-standalone--prelude-file
   (expand-file-name "scripts/nelisp-stdlib-prelude.el"
