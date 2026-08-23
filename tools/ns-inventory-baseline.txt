@@ -230,7 +230,19 @@ ns-collision-divergent 124
 # in src/nelisp-eval.el) predates this commit and stayed self-
 # consistent on purpose rather than mixing two prefixes across one
 # cohesive subsystem.
-ns-prefix-violation 858
+# 858 -> 861 on 2026-08-23: Doc 193 §4.4 Phase 1's standalone runtime
+# shim in packages/nelisp-actor/src/nelisp-actor.el defines `iter-
+# next'/`iter-close'/`iter-end-of-sequence' (installed only when real
+# `generator.el' did not load).  These three cannot carry any
+# `nelisp-'/`nelisp-actor-' prefix: they exist to be a drop-in stand-in
+# for real generator.el's OWN public names, which this package's
+# existing code (`nelisp-actor--step') and a build-time-CPS-transformed
+# thunk's baked-in `(signal 'iter-end-of-sequence ...)' call by those
+# exact names -- prefixing them would just break both callers instead
+# of avoiding a finding.  `iter-empty', generator.el's fourth public
+# name, is deliberately NOT defined here (nothing calls it), so this is
+# +3, not +4.
+ns-prefix-violation 861
 # 611 -> 613 on 2026-08-20: `nelisp--check-string'/`--check-symbol' and the
 # other argument-check helpers are referenced from the lisp/ mirrors that
 # carry copies of the functions using them.  This is the kind this file
