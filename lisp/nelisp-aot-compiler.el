@@ -178,6 +178,46 @@ defuns that receive 7+ GP params.")
   '(x0 x1 x2 x3 x4 x5 x6 x7)
   "AAPCS64 integer argument registers (= positional, 1..8).")
 
+(defconst nelisp-aot-compiler--wasm-arg-regs
+  '(wasm-arg0  wasm-arg1  wasm-arg2  wasm-arg3
+    wasm-arg4  wasm-arg5  wasm-arg6  wasm-arg7
+    wasm-arg8  wasm-arg9  wasm-arg10 wasm-arg11
+    wasm-arg12 wasm-arg13 wasm-arg14 wasm-arg15
+    wasm-arg16 wasm-arg17 wasm-arg18 wasm-arg19
+    wasm-arg20 wasm-arg21 wasm-arg22 wasm-arg23
+    wasm-arg24 wasm-arg25 wasm-arg26 wasm-arg27
+    wasm-arg28 wasm-arg29 wasm-arg30 wasm-arg31)
+  "Doc 192 §3 Phase A placeholder GP \"argument register\" budget for wasm32.
+
+wasm has no physical argument registers at all -- a wasm function's
+parameters are locals, and `--wasm-emit-value' pushes each `extern-call'
+argument onto the value stack in order (see the tag-23 arm in the wasm
+emit dispatcher); nothing here ever reads an element of this list by
+name.  Its only job is to size the parse-time GP-argument budget
+`--parse-extern-call-args' enforces before `--current-arg-regs' gained
+this wasm32 case wasm fell through to the six-slot x86_64 SysV list
+instead (Doc 192 §1.2), which made every `nelisp_aot_builtin_calln'-
+routed builtin call taking one or more user arguments a hard compile
+error on wasm specifically, since wasm was also not in the x86_64
+SysV/Win64 set exempted for stack-argument spilling.
+
+32 matches the arity ceiling this compiler already uses for wasm32 in
+two other places with the identical \"no ISA register constraint
+applies, keep a bounded parser cap so malformed input still fails
+loudly\" rationale: the direct user-defined-function call arity check
+and the wasm32 defun-param arity check (both literal `32' in this
+file).  Doc 192 §3 Phase A measured the substrate-parity corpus's
+(`tools/nelisp-substrate-parity-corpus.el') actual maximum
+calln-routed GP-argument count at 8 (6 fixed ABI-prefix args + 2 user
+args -- every corpus form that used the `calln' bridge called a
+2-argument builtin such as `eq'/`equal'; see the doc's rung-1/rung-2
+before/after probe) -- 32 keeps that measured number as a small
+fraction of the budget rather than picking it exactly, since ordinary
+multi-arg builtins outside this corpus (`replace-regexp-in-string',
+`plist-put', keyword/designator-expanded calls, ...) need more than 2
+user args and none of them should re-hit this ceiling the moment the
+corpus grows past today's 39 forms.")
+
 (defconst nelisp-aot-compiler--xmm-arg-regs
   '(xmm0 xmm1 xmm2 xmm3 xmm4 xmm5 xmm6 xmm7)
   "SysV AMD64 / aarch64 floating-point argument registers (positional 1..8).
@@ -519,8 +559,14 @@ va_list `reg_save_area' field as `rbp - SAVE-DISP'.")
 
 (defsubst nelisp-aot-compiler--current-arg-regs ()
   "Return the GP argument register list for the current ABI.
-Doc 101 §101.B Wave 5: dispatches on `nelisp-aot-compiler--abi'."
+Doc 101 §101.B Wave 5: dispatches on `nelisp-aot-compiler--abi'.
+Doc 192 §3 Phase A: `wasm32' gets its own generously-sized placeholder
+list (`nelisp-aot-compiler--wasm-arg-regs') instead of falling through
+to the `t' clause's x86_64 SysV six-slot list, which had no ISA-level
+justification for a target with no physical registers at all."
   (cond
+   ((eq nelisp-aot-compiler--arch 'wasm32)
+    nelisp-aot-compiler--wasm-arg-regs)
    ((eq nelisp-aot-compiler--arch 'aarch64)
     nelisp-aot-compiler--aarch64-arg-regs)
    ((eq nelisp-aot-compiler--abi 'win64)
