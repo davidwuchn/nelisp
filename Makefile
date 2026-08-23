@@ -568,14 +568,14 @@ reader-surface-audit:
 # integration/wave3: fix/standalone-reader-input-hardening added
 # `standalone-reader-malformed-input-smoke').
 #
-# `standalone-reader-test' runs 18 checks built into the build script (13
-# base + 1 initial exit-code assertion, +4 from this integration: each of
-# fix/control-flow-wrong-values (`...-control-flow-smoke'),
+# `standalone-reader-test' runs 19 checks built into the build script (13
+# base + 1 initial exit-code assertion, +4 from an earlier integration: each
+# of fix/control-flow-wrong-values (`...-control-flow-smoke'),
 # fix/standalone-reader-input-hardening (`...-malformed-input-smoke'),
 # fix/elc-artifact-void-invocation-name (`...-elc-smoke'), and
 # feat/stdlib-hooks-map-fixnum (`...-stdlib-completion-smoke') added one to
-# the dolist -- measured with `GATE-COUNT checked=18 findings=0' on the
-# fully merged tree, all twelve integration/wave3 branches included).
+# the dolist, +1 from Doc 186 (`...-char-table-smoke') -- measured with
+# `GATE-COUNT checked=19 findings=0' on this branch.
 # These 29 are separate make targets testing separate things -- format
 # directives, getenv, TLS, processes, match-data, intern-soft, the FFI bridge
 # -- and until 2026-08-21 nothing ran them, which is how a `print-circle'
