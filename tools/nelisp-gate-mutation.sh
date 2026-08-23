@@ -41,8 +41,19 @@ run_gate() {
       NELISP_GATE_DIR="$mutation_gate_dir" \
         tools/ai/nelisp-ai.sh test >"$log" 2>&1
     else
+      # Which test file a source-file mutation gets scoped to (speed
+      # only -- see the block comment above): `src/nelisp-eval.el' is
+      # exercised by `test/nelisp-eval-test.el' (the pre-existing row);
+      # docs/design/185-cl-generic-subset.org's mutation rows target
+      # `lisp/nelisp-cl-macros.el', exercised by
+      # `test/nelisp-cl-generic-test.el'.  Any other file falls back to
+      # the original single-file scope, unchanged.
+      local scoped_test=test/nelisp-eval-test.el
+      case "$f" in
+        lisp/nelisp-cl-macros.el) scoped_test=test/nelisp-cl-generic-test.el ;;
+      esac
       NELISP_GATE_DIR="$mutation_gate_dir" \
-        NELISP_GATE_MUTATION_TEST_FILES=test/nelisp-eval-test.el \
+        NELISP_GATE_MUTATION_TEST_FILES="$scoped_test" \
         tools/ai/nelisp-ai.sh test >"$log" 2>&1
     fi
   else

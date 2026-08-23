@@ -162,7 +162,21 @@
 # `insert-file-contents' were deleted, not synced, so those pairs no
 # longer collide at all).  Each of the 49 has its own `pinned-collision'
 # line below with the reason grouped in one place rather than repeated.
-ns-collision 225
+#
+# 180 -> 204 on 2026-08-23 (docs/design/185-cl-generic-subset.org): +25 new
+# ns-collision pairs for the cl-defgeneric/cl-defmethod subset block --
+# lisp/nelisp-cl-macros.el and its mirror copy in scripts/nelisp-stdlib-
+# prelude.el, byte-identical (not divergent), each individually pinned
+# below.
+#
+# integration/wave4 (this branch, merge 2/9): the two raises above were
+# each measured on the branch alone against the shared 180 base; on the
+# merged tree they are disjoint (buffer.el names vs. cl-macros.el names,
+# no shared identity) so the interim pin below is the arithmetic union,
+# 180 + 45 + 24 = 249.  Re-run and reconciled to the actual measured
+# count during the post-merge battery, per this file's own rule that a
+# ceiling above the real count is not a ceiling.
+ns-collision 249
 # 97 -> 96 on 2026-08-19: `string-equal' no longer differs between the two
 # files -- the prelude's now signals for a non-string instead of falling
 # through to `equal', and the lisp copy was brought with it.  Ratcheted down
@@ -234,7 +248,16 @@ ns-collision-divergent 121
 # reader-malformed-input-smoke' calls it across the boundary via `-f', and
 # `nelisp-standalone--' would move it into ns-private-escape instead of
 # removing it.
-ns-prefix-violation 854
+# 854 -> 861 on 2026-08-23 (docs/design/185-cl-generic-subset.org): +7,
+# public cl-generic-subset names with no `nelisp-'-prefix boundary of
+# their own -- `cl-defgeneric'/`cl-defmethod'/`cl-call-next-method'/
+# `cl-next-method-p' (real CL names this subset intentionally exposes
+# under, same shape as the pre-existing `cl-defstruct'/`cl-loop'/
+# `cl-block' already in this count) plus three of their own internal
+# `nelisp-cl-generic--*' helpers whose call sites cross the file
+# boundary between the two mirror copies.  Conceded, same as the
+# existing bulk of this count (see the comment below) -- not tightened.
+ns-prefix-violation 861
 # 611 -> 613 on 2026-08-20: `nelisp--check-string'/`--check-symbol' and the
 # other argument-check helpers are referenced from the lisp/ mirrors that
 # carry copies of the functions using them.  This is the kind this file
@@ -614,3 +637,33 @@ pinned-collision ns-collision	nelisp-set-marker	scripts/nelisp-stdlib-prelude.el
 pinned-collision ns-collision	nelisp-text-property-intervals	scripts/nelisp-stdlib-prelude.el src/nelisp-buffer.el
 pinned-collision ns-collision	nelisp-widen	scripts/nelisp-stdlib-prelude.el src/nelisp-buffer.el
 pinned-collision ns-collision	nelisp-with-buffer	scripts/nelisp-stdlib-prelude.el src/nelisp-buffer.el
+# 2026-08-23 (docs/design/185-cl-generic-subset.org): 25 new ns-collision
+# pairs for the cl-generic subset block, byte-identical (same definition,
+# no divergence) in lisp/nelisp-cl-macros.el and its mirror copy in
+# scripts/nelisp-stdlib-prelude.el, per this project's own mirror-
+# consistency convention (the cl-loop fix had to land in both; see AI.md).
+pinned-collision ns-collision	cl-call-next-method	lisp/nelisp-cl-macros.el scripts/nelisp-stdlib-prelude.el
+pinned-collision ns-collision	cl-defgeneric	lisp/nelisp-cl-macros.el scripts/nelisp-stdlib-prelude.el
+pinned-collision ns-collision	cl-defmethod	lisp/nelisp-cl-macros.el scripts/nelisp-stdlib-prelude.el
+pinned-collision ns-collision	cl-next-method-p	lisp/nelisp-cl-macros.el scripts/nelisp-stdlib-prelude.el
+pinned-collision ns-collision	nelisp-cl-generic--applicable-methods	lisp/nelisp-cl-macros.el scripts/nelisp-stdlib-prelude.el
+pinned-collision ns-collision	nelisp-cl-generic--build-dispatch-table	lisp/nelisp-cl-macros.el scripts/nelisp-stdlib-prelude.el
+pinned-collision ns-collision	nelisp-cl-generic--builtin-type-p	lisp/nelisp-cl-macros.el scripts/nelisp-stdlib-prelude.el
+pinned-collision ns-collision	nelisp-cl-generic--call-args	lisp/nelisp-cl-macros.el scripts/nelisp-stdlib-prelude.el
+pinned-collision ns-collision	nelisp-cl-generic--conditions-registered	lisp/nelisp-cl-macros.el scripts/nelisp-stdlib-prelude.el
+pinned-collision ns-collision	nelisp-cl-generic--current-name	lisp/nelisp-cl-macros.el scripts/nelisp-stdlib-prelude.el
+pinned-collision ns-collision	nelisp-cl-generic--dispatch-table	lisp/nelisp-cl-macros.el scripts/nelisp-stdlib-prelude.el
+pinned-collision ns-collision	nelisp-cl-generic--ensure	lisp/nelisp-cl-macros.el scripts/nelisp-stdlib-prelude.el
+pinned-collision ns-collision	nelisp-cl-generic--ensure-conditions	lisp/nelisp-cl-macros.el scripts/nelisp-stdlib-prelude.el
+pinned-collision ns-collision	nelisp-cl-generic--eql-match	lisp/nelisp-cl-macros.el scripts/nelisp-stdlib-prelude.el
+pinned-collision ns-collision	nelisp-cl-generic--invoke	lisp/nelisp-cl-macros.el scripts/nelisp-stdlib-prelude.el
+pinned-collision ns-collision	nelisp-cl-generic--make-dispatcher	lisp/nelisp-cl-macros.el scripts/nelisp-stdlib-prelude.el
+pinned-collision ns-collision	nelisp-cl-generic--next-methods	lisp/nelisp-cl-macros.el scripts/nelisp-stdlib-prelude.el
+pinned-collision ns-collision	nelisp-cl-generic--ordered-type-matches	lisp/nelisp-cl-macros.el scripts/nelisp-stdlib-prelude.el
+pinned-collision ns-collision	nelisp-cl-generic--parse-arglist	lisp/nelisp-cl-macros.el scripts/nelisp-stdlib-prelude.el
+pinned-collision ns-collision	nelisp-cl-generic--parse-specializer	lisp/nelisp-cl-macros.el scripts/nelisp-stdlib-prelude.el
+pinned-collision ns-collision	nelisp-cl-generic--register-method	lisp/nelisp-cl-macros.el scripts/nelisp-stdlib-prelude.el
+pinned-collision ns-collision	nelisp-cl-generic--same-specializer-p	lisp/nelisp-cl-macros.el scripts/nelisp-stdlib-prelude.el
+pinned-collision ns-collision	nelisp-cl-generic--struct-depth	lisp/nelisp-cl-macros.el scripts/nelisp-stdlib-prelude.el
+pinned-collision ns-collision	nelisp-cl-generic--struct-parent	lisp/nelisp-cl-macros.el scripts/nelisp-stdlib-prelude.el
+pinned-collision ns-collision	nelisp-cl-generic--type-match	lisp/nelisp-cl-macros.el scripts/nelisp-stdlib-prelude.el

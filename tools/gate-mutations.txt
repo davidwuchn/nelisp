@@ -110,3 +110,14 @@ gate-selfcheck|tools/nelisp-bootstrap-contract.el|s/^    (princ (format "GATE-CO
 # standalone-smoke.el' went from `6 passed, 0 failed' to `2 passed, 4
 # failed' (exit 1); reverted and rebuilt clean before committing.
 standalone-reader-buffer-smoke|scripts/nelisp-stdlib-prelude.el|s/(nelisp-insert s nelisp--current-buffer)/(ignore s nelisp--current-buffer)/|insert becomes a silent no-op again (Doc 188 §1.3's original bug shape); buffer-string never reflects it
+#
+# 2026-08-23 (docs/design/185-cl-generic-subset.org): the two rows below
+# cover this doc's own loud-failure discipline -- exercised through
+# `test/nelisp-cl-generic-test.el' (`nelisp-gate-mutation.sh' scopes
+# `ert-full' mutations on `lisp/nelisp-cl-macros.el' to that one file; see
+# the case in `run_gate' there).  Both confirmed by hand before landing:
+# each sed hits its target exactly once, and `NELISP_GATE_MUTATION_TEST_FILES=
+# test/nelisp-cl-generic-test.el tools/ai/nelisp-ai.sh test' goes red on the
+# corresponding test, clean on the unmutated file.
+ert-full|lisp/nelisp-cl-macros.el|s/(nelisp-cl-macros--struct-isa (nelisp--record-type val) type))/t)/|every struct instance matches every struct-type specializer regardless of ancestry, so struct-based dispatch order silently collapses (a dog instance would satisfy an unrelated struct's method too)
+ert-full|lisp/nelisp-cl-macros.el|s/(signal 'cl-no-applicable-method (cons name args))/nil/|an unmatched generic-function call silently returns nil instead of signaling cl-no-applicable-method
