@@ -1024,6 +1024,53 @@ portable fallback."
       (when (file-directory-p temp-dir)
         (delete-directory temp-dir t)))))
 
+(ert-deftest nelisp-artifact/reloadable-p-plain-defun ()
+  "Doc 191 Phase 2: a plain interpreted `defun', never routed through
+`nelisp-artifact--install-native-functions', answers `reloadable' --
+against a real function definition, not a mocked symbol."
+  (defun nelisp-p2-plain-defun-probe () 1)
+  (should (nelisp-artifact-reloadable-p 'nelisp-p2-plain-defun-probe))
+  ;; Redefining it changes nothing about the answer -- it was never
+  ;; early-bound to begin with.
+  (defun nelisp-p2-plain-defun-probe () 2)
+  (should (nelisp-artifact-reloadable-p 'nelisp-p2-plain-defun-probe)))
+
+(ert-deftest nelisp-artifact/reloadable-p-native-installed ()
+  "Doc 191 Phase 2: a function installed through
+`nelisp-artifact--install-native-functions' answers `not reloadable' --
+against a real compiled `.neln' artifact and a real native-wrapper
+install (Doc 191 §5's own verification design: \"against real installed
+functions, not mocked state\"), same shape as
+`nelisp-artifact/source-loader-installs-adjacent-neln-native-wrapper'
+above."
+  (skip-unless (memq system-type '(gnu/linux berkeley-unix)))
+  (skip-unless (and (executable-find "cc") (executable-find "objcopy")))
+  (let* ((temp-dir (make-temp-file "nelisp-artifact-p2-reloadable-" t))
+         (source-path (expand-file-name "m.el" temp-dir))
+         (artifact-path (concat source-path ".neln")))
+    (unwind-protect
+        (progn
+          (write-region
+           "(defun p2-reloadable-probe (x) (+ x 1))\n(provide 'p2-reloadable-probe)\n"
+           nil source-path nil 'silent)
+          (let ((manifest (nelisp-artifact-compile-file
+                           source-path artifact-path nil nil nil nil nil 'neln)))
+            (should (plist-get manifest :native)))
+          ;; Before the artifact is loaded, this symbol has never been
+          ;; through the native-wrapper install path.
+          (should (nelisp-artifact-reloadable-p 'p2-reloadable-probe))
+          (nelisp-artifact-load-file artifact-path)
+          (should-not (nelisp-artifact-reloadable-p 'p2-reloadable-probe))
+          ;; Redefining the symbol afterward does not undo the hazard the
+          ;; predicate reports: some caller may already hold a direct call
+          ;; to the native code this symbol had at install time, and no
+          ;; later `defun' can reach that caller.  Stays early-bound for
+          ;; the rest of this process's lifetime.
+          (defun p2-reloadable-probe (x) (+ x 2))
+          (should-not (nelisp-artifact-reloadable-p 'p2-reloadable-probe)))
+      (when (file-directory-p temp-dir)
+        (delete-directory temp-dir t)))))
+
 (ert-deftest nelisp-artifact/nelisp-load-file-auto-recompiles-stale-neln ()
   "`nelisp-load-file' can refresh a missing/stale adjacent `.neln' generically."
   (let* ((temp-dir (make-temp-file "nelisp-artifact-load-refresh-" t))
