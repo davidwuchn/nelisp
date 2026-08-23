@@ -132,16 +132,32 @@ Return (VALUE . NEW-POS)."
       (signal 'nelisp-read-error
               (list "expected atom" pos)))
     (cons (if (string-match-p nelisp-read--numeric-regexp tok)
-              (let ((n (string-to-number tok)))
-                ;; `string-to-number' drops the fractional part from
-                ;; tokens like "1." on some Emacs versions, yielding
-                ;; an integer where the source clearly asked for a
-                ;; float.  Coerce to float whenever the token itself
-                ;; contains a decimal point or an exponent marker.
-                (if (and (integerp n)
-                         (string-match-p "[.eE]" tok))
-                    (float n)
-                  n))
+              ;; Doc 190 Phase A: a PLAIN decimal-integer token (no `.'/
+              ;; `e'/`E' -- `nelisp-read--numeric-regexp' already confirmed
+              ;; TOK is `[-+]?[0-9]+' in that case) reads through
+              ;; `nl--read-int' instead of `string-to-number', so a
+              ;; magnitude past `most-positive-fixnum'/`most-negative-
+              ;; fixnum' parses to a Bignum (Sexp tag 13) rather than
+              ;; signalling `overflow-error' the way `string-to-number'
+              ;; itself still does (Doc 187) -- `nl--read-int' is a
+              ;; standalone-runtime-only native builtin
+              ;; (`nelisp-standalone--applyfn-bignum-helpers'), guarded by
+              ;; `fboundp' so this file still works on any substrate that
+              ;; lacks it (falls back to the unchanged `string-to-number'
+              ;; path, which cannot exceed a real host Emacs's own
+              ;; fixnum/bignum handling).  The float branch is completely
+              ;; untouched: it still always goes through `string-to-number'.
+              (if (string-match-p "[.eE]" tok)
+                  (let ((n (string-to-number tok)))
+                    ;; `string-to-number' drops the fractional part from
+                    ;; tokens like "1." on some Emacs versions, yielding
+                    ;; an integer where the source clearly asked for a
+                    ;; float.  Coerce to float whenever the token itself
+                    ;; contains a decimal point or an exponent marker.
+                    (if (integerp n) (float n) n))
+                (if (fboundp 'nl--read-int)
+                    (nl--read-int tok)
+                  (string-to-number tok)))
             ;; `nil' and `t' must be THE nil and THE t, not fresh symbols that
             ;; merely print that way.  `intern' is canonical for them on some
             ;; substrates this reader runs in and not on others -- measured

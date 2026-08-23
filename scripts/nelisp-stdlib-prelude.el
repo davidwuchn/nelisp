@@ -7851,6 +7851,19 @@ are numbers; `1.' is the integer 1."
       (setq i (1+ i)))
     (and ok seen-digit (or (not in-exp) (> exp-digits 0)))))
 
+;; Doc 190 Phase A: non-nil when TOK (already confirmed numeric syntax by
+;; `nelisp--rd-numeric-token-p') is a PLAIN decimal integer -- no `.'/`e'/
+;; `E' -- the shape `nl--read-int' (the bignum-aware native reader entry,
+;; `nelisp-standalone--applyfn-bignum-helpers') accepts.  Float tokens
+;; keep going through `string-to-number' unchanged, below.
+(defun nelisp--rd-int-token-p (tok)
+  (let ((i 0) (n (length tok)) (plain t))
+    (while (< i n)
+      (let ((c (aref tok i)))
+        (when (or (= c 46) (= c 101) (= c 69)) (setq plain nil)))
+      (setq i (1+ i)))
+    plain))
+
 (defun nelisp--rd-unescape (body)
   (let ((out "") (i 0) (n (length body)))
     (while (< i n)
@@ -7921,7 +7934,19 @@ are numbers; `1.' is the integer 1."
                 (raw-tok (substring s i e))
                 (escaped (nelisp--rd-symbol-unescape raw-tok)))
            (cons (cond ((nelisp--rd-numeric-token-p raw-tok)
-                        (string-to-number raw-tok))
+                        ;; Doc 190 Phase A: `read'/`read-from-string''s own
+                        ;; numeric-token path.  A plain decimal-integer
+                        ;; token routes through the bignum-aware native
+                        ;; `nl--read-int' instead of `string-to-number' (Doc
+                        ;; 187 made `string-to-number''s own int loop signal
+                        ;; `overflow-error' on this exact input; PROMOTING to
+                        ;; a Bignum here is what makes `(read (prin1-to-
+                        ;; string big))' round-trip -- see
+                        ;; `scripts/standalone-bignum-smoke.el'.  Float
+                        ;; tokens (anything with `.'/`e'/`E') are unaffected.
+                        (if (and (nelisp--rd-int-token-p raw-tok) (fboundp 'nl--read-int))
+                            (nl--read-int raw-tok)
+                          (string-to-number raw-tok)))
                       ;; `intern' on "nil"/"t" allocates a fresh Symbol Sexp
                       ;; that is NOT `eq' to the canonical nil/t sentinel this
                       ;; runtime's `while'/`if'/`car'/`cdr' etc. compare

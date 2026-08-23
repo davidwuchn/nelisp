@@ -476,11 +476,26 @@
 
     (defun nelisp_reader_p_leaf (kind result-slot payload-slot)
       (cond
-       ;; Int
+       ;; Int (kind 20): this is `load''s real path for every plain
+       ;; decimal-integer literal in a source file (Doc 190 Phase A).
+       ;; `nelisp_reader_p_atoi'/`_step' (above) accumulate with RAW,
+       ;; unchecked `+'/`*' -- no fixnum-boundary check at all, so a
+       ;; literal past `most-positive-fixnum'/`most-negative-fixnum'
+       ;; silently wrapped at the hardware 64-bit boundary (measured
+       ;; against-the-bug baseline: `scripts/standalone-bignum-smoke.el',
+       ;; `make standalone-reader-bignum-smoke').
+       ;; `nl_read_int_or_bignum' (`nelisp-standalone--applyfn-bignum-
+       ;; helpers', `scripts/nelisp-standalone-build.el') replaces it:
+       ;; same digit loop, but bound-checked against the literal fixnum
+       ;; constants (never itself overflowing, since it never
+       ;; reconstructs a magnitude wider than 2 limbs as a bare i64) and
+       ;; PROMOTES to a canonical Sexp::Bignum (tag 13) instead of
+       ;; wrapping.  Writes RESULT-SLOT directly (unlike `sexp-int-make'
+       ;; above, it can produce either an Int or a Bignum Sexp), so no
+       ;; `sexp-int-make' wrapper is used here.
        ((= kind 20)
         (nelisp_reader_p_prog2
-         (sexp-int-make result-slot
-                        (nelisp_reader_p_atoi payload-slot))
+         (nl_read_int_or_bignum payload-slot result-slot)
          1))
        ;; Str
        ((= kind 22)
