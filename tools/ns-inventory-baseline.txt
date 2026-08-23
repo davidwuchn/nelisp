@@ -528,7 +528,7 @@ pinned-collision ns-collision-divergent	string-lessp	lisp/nelisp-stdlib-plist-st
 pinned-collision ns-collision-divergent	string-prefix-p	lisp/nelisp-stdlib-plist-str.el scripts/nelisp-stdlib-prelude.el	bd8e616b0e2b
 pinned-collision ns-collision-divergent	string-search	lisp/nelisp-stdlib-plist-str.el scripts/nelisp-stdlib-prelude.el	9be7e72a2dc8
 pinned-collision ns-collision-divergent	string-suffix-p	lisp/nelisp-stdlib-plist-str.el scripts/nelisp-stdlib-prelude.el	b576cc288f57
-pinned-collision ns-collision-divergent	string-to-number	lisp/nelisp-stdlib-plist-str.el scripts/nelisp-stdlib-prelude.el	59fef5fd1ab3
+pinned-collision ns-collision-divergent	string-to-number	lisp/nelisp-stdlib-plist-str.el scripts/nelisp-stdlib-prelude.el	4c5ef59edb48
 pinned-collision ns-collision-divergent	string-trim	lisp/nelisp-stdlib-plist-str.el scripts/nelisp-stdlib-prelude.el	2bc7bd50ac8b
 pinned-collision ns-collision-divergent	string-trim-left	lisp/nelisp-stdlib-plist-str.el scripts/nelisp-stdlib-prelude.el	798069bba410
 pinned-collision ns-collision-divergent	string-trim-right	lisp/nelisp-stdlib-plist-str.el scripts/nelisp-stdlib-prelude.el	ad1c68d45490
