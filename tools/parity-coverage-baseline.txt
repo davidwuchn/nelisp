@@ -3,8 +3,18 @@
 # mentions.  Raise it whenever cases are added; it may never go down without a
 # stated reason, so a case cannot be deleted quietly.
 
-covered 259
+covered 264
 
+# 259 -> 264 on 2026-08-23 (Doc 188 P1, buffer unification): the 4 new
+# forms in test/nelisp-shadow-differential-cases.el (§4.2's `with-temp-
+# buffer'/`insert'/`buffer-string'/`goto-char'/`point'/`point-min'/
+# `point-max' round trips) newly mention `insert', `buffer-string',
+# `goto-char', `point-max' and `with-temp-buffer' -- 5 names, matching
+# the gate's own "5 above baseline" notice (`point' is not itself in
+# docs/emacs-compat-table.txt's tracked name list, so it does not add a
+# 6th; `point-min'/`generate-new-buffer'/`kill-buffer'/`buffer-live-p'
+# were already pinned below from earlier corpus entries).
+#
 # 100 -> 157 on 2026-08-20.  The gate had been printing "ratchet available"
 # for most of the day while the corpus grew from 100 names to 157; leaving
 # the floor at its first-measured value means it stops being a floor.  It
@@ -51,6 +61,7 @@ pinned bool-vector-p
 pinned boundp
 pinned buffer-file-name
 pinned buffer-live-p
+pinned buffer-string
 pinned buffer-substring-no-properties
 pinned butlast
 pinned byte-compile-file
@@ -118,6 +129,7 @@ pinned functionp
 pinned generate-new-buffer
 pinned get
 pinned gethash
+pinned goto-char
 pinned hash-table-count
 pinned hash-table-p
 pinned hash-table-test
@@ -125,6 +137,7 @@ pinned help-add-fundoc-usage
 pinned help-split-fundoc
 pinned identity
 pinned ignore
+pinned insert
 pinned int-to-string
 pinned integerp
 pinned intern
@@ -181,6 +194,7 @@ pinned pcase
 pinned plist-get
 pinned plist-member
 pinned plist-put
+pinned point-max
 pinned point-min
 pinned prefix-numeric-value
 pinned prin1
@@ -278,5 +292,6 @@ pinned upcase
 pinned vconcat
 pinned vectorp
 pinned when
+pinned with-temp-buffer
 pinned write-char
 pinned zerop

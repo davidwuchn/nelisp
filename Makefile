@@ -12,7 +12,8 @@
         nelisp-performance-gate nelisp-nelix-command-gate nelisp-native-artifact-gate nelisp-nelix-native-hot-gate \
         nelisp-nelix-operational-gate \
         nelisp-runtime-image-cache-gate nelisp-source-command-substrate-gate \
-        nl-condition-standalone-smoke nl-safe-standalone-smoke nl-resource-standalone-smoke
+        nl-condition-standalone-smoke nl-safe-standalone-smoke nl-resource-standalone-smoke \
+        standalone-reader-buffer-smoke
 
 EMACS ?= emacs
 
@@ -370,6 +371,22 @@ nl-resource-standalone-smoke: $(if $(wildcard target/nelisp target/nelisp.exe),,
 	  exit 0; \
 	fi; \
 	"$$bin" --load packages/nl-safe/test/nl-resource-standalone-smoke.el
+
+# Doc 188 P1 (buffer unification): runs
+# test/nelisp-buffer-unification-standalone-smoke.el -- the same
+# assertions as test/nelisp-buffer-unification-test.el, but against
+# target/nelisp itself via scripts/nelisp-ert-shim.el, since a plain
+# host-Emacs ERT run of those forms cannot distinguish this tree's own
+# `insert'/`buffer-string' wiring from Emacs's (Doc 188 §1.8/§4.1).
+# Same conditional-build pattern as the nl-condition/nl-safe smokes
+# above.
+standalone-reader-buffer-smoke: $(if $(wildcard target/nelisp target/nelisp.exe),,standalone-reader)
+	@bin=./target/nelisp; [ -f "$$bin" ] || bin=./target/nelisp.exe; \
+	if [ ! -f "$$bin" ]; then \
+	  echo "GATE-SKIP no nelisp binary in target/ after build attempt"; \
+	  exit 0; \
+	fi; \
+	"$$bin" --load test/nelisp-buffer-unification-standalone-smoke.el
 
 # fboundp-liar audit: every name in the reader's builtin fboundp list must
 # have a dispatch arm (or be combiner-handled), so `fboundp' never lies the

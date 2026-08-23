@@ -699,11 +699,17 @@ or signals otherwise.  Replaces the deleted Rust `bi_require'."
                             coding))))
     str))
 
-;; NeLisp standalone has no buffer object, only string I/O.
-;; AOT helpers (= elf-write etc.) call bufferp for defensive
-;; type checks; stub returns nil (= no Sexp is a buffer).
-(unless (fboundp 'bufferp)
-  (defun bufferp (_obj) "NeLisp stub: no buffer Sexp exists." nil))
+;; Doc 188 P1 (2026-08-23) removed this file's `bufferp' stub.  It was
+;; permanently, unconditionally `nil' ("no Sexp is a buffer") and dead in
+;; its only real load context: this file is never `require'd (a repo-
+;; wide grep finds none), only parsed -- never evaluated -- by host
+;; Emacs tooling (`tools/nelisp-prelude-toplevel-check.el', `tools/
+;; nelisp-generated-source-parse.el', both read-only) and by test/nelisp-
+;; hooks-map-fixnum-test.el, which extracts only its hook/map.el forms
+;; (see that file's own Commentary), never `bufferp'.  The real `bufferp'
+;; -- and the buffer object this comment said did not exist -- now live
+;; in scripts/nelisp-stdlib-prelude.el's Doc 188 P1 section, ported from
+;; src/nelisp-buffer.el.
 
 ;; multibyte/unibyte distinction collapsed in NeLisp standalone
 ;; (= all strings are internally UTF-8 multibyte). Stubs return t
@@ -735,30 +741,20 @@ or signals otherwise.  Replaces the deleted Rust `bi_require'."
     "NeLisp stub: identity, but STRINGP is still checked."
     (nelisp--check-string s)))
 
-;; Buffer ops collapsed = NeLisp standalone has no buffer Sexp,
-;; all I/O is string-based.  Stubs are no-op / nil.
+;; Buffer ops: `set-buffer-multibyte' is an encoding-flag no-op,
+;; unrelated to which buffer is current, and stays.  The rest of this
+;; block used to be no-op/nil "NeLisp standalone has no buffer Sexp"
+;; stubs for `buffer-string'/`current-buffer'/`with-temp-buffer'/
+;; `insert'/`insert-file-contents'/`point-min'/`point-max'/`goto-char'.
+;; Doc 188 P1 (2026-08-23) removed them: dead in this file's only real
+;; load context for the same reason as `bufferp' above, and the premise
+;; ("no buffer Sexp") that justified them is no longer true -- the real
+;; definitions now live in scripts/nelisp-stdlib-prelude.el's Doc 188 P1
+;; section.
 (unless (fboundp 'set-buffer-multibyte)
   (defun set-buffer-multibyte (flag)
     "Answer FLAG, as Emacs does; there is no buffer to change here."
     flag))
-(unless (fboundp 'buffer-string)
-  (defun buffer-string () "NeLisp stub: returns empty (= no buffer)." ""))
-(unless (fboundp 'current-buffer)
-  (defun current-buffer () "NeLisp stub: nil (= no buffer)." nil))
-(unless (fboundp 'with-temp-buffer)
-  (defmacro with-temp-buffer (&rest body)
-    "NeLisp stub: run BODY (= no buffer to set up)."
-    (cons 'progn body)))
-(unless (fboundp 'insert)
-  (defun insert (&rest _args) "NeLisp stub: no-op (= no buffer to insert into)." nil))
-(unless (fboundp 'insert-file-contents)
-  (defun insert-file-contents (_path) "NeLisp stub: no-op." nil))
-(unless (fboundp 'point-min)
-  (defun point-min () "NeLisp stub: 1." 1))
-(unless (fboundp 'point-max)
-  (defun point-max () "NeLisp stub: 1." 1))
-(unless (fboundp 'goto-char)
-  (defun goto-char (_p) "NeLisp stub: no-op." nil))
 
 ;; Wave 13 self-host follow-up (2026-05-23): write-region stub.
 ;; NeLisp standalone has no buffer object, so the

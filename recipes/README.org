@@ -67,8 +67,14 @@ Beyond the probe, still true of both:
 - =read-string=, =read-from-minibuffer= — void.  =read-stdin-bytes= is
   the only way in.
 - =read= — string streams only; it cannot read from stdin.
-- =goto-char=, =re-search-forward=, =mapatoms= — void.  Buffers exist,
-  but buffer *navigation* does not.
+- =re-search-forward=, =mapatoms= — void. =goto-char=/=point=/=point-min=/
+  =point-max= are real as of Doc 188 Phase 1 (2026-08-23,
+  =docs/design/188-buffer-unification.org=) — buffers exist and basic
+  navigation now works (=insert=/=buffer-string=/=with-current-buffer=/
+  =with-temp-buffer=/=generate-new-buffer=/=kill-buffer= are backed by
+  one coherent model instead of the old disconnected-=insert= bug), but
+  *search* (=re-search-forward=, =search-forward=) and *markers/
+  overlays* (Doc 188 P3-P5) do not exist yet.
 - =json-encode=, =sqlite-open= — not in the base runtime; they live in
   =packages/nelisp-json= and =packages/nelisp-sqlite=.
 - =load= does not stop at an error.  A form that signals inside a loaded

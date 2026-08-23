@@ -73,5 +73,20 @@
 #   twelve branches (seven wave-3 branches + feat/native-observability,
 #   feat/dod-doc-claims, docs/design-{short,mid,long}-term) landed and
 #   `make standalone-reader-test' relinked target/nelisp from scratch.
-size 6741200
+# Raised 2026-08-23 (6741200 -> 6991744, +250544 bytes, +3.7%, exceeding
+# the 2% slack window measured against the PRIOR pin -- expected and
+# explained, not slack-absorbed) by Doc 188 Phase 1 (buffer
+# unification): `src/nelisp-buffer.el''s object model (buffer/marker/
+# overlay structs, the marker/overlay/text-property shift helpers, and
+# the full `nelisp-'-prefixed API -- ~560 source lines) was ported into
+# `scripts/nelisp-stdlib-prelude.el', which is embedded into the linked
+# binary as executable prelude source (same accounting as the 2026-08-22
+# hooks/map.el/fixnum raise above), plus the standard-name wiring layer
+# (`generate-new-buffer'/`insert'/`buffer-string'/`point'/`goto-char'/
+# etc., ~150 lines) and a printer special case for the new buffer
+# representation.  `src/nelisp-buffer.el' itself is unmodified and does
+# not link into the binary on its own; the growth is the port, not a
+# duplicated unit.  Measured with `stat -c %s target/nelisp' after a
+# clean `make standalone-reader'.
+size 6991744
 slack-pct 2

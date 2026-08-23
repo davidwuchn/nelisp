@@ -155,7 +155,14 @@
 # `pinned-collision' identities below were added -- a ceiling 21 above the
 # count it is meant to bound is not a ceiling, the same finding that moved
 # `tools/parity-coverage-baseline.txt' from 259 to its measured floor.
-ns-collision 180
+# 180 -> 225 on 2026-08-23 (Doc 188 P1, buffer unification): 49 new
+# collisions from porting src/nelisp-buffer.el's object model verbatim
+# into scripts/nelisp-stdlib-prelude.el, offset by 4 collisions that
+# disappeared (the misc.el copies of `bufferp'/`goto-char'/`insert'/
+# `insert-file-contents' were deleted, not synced, so those pairs no
+# longer collide at all).  Each of the 49 has its own `pinned-collision'
+# line below with the reason grouped in one place rather than repeated.
+ns-collision 225
 # 97 -> 96 on 2026-08-19: `string-equal' no longer differs between the two
 # files -- the prelude's now signals for a non-string instead of falling
 # through to `equal', and the lisp copy was brought with it.  Ratcheted down
@@ -201,7 +208,16 @@ ns-collision 180
 # ignored, COUNTER as the cons Emacs makes it, the body/docstring split, the
 # float divisor of zero, and the pair-guarded plist walk.  Notes for each in
 # scripts/nl-ns-accepted.el.
-ns-collision-divergent 124
+# 124 -> 121 on 2026-08-23 (Doc 188 P1, buffer unification): lowered to
+# the measurement, since the gate offered.  `bufferp'/`goto-char'/
+# `insert'/`insert-file-contents' stopped being divergent (their
+# lisp/nelisp-stdlib-misc.el copies were deleted, dead cruft per Doc 188
+# §1.4's own research, not synced -- see scripts/nl-ns-accepted.el's
+# updated notes); `with-current-buffer'/`with-temp-buffer' stayed
+# divergent but both changed shape (the latter also dropped from a
+# triple to a pair, for the same reason) and are re-pinned below with
+# fresh identities.
+ns-collision-divergent 121
 # 850 -> 851 on 2026-08-19: `nl-check-file-quoted-unsafe', the entry point
 # that reports the unsafe calls inside quoted forms.  Same situation as the
 # nl-ns pair above -- it is public because tools/nl-check-inventory.el calls
@@ -273,7 +289,6 @@ pinned-collision ns-collision	bool-vector	lisp/nelisp-stdlib-plist-str.el script
 pinned-collision ns-collision	bool-vector-p	lisp/nelisp-stdlib-plist-str.el scripts/nelisp-stdlib-prelude.el
 pinned-collision ns-collision	booleanp	lisp/nelisp-stdlib-misc.el scripts/nelisp-stdlib-prelude.el
 pinned-collision ns-collision	buffer-substring-no-properties	lisp/nelisp-stdlib-misc.el scripts/nelisp-stdlib-prelude.el
-pinned-collision ns-collision	bufferp	lisp/nelisp-stdlib-misc.el scripts/nelisp-stdlib-prelude.el
 pinned-collision ns-collision	caaar	lisp/nelisp-stdlib-list.el scripts/nelisp-stdlib-prelude.el
 pinned-collision ns-collision	caadr	lisp/nelisp-stdlib-list.el scripts/nelisp-stdlib-prelude.el
 pinned-collision ns-collision	caar	lisp/nelisp-stdlib-list.el scripts/nelisp-stdlib-prelude.el
@@ -399,8 +414,6 @@ pinned-collision ns-collision	null	lisp/nelisp-jit-substrate.el lisp/nelisp-stdl
 pinned-collision ns-collision	or	lisp/nelisp-stdlib-eval-special.el scripts/nelisp-stdlib-prelude.el
 pinned-collision ns-collision	path-separator	packages/nelisp-process/src/nelisp-process.el scripts/nelisp-stdlib-prelude.el
 pinned-collision ns-collision	pcase	lisp/nelisp-pcase.el scripts/nelisp-stdlib-prelude.el
-pinned-collision ns-collision	point-max	lisp/nelisp-stdlib-misc.el scripts/nelisp-stdlib-prelude.el
-pinned-collision ns-collision	point-min	lisp/nelisp-stdlib-misc.el scripts/nelisp-stdlib-prelude.el
 pinned-collision ns-collision	pop	lisp/nelisp-stdlib-eval-special.el scripts/nelisp-stdlib-prelude.el
 pinned-collision ns-collision	print-length	lisp/nelisp-stdlib-prn.el scripts/nelisp-stdlib-prelude.el
 pinned-collision ns-collision	print-level	lisp/nelisp-stdlib-prn.el scripts/nelisp-stdlib-prelude.el
@@ -428,7 +441,6 @@ pinned-collision ns-collision-divergent	alist-get	lisp/nelisp-stdlib-misc.el scr
 pinned-collision ns-collision-divergent	append	lisp/nelisp-stdlib-list.el scripts/nelisp-stdlib-prelude.el	f6e086bde312
 pinned-collision ns-collision-divergent	arrayp	lisp/nelisp-stdlib.el scripts/nelisp-stdlib-prelude.el	79c6a8dba449
 pinned-collision ns-collision-divergent	assoc	lisp/nelisp-stdlib-search.el scripts/nelisp-stdlib-prelude.el	1c6f31b6324b
-pinned-collision ns-collision-divergent	buffer-string	lisp/nelisp-stdlib-misc.el scripts/nelisp-stdlib-prelude.el	53bd058b84ad
 pinned-collision ns-collision-divergent	butlast	lisp/nelisp-stdlib-list.el scripts/nelisp-stdlib-prelude.el	7d0524ad6c34
 pinned-collision ns-collision-divergent	byte-compile-file	scripts/nelisp-stdlib-prelude.el src/nelisp-bytecode.el	fd60f8468dac
 pinned-collision ns-collision-divergent	cancel-timer	packages/nelisp-eventloop/src/nelisp-async.el scripts/nelisp-stdlib-prelude.el	b0d0791aa3e2
@@ -464,8 +476,6 @@ pinned-collision ns-collision-divergent	getenv	lisp/nelisp-build-host.el scripts
 pinned-collision ns-collision-divergent	hash-table-keys	lisp/nelisp-stdlib-misc.el scripts/nelisp-stdlib-prelude.el	b6f534bca763
 pinned-collision ns-collision-divergent	hash-table-p	lisp/nelisp-stdlib-hash.el scripts/nelisp-stdlib-prelude.el	8804ccf71408
 pinned-collision ns-collision-divergent	hash-table-values	lisp/nelisp-stdlib-misc.el scripts/nelisp-stdlib-prelude.el	3eddeb1e8483
-pinned-collision ns-collision-divergent	insert	lisp/nelisp-stdlib-misc.el scripts/nelisp-stdlib-prelude.el	2f43c6e88852
-pinned-collision ns-collision-divergent	insert-file-contents	lisp/nelisp-stdlib-misc.el scripts/nelisp-stdlib-prelude.el	3e64e56bdd3f
 pinned-collision ns-collision-divergent	keywordp	lisp/nelisp-stdlib-misc.el scripts/nelisp-stdlib-prelude.el	0401bbf5db7b
 pinned-collision ns-collision-divergent	last	lisp/nelisp-stdlib-list.el scripts/nelisp-stdlib-prelude.el	d3d8fa50dbfe
 pinned-collision ns-collision-divergent	lsh	lisp/nelisp-stdlib-misc.el scripts/nelisp-stdlib-prelude.el	da4995e603d0
@@ -490,7 +500,7 @@ pinned-collision ns-collision-divergent	nelisp--bq-expand-list	lisp/nelisp-cl-ma
 pinned-collision ns-collision-divergent	nelisp--emit-to-stream	lisp/nelisp-stdlib-misc.el scripts/nelisp-stdlib-prelude.el	f51f9ae7cf0a
 pinned-collision ns-collision-divergent	nelisp--make-record	lisp/nelisp-heap-image.el scripts/nelisp-stdlib-prelude.el	8dafd3358494
 pinned-collision ns-collision-divergent	nelisp--prn-record	lisp/nelisp-stdlib-prn.el scripts/nelisp-stdlib-prelude.el	4cf6166f2172
-pinned-collision ns-collision-divergent	nelisp--prn-to-string	lisp/nelisp-stdlib-prn.el scripts/nelisp-stdlib-prelude.el	995f01f9e1a5
+pinned-collision ns-collision-divergent	nelisp--prn-to-string	lisp/nelisp-stdlib-prn.el scripts/nelisp-stdlib-prelude.el	efe6abf25e00
 pinned-collision ns-collision-divergent	nelisp--record-length	lisp/nelisp-heap-image.el scripts/nelisp-stdlib-prelude.el	6436a2c11458
 pinned-collision ns-collision-divergent	nelisp--record-ref	lisp/nelisp-heap-image.el scripts/nelisp-stdlib-prelude.el	da50f1639220
 pinned-collision ns-collision-divergent	nelisp--record-set	lisp/nelisp-heap-image.el scripts/nelisp-stdlib-prelude.el	cd137b492fcd
@@ -543,6 +553,64 @@ pinned-collision ns-collision-divergent	unless	lisp/nelisp-jit-substrate.el lisp
 pinned-collision ns-collision-divergent	upcase	lisp/nelisp-stdlib-plist-str.el scripts/nelisp-stdlib-prelude.el	b0951456fb17
 pinned-collision ns-collision-divergent	vconcat	lisp/nelisp-stdlib-plist-str.el scripts/nelisp-stdlib-prelude.el	1737d584ddfe
 pinned-collision ns-collision-divergent	when	lisp/nelisp-jit-substrate.el lisp/nelisp-stdlib-eval-special.el scripts/nelisp-stdlib-prelude.el	216caa34671c
-pinned-collision ns-collision-divergent	with-current-buffer	lisp/nelisp-stdlib-eval-special.el scripts/nelisp-stdlib-prelude.el	7bf265242b99
-pinned-collision ns-collision-divergent	with-temp-buffer	lisp/nelisp-stdlib-eval-special.el lisp/nelisp-stdlib-misc.el scripts/nelisp-stdlib-prelude.el	72fe4cb5838c
+pinned-collision ns-collision-divergent	with-current-buffer	lisp/nelisp-stdlib-eval-special.el scripts/nelisp-stdlib-prelude.el	5f1ad63b8fb1
+pinned-collision ns-collision-divergent	with-temp-buffer	lisp/nelisp-stdlib-eval-special.el scripts/nelisp-stdlib-prelude.el	0188a49b256f
 pinned-collision ns-collision-divergent	write-region	lisp/nelisp-stdlib-misc.el scripts/nelisp-stdlib-prelude.el	ed3dffedef46
+#
+# Doc 188 P1 (buffer unification, 2026-08-23): src/nelisp-buffer.el's
+# object model was ported into scripts/nelisp-stdlib-prelude.el verbatim
+# (same nelisp-*-prefixed names), so every one of its top-level
+# definitions now collides, byte-identically, with its own source of
+# truth. Benign by construction (ns-collision, not -divergent): the two
+# copies are the SAME code, ported on purpose per Doc 188 Sec.2.1/Sec.6.1's
+# instruction that src/nelisp-buffer.el's model become the prelude's real
+# buffer implementation.
+pinned-collision ns-collision	nelisp-buffer--ambient	scripts/nelisp-stdlib-prelude.el src/nelisp-buffer.el
+pinned-collision ns-collision	nelisp-buffer--current	scripts/nelisp-stdlib-prelude.el src/nelisp-buffer.el
+pinned-collision ns-collision	nelisp-buffer--registry	scripts/nelisp-stdlib-prelude.el src/nelisp-buffer.el
+pinned-collision ns-collision	nelisp-buffer--reset-registry	scripts/nelisp-stdlib-prelude.el src/nelisp-buffer.el
+pinned-collision ns-collision	nelisp-buffer--shift-markers-on-delete	scripts/nelisp-stdlib-prelude.el src/nelisp-buffer.el
+pinned-collision ns-collision	nelisp-buffer--shift-markers-on-insert	scripts/nelisp-stdlib-prelude.el src/nelisp-buffer.el
+pinned-collision ns-collision	nelisp-buffer--shift-overlays-on-delete	scripts/nelisp-stdlib-prelude.el src/nelisp-buffer.el
+pinned-collision ns-collision	nelisp-buffer--shift-overlays-on-insert	scripts/nelisp-stdlib-prelude.el src/nelisp-buffer.el
+pinned-collision ns-collision	nelisp-buffer--shift-text-properties-on-delete	scripts/nelisp-stdlib-prelude.el src/nelisp-buffer.el
+pinned-collision ns-collision	nelisp-buffer--shift-text-properties-on-insert	scripts/nelisp-stdlib-prelude.el src/nelisp-buffer.el
+pinned-collision ns-collision	nelisp-buffer-list	scripts/nelisp-stdlib-prelude.el src/nelisp-buffer.el
+pinned-collision ns-collision	nelisp-buffer-modified-p	scripts/nelisp-stdlib-prelude.el src/nelisp-buffer.el
+pinned-collision ns-collision	nelisp-buffer-set-modified	scripts/nelisp-stdlib-prelude.el src/nelisp-buffer.el
+pinned-collision ns-collision	nelisp-buffer-size	scripts/nelisp-stdlib-prelude.el src/nelisp-buffer.el
+pinned-collision ns-collision	nelisp-buffer-string	scripts/nelisp-stdlib-prelude.el src/nelisp-buffer.el
+pinned-collision ns-collision	nelisp-buffer-substring	scripts/nelisp-stdlib-prelude.el src/nelisp-buffer.el
+pinned-collision ns-collision	nelisp-char-after	scripts/nelisp-stdlib-prelude.el src/nelisp-buffer.el
+pinned-collision ns-collision	nelisp-copy-marker	scripts/nelisp-stdlib-prelude.el src/nelisp-buffer.el
+pinned-collision ns-collision	nelisp-current-buffer	scripts/nelisp-stdlib-prelude.el src/nelisp-buffer.el
+pinned-collision ns-collision	nelisp-delete-overlay	scripts/nelisp-stdlib-prelude.el src/nelisp-buffer.el
+pinned-collision ns-collision	nelisp-delete-region	scripts/nelisp-stdlib-prelude.el src/nelisp-buffer.el
+pinned-collision ns-collision	nelisp-erase-buffer	scripts/nelisp-stdlib-prelude.el src/nelisp-buffer.el
+pinned-collision ns-collision	nelisp-generate-new-buffer	scripts/nelisp-stdlib-prelude.el src/nelisp-buffer.el
+pinned-collision ns-collision	nelisp-get-buffer	scripts/nelisp-stdlib-prelude.el src/nelisp-buffer.el
+pinned-collision ns-collision	nelisp-get-buffer-create	scripts/nelisp-stdlib-prelude.el src/nelisp-buffer.el
+pinned-collision ns-collision	nelisp-get-text-property	scripts/nelisp-stdlib-prelude.el src/nelisp-buffer.el
+pinned-collision ns-collision	nelisp-goto-char	scripts/nelisp-stdlib-prelude.el src/nelisp-buffer.el
+pinned-collision ns-collision	nelisp-insert	scripts/nelisp-stdlib-prelude.el src/nelisp-buffer.el
+pinned-collision ns-collision	nelisp-kill-buffer	scripts/nelisp-stdlib-prelude.el src/nelisp-buffer.el
+pinned-collision ns-collision	nelisp-make-marker	scripts/nelisp-stdlib-prelude.el src/nelisp-buffer.el
+pinned-collision ns-collision	nelisp-make-overlay	scripts/nelisp-stdlib-prelude.el src/nelisp-buffer.el
+pinned-collision ns-collision	nelisp-marker-delete	scripts/nelisp-stdlib-prelude.el src/nelisp-buffer.el
+pinned-collision ns-collision	nelisp-markerp	scripts/nelisp-stdlib-prelude.el src/nelisp-buffer.el
+pinned-collision ns-collision	nelisp-narrow-to-region	scripts/nelisp-stdlib-prelude.el src/nelisp-buffer.el
+pinned-collision ns-collision	nelisp-overlay-get	scripts/nelisp-stdlib-prelude.el src/nelisp-buffer.el
+pinned-collision ns-collision	nelisp-overlay-put	scripts/nelisp-stdlib-prelude.el src/nelisp-buffer.el
+pinned-collision ns-collision	nelisp-overlayp	scripts/nelisp-stdlib-prelude.el src/nelisp-buffer.el
+pinned-collision ns-collision	nelisp-overlays-at	scripts/nelisp-stdlib-prelude.el src/nelisp-buffer.el
+pinned-collision ns-collision	nelisp-overlays-in	scripts/nelisp-stdlib-prelude.el src/nelisp-buffer.el
+pinned-collision ns-collision	nelisp-point	scripts/nelisp-stdlib-prelude.el src/nelisp-buffer.el
+pinned-collision ns-collision	nelisp-point-max	scripts/nelisp-stdlib-prelude.el src/nelisp-buffer.el
+pinned-collision ns-collision	nelisp-point-min	scripts/nelisp-stdlib-prelude.el src/nelisp-buffer.el
+pinned-collision ns-collision	nelisp-put-text-property	scripts/nelisp-stdlib-prelude.el src/nelisp-buffer.el
+pinned-collision ns-collision	nelisp-remove-text-properties	scripts/nelisp-stdlib-prelude.el src/nelisp-buffer.el
+pinned-collision ns-collision	nelisp-set-buffer	scripts/nelisp-stdlib-prelude.el src/nelisp-buffer.el
+pinned-collision ns-collision	nelisp-set-marker	scripts/nelisp-stdlib-prelude.el src/nelisp-buffer.el
+pinned-collision ns-collision	nelisp-text-property-intervals	scripts/nelisp-stdlib-prelude.el src/nelisp-buffer.el
+pinned-collision ns-collision	nelisp-widen	scripts/nelisp-stdlib-prelude.el src/nelisp-buffer.el
+pinned-collision ns-collision	nelisp-with-buffer	scripts/nelisp-stdlib-prelude.el src/nelisp-buffer.el

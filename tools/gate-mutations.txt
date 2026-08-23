@@ -100,3 +100,13 @@ doc-claims|docs/design/160-stdlib-breadth.org|s/^#+VERIFIED-BY: reader-surface-a
 # `make gate-selfcheck' (real Emacs 30.x, no skip in play) correctly goes
 # red on it.
 gate-selfcheck|tools/nelisp-bootstrap-contract.el|s/^    (princ (format "GATE-COUNT checked=%d findings=%d.*missing))$/    nil/|bootstrap-contract fake-passes (prints ok/PASS, no GATE-COUNT line); gate-selfcheck must still flag it as a finding, not confuse it with a reasoned skip
+#
+# 2026-08-23 (Doc 188 P1, buffer unification): standalone-reader-buffer-
+# smoke is new this session.  Confirmed by hand before this row was
+# added: mutated, `make standalone-reader' (forced -- the gate's own
+# conditional prerequisite only builds when target/nelisp is absent, so
+# a stale binary silently re-passes an already-mutated source the first
+# time), then `./target/nelisp --load test/nelisp-buffer-unification-
+# standalone-smoke.el' went from `6 passed, 0 failed' to `2 passed, 4
+# failed' (exit 1); reverted and rebuilt clean before committing.
+standalone-reader-buffer-smoke|scripts/nelisp-stdlib-prelude.el|s/(nelisp-insert s nelisp--current-buffer)/(ignore s nelisp--current-buffer)/|insert becomes a silent no-op again (Doc 188 §1.3's original bug shape); buffer-string never reflects it
