@@ -208,13 +208,13 @@ own `pop' contract (an error, not a silent no-op)."
 
 ;;;; Internal accessors used by tests (structural-sharing proof) ---------
 
-(defun nl-clj--pvec-root (v)
+(defun nl-clj-vector--root (v)
   "Return V's root trie node -- exposed so callers can `eq'-check
 structural sharing between two vectors after an operation (Doc 194
 §4.1's own against-the-bug shape)."
   (aref v 3))
 
-(defun nl-clj--pvec-tail (v)
+(defun nl-clj-vector--tail (v)
   "Return V's tail array."
   (aref v 4))
 

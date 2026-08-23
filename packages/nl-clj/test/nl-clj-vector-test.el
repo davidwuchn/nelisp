@@ -55,10 +55,10 @@
 (ert-deftest nl-clj-vector-test-boundary-32-33 ()
   (let ((v (nl-clj-vector)))
     (dotimes (i 32) (setq v (nl-clj-vector--conj v i)))
-    (should (= (length (nl-clj--pvec-tail v)) 32))
+    (should (= (length (nl-clj-vector--tail v)) 32))
     (setq v (nl-clj-vector--conj v 32))
     ;; the tail just committed 32 elements to the trie and now holds 1
-    (should (= (length (nl-clj--pvec-tail v)) 1))
+    (should (= (length (nl-clj-vector--tail v)) 1))
     (dotimes (i 33) (should (= (nl-clj-vector--nth v i) i)))))
 
 (ert-deftest nl-clj-vector-test-boundary-root-height-growth ()
@@ -120,7 +120,7 @@
 (ert-deftest nl-clj-vector-test-conj-shares-root-when-tail-has-room ()
   (let* ((v (nl-clj-vector 1 2 3))
          (v2 (nl-clj-vector--conj v 4)))
-    (should (eq (nl-clj--pvec-root v) (nl-clj--pvec-root v2)))))
+    (should (eq (nl-clj-vector--root v) (nl-clj-vector--root v2)))))
 
 (ert-deftest nl-clj-vector-test-assoc-shares-untouched-branch ()
   (let ((v (nl-clj-vector)))
@@ -134,11 +134,11 @@
       (should (eq (nl-clj-vector--nth v2 idx-touch) :deep))
       (should (= (nl-clj-vector--nth v idx-touch) idx-touch))
       ;; the untouched top-level branch must be the SAME object
-      (should (eq (aref (nl-clj--pvec-root v) top-untouched)
-                  (aref (nl-clj--pvec-root v2) top-untouched)))
+      (should (eq (aref (nl-clj-vector--root v) top-untouched)
+                  (aref (nl-clj-vector--root v2) top-untouched)))
       ;; the touched branch must be a FRESH copy (not eq)
-      (should-not (eq (aref (nl-clj--pvec-root v) top-touch)
-                       (aref (nl-clj--pvec-root v2) top-touch))))))
+      (should-not (eq (aref (nl-clj-vector--root v) top-touch)
+                       (aref (nl-clj-vector--root v2) top-touch))))))
 
 ;;;; peek / pop: inverse-of-conj round trip ---------------------------------
 

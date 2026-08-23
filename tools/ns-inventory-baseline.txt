@@ -370,7 +370,30 @@ ns-collision-divergent 126
 # is the whole point of the hook existing.  +1, not +0: this is a
 # tracked, explained instance, per this file's own rule, not left for
 # the count to silently absorb.
-ns-prefix-violation 874
+# 874 -> 885 on 2026-08-24 (Doc 194, packages/nl-clj/): 11 new instances of
+# this file's own already-conceded "public API surface" pattern -- a
+# multi-file PACKAGE using a package-level prefix (`nl-clj-') rather than a
+# per-FILE one (this tool infers each file's own expected prefix from its
+# basename, e.g. `nl-clj-hash.el' -> `nl-clj-hash--', so any public name at
+# the package level reads as a "violation" of a convention the package
+# never followed).  Measured, not estimated -- the 11:
+# `nl-clj-error'/`nl-clj-index-error'/`nl-clj-type-error' (nl-clj-core.el,
+# the shared error hierarchy every module signals against),
+# `nl-clj-vector'/`nl-clj-vector-p' (nl-clj-vector.el), `nl-clj-hash-map'/
+# `nl-clj-hash-set'/`nl-clj-keys'/`nl-clj-map-p'/`nl-clj-set-p'/`nl-clj-vals'
+# (nl-clj-hash.el).  Renaming any of these to a file-local prefix would
+# directly contradict Doc 194 §3.1's own naming decision (a single
+# qualified `nl-clj-' prefix is "the ground truth" specifically so the
+# public symbol is never ambiguous regardless of which file happens to
+# define it) -- the same shape this baseline's own 2026-08-23 note already
+# concedes for `nelisp-read-namespace-resolve'.  Two accessor functions
+# this same commit found genuinely misnamed (`nl-clj--pvec-root'/
+# `nl-clj--pvec-tail', which SHOULD have used nl-clj-vector.el's own
+# internal prefix) were renamed to `nl-clj-vector--root'/`nl-clj-vector--
+# tail' instead of being conceded here -- a real fix, not every finding in
+# a new package is "public API," and this baseline only raises for the
+# ones that measurably are.
+ns-prefix-violation 885
 # 611 -> 613 on 2026-08-20: `nelisp--check-string'/`--check-symbol' and the
 # other argument-check helpers are referenced from the lisp/ mirrors that
 # carry copies of the functions using them.  This is the kind this file
@@ -413,7 +436,32 @@ ns-prefix-violation 874
 # interim ceiling is the arithmetic union against the shared 611 base:
 # 611 + (619-611) + (612-611) = 620.  To be reconciled to the measured
 # count in the battery.
-ns-private-escape 620
+#
+# 620 -> 642 on 2026-08-24 (Doc 194, packages/nl-clj/): the same "shared
+# core, conceded cross-file `--' call" shape this file's own async-core
+# note above already established, applied to a 5-file package instead of
+# a 2-file split.  Measured, not estimated -- 22 total: 9 are every module
+# (nl-clj-atom.el/nl-clj-vector.el/nl-clj-hash.el/nl-clj-seq.el) referencing
+# nl-clj-core.el's shared tag constants and its one tag-check helper
+# (`nl-clj--pvec-tag'/`nl-clj--pmap-tag'/`nl-clj--pset-tag'/
+# `nl-clj--atom-tag'/`nl-clj--set-member'/`nl-clj--not-found'/
+# `nl-clj--tagged-p' x3) -- duplicating these per-file instead of sharing
+# one definition (nl-clj-core.el's own Commentary: "so the representation
+# convention lives in exactly one place") would be strictly worse, the
+# same tradeoff the async-core note already made.  The other 13 are
+# nl-clj-seq.el (Doc 194's own "generic dispatch layer," by design calling
+# INTO nl-clj-vector.el's and nl-clj-hash.el's internal engines rather than
+# duplicating trie/HAMT logic a third time) referencing
+# `nl-clj-vector--assoc-n'/`--conj'/`--empty'/`--nth'/`--pop'/`--to-list'
+# and `nl-clj-hash--map-assoc'/`--map-dissoc'/`--map-entries'/`--map-get'/
+# `--set-conj'/`--set-disj'/`--set-elements'.  None of these 22 should
+# widen to single-dash: that would make every one of these internal engine
+# functions callable from OUTSIDE the package too, the exact privacy
+# boundary `--' exists to mark, for a purely mechanical count that this
+# baseline's own history already treats as background debt to concede, not
+# fix on sight (see the "852 and 611... two orders of magnitude larger"
+# framing at the top of this file).
+ns-private-escape 642
 ns-unreadable 0
 
 # `pinned-collision KEY' pins every ns-collision and ns-collision-divergent
