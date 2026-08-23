@@ -1622,6 +1622,25 @@ bit replicates into the high bits."
   (nelisp-asm-x86_64--append-bytes
    buf (unibyte-string #x48 #xD3 #xF8)))
 
+(defun nelisp-asm-x86_64-sar-reg-imm8 (buf reg count)
+  "Emit `SAR REG, COUNT' = REX.W + C1 /7 + ModR/M + ib (4 bytes).
+REG is a 64-bit GP register symbol.  COUNT is the unsigned shift
+amount [0, 63] (arithmetic-right shift, sign bit replicates).  Same
+opcode group as `shl-reg-imm8' (0xC1), differing only in the /digit
+(SHL=/4, SAR=/7 per the x86_64 ISA reference) -- Doc 187 P4's
+fixnum-boundary overflow check (`SHL reg, 2' then `SAR reg, 2' is a
+round trip through this runtime's 62-significant-bit Int width; a
+value that does not survive it crossed the fixnum boundary)."
+  (unless (and (integerp count) (<= 0 count 63))
+    (signal 'nelisp-asm-x86_64-error
+            (list :sar-count-out-of-range count)))
+  (let* ((rex (nelisp-asm-x86_64--rex
+               1 0 0 (nelisp-asm-x86_64--reg-ext reg)))
+         (modrm (nelisp-asm-x86_64--modrm
+                 3 7 (nelisp-asm-x86_64--reg-low3 reg))))
+    (nelisp-asm-x86_64--append-bytes
+     buf (unibyte-string rex #xC1 modrm (logand count #xFF)))))
+
 (defun nelisp-asm-x86_64-shr-rax-cl (buf)
   "Emit `SHR RAX, CL' = REX.W + D3 /5 + ModR/M=0xE8 (3 bytes).
 Logical-right shift; the count is implicit in CL and zeros fill the
