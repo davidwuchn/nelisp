@@ -127,7 +127,6 @@ silent-fallback 52
 # standalone counts already carried (49 pinned/52 total; 48 pinned/51
 # total): 50 + 3 = 53.  To be reconciled to the measured count in the
 # battery.
-ignore-errors   53
 #
 # 50 -> 51 on 2026-08-23: one new site, reviewed and pinned below (Doc 191
 # Phase 1's nelisp-standalone--reader-defun-redefine-epoch-smoke temp-file
@@ -138,8 +137,16 @@ ignore-errors   53
 # integration/wave4 (this branch, merge 7/9): one more disjoint pinned
 # row (the redefine-epoch smoke's cleanup), confirmed unique against the
 # merge-6/9 union.  Interim total bumped by +1 row (+1 through the same
-# +3 pinned/counter offset): 53 + 1 = 54.  To be reconciled to the
-# measured count in the battery.
+# +3 pinned/counter offset): 53 + 1 = 54.
+#
+# integration/wave4 battery reconciliation (post merge 9/9, full tree):
+# `make fallback-inventory' measured ignore-errors=54 against this
+# file's then-duplicate 53/54 lines (the checker reads the first
+# matching line, which was still 53, hence the reported "+1 over
+# baseline"). This merge's interim arithmetic was exactly right; the
+# only defect was leaving a stale duplicate directive line in the file
+# instead of replacing it. Removed the duplicate; single line below now
+# matches the measured count.
 ignore-errors   54
 # 34 -> 32 on 2026-08-19: the two handlers in
 # `nelisp-artifact--ensure-native-compiler' now record the error instead of

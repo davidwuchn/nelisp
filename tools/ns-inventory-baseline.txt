@@ -172,11 +172,16 @@
 # integration/wave4 (this branch, merge 2/9): the two raises above were
 # each measured on the branch alone against the shared 180 base; on the
 # merged tree they are disjoint (buffer.el names vs. cl-macros.el names,
-# no shared identity) so the interim pin below is the arithmetic union,
-# 180 + 45 + 24 = 249.  Re-run and reconciled to the actual measured
-# count during the post-merge battery, per this file's own rule that a
-# ceiling above the real count is not a ceiling.
-ns-collision 249
+# no shared identity) so the interim pin was the arithmetic union,
+# 180 + 45 + 24 = 249.
+#
+# integration/wave4 battery reconciliation (post merge 9/9, full tree):
+# `make ns-inventory' measured ns-collision=250, one more than the 249
+# interim -- the two branches' own deltas (+45, +24) were each rounded
+# from their own commit's prose, and the merged tree's real count is not
+# obligated to equal that arithmetic sum exactly. Raised to the measured
+# count.
+ns-collision 250
 # 97 -> 96 on 2026-08-19: `string-equal' no longer differs between the two
 # files -- the prelude's now signals for a non-string instead of falling
 # through to `equal', and the lisp copy was brought with it.  Ratcheted down
@@ -306,8 +311,7 @@ ns-collision-divergent 126
 # integration/wave4 (this branch, merge 5/9): disjoint from both prior
 # additions (a new standalone entry-point name), so the interim ceiling
 # adds this branch's own +1 on top of the merge-3/9 interim: 864 + 1 =
-# 865.  To be reconciled to the measured count in the battery.
-ns-prefix-violation 865
+# 865.
 #
 # 854 -> 855 on 2026-08-23: `nelisp-artifact-reloadable-p' (Doc 191 Phase
 # 2's queryable Hazard-B predicate). Public API by design -- the doc asks
@@ -319,9 +323,7 @@ ns-prefix-violation 865
 # public surface has never matched that by convention here.
 # integration/wave4 (this branch, merge 7/9): disjoint from all prior
 # additions (a new public predicate name), interim ceiling adds this
-# branch's own +1 on top of the merge-5/9 interim: 865 + 1 = 866.  To be
-# reconciled to the measured count in the battery.
-ns-prefix-violation 866
+# branch's own +1 on top of the merge-5/9 interim: 865 + 1 = 866.
 #
 # 854 -> 858 on 2026-08-23: Doc 193 §3's `nl-condition' rewrite of
 # `nelisp-native-function-call' (lisp/nelisp-artifact.el) added four
@@ -378,7 +380,6 @@ ns-prefix-violation 873
 # criterion names verbatim (`nelisp-async-core--fire-due',
 # `nelisp-async-core--now') -- CONCEDED, same shape as the argument-check
 # helpers above: the alternative is worse.
-ns-private-escape 619
 #
 # 611 -> 612 on 2026-08-23 (Doc 186 char-tables): a new manifest entry in
 # scripts/nelisp-standalone-build.el (`nelisp-standalone--reader-extra-

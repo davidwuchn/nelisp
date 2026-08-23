@@ -96,7 +96,6 @@
 # in practice, from whatever `nelisp--repl-idle-pump' fires -- still
 # works). Both are the same raw-pointer idiom every other `nl_repl_*'
 # helper in this file already uses; neither is new kind of unsafety.
-unsafe-call 564
 #
 # 562 -> 590 on 2026-08-23: Doc 180 Phase 1 (form-located errors), all in
 # `scripts/nelisp-standalone-build.el' (538 -> 566 for that file, measured

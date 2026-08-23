@@ -150,7 +150,20 @@
 # as merge 2/9's note above -- this raise was also measured on a tree
 # that does not yet carry buffer-unification-p1 or cl-generic-subset.
 # Interim pin bumped by this raise's own delta over the prior interim
-# pin (6938328 + 8280 = 6946608); still provisional, still reset ONCE
-# to a real measurement after all 9 branches land.
-size 6946608
+# pin (6938328 + 8280 = 6946608); still provisional at that point.
+#
+# integration/wave4 battery reconciliation (post merge 9/9, full tree,
+# all 9 branches landed): reset ONCE per this file's own rule and the
+# integration playbook, to the real measured size on the merged binary
+# -- `stat -c %s target/nelisp' after a clean `make standalone-reader'
+# on the fully-merged tree: 7247592 bytes, +300984 over the 6946608
+# interim (+4.3%). Every branch after merge 3/9 (native-overflow-checks
+# opt-in AOT flag, form-located-errors' printer/cursor work, char-table
+# layer, reload-verified, wasm-arg-budget's register widening, and
+# extension-flagship-use's actor CPS shim + nl-condition ladder rewrite)
+# also contributed prelude/AOT source growth on top of the interim
+# arithmetic, none of which was accounted for by summing only the first
+# three branches' own deltas -- this measurement supersedes all of the
+# interim arithmetic above, as intended.
+size 7247592
 slack-pct 2
