@@ -4014,25 +4014,90 @@ MATCH = (:u8 NAME) for <=8-byte u64-packed names, (:lit NAME) for full-length
   (cl-subseq nelisp-standalone--applyfn-dispatch-table 0 19)
   "Arithmetic/comparison/list-only dispatch subset for the baked-form eval path.")
 
+(defconst nelisp-standalone--unsupported-primitive-tag "nelisp-unsupported-primitive"
+  "Signal tag `nelisp-standalone--applyfn-unsupported-primitive-form' raises.")
+
+(defun nelisp-standalone--applyfn-unsupported-primitive-form ()
+  "Return the IR form that signals a catchable `nelisp-unsupported-primitive'
+error naming the primitive the free variable `name_ptr' points at (a Symbol
+Sexp, tag 4, name bytes at ptr@16/len@24 -- see
+`nelisp-standalone--applyfn-build-dispatch', the only caller).
+
+Against-the-bug (owner's 2026-08-23 real-machine probe, re-verified on this
+host): user Elisp calling `nelisp--syscall' -- never wired to any dispatch
+entry; the only surviving reference is the dead `(fset (quote
+nelisp--syscall) ...)' JIT-era alias in `nelisp-jit-strategy.el', which
+called deleted-Rust `nl-jit-call-syscall' and which the standalone reader
+never loads -- fell through the unmatched-builtin default that used to
+`nl_os_write_stderr' the bare name and return rc=1 WITHOUT going through the
+signal/unwind protocol (flag@268435472 / TAG@268435480 / VAL@268435512, the
+same stash `bf_signal'/`bf_error'/`nl_cons_stash_void_function' use).  The
+top-level driver then reported \"nelisp: form aborted without signal\" and
+`condition-case' never ran: uncatchable by construction, not by any handler
+bug.  Stashing a real signal here instead of printing makes every call that
+reaches this arm -- an unmatched name, `nelisp--syscall' included -- a
+normal, catchable Lisp error, the same way an ordinary void-function is.
+
+POLICY NOTE on `alloc-bytes'/`ptr-read-*'/`ptr-write-*'/`ptr-call' (raw
+memory from interpreted user code defeats `nl-safe''s whole sandboxing
+story, so the instinct is to gate these here too): TRIED and REVERTED in
+this same change.  Redirecting their `(:lit NAME)' dispatch arms in
+`nelisp-standalone--applyfn-bf-arms' to this same signal broke `--repl'
+mode outright -- even a bare `(defun foo () 1)' typed at the prompt calls
+`ptr-read-u64' through this exact string-name path as part of the reader's
+OWN redefinition/mutation-epoch bookkeeping (see
+`nelisp-standalone--reader-defun-redefine-smoke' /
+`-epoch-smoke'), not anything the user wrote.  Worse than the outright
+failure: call sites that treat these as never-failing utility ops (most of
+the runtime, by design -- arena allocation does not fail in this model)
+do not check the raise flag afterward, so a gated call does not unwind
+cleanly, it leaves flag@268435472 stuck at 1 while execution keeps running
+on the bogus `1' return value, corrupting whatever came after (observed:
+truncated/dropped stdout on later forms in the same `--load'.  Gating
+these four names needs either a calling-convention change (every internal
+alloc-bytes/ptr-* call site starts checking the flag) or a separate
+internal-only dispatch channel that user-typed source cannot reach in the
+first place -- neither exists yet, so `alloc-bytes'/`ptr-*' stay reachable
+by name pending that follow-up; this paragraph is the record of why."
+  (let ((tagbuf (make-symbol "unsup-tagbuf"))
+        (dataname (make-symbol "unsup-dataname"))
+        (nilslot (make-symbol "unsup-nilslot")))
+    `(let* ((,tagbuf (alloc-bytes 32 1))
+            (,dataname (alloc-bytes 32 8))
+            (,nilslot (alloc-bytes 32 8)))
+       (seq
+        ,@(nelisp-standalone--byte-write-forms
+           tagbuf nelisp-standalone--unsupported-primitive-tag)
+        (nl_alloc_symbol
+         ,tagbuf
+         ,(length (encode-coding-string
+                   nelisp-standalone--unsupported-primitive-tag 'utf-8 t))
+         268435480)
+        (nl_alloc_symbol (ptr-read-u64 name_ptr 16) (ptr-read-u64 name_ptr 24)
+                          ,dataname)
+        (wf_write_nil ,nilslot)
+        (nelisp_cons_construct ,dataname ,nilslot 268435512)
+        (ptr-write-u64 268435472 0 1)
+        (atomic-fetch-add 268435544 1)
+        1))))
+
 (defun nelisp-standalone--applyfn-build-dispatch (&optional table default-form)
   "Fold the (MATCH . IMPL) TABLE (default the full dispatch table) into a
 nested-if Phase47 dispatch chain, defaulting to DEFAULT-FORM (an IR form
-returned for an unknown builtin).  DEFAULT-FORM defaults to the stderr
-diagnostic below; pass a self-contained form (e.g. `1') for link sets that do
-NOT provide `nl_os_write_stderr' — the baked eval applyfn, whose manifest omits
-the reader-only stderr unit, so emitting the diagnostic would leave the symbol
-unresolved at link time."
-  (let (;; Unknown-builtin default: write the symbol name to stderr (was a
-        ;; silent failure) so interpreted callers surface WHICH registered-but-
-        ;; undispatched builtin is missing, then fall through to rc 1.  A symbol
-        ;; Sexp (tag 4) keeps its name bytes at ptr@16 / len@24, same as a Str.
+returned for an unknown builtin).  DEFAULT-FORM defaults to the catchable
+`nelisp-unsupported-primitive' signal below; pass a self-contained form
+(e.g. `1') for link sets whose manifest does not carry the units that
+signal needs (`nl_alloc_symbol' / `nelisp_cons_construct' / `bf_signal''s
+reserved-arena convention) -- the baked eval applyfn passes `1' because its
+arithmetic/list-only manifest omits them, so emitting the real signal would
+leave symbols unresolved at link time."
+  (let (;; Unknown-builtin default: 2026-08-23 real-machine probe found this
+        ;; arm previously wrote the symbol name to stderr and returned rc=1
+        ;; WITHOUT the signal/unwind stash -- a bare, uncatchable top-level
+        ;; abort (see `nelisp-standalone--applyfn-unsupported-primitive-form'
+        ;; for the against-the-bug writeup).  Signal instead of print.
         (dispatch (or default-form
-                      '(let* ((unkb (alloc-bytes 1 1)))
-                         (seq (ptr-write-u8 unkb 0 10)
-                              (nl_os_write_stderr (ptr-read-u64 name_ptr 16)
-                                                  (ptr-read-u64 name_ptr 24))
-                              (nl_os_write_stderr unkb 1)
-                              1)))))
+                      (nelisp-standalone--applyfn-unsupported-primitive-form))))
     (dolist (entry (reverse (or table nelisp-standalone--applyfn-dispatch-table)))
       (let* ((match (car entry))
              (impl (cdr entry))
@@ -10226,6 +10291,19 @@ Wave-2 (C) appends bf_ash (shl/sar compose) + bf_str_lt (byte-lexicographic).")
     ;; results are raw i64 (addresses / syscall numbers / counts), carried as
     ;; Int Sexps via wf_argval / wf_write_int.  The underlying ops are the
     ;; same AOT grammar ops the compiler emits, so no new Rust.
+    ;;
+    ;; POLICY NOTE (see `nelisp-standalone--applyfn-unsupported-primitive-form''s
+    ;; own POLICY NOTE paragraph for the full record): gating `alloc-bytes'/
+    ;; `ptr-read-*'/`ptr-write-*'/`ptr-call' to the same catchable signal was
+    ;; TRIED and REVERTED -- the reader's OWN `--repl' redefinition/mutation-
+    ;; epoch bookkeeping calls `ptr-read-u64' through this exact string-name
+    ;; path for a bare `(defun foo () 1)', and most internal call sites treat
+    ;; these as never-failing so they do not check the raise flag afterward,
+    ;; so a gated call corrupts later execution instead of unwinding cleanly.
+    ;; Left real here pending a calling-convention fix or a separate
+    ;; internal-only dispatch channel.  `nelisp--syscall' (the finding this
+    ;; change actually fixes) is unaffected: it was never in this table at
+    ;; all, so it only ever reached the unknown-builtin default.
     ((:lit "syscall-direct") . (wf_write_int out (syscall-direct (wf_argval args 0) (wf_argval args 1) (wf_argval args 2) (wf_argval args 3) (wf_argval args 4) (wf_argval args 5) (wf_argval args 6))))
     ((:lit "atomic-fetch-add") . (wf_write_int out (atomic-fetch-add (wf_argval args 0) (wf_argval args 1))))
     ((:lit "ptr-read-u8") . (wf_write_int out (ptr-read-u8 (wf_argval args 0) (wf_argval args 1))))
@@ -10505,6 +10583,11 @@ too (they need the dynamic build's PLT/GOT)."
         '((:u8 "cdr") . (bf_cdr args out)))
        (t entry)))
     nelisp-standalone--applyfn-dispatch-table)
+   ;; `alloc-bytes'/`ptr-read-*'/`ptr-write-*'/`ptr-call' stay real entries in
+   ;; `nelisp-standalone--applyfn-bf-arms' -- gating them to the catchable
+   ;; `nelisp-unsupported-primitive' signal was tried and reverted; see that
+   ;; function's POLICY NOTE for the against-the-bug evidence of why (the
+   ;; reader's own `--repl' bookkeeping depends on this exact reachability).
    nelisp-standalone--applyfn-bf-arms
    ;; Step C: dynamic builds gain the PLT-backed `nl-ffi-call' arms.
    (if (nelisp-standalone--reader-dynamic-p)
