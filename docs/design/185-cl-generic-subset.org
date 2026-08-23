@@ -1,7 +1,33 @@
 #+TITLE: Doc 185 — cl-generic subset (cl-defgeneric/cl-defmethod)
 #+AUTHOR: nelisp / nelisp-emacs (design: Claude Opus 5 + zawatton)
 #+DATE: 2026-08-22
-#+STATUS: DRAFT — design only, no implementation in this change.
+#+STATUS: SHIPPED (2026-08-23, branch feat/cl-generic-subset) — P0-P3 all
+landed: type+eql specializers, struct dispatch via
+=nelisp-cl-macros--struct-isa= (not =cl-typep=, per §2.1a), primary
+methods + =cl-call-next-method=/=cl-next-method-p=,
+=cl-no-applicable-method=/=cl-no-next-method= signals, ambiguous-dispatch
+detection for same-tier builtin-type matches, and the full §3.5
+loud-failure matrix, all in =lisp/nelisp-cl-macros.el= (host-ERT-loadable)
+mirrored verbatim into =scripts/nelisp-stdlib-prelude.el= (the standalone
+reader). Two corrections found by running, not asserting: (1) §3.5's
+table text for =cl-no-applicable-method='s signal data,
+=(list generic-name args)=, does not match what real Emacs 30.1 actually
+signals (measured this session: =(cons generic-name args)=, flat) — the
+landed code follows the measured shape; (2) =nelisp-cl-generic--ensure='s
+error-condition registration cannot call =define-error= or top-level
+=put= at this block's own position in =scripts/nelisp-stdlib-prelude.el=
+(both are defined LATER in that same sequentially-loaded file) — deferred
+to first actual generic-function definition instead, well after the
+whole prelude has loaded. Every mirror-copy edit (including a
+=cl-typep=-autoload host-Emacs hazard fixed with =funcall= + a quoted
+symbol, §7.1) was applied identically to both files. Test coverage:
+=test/nelisp-cl-generic-test.el= (22 =ert-deftest= cases, all against
+this subset specifically — not real Emacs's =cl-generic=, confirmed by a
+same-session repro of an Emacs/ERT internals hazard documented in that
+file's own commentary), plus a standalone-binary probe (§5's "before"
+=void-function=/"after" probe transcript below) and two parity forms
+against real, unmodified Emacs 30.1 (§5.2).
+#+VERIFIED-BY: ert-full standalone-reader-test binary-size-ratchet emacs-parity
 
 * §0 TL;DR
 
@@ -547,6 +573,72 @@ written).
 As in Doc 187 §6.4 / Doc 186 §6.4: each phase's status line records
 =VERIFIED-BY: <commit-sha> (<gate-name> report, <date>)=, pointing at a
 real =target/gates/<name>.json= report, not a hand-written claim.
+
+** §5.5 As landed (2026-08-23, branch feat/cl-generic-subset)
+
+Implemented per §3-§3.5 with the two corrections noted in the =#+STATUS=
+line above.  Evidence, per this doc's own §5.4 rule (a report, not a
+hand-written claim):
+
+- =target/gates/ert-full.json= (=tools/ai/nelisp-ai.sh test=): full host
+  ERT suite, including this doc's own =test/nelisp-cl-generic-test.el=
+  (22 =ert-deftest= cases) alongside every pre-existing test file in the
+  same shared batch process — 0 unexpected results.
+- =target/gates/standalone-reader-test.json=,
+  =target/gates/binary-size-ratchet.json=,
+  =target/gates/emacs-parity.json= (=tools/ai/nelisp-ai.sh standalone=):
+  all PASS on the rebuilt =target/nelisp= carrying this doc's
+  =scripts/nelisp-stdlib-prelude.el= addition.
+
+Against-the-bug, run both ways this session (not asserted):
+
+#+begin_example
+BEFORE (this session, base 71d5f17ef, target/nelisp rebuilt from a clean
+checkout of that commit):
+  cl-defgeneric fboundp=nil
+  cl-defmethod  fboundp=nil
+  cl-call-next-method fboundp=nil
+  cl-next-method-p    fboundp=nil
+
+AFTER (same probe, target/nelisp rebuilt with this doc's two-file change):
+  cl-defgeneric fboundp=t macro=t
+  cl-defmethod  fboundp=t macro=t
+  cl-call-next-method fboundp=t
+  cl-next-method-p    fboundp=t
+  struct dispatch: dog->woof animal->generic-noise
+  eql dispatch: special->special-form other->fallback
+  call-next-method chain (reverse order): (child parent)
+  no-applicable-method: (caught (cl-no-applicable-method pgt-only-dogs 5))
+  loud error on :around: (caught error)
+#+end_example
+
+Parity forms measured against real, unmodified Emacs 30.1 this session
+(no =nelisp-cl-macros= loaded — real =cl-lib='s own =cl-generic=):
+
+| form | real Emacs 30.1 | this subset |
+|---|---|---|
+| 3-level =:include= chain, =cl-call-next-method= call order | =(child parent grandparent)= | same |
+| =cl-no-applicable-method= signal data shape | =(cons generic-name args)=, flat | same (§+STATUS correction 1) |
+| =(cl-defmethod f :around (...) ...)= | defines a method | documented divergence: loud =error= naming =:around= |
+
+A third, host-Emacs-internals hazard was found and fixed as part of
+getting the ERT suite itself trustworthy, documented in full in
+=test/nelisp-cl-generic-test.el='s own commentary rather than repeated
+here: loading =ert= primes real Emacs's =cl-lib= autoloads, and something
+in ERT's own test-*execution* machinery (not its file-loading machinery)
+re-triggers a full, real =cl-macs.elc= load partway through a batch run,
+silently reclaiming =cl-defstruct=/=setf=/=backquote=/etc. back to real
+Emacs's own versions unless every one of them is forced to resolve
+before this subset's own unconditional overrides install, and re-swapped
+back for the exact dynamic extent of each test.  Confirmed this session:
+without that handling, this doc's own struct-dispatch tests intermittently
+exercised real Emacs's =cl-generic= instead of this subset (a false
+green), and, once =setf= specifically was left overridden process-wide,
+an unrelated sibling test file (=test/nelisp-daemon-test.el=) broke.  Two
+=tools/gate-mutations.txt= rows (§5.3, landed with exact =sed= matches
+rather than the placeholders above) prove the struct-ancestry and
+no-applicable-method loud-failure paths specifically; both confirmed by
+hand to flip =ert-full= red before landing.
 
 * §6 Open questions
 

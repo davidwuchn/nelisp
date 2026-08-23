@@ -100,3 +100,14 @@ doc-claims|docs/design/160-stdlib-breadth.org|s/^#+VERIFIED-BY: reader-surface-a
 # `make gate-selfcheck' (real Emacs 30.x, no skip in play) correctly goes
 # red on it.
 gate-selfcheck|tools/nelisp-bootstrap-contract.el|s/^    (princ (format "GATE-COUNT checked=%d findings=%d.*missing))$/    nil/|bootstrap-contract fake-passes (prints ok/PASS, no GATE-COUNT line); gate-selfcheck must still flag it as a finding, not confuse it with a reasoned skip
+#
+# 2026-08-23 (docs/design/185-cl-generic-subset.org): the two rows below
+# cover this doc's own loud-failure discipline -- exercised through
+# `test/nelisp-cl-generic-test.el' (`nelisp-gate-mutation.sh' scopes
+# `ert-full' mutations on `lisp/nelisp-cl-macros.el' to that one file; see
+# the case in `run_gate' there).  Both confirmed by hand before landing:
+# each sed hits its target exactly once, and `NELISP_GATE_MUTATION_TEST_FILES=
+# test/nelisp-cl-generic-test.el tools/ai/nelisp-ai.sh test' goes red on the
+# corresponding test, clean on the unmutated file.
+ert-full|lisp/nelisp-cl-macros.el|s/(nelisp-cl-macros--struct-isa (nelisp--record-type val) type))/t)/|every struct instance matches every struct-type specializer regardless of ancestry, so struct-based dispatch order silently collapses (a dog instance would satisfy an unrelated struct's method too)
+ert-full|lisp/nelisp-cl-macros.el|s/(signal 'cl-no-applicable-method (cons name args))/nil/|an unmatched generic-function call silently returns nil instead of signaling cl-no-applicable-method

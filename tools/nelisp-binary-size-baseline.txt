@@ -73,5 +73,30 @@
 #   twelve branches (seven wave-3 branches + feat/native-observability,
 #   feat/dod-doc-claims, docs/design-{short,mid,long}-term) landed and
 #   `make standalone-reader-test' relinked target/nelisp from scratch.
-size 6741200
+#
+# Raised 2026-08-23 (6741200 -> 6930136, +188936 bytes, +2.8%, over this
+# file's 2% slack -- the gate correctly failed and this is the required
+# same-commit raise, not slack silently absorbing it) by
+# docs/design/185-cl-generic-subset.org's `cl-defgeneric'/`cl-defmethod'
+# subset: ~340 new source lines added to `scripts/nelisp-stdlib-
+# prelude.el' (dispatch table, specificity ordering, `cl-call-next-
+# method'/`cl-next-method-p', the two macros themselves), embedded into
+# the linked binary as executable prelude source exactly like the
+# hooks/map.el/fixnum raise above -- consistent with that raise's own
+# measured ~760 bytes/source-line average (340 lines * ~760 ~= 258KB
+# upper estimate; the actual +188936 is lower, plausible since not every
+# line is equally dense).  Measured before/after on this session's own
+# HEAD via two `make standalone-reader' builds from a byte-identical
+# tree except for this doc's own two-file change.
+#
+# Raised again same-day 2026-08-23 (6930136 -> 6938328, +8192 bytes,
+# +0.12%) by the defensive bound `nelisp-cl-generic--struct-depth' gained
+# after this session's own `tools/gate-mutations.txt' row for it hung
+# `make gate-mutation' indefinitely: the mutated `nelisp-cl-macros--
+# struct-isa' call sends the ancestry walk through `nil' forever with no
+# termination check, so the fix bounds the walk at the registry's own
+# size and signals instead of looping -- a real robustness fix, not
+# mutation-test-only code (a future bug anywhere upstream of that walk
+# would hang the same way in production).
+size 6938328
 slack-pct 2
