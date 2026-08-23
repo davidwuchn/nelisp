@@ -229,14 +229,16 @@ ns-prefix-violation 854
 # `buffer-substring-no-properties' mirrors stopped referencing the private
 # check helpers once they carried the prelude's own text.
 # 611 -> 612 on 2026-08-23 (Doc 186 char-tables): a new manifest entry in
-# scripts/nelisp-standalone-build.el's `nelisp-standalone--manifest' quotes
-# `nelisp-cc-evalport-nonenv-char-table--source', defined in lisp/nelisp-
-# cc-evalport-nonenv-char-table.el -- the same shape every other manifest
-# entry already uses to reference its sibling kernel file's `--source'
-# defconst (the concentrated 110-in-this-file share this baseline's own
-# 2026-08-17 note already attributes to that pattern). One more entry of an
-# already-conceded, already-established convention, not a new violation
-# class.
+# scripts/nelisp-standalone-build.el (`nelisp-standalone--reader-extra-
+# manifest', not the base `nelisp-standalone--manifest' -- moved there
+# after `nelisp-standalone--manifest' broke `standalone-eval-test' with an
+# unresolved `nelisp_alloc_bytes' symbol) quotes `nelisp-cc-evalport-
+# nonenv-char-table--source', defined in lisp/nelisp-cc-evalport-nonenv-
+# char-table.el -- the same shape every other manifest entry already uses
+# to reference its sibling kernel file's `--source' defconst (the
+# concentrated 110-in-this-file share this baseline's own 2026-08-17 note
+# already attributes to that pattern). One more entry of an already-
+# conceded, already-established convention, not a new violation class.
 ns-private-escape 612
 ns-unreadable 0
 

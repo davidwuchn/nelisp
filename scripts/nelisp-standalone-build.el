@@ -13207,11 +13207,6 @@ KERNEL32!ExitProcess with the driver return already in x0/w0."
     ("str-clone.o"        nelisp-cc-nlstr-clone                   nelisp-cc-nlstr-clone--source)
     ("cell-clone.o"       nelisp-cc-nlcell-clone                  nelisp-cc-nlcell-clone--source)
     ("chartable-clone.o"  nelisp-cc-nlchartable-clone             nelisp-cc-nlchartable-clone--source)
-    ;; Doc 186 P0: nl_char_table_get_raw / nl_char_table_set_raw -- the
-    ;; entries-array + parent-chain + default_val storage kernel `bf_aref_
-    ;; checked'/`bf_aset''s new tag-9 arms (nelisp-standalone-build.el)
-    ;; call directly.  Pre-existing source, newly linked into this binary.
-    ("chartable-getset.o" nelisp-cc-evalport-nonenv-char-table   nelisp-cc-evalport-nonenv-char-table--source)
     ("boolvec-clone.o"    nelisp-cc-nlboolvector-clone            nelisp-cc-nlboolvector-clone--source)
     ("record-alloc.o"     nelisp-cc-nlrecord-alloc                nelisp-cc-nlrecord-alloc--source)
     ("record-clone.o"     nelisp-cc-nlrecord-clone                nelisp-cc-nlrecord-clone--source)
@@ -13418,7 +13413,20 @@ Parallelism pays off only once per-unit compilation dominates startup
     ("ptr-read-u8.o"      nelisp-cc-atomic-raw-mem               nelisp-cc-atomic-raw-mem--read-u8-source)
     ("ptr-write-u8.o"     nelisp-cc-atomic-raw-mem               nelisp-cc-atomic-raw-mem--write-u8-source)
     ("alloc-bytes-fn.o"   nelisp-cc-alloc-dealloc                nelisp-cc-alloc-dealloc--alloc-bytes-source)
-    ("dealloc-bytes-fn.o" nelisp-cc-alloc-dealloc                nelisp-cc-alloc-dealloc--dealloc-bytes-source))
+    ("dealloc-bytes-fn.o" nelisp-cc-alloc-dealloc                nelisp-cc-alloc-dealloc--dealloc-bytes-source)
+    ;; Doc 186 P0: nl_char_table_get_raw / nl_char_table_set_raw -- the
+    ;; entries-array + parent-chain + default_val storage kernel `bf_aref_
+    ;; checked'/`bf_aset''s new tag-9 arms (nelisp-standalone-build.el)
+    ;; call directly.  Pre-existing source, newly linked into this binary.
+    ;; Lives HERE, not in the base `nelisp-standalone--manifest', because
+    ;; its own `nl_ct_grow_entries' calls `nelisp_alloc_bytes'/
+    ;; `nelisp_dealloc_bytes' (the two units directly above), which are
+    ;; themselves reader-extra-only -- putting it in the base manifest
+    ;; linked cleanly for `standalone-reader' but broke `standalone-eval-
+    ;; test' with `nelisp-link--unresolved-symbol ("nelisp_alloc_bytes"
+    ;; "chartable-getset.o")' (measured, not assumed: that is exactly how
+    ;; this entry's first location was found to be wrong).
+    ("chartable-getset.o" nelisp-cc-evalport-nonenv-char-table   nelisp-cc-evalport-nonenv-char-table--source))
   "Extra units the reader path needs beyond `nelisp-standalone--manifest'.
 The reader's grammar ops (mut-str-make-empty/-push-byte/-finalize, the
 raw-mem u8 ops, alloc/dealloc) lower to runtime extern calls that the
