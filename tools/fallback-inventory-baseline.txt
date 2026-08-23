@@ -105,7 +105,12 @@ silent-fallback 53
 # presence-sweep auto-note's defensive shape-extraction for a report-only
 # string, falls back to "?" on a malformed corpus form -- never on a
 # correctness path).
-ignore-errors   50
+# 50 -> 51 on 2026-08-23: one new site, reviewed and pinned below (Doc 191
+# Phase 1's nelisp-standalone--reader-defun-redefine-epoch-smoke temp-file
+# cleanup -- same reasoning and same literal shape, `(ignore-errors
+# (delete-file tmp))', as the other standalone-reader smokes' pins right
+# below).
+ignore-errors   51
 # 34 -> 32 on 2026-08-19: the two handlers in
 # `nelisp-artifact--ensure-native-compiler' now record the error instead of
 # discarding it.  Between them they had hidden a chain of six failures --
