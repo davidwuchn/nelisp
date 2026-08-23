@@ -117,7 +117,35 @@
 # is the arithmetic union against the shared 562 base: 562 + (564-562) +
 # (590-562) = 592.  To be reconciled to the measured count in the
 # battery.
-unsafe-call 592
+#
+# 592 -> 599 on 2026-08-23 (fix/ffi-surface-availability): all in
+# scripts/nelisp-standalone-build.el (568 -> 575 for that file).  The
+# owner's real-machine probe found `nl-ffi-call' void on a Windows PE
+# build and a WSL Debian Linux ELF build -- the default (non-`NELISP_
+# READER_DYNAMIC') standalone reader never installed the name at all.
+# The fix makes `nl-ffi-call' always `fboundp', raising the catchable
+# `nelisp-unsupported-primitive' condition on a build that cannot link
+# the real dispatcher instead.  A first version defined that fallback in
+# scripts/nelisp-stdlib-prelude.el as ordinary elisp -- `unsafe-inventory'
+# correctly rejected it, since `nl-ffi-call' is itself a listed
+# `nl-safe-unsafe-primitives' name and that file is not a kernel file
+# (see docs/design/100-phase-47-dynamic-link-elisp.org section 7).  The
+# shipped fix instead builds the condition natively in
+# `nelisp-standalone--applyfn-ffi-unsupported-form' (this file, already a
+# kernel file, already `nl-ffi-call''s real home), packing the two boxed
+# Symbols (`nelisp-unsupported-primitive', `nl-ffi-call') from name bytes
+# via `nelisp-standalone--name-words' the same way `nelisp-standalone--
+# reader-install-builtins-forms' already does for arbitrary-length
+# builtin names -- 2 `alloc-bytes' scratch buffers (name-byte packing +
+# the boxed data-list cons) plus 7 `ptr-write-u64' (packing "nelisp-
+# unsupported-primitive", 29 bytes = 4 words, and "nl-ffi-call", 11 bytes
+# = 2 words, plus the raise-flag write), same shape as every existing
+# `bf_wrong_type_*' helper in this file that raises a fixed condition
+# with fixed data -- no new kind of unsafe call, one more site of the
+# kind already present throughout this file.  Measured red/green: the
+# unmodified tree (this branch's own base, eb4eb81f3) reports 568/592
+# PASS; this change reports 575/599.
+unsafe-call 599
 
 # `pinned-kernel-call FILE COUNT' pins the per-file unquoted `unsafe-call'
 # count behind `total' above -- the three kernel files that actually carry
@@ -134,4 +162,9 @@ pinned-kernel-call scripts/nelisp-flat-arena-probe.el 6
 # standard-names repl idle-pump) + 28 (form-located-errors) = 568,
 # interim, both branches' additions to this file being disjoint call
 # sites; to be reconciled to the measured count in the battery.
-pinned-kernel-call scripts/nelisp-standalone-build.el 568
+#
+# 568 -> 575 on 2026-08-23 (fix/ffi-surface-availability): see the
+# `unsafe-call' note above for the full explanation (`nl-ffi-call'
+# availability fix's native `nelisp-unsupported-primitive' signal
+# construction).
+pinned-kernel-call scripts/nelisp-standalone-build.el 575

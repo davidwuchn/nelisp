@@ -663,9 +663,14 @@ reader-surface-audit:
 
 # ---- standalone-reader-smokes -------------------------------------------
 #
-# The 29 individual reader smokes, run as one gate (28 -> 29 on
+# The individual reader smokes, run as one gate (28 -> 29 on
 # integration/wave3: fix/standalone-reader-input-hardening added
-# `standalone-reader-malformed-input-smoke').
+# `standalone-reader-malformed-input-smoke'; 34 -> 35 on
+# fix/ffi-surface-availability: added `standalone-reader-ffi-unsupported-
+# smoke', which pins the DEFAULT static build's `nl-ffi-call' availability --
+# see that target's own comment).  The "29" in the prose below has drifted
+# from the list's actual length before this change too; unchanged here
+# rather than reworked without re-verifying its own history.
 #
 # `standalone-reader-test' runs 19 checks built into the build script (13
 # base + 1 initial exit-code assertion, +4 from an earlier integration: each
@@ -696,6 +701,7 @@ STANDALONE_READER_SMOKES = \
   standalone-reader-derived-mode-shape-smoke \
   standalone-reader-elt-smoke \
   standalone-reader-ffi-smoke \
+  standalone-reader-ffi-unsupported-smoke \
   standalone-reader-fmt-smoke \
   standalone-reader-getenv-smoke \
   standalone-reader-intern-soft-loop-smoke \
@@ -1845,6 +1851,92 @@ standalone-reader-ffi-smoke:
 	  fi; \
 	fi
 	@echo "[standalone-reader-ffi-smoke] PASS: libc + libm(f64) + GnuTLS(D1) + FreeType(F1/F2/F3/F4) via nl-ffi-call"
+
+# 2026-08-23: `standalone-reader-ffi-smoke' above force-rebuilds with
+# NELISP_READER_DYNAMIC=1, so it only ever tests that one opt-in variant --
+# never the plain `make standalone-reader' / `make standalone-reader-test' /
+# `tools/build-release-artifact.sh' binary end users and CI's own binary-tier
+# gates actually run.  The owner's 2026-08-23 real-machine probe (Windows PE
+# + a WSL Debian Linux ELF `target/nelisp', both built the ordinary way) found
+# `nl-ffi-call' void on both -- a true finding the smoke above could not have
+# caught, since it never builds what those binaries are.  This smoke pins the
+# OTHER side of the matrix: on a build with no dynamic FFI linkage, `nl-ffi-
+# call' must still be `fboundp' (not void) and must signal the catchable
+# `nelisp-unsupported-primitive' condition on every entry point a user can
+# reach it from -- bare FILE, --load, --eval, eval-elisp-source, the REPL,
+# and a compiled artifact -- not just the one or two paths a smoke happens to
+# exercise.  See `nelisp-standalone--applyfn-ffi-unsupported-form' in
+# scripts/nelisp-standalone-build.el (the always-installed fallback arm) and
+# docs/design/100-phase-47-dynamic-link-elisp.org section 7 (the
+# availability matrix) for the fix this pins.  The condition's DATA is the
+# symbol `nl-ffi-call' (a one-element list, Emacs `wrong-type-argument'
+# style), not a string -- deliberately: `nl-ffi-call' is itself a listed
+# `nl-safe-unsafe-primitives' name (packages/nl-safe/src/nl-safe.el), so its
+# construction lives in the one file `tools/unsafe-kernel.txt' allows to
+# mention it, built from packed symbol-name bytes rather than a string
+# literal (see that function's own commentary for why a first version of
+# this fix, which put a string-carrying `defun' in the prelude instead,
+# tripped `unsafe-inventory').
+standalone-reader-ffi-unsupported-smoke:
+	@mkdir -p target
+	@env -u NELISP_READER_DYNAMIC -u NELISP_STANDALONE_TARGET $(EMACS) --batch -Q -L lisp -L src -L scripts \
+	  --eval '(setq load-prefer-newer t)' \
+	  -l nelisp-standalone-build -f nelisp-standalone-build-reader
+	@chmod +x target/nelisp
+	@case "$$(file -b target/nelisp 2>/dev/null)" in \
+	  *"dynamically linked"*) echo "[ffi-unsupported-smoke] FAIL: target/nelisp is dynamically linked -- not the static default this smoke must test"; exit 1;; \
+	esac
+	@printf '%s\n' '(fboundp (quote nl-ffi-call))' > target/standalone-reader-ffi-unsupported-fboundp.el
+	@out="$$(./target/nelisp --load target/standalone-reader-ffi-unsupported-fboundp.el)"; \
+	if [ "$$out" = "t" ]; then \
+	  echo "[ffi-unsupported-smoke fboundp] PASS: (fboundp 'nl-ffi-call) -> t (static default build)"; \
+	else \
+	  echo "[ffi-unsupported-smoke fboundp] FAIL: -> $$out (expected t; nl-ffi-call must never be void)"; exit 1; \
+	fi
+	@caught='(condition-case e (nl-ffi-call "toupper" 97) (nelisp-unsupported-primitive (car (cdr e))))'; \
+	printf '%s\n' "$$caught" > target/standalone-reader-ffi-unsupported-load.el; \
+	out="$$(./target/nelisp --load target/standalone-reader-ffi-unsupported-load.el)"; \
+	if [ "$$out" = "nl-ffi-call" ]; then \
+	  echo "[ffi-unsupported-smoke --load] PASS: condition-case caught nelisp-unsupported-primitive"; \
+	else \
+	  echo "[ffi-unsupported-smoke --load] FAIL: -> $$out (expected nl-ffi-call)"; exit 1; \
+	fi; \
+	printf '%s\n' "(prin1 $$caught)" > target/standalone-reader-ffi-unsupported-bare.el; \
+	out="$$(./target/nelisp target/standalone-reader-ffi-unsupported-bare.el)"; \
+	if [ "$$out" = "nl-ffi-call" ]; then \
+	  echo "[ffi-unsupported-smoke bare-FILE] PASS: condition-case caught nelisp-unsupported-primitive"; \
+	else \
+	  echo "[ffi-unsupported-smoke bare-FILE] FAIL: -> $$out (expected nl-ffi-call)"; exit 1; \
+	fi; \
+	out="$$(./target/nelisp --eval "$$caught")"; \
+	if [ "$$out" = "nl-ffi-call" ]; then \
+	  echo "[ffi-unsupported-smoke --eval] PASS: condition-case caught nelisp-unsupported-primitive"; \
+	else \
+	  echo "[ffi-unsupported-smoke --eval] FAIL: -> $$out (expected nl-ffi-call)"; exit 1; \
+	fi; \
+	printf '%s\n' '(+ 1 2)' > target/standalone-reader-ffi-unsupported-src.el; \
+	out="$$(./target/nelisp eval-elisp-source target/standalone-reader-ffi-unsupported-src.el "$$caught")"; \
+	if [ "$$out" = "nl-ffi-call" ]; then \
+	  echo "[ffi-unsupported-smoke eval-elisp-source] PASS: condition-case caught nelisp-unsupported-primitive"; \
+	else \
+	  echo "[ffi-unsupported-smoke eval-elisp-source] FAIL: -> $$out (expected nl-ffi-call)"; exit 1; \
+	fi; \
+	out="$$(printf '%s\n' "$$caught" | ./target/nelisp --repl --no-prompt 2>&1)"; \
+	if [ "$$out" = "nl-ffi-call" ]; then \
+	  echo "[ffi-unsupported-smoke REPL] PASS: condition-case caught nelisp-unsupported-primitive"; \
+	else \
+	  echo "[ffi-unsupported-smoke REPL] FAIL: -> $$out (expected nl-ffi-call)"; exit 1; \
+	fi; \
+	./target/nelisp compile-elisp-artifact --kind nelc \
+	  --input target/standalone-reader-ffi-unsupported-load.el \
+	  --output target/standalone-reader-ffi-unsupported.nelc > /dev/null; \
+	out="$$(./target/nelisp eval-elisp-artifact target/standalone-reader-ffi-unsupported.nelc "$$caught")"; \
+	if [ "$$out" = "nl-ffi-call" ]; then \
+	  echo "[ffi-unsupported-smoke compiled-artifact] PASS: condition-case caught nelisp-unsupported-primitive"; \
+	else \
+	  echo "[ffi-unsupported-smoke compiled-artifact] FAIL: -> $$out (expected nl-ffi-call)"; exit 1; \
+	fi
+	@echo "[standalone-reader-ffi-unsupported-smoke] PASS: nl-ffi-call is fboundp and raises nelisp-unsupported-primitive (never void) on the static default build, across bare FILE / --load / --eval / eval-elisp-source / REPL / compiled artifact"
 
 # Phase 47.D D2: REAL TLS 1.3 handshake from the pure-elisp reader.  Opens a raw
 # TCP socket (syscall-direct socket/connect to 1.1.1.1:443), then drives a full

@@ -14,8 +14,7 @@
 ;; on purpose: a presence gap and a behavioral gap should never collapse
 ;; into the same finding count.
 ;;
-;; The surface is the union of two sources, exactly as the survey framed
-;; it:
+;; The surface is the union of three sources:
 ;;
 ;;   1. `scripts/nelisp-stdlib-prelude.el' -- every top-level `defun' /
 ;;      `defmacro' / `defsubst' / `fset' whose bound name is a symbol
@@ -28,6 +27,12 @@
 ;;   2. `nelisp--primitive-symbols' in `src/nelisp-eval.el' -- the host
 ;;      Elisp primitives Phase 1 NeLisp borrows wholesale for the
 ;;      self-hosted evaluator (see that file's own commentary).
+;;   3. `nlsp--extra-names' below -- a short, one-entry-per-reason,
+;;      hand-maintained list for names neither automatic source can ever
+;;      see (added 2026-08-23 for `nl-ffi-call'; see its own docstring for
+;;      why sources 1 and 2 both structurally miss it).  Kept deliberately
+;;      small: a name belongs here only when it is a real gap in what 1
+;;      and 2 can discover, never as a shortcut around fixing the scan.
 ;;
 ;; Function-defining forms only (`nl-ns--definition-host-kind' = variable
 ;; is excluded): `fboundp' is the question this sweep asks, so a `defvar'-
@@ -117,12 +122,37 @@ runtime prerequisite, only a text read)."
              nlsp--eval-file))
     result))
 
+(defconst nlsp--extra-names '(nl-ffi-call)
+  "Names outside both automatic sources above, added by hand because neither
+source can ever see them -- not a general escape hatch, one entry per name
+with its own reason here.
+
+`nl-ffi-call' (Doc 100, Phase 47.D Step C): defined in
+`scripts/nelisp-stdlib-prelude.el' as `(unless (fboundp \\='nl-ffi-call)
+(defun nl-ffi-call (&rest _args) (signal ...)))' -- source #1 only sees a
+NAME at a form's own top-level head (`nlsp--prelude-function-names' checks
+`(car-safe form)' against `nl-ns-definition-heads'), and this `defun' is
+nested inside the `unless', so its head there is `unless', not `defun'.
+It is not a host Emacs primitive either (source #2), since host Emacs has
+no such function at all.  On a dynamically linked standalone reader
+build (`NELISP_READER_DYNAMIC=1', linux-x86_64 only) the REAL native
+dispatcher shadows this fallback and is invisible to source scanning for
+the same structural reason -- it is installed directly by
+`nelisp-standalone--reader-install-builtins-forms' in
+scripts/nelisp-standalone-build.el, never as an elisp `defun' at all.
+Measured 2026-08-23: this gap is exactly why the presence sweep never
+caught `nl-ffi-call' reading void on the owner's real-machine probe (both
+a Windows PE and a WSL Debian Linux ELF build) even though `fboundp'
+already answers correctly on the fallback-carrying tree -- the name was
+simply never in the corpus to begin with.")
+
 (defun nlsp--surface-names ()
   "The definable-name surface: sorted, duplicate-free union of the prelude's
-function names and `nelisp--primitive-symbols'."
+function names, `nelisp--primitive-symbols', and `nlsp--extra-names'."
   (let ((seen (make-hash-table :test 'eq))
         (names nil))
-    (dolist (name (append (nlsp--prelude-function-names) (nlsp--primitive-symbols)))
+    (dolist (name (append (nlsp--prelude-function-names) (nlsp--primitive-symbols)
+                           nlsp--extra-names))
       (unless (gethash name seen)
         (puthash name t seen)
         (push name names)))
@@ -142,8 +172,17 @@ even broader `--'-anywhere convention for its own, different purpose
 \(namespace-boundary checking across the whole tree, not just this
 surface\); the `nelisp-' prefix check here is narrower on purpose --
 it tags exactly this project's own namespace, not every private-by-
-convention helper host Emacs happens to lack."
-  (if (string-prefix-p "nelisp-" (symbol-name name)) 'standalone-only 'shared))
+convention helper host Emacs happens to lack.
+
+A name in `nlsp--extra-names' is standalone-only unconditionally, checked
+before the prefix rule: that list exists for capabilities host Emacs could
+never have regardless of spelling -- `nl-ffi-call' has no `nelisp-' prefix
+(so the prefix rule alone would wrongly tag it `shared' and manufacture a
+permanent `host baseline=... actual=nil' finding, the exact false-positive
+shape this function exists to prevent) but is exactly as host-absent as
+any `nelisp-'-prefixed internal."
+  (if (memq name nlsp--extra-names) 'standalone-only
+    (if (string-prefix-p "nelisp-" (symbol-name name)) 'standalone-only 'shared)))
 
 (defun nlsp--render (names)
   "Render the checked-in corpus file's full text for NAMES."
