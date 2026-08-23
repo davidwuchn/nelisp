@@ -105,7 +105,7 @@ silent-fallback 53
 # presence-sweep auto-note's defensive shape-extraction for a report-only
 # string, falls back to "?" on a malformed corpus form -- never on a
 # correctness path).
-ignore-errors   50
+ignore-errors   51
 # 34 -> 32 on 2026-08-19: the two handlers in
 # `nelisp-artifact--ensure-native-compiler' now record the error instead of
 # discarding it.  Between them they had hidden a chain of six failures --
@@ -173,6 +173,7 @@ pinned-site bare-handler	nl-check-gate.el	defun nl-check-gate--findings	4935c20a
 pinned-site ignore-errors	anvil-standalone-db.el	defun anvil-standalone-db-worklog-add	8ef977e61185 1
 pinned-site ignore-errors	nelisp-fallback-inventory.el	defun nelisp-fallback-inventory--classify	87aa892adb2e 1
 pinned-site ignore-errors	nelisp-standalone-build.el	defun nelisp-standalone--reader-asm-arm64-byte-identity-smoke	7a85c44cdaf9 1
+pinned-site ignore-errors	nelisp-standalone-build.el	defun nelisp-standalone--reader-char-table-smoke	7a85c44cdaf9 1
 pinned-site ignore-errors	nelisp-standalone-build.el	defun nelisp-standalone--reader-cli-smoke	21ea7e6a6bbc 1
 pinned-site ignore-errors	nelisp-standalone-build.el	defun nelisp-standalone--reader-cli-smoke	3a13a80d0ae2 2
 pinned-site ignore-errors	nelisp-standalone-build.el	defun nelisp-standalone--reader-cli-smoke	43d4008267dc 1

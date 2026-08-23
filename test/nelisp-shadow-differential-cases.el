@@ -1268,7 +1268,15 @@
        (condition-case e (format "%a" 1.0) (error e))
        (condition-case e (format "%A" 1.0) (error e))
        (condition-case e (format "%.3a" 1.5) (error e))
-       (condition-case e (format "%#a" 1.0) (error e)))
+       (condition-case e (format "%#a" 1.0) (error e))
+       ;; Doc 186 P0/P1: char-table constructor/accessor layer.  Not a
+       ;; native/prelude shadow case (there is no prelude definition to
+       ;; shadow -- these two names live only in the standalone's own
+       ;; `bf_*' dispatch), but the gate's own contract is "byte-identical
+       ;; printed output on both sides" regardless, and these are the
+       ;; doc's own §6.2 parity forms.
+       (char-table-p (make-char-table 'test))
+       (aref (make-char-table 'test 'D) ?a))
 )
 
 ;;; nelisp-shadow-differential-cases.el ends here
