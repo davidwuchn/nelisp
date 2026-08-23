@@ -7808,6 +7808,298 @@ eval applyfn.")
         (seq (record-make tag n out)
              (bf_mkrec_fill out 0 n init)
              0)))
+    ;; ---------------------------------------------------------------
+    ;; Doc 186 P0/P1/P2 -- char-table Elisp-visible constructor/accessor
+    ;; layer.  `nl_char_table_get_raw'/`nl_char_table_set_raw' (the
+    ;; entries-array + parent-chain + default_val storage kernel) already
+    ;; existed as source (`lisp/nelisp-cc-evalport-nonenv-char-table.el',
+    ;; linked here via the "chartable-getset.o" manifest entry) but had NO
+    ;; Elisp-reachable constructor and were not linked into this reader
+    ;; binary; `bf_aref_checked'/`bf_aset' above gained the tag-9 dispatch
+    ;; arm that actually reaches them.  Everything below is new.
+    ;;
+    ;; Box layout (128 bytes -- matches the CharTableInner + refcount trailer
+    ;; `lisp/nelisp-cc-nlchartable-drop.el' documents):
+    ;;   0   subtype      (32B Sexp)
+    ;;   32  default_val  (32B Sexp)
+    ;;   64  entries.ptr  (8B)  \
+    ;;   72  entries.cap  (8B)   > owned by nl_char_table_{get,set}_raw
+    ;;   80  entries.len  (8B)  /
+    ;;   88  parent       (8B)  -- 0 = none, else a raw CharTable box pointer
+    ;;   96  extra.ptr    (8B)  \  Doc 186 P1: fixed NL_CT_MAX_EXTRA (10 --
+    ;;   104 extra.cap    (8B)   > Emacs's own extra-slot ceiling) buffer of
+    ;;   112 extra.len    (8B)  /  32B Sexp slots, Nil-filled at construction.
+    ;;   120 refcount     (8B)  -- vestigial in this arena-allocated reader
+    ;;                            (real reclaim is per-top-level-form arena
+    ;;                            epoch, not refcounting); kept only so the
+    ;;                            layout matches the drop/clone kernels this
+    ;;                            build does not yet link.
+    ;;
+    ;; This build has no per-subtype `char-table-extra-slots' property
+    ;; machinery (out of Doc 186's scope), so every char-table gets the
+    ;; fixed 10-slot buffer regardless of SUBTYPE; a subtype that Emacs
+    ;; would register with fewer (or zero) extra slots is more permissive
+    ;; here, not less -- an accepted, documented simplification.
+    (defun bf_char_table_p (args out)
+      (if (= (ptr-read-u64 (wf_arg_ptr args 0) 0) 9)
+          (wf_write_t out) (wf_write_nil out)))
+    (defun nl_ct_extra_fill (ptr i n)
+      (if (>= i n) ptr
+        (seq (wf_write_nil (+ ptr (* i 32)))
+             (nl_ct_extra_fill ptr (+ i 1) n))))
+    ;; nl_char_table_alloc SUBTYPE-PTR DEFAULT-PTR OUT -> CharTable(tag9).
+    ;; The one genuinely new native primitive Doc 186 §3.1 calls for --
+    ;; every other char-table primitive already existed.  No dedicated
+    ;; `char-table-make' grammar op exists (unlike `record-make'/`vector-
+    ;; make'), so the tag byte + box pointer are written directly with
+    ;; `ptr-write-u64', mirroring exactly what `record-make''s own x86_64
+    ;; codegen does at the machine-code level (tag at offset 0, payload
+    ;; pointer at offset 8) -- see `nelisp-aot-compiler.el's
+    ;; `--emit-record-make'.  `nl_sexp_clone_into' (already linked via
+    ;; "clone.o") gives subtype/default_val the same refcount-aware copy
+    ;; discipline `nl_char_table_get_raw'/`_set_raw' use internally.
+    (defun nl_char_table_alloc (subtype default_ptr out)
+      (let* ((box (alloc-bytes 128 8))
+             (extra (nl_ct_extra_fill (alloc-bytes 320 8) 0 10)))
+        (seq
+         (nl_sexp_clone_into subtype box)
+         (nl_sexp_clone_into default_ptr (+ box 32))
+         (ptr-write-u64 (+ box 64) 0 0)
+         (ptr-write-u64 (+ box 72) 0 0)
+         (ptr-write-u64 (+ box 80) 0 0)
+         (ptr-write-u64 (+ box 88) 0 0)
+         (ptr-write-u64 (+ box 96) 0 extra)
+         (ptr-write-u64 (+ box 104) 0 10)
+         (ptr-write-u64 (+ box 112) 0 10)
+         (ptr-write-u64 (+ box 120) 0 1)
+         (ptr-write-u64 out 0 9)
+         (ptr-write-u64 (+ out 8) 0 box)
+         (ptr-write-u64 (+ out 16) 0 0)
+         (ptr-write-u64 (+ out 24) 0 0)
+         0)))
+    ;; wrong-number-of-arguments make-char-table 0 -- SUBTYPE is mandatory.
+    ;; `bf_make_record'/`bf_make_vector' share the same unguarded
+    ;; `nl_cons_car_ptr args' shape on a zero-arg call (a pre-existing,
+    ;; unrelated gap in this reader's arity checking, not introduced here
+    ;; and out of Doc 186's scope to fix for the whole family) -- but a
+    ;; brand-new builtin should not SIGSEGV where Emacs cleanly signals, so
+    ;; this one guards it.  Verified against host Emacs: `(make-char-table)'
+    ;; signals exactly `(wrong-number-of-arguments make-char-table 0)'.
+    (defun bf_wrong_number_of_args_make_char_table ()
+      (let* ((wbuf (alloc-bytes 32 1))
+             (fbuf (alloc-bytes 16 1))
+             (fsym (alloc-bytes 32 8))
+             (zero (alloc-bytes 32 8))
+             (nil-slot (alloc-bytes 32 8))
+             (data-tail (alloc-bytes 32 8)))
+        (seq
+         (ptr-write-u64 wbuf 0 8461750672133419639) ; "wrong-nu"
+         (ptr-write-u64 (+ wbuf 8) 0 3271424420314702445) ; "mber-of-"
+         (ptr-write-u64 (+ wbuf 16) 0 8389754676633367137) ; "argument"
+         (ptr-write-u64 (+ wbuf 24) 0 115) ; "s"
+         (nl_alloc_symbol wbuf 25 268435480)
+         (ptr-write-u64 fbuf 0 7018969065883132269) ; "make-cha"
+         (ptr-write-u64 (+ fbuf 8) 0 28548142445374834) ; "r-table"
+         (nl_alloc_symbol fbuf 15 fsym)
+         (wf_write_int zero 0)
+         (wf_write_nil nil-slot)
+         (nelisp_cons_construct zero nil-slot data-tail)
+         (nelisp_cons_construct fsym data-tail 268435512)
+         (ptr-write-u64 268435472 0 1)
+         (atomic-fetch-add 268435544 1)
+         1)))
+    ;; make-char-table SUBTYPE &optional INIT.  INIT defaults to nil, same
+    ;; as Emacs.  `rest' (the cdr of the arg list past SUBTYPE) is Cons(7)
+    ;; iff INIT was actually passed -- an omitted &optional simply ends the
+    ;; arg list one cons early, the same shape `bf_make_vector'/`bf_record'
+    ;; rely on for their own arg-list walks.
+    (defun bf_make_char_table (args out)
+      (if (= (ptr-read-u64 args 0) 7)
+          (let* ((subtype (nl_cons_car_ptr args))
+                 (rest (nl_cons_cdr_ptr args)))
+            (if (= (ptr-read-u64 rest 0) 7)
+                (nl_char_table_alloc subtype (nl_cons_car_ptr rest) out)
+              (let* ((nilbuf (alloc-bytes 32 8)))
+                (seq (wf_write_nil nilbuf)
+                     (nl_char_table_alloc subtype nilbuf out)))))
+        (bf_wrong_number_of_args_make_char_table)))
+    (defun bf_char_table_subtype (args out)
+      (let* ((ct (wf_arg_ptr args 0)))
+        (if (= (ptr-read-u64 ct 0) 9)
+            (seq (nl_sexp_clone_into (ptr-read-u64 ct 8) out) 0)
+          (bf_wrong_type_char_table_p ct))))
+    (defun bf_char_table_parent (args out)
+      (let* ((ct (wf_arg_ptr args 0)))
+        (if (= (ptr-read-u64 ct 0) 9)
+            (let* ((box (ptr-read-u64 ct 8))
+                   (pptr (ptr-read-u64 (+ box 88) 0)))
+              (if (= pptr 0)
+                  (seq (wf_write_nil out) 0)
+                (seq (ptr-write-u64 out 0 9) (ptr-write-u64 (+ out 8) 0 pptr)
+                     (ptr-write-u64 (+ out 16) 0 0) (ptr-write-u64 (+ out 24) 0 0)
+                     0)))
+          (bf_wrong_type_char_table_p ct))))
+    ;; set-char-table-parent CHAR-TABLE PARENT -> PARENT (Emacs's own return
+    ;; convention, verified against host Emacs).  PARENT nil clears the link
+    ;; (box+88 = 0, matching `nl_char_table_get_raw''s own "0 = no parent"
+    ;; reading of that field).  `wf_dirty' bumps the mutation epoch: writing
+    ;; a box pointer into a persistent struct field is the same escape-site
+    ;; shape `setcar'/`setcdr' guard above.
+    (defun bf_set_char_table_parent (args out)
+      (let* ((ct (wf_arg_ptr args 0)) (parent (wf_arg_ptr args 1)))
+        (if (= (ptr-read-u64 ct 0) 9)
+            (let* ((box (ptr-read-u64 ct 8)) (ptag (ptr-read-u64 parent 0)))
+              (if (= ptag 0)
+                  (seq (wf_dirty) (ptr-write-u64 (+ box 88) 0 0)
+                       (wf_write_nil out) 0)
+                (if (= ptag 9)
+                    (seq (wf_dirty)
+                         (ptr-write-u64 (+ box 88) 0 (ptr-read-u64 parent 8))
+                         (wf_copy32 out parent) 0)
+                  (bf_wrong_type_char_table_p parent))))
+          (bf_wrong_type_char_table_p ct))))
+    ;; char-table-extra-slot / set-char-table-extra-slot: N must be a fixnum
+    ;; in [0, 10) (Emacs's own MAX_CHAR_TABLE_EXTRA_SLOTS ceiling); out of
+    ;; range signals `args-out-of-range', matching Emacs's own error shape
+    ;; for this accessor (verified against host Emacs).
+    (defun bf_char_table_extra_slot (args out)
+      (let* ((ct (wf_arg_ptr args 0)) (nbox (wf_arg_ptr args 1)))
+        (if (= (ptr-read-u64 ct 0) 9)
+            (if (= (ptr-read-u64 nbox 0) 2)
+                (let* ((n (ptr-read-u64 nbox 8)) (box (ptr-read-u64 ct 8)))
+                  (if (if (< n 0) 1 (if (< n 10) 0 1))
+                      (bf_args_out_of_range ct nbox)
+                    (seq (nl_sexp_clone_into
+                          (+ (ptr-read-u64 (+ box 96) 0) (* n 32)) out)
+                         0)))
+              (bf_wrong_type_fixnump nbox))
+          (bf_wrong_type_char_table_p ct))))
+    (defun bf_set_char_table_extra_slot (args out)
+      (let* ((ct (wf_arg_ptr args 0)) (nbox (wf_arg_ptr args 1))
+             (val (wf_arg_ptr args 2)))
+        (if (= (ptr-read-u64 ct 0) 9)
+            (if (= (ptr-read-u64 nbox 0) 2)
+                (let* ((n (ptr-read-u64 nbox 8)) (box (ptr-read-u64 ct 8)))
+                  (if (if (< n 0) 1 (if (< n 10) 0 1))
+                      (bf_args_out_of_range ct nbox)
+                    (seq (wf_dirty)
+                         (nl_sexp_clone_into
+                          val (+ (ptr-read-u64 (+ box 96) 0) (* n 32)))
+                         (wf_copy32 out val) 0)))
+              (bf_wrong_type_fixnump nbox))
+          (bf_wrong_type_char_table_p ct))))
+    ;; char-table-range / set-char-table-range (Doc 186 §3.3 -- SCOPED, not
+    ;; general).  RANGE is a single fixnum char or a (FROM . TO) cons --
+    ;; the only two forms the doc names as in scope.  Emacs's other two
+    ;; forms, nil (the default slot) and `t' (every char), both signal
+    ;; `char-table-range-too-large' instead of being handled: `t' per the
+    ;; doc's explicit "has no honest small-N encoding... signals the same
+    ;; way"; nil was tried and DROPPED after checking host Emacs directly
+    ;; -- `(set-char-table-range tbl nil V)' does NOT change what `aref'
+    ;; falls through to (verified: `aref' after it still answers the OLD
+    ;; default), so it is evidently keyed to some part of Emacs's real
+    ;; multi-level sub-char-table structure this flat entries-array
+    ;; representation has no equivalent for. Claiming nil == "the
+    ;; default_val aref falls back to" would have been a confident, wrong
+    ;; parity claim, which is worse than declining the form outright.
+    ;;
+    ;; GET on a (FROM . TO) cons returns the value AT FROM -- verified
+    ;; against host Emacs (both a uniform-value range and a non-uniform one
+    ;; answer the FROM-boundary value, not "nil unless uniform" as the
+    ;; multi-level sub-char-table docstring might suggest; this flat
+    ;; implementation has no sub-table concept to do otherwise).
+    (defun bf_char_table_range (args out)
+      (let* ((ct (wf_arg_ptr args 0)) (range (wf_arg_ptr args 1)))
+        (if (= (ptr-read-u64 ct 0) 9)
+            (let* ((rtag (ptr-read-u64 range 0)))
+              (if (= rtag 2)
+                  (seq (nl_char_table_get_raw ct (ptr-read-u64 range 8) out) 0)
+                (if (= rtag 7)
+                    (let* ((from (nl_cons_car_ptr range)))
+                      (if (= (ptr-read-u64 from 0) 2)
+                          (seq (nl_char_table_get_raw
+                                ct (ptr-read-u64 from 8) out)
+                               0)
+                        (bf_wrong_type_fixnump from)))
+                  (bf_char_table_range_too_large range))))
+          (bf_wrong_type_char_table_p ct))))
+    ;; SET on a (FROM . TO) cons expands to one `nl_char_table_set_raw' call
+    ;; per character, guarded by the 4096-entry ceiling Doc 186 §3.3 sets
+    ;; (comfortably above a full ASCII+Latin-1+Latin-Extended-A syntax
+    ;; table, the doc's own stated near-term consumer) -- LOUD signal above
+    ;; the ceiling, never silent truncation or a silent O(n) slow path.
+    (defun nl_ct_set_range_loop (ct to val out i)
+      (if (> i to) 0
+        (seq (nl_char_table_set_raw ct i val out)
+             (nl_ct_set_range_loop ct to val out (+ i 1)))))
+    (defun bf_set_char_table_range (args out)
+      (let* ((ct (wf_arg_ptr args 0)) (range (wf_arg_ptr args 1))
+             (val (wf_arg_ptr args 2)))
+        (if (= (ptr-read-u64 ct 0) 9)
+            (let* ((rtag (ptr-read-u64 range 0)))
+              (if (= rtag 2)
+                  (seq (wf_dirty)
+                       (nl_char_table_set_raw ct (ptr-read-u64 range 8) val out)
+                       0)
+                (if (= rtag 7)
+                    (let* ((fromp (nl_cons_car_ptr range))
+                           (top (nl_cons_cdr_ptr range)))
+                      (if (if (= (ptr-read-u64 fromp 0) 2)
+                              (= (ptr-read-u64 top 0) 2) 0)
+                          (let* ((from (ptr-read-u64 fromp 8))
+                                 (to (ptr-read-u64 top 8)))
+                            (if (> from to)
+                                (bf_wrong_type_fixnump fromp)
+                              (if (> (+ (- to from) 1) 4096)
+                                  (bf_char_table_range_too_large range)
+                                (seq (wf_dirty)
+                                     (nl_ct_set_range_loop ct to val out from)
+                                     (wf_copy32 out val) 0))))
+                        (bf_wrong_type_fixnump fromp)))
+                  (bf_char_table_range_too_large range))))
+          (bf_wrong_type_char_table_p ct))))
+    ;; wrong-type-argument char-table-p OFFENDER -- mirrors
+    ;; `bf_wrong_type_symbolp' exactly, byte-packed the same way (verified
+    ;; the predicate name against host Emacs: `(char-table-parent 5)' signals
+    ;; `(wrong-type-argument char-table-p 5)').
+    (defun bf_wrong_type_char_table_p (offender)
+      (let* ((wbuf (alloc-bytes 24 1))
+             (cbuf (alloc-bytes 16 1))
+             (expected (alloc-bytes 32 8))
+             (nil-slot (alloc-bytes 32 8))
+             (data-tail (alloc-bytes 32 8)))
+        (seq
+         (ptr-write-u64 wbuf 0 8751669898145395319) ; "wrong-ty"
+         (ptr-write-u64 (+ wbuf 8) 0 7887324063363589488) ; "pe-argum"
+         (ptr-write-u64 (+ wbuf 16) 0 7630437) ; "ent"
+         (nl_alloc_symbol wbuf 19 268435480)
+         (ptr-write-u64 cbuf 0 7089075026999208035) ; "char-tab"
+         (ptr-write-u64 (+ cbuf 8) 0 1882023276) ; "le-p"
+         (nl_alloc_symbol cbuf 12 expected)
+         (wf_write_nil nil-slot)
+         (nelisp_cons_construct offender nil-slot data-tail)
+         (nelisp_cons_construct expected data-tail 268435512)
+         (ptr-write-u64 268435472 0 1)
+         (atomic-fetch-add 268435544 1)
+         1)))
+    ;; char-table-range-too-large OFFENDER -- Doc 186 §3.3's own new error
+    ;; symbol (not an Emacs one; no host-Emacs form exercises it), same
+    ;; stash-and-raise shape as `bf_wrong_type_char_table_p' above but with
+    ;; a single-element data list.
+    (defun bf_char_table_range_too_large (offender)
+      (let* ((wbuf (alloc-bytes 32 1))
+             (nil-slot (alloc-bytes 32 8)))
+        (seq
+         (ptr-write-u64 wbuf 0 7089075026999208035) ; "char-tab"
+         (ptr-write-u64 (+ wbuf 8) 0 7306930285238379884) ; "le-range"
+         (ptr-write-u64 (+ wbuf 16) 0 8241987735463621677) ; "-too-lar"
+         (ptr-write-u64 (+ wbuf 24) 0 25959) ; "ge"
+         (nl_alloc_symbol wbuf 26 268435480)
+         (wf_write_nil nil-slot)
+         (nelisp_cons_construct offender nil-slot 268435512)
+         (ptr-write-u64 268435472 0 1)
+         (atomic-fetch-add 268435544 1)
+         1)))
     ;; make-vector LEN INIT -> Vector(tag8) with every slot = INIT (cloned).
     ;; NB: use the `vector-slot-set' GRAMMAR OP (takes the Sexp ptr, derefs the
     ;; box internally), NOT the raw nl_vector_set_slot (which wants the box ptr).
@@ -7887,15 +8179,25 @@ eval applyfn.")
                 (if (= idx 0)
                     (seq (record-type-tag arr out) 0)
                   (seq (record-slot-ref arr (- idx 1) out) 0)))
-            ;; Doc 161: aref on a string returns the CHARACTER (codepoint) at
-            ;; the char index, decoding UTF-8 (tags 5 Str and 6 MutStr).
-            (if (if (= tg 5) 1 (if (= tg 6) 1 0))
-                (if (if (< idx 0) 1 (if (< idx (nl_str_charlen arr)) 0 1))
-                    (bf_args_out_of_range arr (wf_arg_ptr args 1))
-                  (wf_write_int out
-                    (nl_u8_decode arr (nl_u8_cidx_byte arr 0 (str-len arr) 0 idx))))
-              ;; Not an array at all: Emacs signals `arrayp' here.
-              (bf_wrong_type_arrayp arr))))))
+            ;; Doc 186 P0/P1: CharTable(9).  Delegates to `nl_char_table_get_raw'
+            ;; (linked from `nelisp-cc-evalport-nonenv-char-table.el' -- see the
+            ;; "chartable-getset.o" manifest entry), which already implements the
+            ;; entries-array scan + parent-chain fallback + default_val return.
+            ;; No bounds check here (unlike Vector/Str above): the raw kernel has
+            ;; none either, and a miss just falls through to the default value,
+            ;; matching Emacs's own "aref past what was `aset' returns the
+            ;; default" char-table semantics rather than an out-of-range error.
+            (if (= tg 9)
+                (seq (nl_char_table_get_raw arr idx out) 0)
+              ;; Doc 161: aref on a string returns the CHARACTER (codepoint) at
+              ;; the char index, decoding UTF-8 (tags 5 Str and 6 MutStr).
+              (if (if (= tg 5) 1 (if (= tg 6) 1 0))
+                  (if (if (< idx 0) 1 (if (< idx (nl_str_charlen arr)) 0 1))
+                      (bf_args_out_of_range arr (wf_arg_ptr args 1))
+                    (wf_write_int out
+                      (nl_u8_decode arr (nl_u8_cidx_byte arr 0 (str-len arr) 0 idx))))
+                ;; Not an array at all: Emacs signals `arrayp' here.
+                (bf_wrong_type_arrayp arr)))))))
     ;; Generated Emacs char-table literals are read as vectors shaped like:
     ;;   #^[EXTRA0 EXTRA1 EXTRA2 #^^[1 MIN ...]]
     ;; and sub-char-tables are vectors shaped like:
@@ -8096,7 +8398,17 @@ eval applyfn.")
                       (seq (wf_copy32 out val) 0)
                     (seq (wf_dirty) (record-slot-set arr (- idx 1) val)
                          (wf_copy32 out val) 0))
-                (seq (wf_copy32 out val) 0)))))))
+                ;; Doc 186 P0/P1: CharTable(9).  Delegates to
+                ;; `nl_char_table_set_raw' (same manifest unit as the aref arm
+                ;; above); the kernel grows the entries array itself and echoes
+                ;; VAL into OUT, matching Vector/Record aset's "return the
+                ;; value written" contract.  `wf_dirty' bumps the mutation
+                ;; epoch, same as the Vector/Str/Record arms above -- a growing
+                ;; entries array is a PERSISTENT-structure escape site exactly
+                ;; like `vector-slot-set'/`record-slot-set'.
+                (if (= (ptr-read-u64 arr 0) 9)
+                    (seq (wf_dirty) (nl_char_table_set_raw arr idx val out) 0)
+                  (seq (wf_copy32 out val) 0))))))))
     ;; signal/error: NON-CRASHING.  Stash (sym . data) into the catch/throw
     ;; region + set the throw flag, then return rc=1 so the rc!=0 propagation
     ;; unwinds the native stack like an error.
@@ -9398,6 +9710,16 @@ Wave-2 (C) appends bf_ash (shl/sar compose) + bf_str_lt (byte-lexicographic).")
     ((:lit "aref")        . (bf_aref args out))
     ((:lit "elt")         . (bf_elt args out))
     ((:lit "aset")        . (bf_aset args out))
+    ;; --- char-table ops (Doc 186 P0/P1/P2) ---
+    ((:lit "char-table-p")           . (bf_char_table_p args out))
+    ((:lit "make-char-table")        . (bf_make_char_table args out))
+    ((:lit "char-table-subtype")     . (bf_char_table_subtype args out))
+    ((:lit "char-table-parent")      . (bf_char_table_parent args out))
+    ((:lit "set-char-table-parent")  . (bf_set_char_table_parent args out))
+    ((:lit "char-table-extra-slot")  . (bf_char_table_extra_slot args out))
+    ((:lit "set-char-table-extra-slot") . (bf_set_char_table_extra_slot args out))
+    ((:lit "char-table-range")       . (bf_char_table_range args out))
+    ((:lit "set-char-table-range")   . (bf_set_char_table_range args out))
     ;; --- signal / error (non-crashing stub; condition-case trapping deferred) ---
     ((:lit "signal")      . (bf_signal args out))
     ((:lit "error")       . (bf_error args out))
@@ -9538,6 +9860,11 @@ ash/logand/logior/logxor/lognot + string<.")
     "vectorp" "listp" "zerop" "set" "symbol-value" "fboundp" "boundp" "featurep" "provide" "require"
     "symbol-name" "intern" "make-symbol" "nelisp--intern-lookup" "unibyte-string"
     "make-vector" "vector" "aref" "elt" "aset" "record" "recordp" "make-record"
+    ;; Doc 186 P0/P1/P2: char-table constructor/accessor layer.
+    "char-table-p" "make-char-table" "char-table-subtype"
+    "char-table-parent" "set-char-table-parent"
+    "char-table-extra-slot" "set-char-table-extra-slot"
+    "char-table-range" "set-char-table-range"
     "signal" "error" "equal" "setcar" "setcdr" "load"
     ;; Wave-2 (C): bitwise / shift / string<
     "ash" "logand" "logior" "logxor" "lognot" "string<"
@@ -13203,7 +13530,20 @@ Parallelism pays off only once per-unit compilation dominates startup
     ("ptr-read-u8.o"      nelisp-cc-atomic-raw-mem               nelisp-cc-atomic-raw-mem--read-u8-source)
     ("ptr-write-u8.o"     nelisp-cc-atomic-raw-mem               nelisp-cc-atomic-raw-mem--write-u8-source)
     ("alloc-bytes-fn.o"   nelisp-cc-alloc-dealloc                nelisp-cc-alloc-dealloc--alloc-bytes-source)
-    ("dealloc-bytes-fn.o" nelisp-cc-alloc-dealloc                nelisp-cc-alloc-dealloc--dealloc-bytes-source))
+    ("dealloc-bytes-fn.o" nelisp-cc-alloc-dealloc                nelisp-cc-alloc-dealloc--dealloc-bytes-source)
+    ;; Doc 186 P0: nl_char_table_get_raw / nl_char_table_set_raw -- the
+    ;; entries-array + parent-chain + default_val storage kernel `bf_aref_
+    ;; checked'/`bf_aset''s new tag-9 arms (nelisp-standalone-build.el)
+    ;; call directly.  Pre-existing source, newly linked into this binary.
+    ;; Lives HERE, not in the base `nelisp-standalone--manifest', because
+    ;; its own `nl_ct_grow_entries' calls `nelisp_alloc_bytes'/
+    ;; `nelisp_dealloc_bytes' (the two units directly above), which are
+    ;; themselves reader-extra-only -- putting it in the base manifest
+    ;; linked cleanly for `standalone-reader' but broke `standalone-eval-
+    ;; test' with `nelisp-link--unresolved-symbol ("nelisp_alloc_bytes"
+    ;; "chartable-getset.o")' (measured, not assumed: that is exactly how
+    ;; this entry's first location was found to be wrong).
+    ("chartable-getset.o" nelisp-cc-evalport-nonenv-char-table   nelisp-cc-evalport-nonenv-char-table--source))
   "Extra units the reader path needs beyond `nelisp-standalone--manifest'.
 The reader's grammar ops (mut-str-make-empty/-push-byte/-finalize, the
 raw-mem u8 ops, alloc/dealloc) lower to runtime extern calls that the
@@ -13337,6 +13677,11 @@ value (matches the binary's M8 read+eval-loop driver)."
     "vectorp" "listp" "zerop" "set" "symbol-value" "fboundp" "boundp" "featurep" "provide" "require"
     "symbol-name" "intern" "make-symbol" "nelisp--intern-lookup" "unibyte-string"
     "make-vector" "vector" "aref" "elt" "aset" "record" "recordp" "make-record"
+    ;; Doc 186 P0/P1/P2: char-table constructor/accessor layer.
+    "char-table-p" "make-char-table" "char-table-subtype"
+    "char-table-parent" "set-char-table-parent"
+    "char-table-extra-slot" "set-char-table-extra-slot"
+    "char-table-range" "set-char-table-range"
     "signal" "error" "equal" "setcar" "setcdr"
     ;; Wave-2 (C): bitwise / shift / string<
     "ash" "logand" "logior" "logxor" "lognot" "string<"
@@ -19316,6 +19661,7 @@ loader when it is absent."
                                  nelisp-standalone--reader-elc-smoke
                                  nelisp-standalone--reader-intern-canonical-smoke
                                  nelisp-standalone--reader-stdlib-completion-smoke
+                                 nelisp-standalone--reader-char-table-smoke
                                  nelisp-standalone--reader-defvaralias-smoke
                                  nelisp-standalone--reader-temp-outside-cwd-smoke
                                  nelisp-standalone--reader-asm-arm64-byte-identity-smoke
@@ -19925,6 +20271,79 @@ divergence `expt''s own contract already established, not a new one)."
             (setq out (string-trim (buffer-string))))
           (unless (string= out "(t t t t t t t t t t t t t t t t t t)")
             (error "stdlib-completion smoke -> %S (expected (t t t t t t t t t t t t t t t t t t))" out)))
+      (ignore-errors (delete-file tmp)))))
+
+(defun nelisp-standalone--reader-char-table-smoke ()
+  "Assert the Doc 186 P0/P1/P2 char-table constructor/accessor layer.
+
+Against `target/nelisp' directly (the only place these `bf_*' dispatch
+arms in this file run -- there is no elisp-level `defun make-char-
+table' anywhere in this tree for `--load'/`eval-elisp-source' to pick
+up instead).  Every value below was cross-checked against host Emacs
+first (see `test/nelisp-char-table-test.el', which runs the same
+assertions as real `ert-deftest' forms under real Emacs's own native
+char-tables as the host-Emacs behavior control).
+
+Uses plain integers (97/98/99, not `?a'/`?b'/`?c') for character
+codes: `eval-elisp-source''s file-reading path does not accept `?'
+character-literal syntax in this build (a pre-existing reader gap,
+unrelated to char-tables and confirmed present before this branch --
+`--load' on the same form works fine)."
+  (let ((tmp (make-temp-file "nelisp-reader-char-table-" nil ".el"))
+        (out nil))
+    (unwind-protect
+        (progn
+          (with-temp-file tmp
+            (insert
+             ;; P0: construct + aref (against-the-bug -- void-function
+             ;; `make-char-table' before this branch, per Doc 186 §1.1).
+             "(defvar nelisp-ct-check1 (char-table-p (make-char-table 'test nil)))\n"
+             "(defvar nelisp-ct-check2 (eq 'DEFAULT (aref (make-char-table 'test 'DEFAULT) 97)))\n"
+             ;; aset-then-aref + miss-falls-to-default.
+             "(defvar nelisp-ct-tbl (make-char-table 'test nil))\n"
+             "(aset nelisp-ct-tbl 97 1)\n"
+             "(defvar nelisp-ct-check3 (and (eq 1 (aref nelisp-ct-tbl 97)) (eq nil (aref nelisp-ct-tbl 98))))\n"
+             ;; P1: parent fallback + parent accessor.
+             "(defvar nelisp-ct-parent (make-char-table 'test 'from-parent))\n"
+             "(defvar nelisp-ct-child (make-char-table 'test nil))\n"
+             "(set-char-table-parent nelisp-ct-child nelisp-ct-parent)\n"
+             "(defvar nelisp-ct-check4 (eq 'from-parent (aref nelisp-ct-child 122)))\n"
+             "(defvar nelisp-ct-check5 (eq (char-table-parent nelisp-ct-child) nelisp-ct-parent))\n"
+             "(set-char-table-parent nelisp-ct-child nil)\n"
+             "(defvar nelisp-ct-check6 (and (eq nil (char-table-parent nelisp-ct-child)) (eq nil (aref nelisp-ct-child 122))))\n"
+             ;; P1: subtype.
+             "(defvar nelisp-ct-check7 (eq 'my-subtype (char-table-subtype (make-char-table 'my-subtype nil))))\n"
+             ;; P1: extra-slot get/set roundtrip + out-of-range.
+             "(defvar nelisp-ct-etbl (make-char-table 'test nil))\n"
+             "(defvar nelisp-ct-check8 (eq nil (char-table-extra-slot nelisp-ct-etbl 0)))\n"
+             "(set-char-table-extra-slot nelisp-ct-etbl 0 'hi)\n"
+             "(defvar nelisp-ct-check9 (eq 'hi (char-table-extra-slot nelisp-ct-etbl 0)))\n"
+             "(defvar nelisp-ct-check10 (eq 'signalled (condition-case nil (progn (char-table-extra-slot nelisp-ct-etbl 20) 'no-signal) (args-out-of-range 'signalled))))\n"
+             ;; P2: char-table-range (single char + cons, verified against
+             ;; host Emacs: the cons form returns the value AT FROM).
+             "(defvar nelisp-ct-rtbl (make-char-table 'test nil))\n"
+             "(aset nelisp-ct-rtbl 97 5) (aset nelisp-ct-rtbl 98 2) (aset nelisp-ct-rtbl 99 9)\n"
+             "(defvar nelisp-ct-check11 (and (eq 5 (char-table-range nelisp-ct-rtbl 97)) (eq 5 (char-table-range nelisp-ct-rtbl (cons 97 99))) (eq 2 (char-table-range nelisp-ct-rtbl (cons 98 99)))))\n"
+             ;; P2: set-char-table-range over a (FROM . TO) cons.
+             "(defvar nelisp-ct-srtbl (make-char-table 'test nil))\n"
+             "(defvar nelisp-ct-check12 (eq 42 (set-char-table-range nelisp-ct-srtbl (cons 97 99) 42)))\n"
+             "(defvar nelisp-ct-check13 (and (eq 42 (aref nelisp-ct-srtbl 97)) (eq 42 (aref nelisp-ct-srtbl 98)) (eq 42 (aref nelisp-ct-srtbl 99))))\n"
+             ;; P2: the ceiling -- LOUD, not a silent truncation/slow path.
+             "(defvar nelisp-ct-check14 (eq 'signalled (condition-case nil (progn (set-char-table-range nelisp-ct-srtbl (cons 0 5000) 1) 'no-signal) (char-table-range-too-large 'signalled))))\n"
+             ;; P2: `t' (every char) is explicitly out of scope, same signal.
+             "(defvar nelisp-ct-check15 (eq 'signalled (condition-case nil (progn (set-char-table-range nelisp-ct-srtbl t 1) 'no-signal) (char-table-range-too-large 'signalled))))\n"
+             ;; wrong-type-argument on a non-char-table.
+             "(defvar nelisp-ct-check16 (eq 'signalled (condition-case nil (progn (char-table-parent 5) 'no-signal) (wrong-type-argument 'signalled))))\n"
+             ;; wrong-number-of-arguments, not a crash (`bf_make_char_table's
+             ;; own arity guard; see the defun's comment).
+             "(defvar nelisp-ct-check17 (eq 'signalled (condition-case nil (progn (make-char-table) 'no-signal) (wrong-number-of-arguments 'signalled))))\n"))
+          (with-temp-buffer
+            (call-process nelisp-standalone--reader-out nil t nil
+                          "eval-elisp-source" tmp
+                          "(list nelisp-ct-check1 nelisp-ct-check2 nelisp-ct-check3 nelisp-ct-check4 nelisp-ct-check5 nelisp-ct-check6 nelisp-ct-check7 nelisp-ct-check8 nelisp-ct-check9 nelisp-ct-check10 nelisp-ct-check11 nelisp-ct-check12 nelisp-ct-check13 nelisp-ct-check14 nelisp-ct-check15 nelisp-ct-check16 nelisp-ct-check17)")
+            (setq out (string-trim (buffer-string))))
+          (unless (string= out "(t t t t t t t t t t t t t t t t t)")
+            (error "char-table smoke -> %S (expected (t t t t t t t t t t t t t t t t t))" out)))
       (ignore-errors (delete-file tmp)))))
 
 (defun nelisp-standalone--reader-defvaralias-smoke ()

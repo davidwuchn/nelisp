@@ -334,6 +334,24 @@ ns-prefix-violation 865
 # `nelisp-async-core--now') -- CONCEDED, same shape as the argument-check
 # helpers above: the alternative is worse.
 ns-private-escape 619
+#
+# 611 -> 612 on 2026-08-23 (Doc 186 char-tables): a new manifest entry in
+# scripts/nelisp-standalone-build.el (`nelisp-standalone--reader-extra-
+# manifest', not the base `nelisp-standalone--manifest' -- moved there
+# after `nelisp-standalone--manifest' broke `standalone-eval-test' with an
+# unresolved `nelisp_alloc_bytes' symbol) quotes `nelisp-cc-evalport-
+# nonenv-char-table--source', defined in lisp/nelisp-cc-evalport-nonenv-
+# char-table.el -- the same shape every other manifest entry already uses
+# to reference its sibling kernel file's `--source' defconst (the
+# concentrated 110-in-this-file share this baseline's own 2026-08-17 note
+# already attributes to that pattern). One more entry of an already-
+# conceded, already-established convention, not a new violation class.
+# integration/wave4 (this branch, merge 6/9): both raises above are
+# disjoint (async-core cross-file calls vs. a new manifest entry), so the
+# interim ceiling is the arithmetic union against the shared 611 base:
+# 611 + (619-611) + (612-611) = 620.  To be reconciled to the measured
+# count in the battery.
+ns-private-escape 620
 ns-unreadable 0
 
 # `pinned-collision KEY' pins every ns-collision and ns-collision-divergent

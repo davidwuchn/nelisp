@@ -210,6 +210,13 @@
                          (error nil))
                        (equal log '(outer inner)))
                      1 0)))
+
+    ;; -- Doc 186 P0/P1: char-table constructor/accessor layer.  `shared':
+    ;; char-tables exist in stock Emacs too, and these are the doc's own
+    ;; §6.2 parity pins -- construct + `char-table-p' (39), and `aref's
+    ;; default-value fallback (40).
+    (39 shared (if (char-table-p (make-char-table 'test)) 1 0))
+    (40 shared (if (eq (aref (make-char-table 'test 'D) ?a) 'D) 1 0))
     ))
 
 (provide 'nelisp-substrate-parity-corpus)

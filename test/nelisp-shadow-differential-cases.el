@@ -1280,7 +1280,15 @@
        (with-temp-buffer (insert "abc") (buffer-string))
        (with-temp-buffer (insert "abcdef") (goto-char 3) (point))
        (with-temp-buffer (insert "ab") (point-min))
-       (with-temp-buffer (insert "hi") (point-max)))
+       (with-temp-buffer (insert "hi") (point-max))
+       ;; Doc 186 P0/P1: char-table constructor/accessor layer.  Not a
+       ;; native/prelude shadow case (there is no prelude definition to
+       ;; shadow -- these two names live only in the standalone's own
+       ;; `bf_*' dispatch), but the gate's own contract is "byte-identical
+       ;; printed output on both sides" regardless, and these are the
+       ;; doc's own §6.2 parity forms.
+       (char-table-p (make-char-table 'test))
+       (aref (make-char-table 'test 'D) ?a))
 )
 
 ;;; nelisp-shadow-differential-cases.el ends here
