@@ -71,7 +71,16 @@ while IFS='|' read -r gate file expr what; do
   # OLD binary was used, and the gate passed on code that no longer existed.
   # A harness that can be fooled by a stale artifact is measuring nothing --
   # which is the class it exists to catch.
-  if [ "$gate" = "emacs-parity" ]; then
+  #
+  # standalone-reader-buffer-smoke (Doc 188 P1, 2026-08-23) joins this list
+  # for the identical reason: its own Makefile rule's prerequisite is
+  # `$(if $(wildcard target/nelisp target/nelisp.exe),,standalone-reader)'
+  # -- conditional on the binary's ABSENCE, not on the source being newer,
+  # exactly like emacs-parity's own `standalone-reader-test' prerequisite.
+  # Confirmed by hand while adding this row: with a leftover target/nelisp
+  # already present, `make standalone-reader-buffer-smoke' on freshly
+  # mutated source ran the OLD binary and reported PASS.
+  if [ "$gate" = "emacs-parity" ] || [ "$gate" = "standalone-reader-buffer-smoke" ]; then
     if ! rebuild_checked; then
       echo "  $gate: HARNESS ERROR (rebuild with the injection failed; a stale binary would have read as PASS)"
       bad=$((bad+1))

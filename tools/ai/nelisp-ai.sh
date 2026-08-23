@@ -303,7 +303,8 @@ cmd_extras() {
              substrate-parity-smoke \
              nl-condition-standalone-smoke \
              nl-safe-standalone-smoke \
-             nl-resource-standalone-smoke; do
+             nl-resource-standalone-smoke \
+             standalone-reader-buffer-smoke; do
         printf '\n=== %s ===\n' "$g"
         ( cmd_gate "$g" -- make "$g" ) || failures=$((failures + 1))
     done

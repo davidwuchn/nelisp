@@ -244,10 +244,16 @@ a negative, and signalling there turned a limit into a failure."
   (defun bool-vector-p (_x)
     "Always nil: bool vectors are plain vectors here (Doc 22)."
     nil))
-(unless (fboundp 'point-min)
-  (defun point-min () 1))
-(unless (fboundp 'point-max)
-  (defun point-max () 1))
+;; `point-min'/`point-max' used to be hardcoded here (`(defun point-min ()
+;; 1)', unconditionally, regardless of buffer state -- Doc 188 §1.3).  The
+;; real, buffer-backed definitions now live in the Doc 188 P1 buffer
+;; section below (search for "Doc 188 P1"), after the buffer object model
+;; they read from is defined.  Moving the hardcoded stub out from under
+;; its own `unless (fboundp ...)' guard, rather than leaving it here and
+;; overriding it unconditionally later, keeps that guard meaningful: the
+;; real definition is the ONLY one that ever runs, so `unless (fboundp
+;; ...)' still means "only if nothing has defined this yet" everywhere in
+;; this file, not "only if my own earlier stub hasn't already claimed it".
 (unless (fboundp 'locate-library)
   (defun locate-library (library &optional _nosuffix _path _interactive-call)
     "Find LIBRARY on `load-path', trying .el; nil when not found."
@@ -5813,8 +5819,13 @@ Rust-min migration (= moved out of build-tool/src/eval/special_forms.rs)."
               (list (format "decode-coding-string stub: only utf-8 supported, got %S"
                             coding))))
     str))
-(unless (fboundp 'bufferp)
-  (defun bufferp (_obj) nil))
+;; `bufferp' used to be a permanent, unconditional `nil' here (Doc 188
+;; §1.4 -- "no Sexp is a buffer" was true before this file had a buffer
+;; object).  The real definition lives in the Doc 188 P1 buffer section
+;; below (search for "Doc 188 P1"), for the same reason `point-min'/
+;; `point-max' moved: `unless (fboundp ...)' has to guard the ONE
+;; definition that actually runs, not an earlier stub that already
+;; claimed the name.
 (unless (fboundp 'set-buffer-multibyte)
   (defun set-buffer-multibyte (flag)
     "Answer FLAG, as Emacs does; there is no buffer to change here."
@@ -5877,103 +5888,650 @@ Rust-min migration (= moved out of build-tool/src/eval/special_forms.rs)."
                 (list (format "write-region stub: wrf returned %S (expected %S bytes) path=%s"
                               rc expected filename)))))
 	    nil))
-(defvar nelisp--with-temp-file-contents nil)
-(unless (fboundp 'insert)
-  (defun insert (&rest strings)
-    (dolist (s strings)
-      (setq nelisp--with-temp-file-contents
-            (concat (or nelisp--with-temp-file-contents "") s)))
+;; ---------------------------------------------------------------------
+;; Doc 188 P1 -- buffer object model (ported from src/nelisp-buffer.el).
+;;
+;; The standard names below (`insert'/`buffer-string'/`with-current-
+;; buffer'/`generate-new-buffer'/`kill-buffer'/`point'/`goto-char'/
+;; `point-min'/`point-max'/`bufferp') used to operate on an ad-hoc
+;; 4-slot vector `(vector 'buffer NAME CONTENT LIVE-P)' that `insert'
+;; never actually wrote to -- it wrote a DIFFERENT, buffer-unconnected
+;; variable (the old `nelisp--with-temp-file-contents', removed below),
+;; so `buffer-string' always read back whatever `generate-new-buffer'
+;; had seeded (""), no matter what had been `insert'ed (Doc 188 §1.3,
+;; confirmed live this session: `(let ((b (generate-new-buffer
+;; "probe"))) (with-current-buffer b (insert "abc")) (aref b 2))'
+;; answered "" -- not "abc").  `point'/`goto-char' were void-function,
+;; and `point-min'/`point-max' were hardcoded to 1 regardless of buffer
+;; content (moved from earlier in this file to below; see the comments
+;; left in their place).
+;;
+;; This section replaces that vector with `src/nelisp-buffer.el''s real,
+;; already-tested (host-Emacs ERT: test/nelisp-buffer-test.el,
+;; test/nelisp-marker-test.el, test/nelisp-editor-test.el) 1-indexed
+;; gap-buffer/marker/overlay/text-property model -- the Layer-1
+;; substrate of record per Doc 33 §12's 2026-08-22 amendment (owner-
+;; approved; Doc 188 §2.1/§6.1).  The struct/function bodies immediately
+;; below are ported verbatim from that file under the same `nelisp-'-
+;; prefixed names (so that file's own host-Emacs test suite and its
+;; `nelisp-with-buffer'/`nelisp-current-buffer'/`nelisp-set-buffer'
+;; ambient-buffer API keep working, unmodified, wherever it is loaded);
+;; see that file for the authoritative source and full documentation.
+;;
+;; Only the STANDARD Emacs names after the port are new here.  Each
+;; stays `unless (fboundp ...)'-guarded per this file's own convention,
+;; and each threads this file's own `nelisp--current-buffer' variable
+;; through to the ported functions explicitly, rather than relying on
+;; the ported file's own ambient `nelisp-buffer--current' -- so the two
+;; "current buffer" trackers never need to agree for the standard-name
+;; path to work.
+;;
+;; Doc 188 P1 ships the object model plus `insert'/`point'/`goto-char'/
+;; `point-min'/`point-max'/`buffer-string' (its own stated exit bar) and
+;; the surrounding lifecycle names needed to make that a COHERENT set:
+;; `generate-new-buffer'/`get-buffer'/`buffer-live-p'/`kill-buffer'/
+;; `with-current-buffer'/`with-temp-buffer'/`bufferp'/`insert-file-
+;; contents'.  It deliberately does NOT wire `current-buffer'/`set-
+;; buffer'/`buffer-substring'/`erase-buffer' (Doc 188 §2.2/§3 P2), nor
+;; any marker/overlay/text-property/search standard name (P3-P5) -- the
+;; struct's marker/overlay/text-property slots and the ported file's own
+;; internal shift helpers ARE present (`nelisp-insert'/`nelisp-delete-
+;; region' call them unconditionally, so they could not be left out of
+;; the port), but nothing below exposes `set-marker'/`make-overlay'/etc.
+;; under their standard Emacs names.
+
+(require 'cl-lib)
+
+(cl-defstruct (nelisp-buffer
+               (:constructor nelisp-buffer--make)
+               (:copier nil))
+  name
+  (before-gap "")
+  (after-gap "")
+  (modified nil)
+  (markers nil)
+  (overlays nil)
+  (narrow-start nil)
+  (narrow-end nil)
+  (text-properties nil))       ; list of (START END PROP-PLIST) intervals
+
+(cl-defstruct (nelisp-marker
+               (:constructor nelisp-marker--make)
+               (:copier nil))
+  (buffer nil)
+  (position 1)
+  (insertion-type nil))
+
+(cl-defstruct (nelisp-overlay
+               (:constructor nelisp-overlay--make)
+               (:copier nil))
+  (buffer nil)
+  (start 1)
+  (end 1)
+  (front-advance nil)
+  (rear-advance nil)
+  (props nil))
+
+(defvar nelisp-buffer--registry
+  (make-hash-table :test 'equal)
+  "Name -> `nelisp-buffer' map.  Ported from src/nelisp-buffer.el.")
+
+(defvar nelisp-buffer--current nil
+  "The ported file's OWN ambient current buffer.  Unused by the
+standard-name wrappers below (they thread `nelisp--current-buffer'
+explicitly instead, see the section header comment above); kept so
+`nelisp-with-buffer'/`nelisp-current-buffer'/`nelisp-set-buffer' -- the
+`nelisp-'-prefixed API -- still work self-consistently on their own.")
+
+(defun nelisp-buffer--reset-registry ()
+  "Clear the NeLisp buffer registry.  Test hygiene only."
+  (clrhash nelisp-buffer--registry)
+  (setq nelisp-buffer--current nil))
+
+(defun nelisp-generate-new-buffer (name)
+  "Return a fresh `nelisp-buffer', uniquifying NAME via `<N>' suffix."
+  (let* ((base name)
+         (final name)
+         (count 0))
+    (while (gethash final nelisp-buffer--registry)
+      (setq count (1+ count))
+      (setq final (format "%s<%d>" base count)))
+    (let ((buf (nelisp-buffer--make :name final)))
+      (puthash final buf nelisp-buffer--registry)
+      buf)))
+
+(defun nelisp-get-buffer-create (name)
+  "Return the buffer named NAME, creating it if absent."
+  (or (gethash name nelisp-buffer--registry)
+      (let ((buf (nelisp-buffer--make :name name)))
+        (puthash name buf nelisp-buffer--registry)
+        buf)))
+
+(defun nelisp-get-buffer (name)
+  "Return the buffer named NAME, or nil if absent."
+  (gethash name nelisp-buffer--registry))
+
+(defun nelisp-kill-buffer (buf)
+  "Remove BUF from the registry.  Returns t on success."
+  (let ((name (nelisp-buffer-name buf)))
+    (when (gethash name nelisp-buffer--registry)
+      (remhash name nelisp-buffer--registry)
+      (when (eq nelisp-buffer--current buf)
+        (setq nelisp-buffer--current nil))
+      t)))
+
+(defun nelisp-buffer-list ()
+  "Return a list of live NeLisp buffers."
+  (let (result)
+    (maphash (lambda (_ buf) (push buf result))
+             nelisp-buffer--registry)
+    result))
+
+(defun nelisp-current-buffer ()
+  "Return the currently selected NeLisp buffer, or nil."
+  nelisp-buffer--current)
+
+(defun nelisp-set-buffer (buf)
+  "Set BUF as the current NeLisp buffer.  Returns BUF."
+  (setq nelisp-buffer--current buf)
+  buf)
+
+(defmacro nelisp-with-buffer (buf &rest body)
+  "Evaluate BODY with BUF as the NeLisp current buffer."
+  (declare (indent 1))
+  `(let ((nelisp-buffer--current ,buf))
+     ,@body))
+
+(defun nelisp-buffer--ambient (buf-or-nil)
+  "Resolve BUF-OR-NIL to an actual buffer (defaulting to current)."
+  (or buf-or-nil nelisp-buffer--current
+      (error "No NeLisp current buffer")))
+
+(defun nelisp-buffer-size (&optional buf)
+  "Return the length of BUF's visible (unrestricted) text."
+  (let ((b (nelisp-buffer--ambient buf)))
+    (+ (length (nelisp-buffer-before-gap b))
+       (length (nelisp-buffer-after-gap b)))))
+
+(defun nelisp-point (&optional buf)
+  "Return the current point in BUF (1-based)."
+  (1+ (length (nelisp-buffer-before-gap
+               (nelisp-buffer--ambient buf)))))
+
+(defun nelisp-point-min (&optional buf)
+  "Return the narrowed point-min of BUF (defaults to 1)."
+  (or (nelisp-buffer-narrow-start
+       (nelisp-buffer--ambient buf))
+      1))
+
+(defun nelisp-point-max (&optional buf)
+  "Return the narrowed point-max of BUF."
+  (let ((b (nelisp-buffer--ambient buf)))
+    (or (nelisp-buffer-narrow-end b)
+        (1+ (nelisp-buffer-size b)))))
+
+(defun nelisp-buffer-string (&optional buf)
+  "Return the entire text of BUF as a new string."
+  (let ((b (nelisp-buffer--ambient buf)))
+    (concat (nelisp-buffer-before-gap b)
+            (nelisp-buffer-after-gap b))))
+
+(defun nelisp-buffer-substring (start end &optional buf)
+  "Return the substring between 1-based START and END in BUF."
+  (let ((b (nelisp-buffer--ambient buf)))
+    (substring (nelisp-buffer-string b) (1- start) (1- end))))
+
+(defun nelisp-char-after (&optional pos buf)
+  "Return the character at POS (default point) in BUF, or nil."
+  (let* ((b (nelisp-buffer--ambient buf))
+         (p (or pos (nelisp-point b)))
+         (total (nelisp-buffer-string b))
+         (idx (1- p)))
+    (and (>= idx 0) (< idx (length total))
+         (elt total idx))))
+
+(defun nelisp-buffer--shift-markers-on-insert (buf at inserted-len)
+  "Advance markers at or past AT by INSERTED-LEN."
+  (dolist (m (nelisp-buffer-markers buf))
+    (when (nelisp-marker-p m)
+      (let ((pos (nelisp-marker-position m)))
+        (cond
+         ((< pos at) nil)
+         ((and (= pos at) (null (nelisp-marker-insertion-type m))) nil)
+         (t (setf (nelisp-marker-position m) (+ pos inserted-len))))))))
+
+(defun nelisp-buffer--shift-markers-on-delete (buf start end)
+  "Collapse markers inside [START, END] to START, shift markers past END."
+  (let ((delta (- end start)))
+    (dolist (m (nelisp-buffer-markers buf))
+      (when (nelisp-marker-p m)
+        (let ((pos (nelisp-marker-position m)))
+          (cond
+           ((<= pos start) nil)
+           ((>= pos end)
+            (setf (nelisp-marker-position m) (- pos delta)))
+           (t
+            (setf (nelisp-marker-position m) start))))))))
+
+(defun nelisp-buffer--shift-overlays-on-insert (buf at inserted-len)
+  "Update overlay endpoints when INSERTED-LEN chars land at AT."
+  (dolist (o (nelisp-buffer-overlays buf))
+    (when (nelisp-overlay-p o)
+      (let ((s (nelisp-overlay-start o))
+            (e (nelisp-overlay-end o)))
+        (cond
+         ((< s at) nil)
+         ((and (= s at) (null (nelisp-overlay-front-advance o))) nil)
+         (t (setf (nelisp-overlay-start o) (+ s inserted-len))))
+        (cond
+         ((< e at) nil)
+         ((and (= e at) (null (nelisp-overlay-rear-advance o))) nil)
+         (t (setf (nelisp-overlay-end o) (+ e inserted-len))))))))
+
+(defun nelisp-buffer--shift-overlays-on-delete (buf start end)
+  "Collapse overlay endpoints falling in [START, END] to START; shift
+endpoints past END backwards by (END - START)."
+  (let ((delta (- end start)))
+    (dolist (o (nelisp-buffer-overlays buf))
+      (when (nelisp-overlay-p o)
+        (let ((s (nelisp-overlay-start o))
+              (e (nelisp-overlay-end o)))
+          (setf (nelisp-overlay-start o)
+                (cond
+                 ((<= s start) s)
+                 ((>= s end) (- s delta))
+                 (t start)))
+          (setf (nelisp-overlay-end o)
+                (cond
+                 ((<= e start) e)
+                 ((>= e end) (- e delta))
+                 (t start))))))))
+
+(defun nelisp-buffer--shift-text-properties-on-insert (buf at len)
+  "Expand text-property intervals straddling AT; shift those past AT."
+  (dolist (ival (nelisp-buffer-text-properties buf))
+    (let ((s (nth 0 ival))
+          (e (nth 1 ival)))
+      (cond ((< s at) nil)
+            (t (setcar ival (+ s len))))
+      (cond ((< e at) nil)
+            ((= e at) nil)
+            (t (setcar (cdr ival) (+ e len)))))))
+
+(defun nelisp-buffer--shift-text-properties-on-delete (buf start end)
+  "Collapse text-property intervals within [START, END] and shift later
+ones."
+  (let ((delta (- end start)))
+    (dolist (ival (nelisp-buffer-text-properties buf))
+      (let ((s (nth 0 ival))
+            (e (nth 1 ival)))
+        (setcar ival
+                (cond
+                 ((<= s start) s)
+                 ((>= s end) (- s delta))
+                 (t start)))
+        (setcar (cdr ival)
+                (cond
+                 ((<= e start) e)
+                 ((>= e end) (- e delta))
+                 (t start)))))))
+
+(defun nelisp-goto-char (pos &optional buf)
+  "Move point to POS in BUF, rebalancing the gap.
+POS is clamped into [point-min, point-max] per Emacs semantics."
+  (let* ((b (nelisp-buffer--ambient buf))
+         (total (nelisp-buffer-string b))
+         (lo (nelisp-point-min b))
+         (hi (nelisp-point-max b))
+         (clamped (max lo (min hi pos)))
+         (idx (1- clamped)))
+    (setf (nelisp-buffer-before-gap b) (substring total 0 idx))
+    (setf (nelisp-buffer-after-gap b) (substring total idx))
+    clamped))
+
+(defun nelisp-insert (text &optional buf)
+  "Insert TEXT at point in BUF.  TEXT must be a string."
+  (unless (stringp text)
+    (signal 'wrong-type-argument (list 'stringp text)))
+  (let* ((b (nelisp-buffer--ambient buf))
+         (before (nelisp-buffer-before-gap b))
+         (at (1+ (length before)))
+         (n (length text)))
+    (setf (nelisp-buffer-before-gap b) (concat before text))
+    (setf (nelisp-buffer-modified b) t)
+    (nelisp-buffer--shift-markers-on-insert b at n)
+    (nelisp-buffer--shift-overlays-on-insert b at n)
+    (nelisp-buffer--shift-text-properties-on-insert b at n))
+  nil)
+
+(defun nelisp-delete-region (start end &optional buf)
+  "Delete the text between 1-based START and END (exclusive) in BUF."
+  (let* ((b (nelisp-buffer--ambient buf))
+         (size (nelisp-buffer-size b))
+         (lo 1)
+         (hi (1+ size))
+         (s (min start end))
+         (e (max start end)))
+    (when (or (< s lo) (> e hi))
+      (signal 'args-out-of-range (list start end)))
+    (let* ((total (nelisp-buffer-string b))
+           (si (1- s))
+           (ei (1- e)))
+      (setf (nelisp-buffer-before-gap b) (substring total 0 si))
+      (setf (nelisp-buffer-after-gap b) (substring total ei))
+      (setf (nelisp-buffer-modified b) t)
+      (nelisp-buffer--shift-markers-on-delete b s e)
+      (nelisp-buffer--shift-overlays-on-delete b s e)
+      (nelisp-buffer--shift-text-properties-on-delete b s e)))
+  nil)
+
+(defun nelisp-erase-buffer (&optional buf)
+  "Clear BUF entirely.  Markers / overlays collapse to `point-min'."
+  (let ((b (nelisp-buffer--ambient buf)))
+    (setf (nelisp-buffer-before-gap b) "")
+    (setf (nelisp-buffer-after-gap b) "")
+    (setf (nelisp-buffer-modified b) t)
+    (dolist (m (nelisp-buffer-markers b))
+      (when (nelisp-marker-p m)
+        (setf (nelisp-marker-position m) 1)))
+    (dolist (o (nelisp-buffer-overlays b))
+      (when (nelisp-overlay-p o)
+        (setf (nelisp-overlay-start o) 1)
+        (setf (nelisp-overlay-end o) 1)))
+    (setf (nelisp-buffer-text-properties b) nil))
+  nil)
+
+(defun nelisp-buffer-modified-p (&optional buf)
+  "Return non-nil if BUF has been modified since creation/last reset."
+  (nelisp-buffer-modified (nelisp-buffer--ambient buf)))
+
+(defun nelisp-buffer-set-modified (flag &optional buf)
+  "Set BUF's modified flag to FLAG (t/nil)."
+  (setf (nelisp-buffer-modified (nelisp-buffer--ambient buf))
+        (and flag t))
+  flag)
+
+(defun nelisp-markerp (obj)
+  "Return non-nil when OBJ is a `nelisp-marker'."
+  (nelisp-marker-p obj))
+
+(defun nelisp-make-marker ()
+  "Return a marker not yet attached to any buffer."
+  (nelisp-marker--make))
+
+(defun nelisp-copy-marker (buf pos &optional insertion-type)
+  "Return a fresh marker inside BUF at POS."
+  (let ((m (nelisp-marker--make :buffer buf
+                                :position pos
+                                :insertion-type insertion-type)))
+    (push m (nelisp-buffer-markers buf))
+    m))
+
+(defun nelisp-set-marker (marker pos &optional buf)
+  "Re-point MARKER at POS, optionally moving it to BUF."
+  (cond
+   ((null pos)
+    (when-let* ((old (nelisp-marker-buffer marker)))
+      (setf (nelisp-buffer-markers old)
+            (delq marker (nelisp-buffer-markers old))))
+    (setf (nelisp-marker-buffer marker) nil)
+    (setf (nelisp-marker-position marker) 1))
+   (t
+    (let ((target (or buf (nelisp-marker-buffer marker))))
+      (unless target (error "nelisp-set-marker: no target buffer"))
+      (when (and (nelisp-marker-buffer marker)
+                 (not (eq target (nelisp-marker-buffer marker))))
+        (setf (nelisp-buffer-markers (nelisp-marker-buffer marker))
+              (delq marker (nelisp-buffer-markers
+                            (nelisp-marker-buffer marker))))
+        (push marker (nelisp-buffer-markers target)))
+      (unless (nelisp-marker-buffer marker)
+        (push marker (nelisp-buffer-markers target)))
+      (setf (nelisp-marker-buffer marker) target)
+      (setf (nelisp-marker-position marker) pos))))
+  marker)
+
+(defun nelisp-marker-delete (marker)
+  "Unlink MARKER from its buffer's marker list.  Returns nil."
+  (when-let* ((b (nelisp-marker-buffer marker)))
+    (setf (nelisp-buffer-markers b)
+          (delq marker (nelisp-buffer-markers b))))
+  (setf (nelisp-marker-buffer marker) nil)
+  nil)
+
+(defun nelisp-overlayp (obj)
+  "Return non-nil when OBJ is a `nelisp-overlay'."
+  (nelisp-overlay-p obj))
+
+(defun nelisp-make-overlay (start end &optional buf
+                                  front-advance rear-advance)
+  "Create an overlay covering [START, END) in BUF."
+  (let* ((b (nelisp-buffer--ambient buf))
+         (o (nelisp-overlay--make :buffer b :start start :end end
+                                  :front-advance front-advance
+                                  :rear-advance rear-advance)))
+    (push o (nelisp-buffer-overlays b))
+    o))
+
+(defun nelisp-delete-overlay (o)
+  "Unlink O from its buffer's overlay list.  Returns nil."
+  (when-let* ((b (nelisp-overlay-buffer o)))
+    (setf (nelisp-buffer-overlays b)
+          (delq o (nelisp-buffer-overlays b))))
+  (setf (nelisp-overlay-buffer o) nil)
+  nil)
+
+(defun nelisp-overlay-put (o prop val)
+  "Store (PROP . VAL) on overlay O.  Returns VAL."
+  (let ((cell (assq prop (nelisp-overlay-props o))))
+    (if cell
+        (setcdr cell val)
+      (push (cons prop val) (nelisp-overlay-props o))))
+  val)
+
+(defun nelisp-overlay-get (o prop)
+  "Return the value of PROP stored on O, or nil."
+  (cdr (assq prop (nelisp-overlay-props o))))
+
+(defun nelisp-overlays-at (pos &optional buf)
+  "Return the list of overlays in BUF whose range covers POS."
+  (let ((b (nelisp-buffer--ambient buf))
+        result)
+    (dolist (o (nelisp-buffer-overlays b))
+      (when (nelisp-overlayp o)
+        (when (and (>= pos (nelisp-overlay-start o))
+                   (< pos (nelisp-overlay-end o)))
+          (push o result))))
+    (nreverse result)))
+
+(defun nelisp-overlays-in (start end &optional buf)
+  "Return the list of overlays in BUF overlapping [START, END)."
+  (let ((b (nelisp-buffer--ambient buf))
+        result)
+    (dolist (o (nelisp-buffer-overlays b))
+      (when (nelisp-overlayp o)
+        (let ((s (nelisp-overlay-start o))
+              (e (nelisp-overlay-end o)))
+          (when (and (< s end) (> e start))
+            (push o result)))))
+    (nreverse result)))
+
+(defun nelisp-put-text-property (start end prop val &optional buf)
+  "Store PROP=VAL for text in [START, END) of BUF."
+  (let ((b (nelisp-buffer--ambient buf)))
+    (push (list start end (list prop val))
+          (nelisp-buffer-text-properties b))
+    val))
+
+(defun nelisp-get-text-property (pos prop &optional buf)
+  "Return the value of PROP at POS in BUF, or nil."
+  (let ((b (nelisp-buffer--ambient buf))
+        (hit nil))
+    (dolist (ival (nelisp-buffer-text-properties b))
+      (unless hit
+        (let ((s (nth 0 ival))
+              (e (nth 1 ival))
+              (pl (nth 2 ival)))
+          (when (and (>= pos s) (< pos e)
+                     (plist-member pl prop))
+            (setq hit (cons :v (plist-get pl prop)))))))
+    (and hit (cdr hit))))
+
+(defun nelisp-text-property-intervals (&optional buf)
+  "Return a shallow copy of BUF's text-property interval list."
+  (copy-sequence
+   (nelisp-buffer-text-properties (nelisp-buffer--ambient buf))))
+
+(defun nelisp-remove-text-properties (start end props &optional buf)
+  "Drop each key in PROPS from any interval overlapping [START, END)."
+  (let ((b (nelisp-buffer--ambient buf)))
+    (dolist (ival (nelisp-buffer-text-properties b))
+      (let ((s (nth 0 ival))
+            (e (nth 1 ival)))
+        (when (and (< s end) (> e start))
+          (let* ((pl (nth 2 ival))
+                 (new (let (out)
+                        (while pl
+                          (unless (memq (car pl) props)
+                            (push (car pl) out)
+                            (push (cadr pl) out))
+                          (setq pl (cddr pl)))
+                        (nreverse out))))
+            (setcar (cddr ival) new))))))
+  nil)
+
+(defun nelisp-narrow-to-region (start end &optional buf)
+  "Restrict visible range of BUF to [START, END]."
+  (let* ((b (nelisp-buffer--ambient buf))
+         (size (nelisp-buffer-size b))
+         (lo 1)
+         (hi (1+ size))
+         (s (max lo (min hi (min start end))))
+         (e (max lo (min hi (max start end)))))
+    (setf (nelisp-buffer-narrow-start b) s)
+    (setf (nelisp-buffer-narrow-end b) e)
     nil))
-(unless (fboundp 'with-temp-file)
-  (defmacro with-temp-file (file &rest body)
-    `(let ((nelisp--with-temp-file-contents ""))
-       ,@body
-       (write-region nelisp--with-temp-file-contents nil ,file))))
-(unless (fboundp 'ignore-errors)
-  (defmacro ignore-errors (&rest body)
-    `(condition-case nil (progn ,@body) (error nil))))
-(defvar nelisp--current-buffer nil)
+
+(defun nelisp-widen (&optional buf)
+  "Remove the narrowing of BUF."
+  (let ((b (nelisp-buffer--ambient buf)))
+    (setf (nelisp-buffer-narrow-start b) nil)
+    (setf (nelisp-buffer-narrow-end b) nil))
+  nil)
+
+(provide 'nelisp-buffer)
+
+;; ---- standard-name wiring onto the model above (Doc 188 §2.2) --------
+
+(defvar nelisp--current-buffer nil
+  "The ambient current buffer for the STANDARD names below (`point',
+`insert', `buffer-string', ...).  Seeded to a real `*scratch*' buffer
+further down this file (search for \"Doc 188 P1 scratch/Messages
+seed\"), matching Emacs (there is always a current buffer) and this
+file's own earlier, never-honored intent -- the old ad-hoc vector
+implementation seeded a `*scratch*'/`*Messages*' alist entry but never
+actually pointed this variable at either of them (Doc 188 §1.3).  The
+seed call itself has to come after `nelisp--make-record' is defined
+-- much further down -- since `nelisp-generate-new-buffer' allocates a
+`cl-defstruct' record and a first attempt placed the seed call here,
+immediately after the model, and got a live `void-function:
+(nelisp--make-record)' on every single invocation of the binary
+(caught by the same probe workflow this doc's own §1.3 used, before
+this file was committed).")
 (defvar nelisp--pending-processes nil)
 (defvar nelisp--process-props nil)
 (defvar coding-system-for-write nil)
 (defvar coding-system-for-read nil)
 (defvar system-type 'gnu/linux)
 (defvar system-configuration "x86_64-pc-linux-gnu")
-(defvar nelisp--buffers nil
-  "Alist of NAME -> buffer vector for every buffer this runtime knows.")
-(setq nelisp--buffers
-      (list (cons "*scratch*" (vector 'buffer "*scratch*" "" t))
-            (cons "*Messages*" (vector 'buffer "*Messages*" "" t))))
+
+(unless (fboundp 'bufferp)
+  (defun bufferp (obj) (nelisp-buffer-p obj)))
+(unless (fboundp 'point-min)
+  (defun point-min () (nelisp-point-min nelisp--current-buffer)))
+(unless (fboundp 'point-max)
+  (defun point-max () (nelisp-point-max nelisp--current-buffer)))
+(unless (fboundp 'point)
+  (defun point () (nelisp-point nelisp--current-buffer)))
+(unless (fboundp 'goto-char)
+  (defun goto-char (pos) (nelisp-goto-char pos nelisp--current-buffer)))
 (unless (fboundp 'generate-new-buffer)
   (defun generate-new-buffer (name &optional _inhibit-buffer-hooks)
     (nelisp--check-string name)
     (when (= (length name) 0)
       (signal 'error (list "Empty string for buffer name is not allowed")))
-    (let* ((n 2) (uniq name))
-      (while (assoc uniq nelisp--buffers)
-        (setq uniq (concat name "<" (number-to-string n) ">"))
-        (setq n (1+ n)))
-      (let ((b (vector 'buffer uniq "" t)))
-        (setq nelisp--buffers (cons (cons uniq b) nelisp--buffers))
-        b))))
+    (nelisp-generate-new-buffer name)))
 (unless (fboundp 'get-buffer)
   (defun get-buffer (buffer-or-name)
     (cond
-     ((and (vectorp buffer-or-name) (> (length buffer-or-name) 0)
-           (eq (aref buffer-or-name 0) 'buffer))
-      buffer-or-name)
-     ((stringp buffer-or-name) (cdr (assoc buffer-or-name nelisp--buffers)))
+     ((nelisp-buffer-p buffer-or-name) buffer-or-name)
+     ((stringp buffer-or-name) (nelisp-get-buffer buffer-or-name))
      (t (signal 'wrong-type-argument (list 'stringp buffer-or-name))))))
 (unless (fboundp 'buffer-live-p)
   (defun buffer-live-p (buffer)
-    (and (vectorp buffer)
-         (> (length buffer) 3)
-         (eq (aref buffer 0) 'buffer)
-         (aref buffer 3))))
+    "T when BUFFER is still in the registry under its own name.
+`nelisp-kill-buffer' only removes the registry entry (the struct itself
+carries no separate liveness flag), so a stale reference is live iff
+the registry still maps its name back to this exact object."
+    (and (nelisp-buffer-p buffer)
+         (eq buffer (nelisp-get-buffer (nelisp-buffer-name buffer))))))
 (unless (fboundp 'kill-buffer)
-  (defun kill-buffer (&optional buffer)
-    "Kill BUFFER (a buffer object or a name); answer t.
-Answering t for a name that does not exist told callers a buffer had
-been killed when none had."
-    (cond
-     ((null buffer) t)
-     ((and (vectorp buffer) (> (length buffer) 0) (eq (aref buffer 0) 'buffer))
-      (aset buffer 3 nil)
-      t)
-     ((stringp buffer)
-      (let ((b (get-buffer buffer)))
-        (if b
-            (progn (aset b 3 nil)
-                   (setq nelisp--buffers
-                         (delq (assoc buffer nelisp--buffers) nelisp--buffers))
-                   t)
-          (signal 'error (list (format "No buffer named %s" buffer))))))
-     (t (signal 'wrong-type-argument (list 'stringp buffer))))))
+  (defun kill-buffer (&optional buffer-or-name)
+    "Kill BUFFER-OR-NAME, defaulting to the CURRENT buffer per the Emacs
+contract -- the old stub answered t for a nil argument without killing
+anything (Doc 188 §2.2)."
+    (let ((b (if buffer-or-name (get-buffer buffer-or-name) nelisp--current-buffer)))
+      (unless b (signal 'error (list "No buffer to kill")))
+      (when (eq b nelisp--current-buffer) (setq nelisp--current-buffer nil))
+      (or (nelisp-kill-buffer b) t))))
 (unless (fboundp 'with-current-buffer)
-  (defmacro with-current-buffer (buffer &rest body)
-    `(let ((nelisp--current-buffer ,buffer))
-       ,@body)))
+  (defmacro with-current-buffer (buffer-or-name &rest body)
+    (let ((b (make-symbol "buf")))
+      `(let ((,b (get-buffer ,buffer-or-name)))
+         (unless ,b (signal 'error (list (format "No such buffer: %S" ,buffer-or-name))))
+         (let ((nelisp--current-buffer ,b))
+           ,@body)))))
 (unless (fboundp 'with-temp-buffer)
   (defmacro with-temp-buffer (&rest body)
-    `(let ((nelisp--current-buffer (generate-new-buffer " *temp*")))
-       ,@body)))
+    (let ((b (make-symbol "buf")))
+      `(let* ((,b (nelisp-generate-new-buffer " *temp*"))
+              (nelisp--current-buffer ,b))
+         (unwind-protect
+             (progn ,@body)
+           (nelisp-kill-buffer ,b))))))
 (when (fboundp 'rdf)
   ;; Keep the public compatibility name on `rdf' so callers get the same
   ;; value-returning read path used by the short builtin.
   (fset 'nelisp--syscall-read-file (symbol-function 'rdf)))
+(unless (fboundp 'insert)
+  (defun insert (&rest strings)
+    (dolist (s strings)
+      (nelisp-insert s nelisp--current-buffer))
+    nil))
 (unless (fboundp 'buffer-string)
   (defun buffer-string ()
-    (if (and (vectorp nelisp--current-buffer)
-             (eq (aref nelisp--current-buffer 0) 'buffer))
-        (aref nelisp--current-buffer 2)
-      "")))
+    (nelisp-buffer-string nelisp--current-buffer)))
+(unless (fboundp 'with-temp-file)
+  (defmacro with-temp-file (file &rest body)
+    "Real buffer-backed `with-temp-file' (Doc 188 P1): BODY runs with a
+fresh temp buffer current, same as `with-temp-buffer', then its
+`buffer-string' is written to FILE.  Replaces the old dedicated
+`nelisp--with-temp-file-contents' variable, which `insert' used to
+write instead of ever touching a real buffer."
+    (let ((b (make-symbol "buf")))
+      `(let* ((,b (nelisp-generate-new-buffer " *temp-file*"))
+              (nelisp--current-buffer ,b))
+         (unwind-protect
+             (progn ,@body
+                    (write-region (nelisp-buffer-string ,b) nil ,file))
+           (nelisp-kill-buffer ,b))))))
+(unless (fboundp 'ignore-errors)
+  (defmacro ignore-errors (&rest body)
+    `(condition-case nil (progn ,@body) (error nil))))
 (unless (fboundp 'insert-file-contents)
   (defun insert-file-contents (filename &rest _args)
     (let ((contents (or (nelisp--syscall-read-file filename) "")))
-      (when (and (vectorp nelisp--current-buffer)
-                 (eq (aref nelisp--current-buffer 0) 'buffer))
-        (aset nelisp--current-buffer 2
-              (concat (aref nelisp--current-buffer 2) contents)))
+      (nelisp-insert contents nelisp--current-buffer)
       (list filename (length contents)))))
 (unless (fboundp 'insert-file-contents-literally)
   (defun insert-file-contents-literally (filename &rest args)
@@ -6037,9 +6595,11 @@ been killed when none had."
     (when (null process)
       (signal 'error
               (list (format "Buffer %s has no process"
-                            (if (and (vectorp nelisp--current-buffer)
-                                     (> (length nelisp--current-buffer) 1))
-                                (aref nelisp--current-buffer 1)
+                            ;; Doc 188 P1: the current buffer is now a
+                            ;; `nelisp-buffer' struct, not the old
+                            ;; `(vector 'buffer NAME ...)'.
+                            (if (nelisp-buffer-p nelisp--current-buffer)
+                                (nelisp-buffer-name nelisp--current-buffer)
                               "*scratch*")))))
     ;; A STRING is a process NAME and answers nil; anything else is
     ;; `processp'.  Measured -- the two look the same from a single failing
@@ -6365,6 +6925,22 @@ Doc 156: was `(apply #\\='vector ...)', but the reader now exposes a native
 ;; it.  Fall back to the permissive vectorp-based form only if no native
 ;; `recordp' is bound (the old workaround when records surfaced as vectors).
 (unless (fboundp 'recordp) (defun recordp (x) (vectorp x)))
+
+;; Doc 188 P1 scratch/Messages seed.  Must run after `nelisp--make-
+;; record' (just above) is defined: `nelisp-generate-new-buffer'
+;; allocates a `cl-defstruct' record, and this call needs to actually
+;; run at prelude load time (real Emacs always has a current buffer),
+;; not merely be defined -- see the long comment on the
+;; `nelisp--current-buffer' `defvar' for why this is not positioned
+;; next to it.
+(setq nelisp--current-buffer (nelisp-generate-new-buffer "*scratch*"))
+(defvar nelisp--messages-buffer (nelisp-generate-new-buffer "*Messages*")
+  "The seeded `*Messages*' buffer object, matching real Emacs's always-
+present pair of default buffers.  A `defvar' rather than a bare top-
+level call to `nelisp-generate-new-buffer' so this stays a top-level
+DEFINITION for `make prelude-toplevel-check' -- see that tool's own
+Commentary for why a bare call at the prelude's top level is treated
+as a likely mistake.")
 
 ;; Hash-table predicate + iteration for the reader's builtin hash table.
 ;; The builtin `make-hash-table' returns the cons pair (MARKER . DATA) where
@@ -6723,6 +7299,17 @@ claimed to match, only the shape."
    ;; both and truncated vectors Emacs does not.
    ((and (vectorp obj) (> (length obj) 1) (eq (aref obj 0) 'buffer))
     (concat "#<buffer " (aref obj 1) ">"))
+   ;; Doc 188 P1 (2026-08-23): buffers are now `nelisp-buffer' records
+   ;; (the ported src/nelisp-buffer.el model), not the ad-hoc vector the
+   ;; clause above still recognises for any stray old-shape value.
+   ;; Without this clause a real buffer fell through to the generic
+   ;; `nelisp--prn-record' arm below and printed as
+   ;; `#s(nelisp-buffer "x" "" "" nil nil nil nil nil nil)' instead of
+   ;; Emacs's own `#<buffer x>' -- caught by `make emacs-parity' going
+   ;; red on the `generate-new-buffer' calls already in
+   ;; test/nelisp-shadow-differential-cases.el before this fix landed.
+   ((and (fboundp 'nelisp-buffer-p) (nelisp-buffer-p obj))
+    (concat "#<buffer " (nelisp-buffer-name obj) ">"))
    ((vectorp obj) (nelisp--prn-vector obj escape (1+ depth)))
    ((recordp obj) (nelisp--prn-record obj escape))
    ;; NOT (format "#<unprintable %S>" obj): `%S' re-enters this function on

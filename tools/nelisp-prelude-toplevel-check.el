@@ -33,6 +33,10 @@
     dolist dotimes let let* while cond and or eval-when-compile
     eval-and-compile with-no-warnings declare-function ignore-errors
     condition-case add-to-list define-error
+    ;; Doc 188 P1 (2026-08-23): `cl-defstruct' expands to a handful of
+    ;; `defun'/`defvar' forms, same shape as `defun'/`defvar' themselves
+    ;; -- it is a definition, not a call with a stray trailing form.
+    cl-defstruct
     ;; the prelude installs some names by calling its own registrars
     nelisp--error-register)
   "Heads that make sense as a top-level form here.")

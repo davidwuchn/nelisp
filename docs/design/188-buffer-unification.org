@@ -1,7 +1,9 @@
 #+TITLE: Doc 188 — Buffer unification
 #+AUTHOR: nelisp / nelisp-emacs (design: Claude Opus 5 + zawatton)
 #+DATE: 2026-08-22
-#+STATUS: DRAFT — design only, no implementation in this change.
+#+STATUS: P1 SHIPPED (2026-08-23) — §3's remaining phases (P0 add-hook, P2 current-buffer/set-buffer/buffer-substring/erase-buffer, P3 search, P4 markers, P5 overlays, P6 package attach) are still DRAFT, not started by this change.
+#+VERIFIED-BY: standalone-reader-buffer-smoke emacs-parity ns-gate ns-inventory parity-coverage partial-inventory prelude-toplevel-check gate-mutation compile
+#+STATUS2: P1 = generate-new-buffer/get-buffer/buffer-live-p/kill-buffer/with-current-buffer/with-temp-buffer/insert/buffer-string/insert-file-contents/point/goto-char/point-min/point-max wired to the ported src/nelisp-buffer.el model, standalone. P0 (add-hook) and P2-P6 remain DRAFT; see §8.
 
 * §0 TL;DR
 
@@ -707,3 +709,179 @@ small naming/ownership call left to the implementer.
 - "Cite recipes/README's own [Magit/Org] list" -> no such list exists;
   the file's actual, cited content is a flatter "buffers exist, buffer
   navigation does not" verdict (§0, §1.7).
+
+* §8 P1 implementation record (SHIPPED 2026-08-23)
+
+** §8.1 What shipped
+
+Per §3's own P1 scope ("port =nelisp-buffer.el='s object model +
+point/goto-char/insert/delete-region... a standalone smoke —
+=generate-new-buffer=, =insert=, =point=, =goto-char=, =buffer-string= —
+round-trips correctly on =target/nelisp="), plus the surrounding
+lifecycle names §2.2 groups with it as one coherent set:
+
+- =src/nelisp-buffer.el='s struct/function bodies (buffer/marker/overlay
+  structs, the marker/overlay/text-property shift helpers =nelisp-insert=/
+  =nelisp-delete-region= call unconditionally, and the full =nelisp-=
+  prefixed API) are ported, effectively verbatim, into
+  =scripts/nelisp-stdlib-prelude.el=, so they are baked into
+  =target/nelisp= — no separate =--load= of =src/nelisp-buffer.el=
+  required. =src/nelisp-buffer.el= itself is untouched; it remains the
+  source of truth and its own host-Emacs ERT suite
+  (=test/nelisp-buffer-test.el=, =test/nelisp-marker-test.el=,
+  =test/nelisp-editor-test.el=) is unaffected.
+- The old ad-hoc 4-slot vector (=(vector 'buffer NAME CONTENT LIVE-P)=)
+  and its disconnected =nelisp--with-temp-file-contents= variable are
+  gone. =generate-new-buffer=/=get-buffer=/=buffer-live-p=/=kill-buffer=/
+  =with-current-buffer=/=with-temp-buffer=/=bufferp=/=insert=/=buffer-
+  string=/=insert-file-contents=/=with-temp-file= are repointed to the
+  ported model, sharing =nelisp--current-buffer= as the one ambient
+  pointer (seeded to a real =*scratch*= buffer at prelude load, with
+  =*Messages*= also seeded — matching the old code's own never-honored
+  intent). =point=/=goto-char=/=point-min=/=point-max= are new,
+  delegating to =nelisp-point=/=nelisp-goto-char=/=nelisp-point-min=/
+  =nelisp-point-max= with =nelisp--current-buffer= threaded through
+  explicitly (never relying on the ported file's own ambient
+  =nelisp-buffer--current=, so the two "current buffer" trackers cannot
+  desync for this standard-name path). =kill-buffer='s nil-argument case
+  (kill the current buffer) is fixed as part of the same coherence pass —
+  the old stub silently no-opped and returned =t=.
+- Not wired (P2+, per §2.2/§3's own split, honored as this task's scope
+  boundary): =current-buffer=, =set-buffer=, =buffer-substring=,
+  =erase-buffer=. Calling these standalone remains void-function, same as
+  before this phase.
+- =lisp/nelisp-stdlib-misc.el='s dead buffer stubs (=bufferp=,
+  =buffer-string=, =current-buffer=, =with-temp-buffer=, =insert=,
+  =insert-file-contents=, =point-min=, =point-max=, =goto-char=) are
+  deleted — §1.4's own research already established they are inert in
+  this file's only real load context (never =require='d; parsed, not
+  evaluated, by host-Emacs tooling and by
+  =test/nelisp-hooks-map-fixnum-test.el=, which extracts only its
+  hook/map.el forms). =set-buffer-multibyte= (an encoding-flag no-op,
+  unrelated to buffer identity) is out of scope and untouched.
+- A NEW load-bearing fix this phase's own smoke found:
+  =nelisp--prn-to-string= (=lisp/nelisp-stdlib-prn.el='s printer, the
+  copy the prelude runs) special-cased the OLD ad-hoc vector to print as
+  =#<buffer NAME>=, matching Emacs. Ported buffers are records, not
+  vectors, so without an equivalent special case they fell through to
+  the generic record printer (=#s(nelisp-buffer "x" "" "" nil nil nil
+  nil nil nil)=) — caught by =make emacs-parity= going red on the
+  =generate-new-buffer= calls already present in
+  =test/nelisp-shadow-differential-cases.el= before this fix landed, not
+  found by inspection. Fixed with an equivalent special case for
+  =nelisp-buffer-p=.
+- §6.2's open question ("what actually blocks =nelisp-buffer.el= from
+  loading standalone") is answered: nothing does. =./target/nelisp --load
+  src/nelisp-buffer.el= (unmodified) loads cleanly and its functions
+  return correct values when called immediately afterward — it had
+  simply never been tried standalone, exactly as §6.2 speculated.
+
+** §8.2 Against-the-bug (verbatim)
+
+Red, reproduced live before any fix (matches §1.3 exactly):
+
+#+begin_example
+(let ((b (generate-new-buffer "probe")))
+  (with-current-buffer b (insert "abc"))
+  (prin1 (list 'with-temp-file-contents-var nelisp--with-temp-file-contents
+               'buffer-slot2 (aref b 2))))
+=> (with-temp-file-contents-var "abc"  buffer-slot2 "")
+#+end_example
+
+Green, same shape, after the fix (probed via
+=tools/ai/nelisp-ai.sh probe=, run against the built =target/nelisp=):
+
+#+begin_example
+(let ((b (generate-new-buffer "hw")))
+  (with-current-buffer b (insert "hello-world"))
+  (with-current-buffer b (buffer-string)))
+=> "hello-world"
+#+end_example
+
+=point-max= (§1.3's hardcoded-=1= bug): =(with-temp-buffer (insert "hi")
+(point-max))= was =1=, is now =3=. =goto-char=/=point=: void-function
+before, =(with-temp-buffer (insert "abcdef") (goto-char 3) (point))= is
+now =3=.
+
+** §8.3 Verification
+
+- *Standalone smoke* (Doc 187 §6.1's lesson: a host-ERT case of these
+  forms cannot distinguish the fix from the bug, §4.1):
+  =test/nelisp-buffer-unification-standalone-smoke.el=, run via
+  =make standalone-reader-buffer-smoke= against =target/nelisp= itself,
+  using =scripts/nelisp-ert-shim.el= (its first real consumer) — 6
+  =ert-deftest= cases (insert/buffer-string round trip, goto-char/point
+  agreement, point-min anchor, point-max no-longer-hardcoded, kill-buffer
+  then not-live, and the task's own "hello-world" =with-temp-file= +
+  =insert-file-contents= + =with-temp-buffer= round trip). All 6 pass.
+- *Host-ERT companion*: =test/nelisp-buffer-unification-test.el=, the
+  literal §4.1 P1 subset (test 3, needing =point-marker=, is P4 scope,
+  not added). Its own Commentary states plainly that it exercises host
+  Emacs's real functions, not this tree's — included because §4.1 asks
+  for it, not as evidence of this fix.
+- *Parity forms* (§4.2, host-comparable): the 4 forms from §4.2's table
+  added to =test/nelisp-shadow-differential-cases.el=; =make emacs-parity=
+  passes byte-identical against stock Emacs 30.1 (19942 bytes). =make
+  parity-coverage= rose from 259 to 264 covered names (=insert=,
+  =buffer-string=, =goto-char=, =point-max=, =with-temp-buffer= — =point=
+  itself is not in the tracked compat-table); baseline and =pinned= lines
+  raised in the same commit.
+- *Mutation row* (§4.3, new required gate =standalone-reader-buffer-
+  smoke=): =tools/gate-mutations.txt= gained a real row (the placeholder
+  in §4.3 named a variable, =nelisp--current-buffer-obj=, that does not
+  exist in the landed code; the real row targets the actual =insert=
+  call site). Confirmed by hand — mutated, forced a rebuild (the gate's
+  own conditional prerequisite only builds when no binary exists, so
+  =tools/nelisp-gate-mutation.sh= needed the same =rebuild_checked=
+  treatment already carved out for =emacs-parity=, for the identical
+  stale-binary reason), the smoke went from 6/6 to 2/6, reverted, rebuilt
+  clean. =make gate-mutation= now runs 15 rows, including this one, all
+  green.
+- *Housekeeping gates touched by the port itself*: =make ns-gate=/=make
+  ns-inventory= (the verbatim port makes every ported name collide,
+  byte-identically, with its own =src/nelisp-buffer.el= source —
+  =ns-collision=, not =-divergent=; 49 new =pinned-collision= lines,
+  baseline raised 180->225; the two =with-current-buffer=/=with-temp-
+  buffer= divergent pairs changed shape, re-pinned with fresh identities,
+  baseline lowered 124->121 since =with-temp-buffer= dropped from a
+  triple to a pair). =make partial-inventory= (misc.el's deleted stubs'
+  ignored-arg rows removed; the prelude's =bufferp= no longer ignores its
+  argument, its row removed too). =make prelude-toplevel-check=
+  (=cl-defstruct= added to the tool's own allowed-top-level-heads list —
+  a genuinely new, legitimate top-level shape, exactly the case its
+  Commentary invites; the =*Messages*= seed changed from a bare top-level
+  call to a =defvar=, avoiding the "call, not a definition" flag the same
+  way the =*scratch*= seed already did via =setq=).
+
+** §8.4 Battery
+
+=make compile=, =make parens-check=, =make generated-source-parse=,
+=tools/ai/nelisp-ai.sh check= (scoped verify), =tools/ai/nelisp-ai.sh
+standalone= (=standalone-reader-test= + =binary-size-ratchet= +
+=emacs-parity=), =tools/ai/nelisp-ai.sh smokes=, =tools/ai/nelisp-ai.sh
+test= (full ERT, host Emacs — =src/nelisp-buffer.el= untouched, so its
+own suite is unaffected), and =make substrate-parity-smoke= all pass. See
+the implementing commits' own messages for exact gate-report numbers;
+=target/gates/= reports are per-machine and untracked.
+
+Binary size: =target/nelisp= grew (the ported model + printer special
+case add real code to the baked-in prelude, as expected and as this
+task's own instructions anticipated — "buffer wiring may grow the
+binary"). =tools/nelisp-binary-size-baseline.txt= raised in the same
+commit as the growth, per that file's own ratchet convention.
+
+** §8.5 Files touched
+
+=scripts/nelisp-stdlib-prelude.el= (the port + standard-name wiring +
+printer fix), =lisp/nelisp-stdlib-misc.el= (dead-stub deletion),
+=test/nelisp-buffer-unification-test.el= (new),
+=test/nelisp-buffer-unification-standalone-smoke.el= (new),
+=test/nelisp-shadow-differential-cases.el= (§4.2 forms), =Makefile= (new
+=standalone-reader-buffer-smoke= target), =tools/ai/nelisp-ai.sh= (gate
+wired into =extras=), =tools/ai/gates.expected=,
+=tools/gate-mutations.txt=, =tools/nelisp-gate-mutation.sh=
+(=rebuild_checked= extended), =tools/nelisp-prelude-toplevel-check.el=
+(=cl-defstruct= allowed), =tools/partial-accepted.txt=,
+=scripts/nl-ns-accepted.el=, =tools/ns-inventory-baseline.txt=,
+=tools/parity-coverage-baseline.txt=,
+=tools/nelisp-binary-size-baseline.txt=.

@@ -1268,7 +1268,19 @@
        (condition-case e (format "%a" 1.0) (error e))
        (condition-case e (format "%A" 1.0) (error e))
        (condition-case e (format "%.3a" 1.5) (error e))
-       (condition-case e (format "%#a" 1.0) (error e)))
+       (condition-case e (format "%#a" 1.0) (error e))
+       ;; Doc 188 §4.2 (buffer unification P1).  `with-temp-buffer' uses an
+       ;; auto-named, caller-invisible buffer, so it cannot collide with
+       ;; the `generate-new-buffer "x"'/`" a b "' calls earlier in this
+       ;; file.  `insert'/`buffer-string' round-tripped "" before this
+       ;; phase (Doc 188 §1.3's disconnected-variable bug); `point-max'
+       ;; was hardcoded to 1 regardless of content.  `point-min' is
+       ;; already-correct anchor: must not regress the one thing that was
+       ;; already right.
+       (with-temp-buffer (insert "abc") (buffer-string))
+       (with-temp-buffer (insert "abcdef") (goto-char 3) (point))
+       (with-temp-buffer (insert "ab") (point-min))
+       (with-temp-buffer (insert "hi") (point-max)))
 )
 
 ;;; nelisp-shadow-differential-cases.el ends here

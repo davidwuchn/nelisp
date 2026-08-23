@@ -469,6 +469,19 @@ nl-condition-standalone-smoke
 nl-safe-standalone-smoke
 nl-resource-standalone-smoke
 #
+# standalone-reader-buffer-smoke: promoted 2026-08-23, Doc 188 Phase 1
+# (buffer unification), also `nelisp-ai.sh extras' (needs target/nelisp
+# built, does not build it).  Runs test/nelisp-buffer-unification-
+# standalone-smoke.el directly against target/nelisp via
+# scripts/nelisp-ert-shim.el (its first real consumer) -- a plain
+# host-Emacs ERT run of the same forms (test/nelisp-buffer-unification-
+# test.el) cannot distinguish this tree's own `insert'/`buffer-string'
+# wiring from host Emacs's, since host Emacs already has real
+# implementations of every name involved (Doc 188 §1.8/§4.1).
+# Red-proven 2026-08-23 by injecting the row in tools/gate-mutations.txt
+# that names this gate.
+standalone-reader-buffer-smoke
+#
 # substrate-presence-sweep (Task A, added same day as the addendum above):
 # own tier, `nelisp-ai.sh presence', not `extras' (see "SUBSTRATE PARITY"'s
 # addendum for the ~15-17 minute measurement).  OPTIONAL, not yet promoted
