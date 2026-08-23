@@ -1,20 +1,27 @@
 #+TITLE: Doc 193 — Extension assets: from gated to used, package by package
 #+AUTHOR: Claude (design), zawatton (direction)
 #+DATE: 2026-08-22
-#+STATUS: DRAFT — design only, no implementation.  One of the four packages
-#+STATUS: this doc covers (nl-safe) has already crossed the line this doc
-#+STATUS: is nominally designing for the other three — see §2, which treats
-#+STATUS: it as an existence proof rather than a hypothesis.
+#+STATUS: PARTIALLY IMPLEMENTED (2026-08-23) — §3's nl-condition flagship
+#+STATUS: consumer and §4 Phase 0/1's nelisp-actor build-time CPS transform
+#+STATUS: are implemented and verified (see §8 and #+VERIFIED-BY: below).
+#+STATUS: nl-safe (§2) was already an existence proof, unchanged by this
+#+STATUS: pass. nl-prelude (§5) needed no new work, per its own conclusion.
+#+STATUS: Still open, by design, not oversight: §4 Phase 2 (whether the CPS
+#+STATUS: transform generalizes beyond nelisp-actor) and §7's publication
+#+STATUS: judgment call (repo owner's, not this doc's, to make).
+#+VERIFIED-BY: nl-actor-standalone-smoke gate-mutation nelisp-native-artifact-gate ns-inventory fallback-inventory
 
 * Status
 
 | item     | value                                                             |
 |----------+--------------------------------------------------------------------|
 | Doc #    | 193                                                               |
-| State    | DRAFT                                                             |
+| State    | PARTIALLY IMPLEMENTED — §3 and §4 Phase 0/1 done; §4 Phase 2 and §7 still open by design |
 | Covers   | =packages/nl-condition=, =packages/nl-safe= (+nl-contract/nl-check), =packages/nelisp-actor=, =packages/nl-prelude= |
 | Parent   | Doc 168 (extension libraries), Doc 169 (nl-prelude/nl-condition), Doc 170 (nl-safe/nl-contract/nl-check) |
 | Reads    | =packages/*/README.org= x4, =tools/ai/gates.expected=, =recipes/README.org=, =recipes/stdio-service/README.org=, =recipes/checked-resources/README.org=, =scripts/nelisp-stdlib-prelude.el=, =lisp/nelisp-artifact.el= |
+| Implemented | §3: =nelisp-native-function-call= (=lisp/nelisp-artifact.el=) rewritten onto =nl-restart-case=/=nl-handler-bind=, differential-tested (=test/nelisp-artifact-test.el= "ladder-*"), end-to-end verified on =target/nelisp= (=tools/nelisp-native-artifact-gate.sh=). §4 Phase 0/1: =packages/nelisp-actor/src/nelisp-actor.el= loads standalone (soft =require= + runtime shim); =packages/nelisp-actor/scripts/nelisp-actor-cps-dump.el= generates =packages/nelisp-actor/generated/two-actor-exchange-cps.el=; standalone smoke =nl-actor-standalone-smoke= (=tools/gate-mutations.txt= row, red-proven); host-vs-generated parity =nelisp-actor-cps-parity-test.el=. |
+| Publication (§7) | Standing owner-held gate re-cited, not scheduled or satisfied by this pass — see §7.1: standalone verify PASS + CI green (the gate's since-modernized operational shape) both cited as ACHIEVED as of 2026-08-23, without resolving §7's mechanism/intent question or publishing anything, which stays the owner's call. |
 
 * 1. Current state, verified per package, not assumed uniform
 
@@ -310,6 +317,19 @@ resolves: none of =nl-condition=, =nl-safe=, =nl-prelude=, or
 whatever the standalone-readiness answer turns out to be, since all
 four are extension libraries *of* the substrate that gate concerns, not
 independent of it.
+
+** 7.1 2026-08-23 addendum: citing, not resolving, where the gate stands
+
+The gate's own operational shape has since been described, elsewhere,
+as modernized to two concrete conditions: a passing standalone verify
+and a green CI. Both are cited here as ACHIEVED as of 2026-08-23 —
+=tools/ai/nelisp-ai.sh check= (the standalone-relevant check tier) ran
+22/22 PASS on this clone the same day, and AI.md's Inner-loop section
+records the CI lane's own first green run — without this doc treating
+that as resolving §7's mechanism/intent question above, which remains
+open, or as authorization to publish anything: this doc does not
+publish, announce, or schedule a release, and that stays a call for the
+repo owner to make, not this section's.
 
 * 8. Verification design
 

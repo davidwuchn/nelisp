@@ -112,7 +112,15 @@ at rather than counted.  Five names were removed:
     ;; one it caught; counting it as a silent fallback was wrong in 13
     ;; places, all in nelisp-jit-strategy.el.
     nelisp--signal-wrong-type
-    nelisp--signal-arith)
+    nelisp--signal-arith
+    ;; Doc 168/169's `nl-condition' re-signal entry point (Doc 193 §3:
+    ;; `nelisp-native--tier-call' in lisp/nelisp-artifact.el catches a
+    ;; native exec tier's plain `error' only to hand it straight to
+    ;; `nl-signal', so `nl-handler-bind' frames further out can act on
+    ;; it pre-unwind).  Same shape as the `nelisp--signal-*' pair above:
+    ;; the condition is not swallowed, it is re-raised through a named
+    ;; wrapper this scanner did not know about yet.
+    nl-signal)
   "Names whose presence in a handler counts as not swallowing the error.")
 
 (defconst nelisp-fallback-inventory--kinds

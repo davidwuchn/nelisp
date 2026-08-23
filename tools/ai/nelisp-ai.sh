@@ -304,7 +304,8 @@ cmd_extras() {
              nl-condition-standalone-smoke \
              nl-safe-standalone-smoke \
              nl-resource-standalone-smoke \
-             standalone-reader-buffer-smoke; do
+             standalone-reader-buffer-smoke \
+             nl-actor-standalone-smoke; do
         printf '\n=== %s ===\n' "$g"
         ( cmd_gate "$g" -- make "$g" ) || failures=$((failures + 1))
     done

@@ -322,6 +322,37 @@ ns-prefix-violation 865
 # branch's own +1 on top of the merge-5/9 interim: 865 + 1 = 866.  To be
 # reconciled to the measured count in the battery.
 ns-prefix-violation 866
+#
+# 854 -> 858 on 2026-08-23: Doc 193 §3's `nl-condition' rewrite of
+# `nelisp-native-function-call' (lisp/nelisp-artifact.el) added four
+# private helpers named `nelisp-native--*'
+# (`nelisp-native--tier-call'/`-ensure-condition'/
+# `-condition-root-candidates'/`-condition-loaded'), matching the
+# `nelisp-native-*' family the un-renamed `nelisp-native-function-call'
+# already established in this same file -- the check wants
+# `nelisp-artifact--' here since that is the file's own feature name,
+# but the ladder's whole naming family (also `nelisp-native-function-p'
+# in src/nelisp-eval.el) predates this commit and stayed self-
+# consistent on purpose rather than mixing two prefixes across one
+# cohesive subsystem.
+# 858 -> 861 on 2026-08-23: Doc 193 §4.4 Phase 1's standalone runtime
+# shim in packages/nelisp-actor/src/nelisp-actor.el defines `iter-
+# next'/`iter-close'/`iter-end-of-sequence' (installed only when real
+# `generator.el' did not load).  These three cannot carry any
+# `nelisp-'/`nelisp-actor-' prefix: they exist to be a drop-in stand-in
+# for real generator.el's OWN public names, which this package's
+# existing code (`nelisp-actor--step') and a build-time-CPS-transformed
+# thunk's baked-in `(signal 'iter-end-of-sequence ...)' call by those
+# exact names -- prefixing them would just break both callers instead
+# of avoiding a finding.  `iter-empty', generator.el's fourth public
+# name, is deliberately NOT defined here (nothing calls it), so this is
+# +3, not +4.
+# integration/wave4 (this branch, merge 9/9): disjoint from all prior
+# additions (nl-condition ladder helpers + iter-* generator shim names),
+# interim ceiling adds this branch's own +7 (861-854) on top of the
+# merge-7/9 interim: 866 + 7 = 873.  To be reconciled to the measured
+# count in the battery.
+ns-prefix-violation 873
 # 611 -> 613 on 2026-08-20: `nelisp--check-string'/`--check-symbol' and the
 # other argument-check helpers are referenced from the lisp/ mirrors that
 # carry copies of the functions using them.  This is the kind this file

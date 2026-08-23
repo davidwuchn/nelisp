@@ -13,7 +13,8 @@
         nelisp-nelix-operational-gate \
         nelisp-runtime-image-cache-gate nelisp-source-command-substrate-gate \
         nl-condition-standalone-smoke nl-safe-standalone-smoke nl-resource-standalone-smoke \
-        standalone-reader-buffer-smoke
+        standalone-reader-buffer-smoke \
+        nl-actor-standalone-smoke nelisp-actor-cps-baseline nelisp-actor-cps-parity
 
 EMACS ?= emacs
 
@@ -405,6 +406,54 @@ standalone-reader-buffer-smoke: $(if $(wildcard target/nelisp target/nelisp.exe)
 	  exit 0; \
 	fi; \
 	"$$bin" --load test/nelisp-buffer-unification-standalone-smoke.el
+
+# Doc 193 §4.4 Phase 1: nelisp-actor's own standalone reality --
+# `generator.el' is not vendored for the substrate, so nothing built
+# from `(nelisp-actor-lambda ...)' directly can run here (see
+# packages/nelisp-actor/README.org).  Unlike the three smokes above,
+# this does NOT replay nelisp-actor-test.el's ERT bodies (those spawn
+# actors via the macro and stay host-Emacs-only by design); it runs
+# packages/nelisp-actor/generated/two-actor-exchange-cps.el -- the
+# checked-in build-time CPS transform of the ping-pong demo
+# (regenerate with `make nelisp-actor-cps-baseline') -- proving spawn/
+# mailbox/send/receive/yield/run-until-idle all work on the binary
+# itself.  Same conditional-build shape as the three above.
+nl-actor-standalone-smoke: $(if $(wildcard target/nelisp target/nelisp.exe),,standalone-reader)
+	@bin=./target/nelisp; [ -f "$$bin" ] || bin=./target/nelisp.exe; \
+	if [ ! -f "$$bin" ]; then \
+	  echo "GATE-SKIP no nelisp binary in target/ after build attempt"; \
+	  exit 0; \
+	fi; \
+	"$$bin" --load packages/nelisp-actor/test/nelisp-actor-standalone-smoke.el
+
+# Regenerates packages/nelisp-actor/generated/two-actor-exchange-cps.el
+# from examples/nelisp-actor/two-actor-exchange.el's `nelisp-demo-ping-
+# pong', under THIS host's real Emacs + generator.el (AI.md rule 7: the
+# recipe lives next to the generator, not in a session transcript).  Run
+# this after editing either that example or nelisp-actor.el's struct/
+# macros, then re-run `nl-actor-standalone-smoke' and `nelisp-actor-cps-
+# parity' to confirm the regenerated file still matches host-Emacs
+# behavior before committing it.
+nelisp-actor-cps-baseline:
+	$(EMACS) --batch -Q -L src -L packages/nelisp-actor/src \
+	  -l packages/nelisp-actor/scripts/nelisp-actor-cps-dump.el \
+	  --eval "(nelisp-actor-cps-dump-write \
+	            \"examples/nelisp-actor/two-actor-exchange.el\" \
+	            'nelisp-demo-ping-pong \
+	            \"packages/nelisp-actor/generated/two-actor-exchange-cps.el\" \
+	            'nelisp-demo-ping-pong-standalone)"
+
+# Doc 193 §8's host-Emacs half of the §4 verification design: the
+# generated forms behave identically to what real generator.el would
+# have produced (not just "it runs").  Also covered by plain `make
+# test' (the file matches the `packages/*/test/nelisp*-test.el' glob);
+# this target is the fast, standalone-file way to run just this check.
+nelisp-actor-cps-parity:
+	$(EMACS) --batch -Q -L lisp -L src -L test -L bench \
+	  $(PACKAGE_SRC_LOADS) $(PACKAGE_TEST_LOADS) \
+	  --eval '(setq load-prefer-newer t)' \
+	  -l ert -l packages/nelisp-actor/test/nelisp-actor-cps-parity-test.el \
+	  -f ert-run-tests-batch-and-exit
 
 # fboundp-liar audit: every name in the reader's builtin fboundp list must
 # have a dispatch arm (or be combiner-handled), so `fboundp' never lies the

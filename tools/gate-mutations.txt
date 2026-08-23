@@ -145,3 +145,21 @@ standalone-reader-test|scripts/nelisp-standalone-build.el|s#(/= (/ prod acc) v)#
 # row (`nelisp-standalone--reader-form-location-smoke') asserts the literal
 # substring "top-level form #2 (byte ...", so this must fail it.
 standalone-reader-form-location-smoke|scripts/nelisp-standalone-build.el|s/(setq form_index (+ form_index 1))/(setq form_index 1)/|every uncaught error reports "top-level form #1" regardless of which form actually failed
+# nl-actor-standalone-smoke: added 2026-08-23 (Doc 193 §4.4 Phase 1).
+# The injection reverts nelisp-actor.el's soft `(require 'generator nil
+# t)' back to the hard `(require 'generator)' it replaced -- i.e. it
+# reproduces, verbatim, the exact defect this whole phase fixed
+# (`nelisp: uncaught error: file-missing: generator', measured before
+# any change here and again with this exact injection applied).  Chosen
+# over mutating the generated CPS file or the scheduler/mailbox logic
+# after two of those (`(setf (nelisp-actor-status actor) actor)' and
+# `nelisp-actor--mailbox-pop' returning `(cdr box)' instead of `(car
+# box)') were tried by hand and BOTH hung target/nelisp instead of
+# failing cleanly (one grew to 15GB RSS before being killed) -- a
+# corrupted status or mailbox value defeats `nelisp-actor-run-until-
+# idle''s termination on this substrate rather than erroring the way
+# host Emacs does, which is a real, separate, un-investigated
+# divergence this row deliberately does not depend on.  This injection
+# fails at the very first `load' statement, before any scheduling code
+# runs, so it cannot hit that class of problem.
+nl-actor-standalone-smoke|packages/nelisp-actor/src/nelisp-actor.el|s/^(require 'generator nil t)$/(require 'generator)/|nelisp-actor becomes unloadable standalone again (file-missing: generator), the exact pre-Doc-193-§4 defect
