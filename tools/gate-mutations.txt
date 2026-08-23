@@ -173,3 +173,25 @@ nl-actor-standalone-smoke|packages/nelisp-actor/src/nelisp-actor.el|s/^(require 
 # this smoke's own fencepost/printing/GC-stress checks, not by any
 # pre-existing gate (no prior gate constructs a tag-13 Sexp at all).
 standalone-reader-bignum-smoke|scripts/nelisp-standalone-build.el|s/(seq (ptr-write-u8  result_slot 0  13)/(seq (ptr-write-u8  result_slot 0  2)/|a constructed bignum is mis-tagged as a plain Int (its sign word read back as the "value"), corrupting bignump/prin1/comparison for every bignum the reader produces
+# standalone-reader-frame-stack-pop-desync-smoke: added 2026-08-23 (Doc 180
+# Phase 2 item 1).  The injection reverts `nelisp_eval_call_recorded_done''s
+# pop back to unconditional -- the exact pre-fix defect -- by deleting the
+# `pushed' guard the fix added.  The identical substring appears a second
+# time in `nl_driver_eval_with_recorded_roots' (the same fix, same shape,
+# applied there too); the sed has no `/g' but matches the whole line so
+# both occurrences (one per line) are reverted.  Only the first matters for
+# this smoke (it goes through `nelisp_eval_call', not the driver-level
+# wrapper), and reverting the second is harmless here since nothing in this
+# smoke exercises it.  Measured RED with this exact injection applied:
+# depth=5 at the checkpoint (want 1024); GREEN with it removed.
+standalone-reader-frame-stack-pop-desync-smoke|scripts/nelisp-standalone-build.el|s/(if (= pushed 1) (nl_gc_ctx_pop) 0)/(nl_gc_ctx_pop)/|the recorded frame-stack depth counter under-counts during unwind past the ring's capacity (the pop/depth-cap desync this smoke exists to catch)
+# standalone-reader-bounded-backtrace-smoke: added 2026-08-23 (Doc 180
+# Phase 2 item 3).  The injection reverses `nl_bt_capture_frames_from''s
+# write index, so buffer slot 0 receives the INNERMOST ring frame instead
+# of the outermost one of the captured window -- the captured window's
+# names come out reversed (outermost-first: level-a, level-b, level-c,
+# error) instead of innermost-first.  Measured RED with this exact
+# injection applied: "nelisp-doc180-level-c" not found after "error"'s
+# position (the smoke's own ordered-position check); GREEN with it
+# removed.
+standalone-reader-bounded-backtrace-smoke|scripts/nelisp-standalone-build.el|s/(ptr-write-u64 (+ (data-addr nl_bt_snapshot) (+ 16 (\* i 8))) 0/(ptr-write-u64 (+ (data-addr nl_bt_snapshot) (+ 16 (* (- count (+ i 1)) 8))) 0/|the bounded backtrace prints outermost-first instead of innermost-first (the capture write index is reversed)

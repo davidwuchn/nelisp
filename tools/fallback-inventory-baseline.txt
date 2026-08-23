@@ -147,7 +147,16 @@ silent-fallback        57
 # only defect was leaving a stale duplicate directive line in the file
 # instead of replacing it. Removed the duplicate; single line below now
 # matches the measured count.
-ignore-errors   54
+# 54 -> 59 on 2026-08-23 (Doc 180 Phase 2): five new sites, reviewed and
+# pinned below -- `nelisp-standalone--reader-frame-stack-pop-desync-
+# smoke''s temp load-file cleanup (one site, same best-effort shape every
+# sibling `reader-*-smoke' already uses) and
+# `nelisp-standalone--reader-bounded-backtrace-smoke''s four (its two
+# fixture-file cleanups, `dormant-file'/`armed-file', plus its two
+# per-run stderr-file cleanups -- textually identical to each other
+# since both reuse the local name `stderr-file', so they pin to the same
+# hash at count 2, not two separate hash rows).
+ignore-errors   59
 # 34 -> 32 on 2026-08-19: the two handlers in
 # `nelisp-artifact--ensure-native-compiler' now record the error instead of
 # discarding it.  Between them they had hidden a chain of six failures --
@@ -246,6 +255,10 @@ pinned-site ignore-errors	nelisp-standalone-build.el	defun nelisp-standalone--re
 pinned-site ignore-errors	nelisp-standalone-build.el	defun nelisp-standalone--reader-large-quoted-alist-mutation-smoke	7a85c44cdaf9 1
 pinned-site ignore-errors	nelisp-standalone-build.el	defun nelisp-standalone--reader-malformed-input-smoke	b58994cdbf57 1
 pinned-site ignore-errors	nelisp-standalone-build.el	defun nelisp-standalone--reader-malformed-input-smoke--rm	dd8bb1462f63 1
+pinned-site ignore-errors	nelisp-standalone-build.el	defun nelisp-standalone--reader-frame-stack-pop-desync-smoke	4f1f2f39ef95 1
+pinned-site ignore-errors	nelisp-standalone-build.el	defun nelisp-standalone--reader-bounded-backtrace-smoke	7d6ddaad377d 1
+pinned-site ignore-errors	nelisp-standalone-build.el	defun nelisp-standalone--reader-bounded-backtrace-smoke	323d67589a84 1
+pinned-site ignore-errors	nelisp-standalone-build.el	defun nelisp-standalone--reader-bounded-backtrace-smoke	b58994cdbf57 2
 pinned-site ignore-errors	nelisp-standalone-build.el	defun nelisp-standalone--reader-repl-smoke	12ae73a754c4 1
 pinned-site ignore-errors	nelisp-standalone-build.el	defun nelisp-standalone--reader-repl-smoke	614d75952366 1
 pinned-site ignore-errors	nelisp-standalone-build.el	defun nelisp-standalone--reader-setcar-setcdr-type-smoke	7a85c44cdaf9 1

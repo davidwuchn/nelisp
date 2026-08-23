@@ -117,7 +117,16 @@
 # is the arithmetic union against the shared 562 base: 562 + (564-562) +
 # (590-562) = 592.  To be reconciled to the measured count in the
 # battery.
-unsafe-call 592
+# 592 -> 593 on 2026-08-23 (Doc 180 Phase 2 item 3): one new site, in
+# `nl_eval_source_print_error''s own backquote generator (`nelisp-
+# standalone--eval-source-report-error-form') -- the one `ptr-read-u64'
+# gating whether to call `nl_bt_print_backtrace' after the location line.
+# Everything else Phase 2 added (the capture/render helpers themselves,
+# the desync fix, the new debug-switch codes) lives inside `nelisp-
+# standalone--shim-source''s plain-quoted block, so it falls in the
+# "inside quoted forms" bucket above, not this gated one -- same shape as
+# every other addition to that block already does.
+unsafe-call 593
 
 # `pinned-kernel-call FILE COUNT' pins the per-file unquoted `unsafe-call'
 # count behind `total' above -- the three kernel files that actually carry
@@ -134,4 +143,6 @@ pinned-kernel-call scripts/nelisp-flat-arena-probe.el 6
 # standard-names repl idle-pump) + 28 (form-located-errors) = 568,
 # interim, both branches' additions to this file being disjoint call
 # sites; to be reconciled to the measured count in the battery.
-pinned-kernel-call scripts/nelisp-standalone-build.el 568
+# 568 -> 569 on 2026-08-23 (Doc 180 Phase 2 item 3): the one new
+# unquoted call noted above.
+pinned-kernel-call scripts/nelisp-standalone-build.el 569

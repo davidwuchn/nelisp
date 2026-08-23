@@ -575,7 +575,22 @@ storage — not an arena reservation."
    ;;   +48 checked-alloc count       +56 verified-free count
    ;;   +64 leak-scan live count      +72 leak-scan live bytes
    ;;   +80/+88 spare.  BSS zero-fill = disabled by default.
-   (list (cons 'bss (+ 57616 1048576 96)))
+   ;; Doc 180 Phase 2 item 3: nl_bt_snapshot @ +57616+1MiB+96 (right after
+   ;; nl_alloc_check) = a 176-byte bounded backtrace side buffer, captured
+   ;; from the live ring (`nl_gc_loop_ctx') at the innermost point of an
+   ;; uncaught signal/throw, before any pop erases it -- see
+   ;; `nelisp_eval_call_recorded_done' (the capture) and
+   ;; `nl_eval_source_print_error' (the render).  Slots:
+   ;;   +0  has-snapshot flag (0/1; reset to 0 once per top-level form by
+   ;;       `nl_driver_eval_with_recorded_roots', set to 1 by the first
+   ;;       `nelisp_eval_call_recorded_done' to see a non-zero rc for that
+   ;;       form -- so a re-propagating rc from a shallower frame never
+   ;;       overwrites the innermost capture)
+   ;;   +8  captured frame count N (0..20)
+   ;;   +16..+175 up to 20 form_ptr words, ring order (index 0 = outermost
+   ;;       of the captured window), 8 bytes each.  BSS zero-fill = no
+   ;;       snapshot, exactly like every other slot in this unit.
+   (list (cons 'bss (+ 57616 1048576 96 176)))
    (list (nelisp-link-symbol "nl_arena_base" 0
                              :section 'bss :bind 'global :type 'object)
          (nelisp-link-symbol "nl_rootstack_top" 8
@@ -607,6 +622,8 @@ storage — not an arena reservation."
          (nelisp-link-symbol "nl_dynalign_rsp_save" (+ 57560 1048576)
                              :section 'bss :bind 'global :type 'object)
          (nelisp-link-symbol "nl_alloc_check" (+ 57616 1048576)
+                             :section 'bss :bind 'global :type 'object)
+         (nelisp-link-symbol "nl_bt_snapshot" (+ 57616 1048576 96)
                              :section 'bss :bind 'global :type 'object))
    nil))
 
@@ -3528,10 +3545,140 @@ argument (reachability + in-arena bounds checks).")
                   0)
               0))
         0))
+    ;; Doc 180 Phase 2 item 2: a SECOND, independent arm bit for
+    ;; `nelisp_eval_call''s push, at ctx+48 -- unused padding inside the
+    ;; existing 64-byte header (depth@0/enable@8/precise_only@16/
+    ;; in_progress@24/alloc_debt@32/alloc_limit@40 already account for only
+    ;; 48 of the 64 header bytes; frames start at +64).  ctx+8 (`enable') is
+    ;; left with its exact pre-existing meaning and its exact pre-existing
+    ;; callers (`nl_gc_midform_collect''s gate, `bf_debug_switch' codes
+    ;; 5/6): arming the mid-form collector has always also armed the push,
+    ;; and still does.  ctx+48 arms the push WITHOUT arming the collector --
+    ;; `nl_gc_midform_collect' never reads ctx+48, so a build that only
+    ;; wants frame-stack recording (for a bounded backtrace on an uncaught
+    ;; error) never pays for or risks the mid-form collector Doc 152 built
+    ;; this stack for.  `bf_debug_switch' codes 22/23 toggle ctx+48; see
+    ;; `nl_gc_frame_record_armed_p''s callers for where the OR of the two
+    ;; bits is actually read.
+    (defun nl_gc_frame_record_armed_p ()
+      (if (= (ptr-read-u64 (data-addr nl_gc_loop_ctx) 8) 1) 1
+        (if (= (ptr-read-u64 (data-addr nl_gc_loop_ctx) 48) 1) 1 0)))
+    ;; Doc 180 Phase 2 item 3: capture the innermost <=20 recorded frames
+    ;; into `nl_bt_snapshot' the FIRST time an armed call sees a non-zero
+    ;; rc for the current top-level form (see `nelisp_eval_call_recorded_
+    ;; done', the sole caller).  `nl_gc_loop_ctx' depth@+0 at this exact
+    ;; moment -- before THIS frame's own pop -- is the deepest, most
+    ;; complete view of the live call chain: the frame where the signal/
+    ;; throw actually originated is still recorded (its own push already
+    ;; happened, its own pop has not).  A shallower, re-propagating call to
+    ;; this same function later in the unwind sees has-snapshot already 1
+    ;; and skips, so the FIRST (innermost) capture wins.
+    (defun nl_bt_capture_frames_from (ring_start count i)
+      (if (>= i count) 0
+        (nl_seq2
+         (ptr-write-u64 (+ (data-addr nl_bt_snapshot) (+ 16 (* i 8))) 0
+                        (ptr-read-u64
+                         (+ (data-addr nl_gc_loop_ctx)
+                            (+ 64 (* (+ ring_start i) 56)))
+                         8))
+         (nl_bt_capture_frames_from ring_start count (+ i 1)))))
+    (defun nl_bt_capture_now ()
+      (let* ((depth (ptr-read-u64 (data-addr nl_gc_loop_ctx) 0))
+             (n (if (< depth 20) depth 20))
+             (ring_start (- depth n)))
+        (seq
+         (ptr-write-u64 (data-addr nl_bt_snapshot) 0 1)
+         (ptr-write-u64 (data-addr nl_bt_snapshot) 8 n)
+         (nl_bt_capture_frames_from ring_start n 0)
+         0)))
+    (defun nl_bt_maybe_capture (rc)
+      (if (= rc 0) 0
+        (if (= (ptr-read-u64 (data-addr nl_bt_snapshot) 0) 1) 0
+          (nl_bt_capture_now))))
+    ;; Doc 180 Phase 2 item 3: render the captured snapshot.  A frame's own
+    ;; `form_ptr' is the whole form being evaluated, not a function name --
+    ;; when it is a call shape (Sexp tag 7 = Cons), the operator in car is
+    ;; the closest thing to a "function name" this frame has (matches
+    ;; Emacs's own backtrace, which also names the operator, not the whole
+    ;; form); anything else (a bare variable reference, a self-evaluating
+    ;; literal, ...) is printed as-is.  A null form_ptr (defensive; not
+    ;; expected for a real push) prints as nil rather than risking a null
+    ;; deref.
+    (defun nl_bt_frame_name_ptr (form_ptr)
+      (if (= form_ptr 0)
+          (let* ((nilslot (alloc-bytes 32 8)))
+            (nl_seq2 (wf_write_nil nilslot) nilslot))
+        (if (= (ptr-read-u8 form_ptr 0) 7) (nl_cons_car_ptr form_ptr) form_ptr)))
+    (defun nl_bt_print_frame (i form_ptr)
+      (let* ((idx_slot (alloc-bytes 32 8))
+             (idx_ms (alloc-bytes 32 8)) (idx_repr (alloc-bytes 32 8))
+             (name_ms (alloc-bytes 32 8)) (name_repr (alloc-bytes 32 8))
+             (punct_buf (alloc-bytes 4 1))
+             (nl_buf (alloc-bytes 1 1)))
+        (seq
+         (wf_write_int idx_slot i)
+         (mut-str-make-empty idx_ms 32)
+         (m5_prin1 idx_ms idx_slot)
+         (mut-str-finalize idx_ms idx_repr)
+         (ptr-write-u8 punct_buf 0 32) (ptr-write-u8 punct_buf 1 32) ; "  "
+         (nl_os_write_stderr punct_buf 2)
+         (nl_os_write_stderr (nl_bi_strptr idx_repr) (nl_bi_strlen idx_repr))
+         (ptr-write-u8 punct_buf 2 58) (ptr-write-u8 punct_buf 3 32) ; ": "
+         (nl_os_write_stderr (+ punct_buf 2) 2)
+         (mut-str-make-empty name_ms 32)
+         (m5_prin1 name_ms (nl_bt_frame_name_ptr form_ptr))
+         (mut-str-finalize name_ms name_repr)
+         (nl_os_write_stderr (nl_bi_strptr name_repr) (nl_bi_strlen name_repr))
+         (ptr-write-u8 nl_buf 0 10)
+         (nl_os_write_stderr nl_buf 1)
+         0)))
+    ;; Innermost-first: I descends from the last captured index to 0, and
+    ;; `nl_bt_snapshot' stores the ring in push order (index 0 = outermost
+    ;; of the captured window), so counting DOWN here prints the frame
+    ;; closest to where the error actually happened first.
+    (defun nl_bt_print_frames_from (i)
+      (if (< i 0) 0
+        (nl_seq2
+         (nl_bt_print_frame
+          i (ptr-read-u64 (+ (data-addr nl_bt_snapshot) (+ 16 (* i 8))) 0))
+         (nl_bt_print_frames_from (- i 1)))))
+    (defun nl_bt_print_backtrace ()
+      (let* ((hdr_buf (alloc-bytes 32 1)))
+        (seq
+         ;; "backtrace (innermost first):\n" (29 bytes), packed LE the same
+         ;; way `bf_wrong_type_consp' &c. hand-encode short literals inside
+         ;; this plain-quoted shim source (no backquote splice available
+         ;; here for `nelisp-standalone--byte-write-forms').
+         (ptr-write-u64 hdr_buf 0 7161130726839247202)
+         (ptr-write-u64 (+ hdr_buf 8) 0 8243116113461256293)
+         (ptr-write-u64 (+ hdr_buf 16) 0 8244232882457112429)
+         (ptr-write-u64 (+ hdr_buf 24) 0 43925468275)
+         (nl_os_write_stderr hdr_buf 29)
+         (nl_bt_print_frames_from
+          (- (ptr-read-u64 (data-addr nl_bt_snapshot) 8) 1))
+         0)))
     (defun nelisp_eval_call_done (rc rec_cur rec_cur_addr _pad)
           (nl_seq2 (ptr-write-u64 rec_cur_addr 0 rec_cur) rc))
-        (defun nelisp_eval_call_recorded_done (rc form_ptr env out rec_cur rec_cur_addr)
-          (seq (nl_gc_ctx_pop)
+        ;; fix/gc-ctx-pop-desync (Doc 180 Phase 2 item 1): PUSHED must gate the
+        ;; pop the same way the depth cap gated the push.  `nl_gc_eval_ctx_push'
+        ;; silently no-ops (returns 0, does not touch depth@+0) once depth >=
+        ;; `nl_gc_ctx_max_depth' -- but this function used to call
+        ;; `nl_gc_ctx_pop' UNCONDITIONALLY on every call, regardless of whether
+        ;; its own paired push actually stored a frame.  Once recursion passed
+        ;; the ring's capacity, every further-nested call's return "borrowed" a
+        ;; decrement its own push never earned: depth@+0 walked down to 0 while
+        ;; real, still-live frames (the ones that DID push, still on the native
+        ;; call stack, not yet returned) were still owed their place in the
+        ;; window `nl_gc_mark_recorded_contexts' considers live.  A mid-form
+        ;; collect firing in that window would mark only `[0, depth)' of the
+        ;; ring and miss those frames' roots.  PUSHED (nl_gc_eval_ctx_push's
+        ;; own 1/0 return, now threaded through instead of discarded) makes
+        ;; the pop exactly as conditional as the push it is undoing.  See
+        ;; `nelisp-standalone--reader-frame-stack-pop-desync-smoke' for the
+        ;; against-the-bug proof (RED before this fix, GREEN after).
+        (defun nelisp_eval_call_recorded_done (rc form_ptr env out rec_cur rec_cur_addr pushed)
+          (seq (nl_bt_maybe_capture rc)
+               (if (= pushed 1) (nl_gc_ctx_pop) 0)
                (nl_seq2 (ptr-write-u64 rec_cur_addr 0 rec_cur) rc)))
         (defun nelisp_eval_call_stash_excessive_lisp_nesting (_env rec_max)
           (let* ((tag_buf (alloc-bytes 24 1)))
@@ -3555,12 +3702,11 @@ argument (reachability + in-arena bounds checks).")
               (if (>= rec_cur rec_max)
                   (nelisp_eval_call_stash_excessive_lisp_nesting env rec_max)
                 (nl_seq2 (ptr-write-u64 rec_cur_addr 0 (+ rec_cur 1))
-                  (if (= (ptr-read-u64 (data-addr nl_gc_loop_ctx) 8) 1)
-                      (seq
-                       (nl_gc_eval_ctx_push env form_ptr out 0)
+                  (if (= (nl_gc_frame_record_armed_p) 1)
+                      (let* ((pushed (nl_gc_eval_ctx_push env form_ptr out 0)))
                        (nelisp_eval_call_recorded_done
                         (nl_eval_inner form_ptr env out 0)
-                        form_ptr env out rec_cur rec_cur_addr))
+                        form_ptr env out rec_cur rec_cur_addr pushed))
                     (nelisp_eval_call_done
                      (nl_eval_inner form_ptr env out 0)
                      rec_cur rec_cur_addr 0)))))))))
@@ -4498,8 +4644,21 @@ unresolved at link time."
     ;;   20 = disable checked mode entirely (enable + armed + poison off).
     ;;   21 = set the current alloc-site id to ARG1 (stamped into the
     ;;        site word of every subsequent checked allocation).
+    ;; Doc 180 Phase 2 item 2: frame-stack recording, independent of the
+    ;; mid-form collector 5/6 already (also) arms.
+    ;;   22 = arm `nelisp_eval_call''s frame push ONLY (ctx+48=1).  The
+    ;;        mid-form collector's own gate (ctx+8, still exactly what 5/6
+    ;;        toggle) is untouched, so this does not enable mid-form
+    ;;        collection -- see `nl_gc_frame_record_armed_p'.
+    ;;   23 = disarm (ctx+48=0).
     ;; Unknown codes return 0 (same as the historical default arm).
     (defun bf_debug_switch_ext (args)
+      (if (= (wf_argval args 0) 22)
+          (nl_seq2 (ptr-write-u64 (data-addr nl_gc_loop_ctx) 48 1) 0)
+        (if (= (wf_argval args 0) 23)
+            (nl_seq2 (ptr-write-u64 (data-addr nl_gc_loop_ctx) 48 0) 0)
+          (bf_debug_switch_ext2 args))))
+    (defun bf_debug_switch_ext2 (args)
       (if (= (wf_argval args 0) 19)
           (seq
            (ptr-write-u64 (data-addr nl_alloc_check) 0 1)
@@ -9584,10 +9743,24 @@ baked build's own `<'/`>'/`=' arms need it too.")
     ;; collect (in nl_sf_while) can invoke a sound collect.  push BEFORE eval /
     ;; pop AFTER (the boundary collect stays the direct nl_gc_collect and reads
     ;; the driver locals, not the ctx, so popping here is fine).  Returns rc.
+    ;; fix/gc-ctx-pop-desync (Doc 180 Phase 2 item 1): the same conditional-pop
+    ;; shape as `nelisp_eval_call_recorded_done' -- `nl_gc_ctx_push' no-ops
+    ;; past the depth cap, so its own matching pop must no-op too, or a
+    ;; sufficiently deep chain of nested driver-level evals (e.g. `load'
+    ;; recursively `load'-ing past 1024 levels) has the identical
+    ;; over-decrement risk.  PUSHED gates it.
+    ;; Doc 180 Phase 2 item 3: this is the ONE place every top-level form's
+    ;; eval funnels through (`bf_load_eval_loop', `bf_eval_source_string_
+    ;; loop' and `nl_eval_source_all''s own call site all call this, not
+    ;; `nelisp_eval_call' directly), so resetting `nl_bt_snapshot''s
+    ;; has-snapshot flag here -- once per top-level form, before that
+    ;; form's own eval starts -- covers all of them uniformly instead of
+    ;; needing a reset at each caller.
     (defun nl_driver_eval_with_recorded_roots (result env out pool src cursor bsym)
-      (seq (nl_gc_ctx_push env result out pool src cursor bsym)
-           (let* ((rc (nelisp_eval_call result env out)))
-             (seq (nl_gc_ctx_pop) rc))))
+      (let* ((pushed (nl_gc_ctx_push env result out pool src cursor bsym)))
+        (seq (ptr-write-u64 (data-addr nl_bt_snapshot) 0 0)
+             (let* ((rc (nelisp_eval_call result env out)))
+               (seq (if (= pushed 1) (nl_gc_ctx_pop) 0) rc)))))
     (defun bf_load_eval_loop (src cursor result pool env out bsym more)
       (while (= more 1)
         (seq
@@ -14579,6 +14752,16 @@ no-catch tail above, not this defensive path."
                (nl_bi_strptr ,val-repr) (nl_bi_strlen ,val-repr))))
            (ptr-write-u8 ,nl-buf 0 10)
            (nl_os_write_stderr ,nl-buf 1)
+           ;; Doc 180 Phase 2 item 3: a bounded backtrace, after the
+           ;; location line, only when `nl_bt_snapshot' actually holds one
+           ;; (the frame stack was armed AND this error's innermost frame
+           ;; was captured -- see `nl_bt_maybe_capture').  Dormant/unarmed
+           ;; runs never set the flag, so this is the one extra branch the
+           ;; whole feature costs on the (already cold, rare) error path
+           ;; when nobody asked for a trace.
+           (if (= (ptr-read-u64 (data-addr nl_bt_snapshot) 0) 1)
+               (nl_bt_print_backtrace)
+             0)
            0)))
       (defun nl_eval_source_report_error (file_ptr file_len form_index form_start line_no)
         (seq
@@ -20090,7 +20273,9 @@ loader when it is absent."
                                  nelisp-standalone--reader-repl-smoke
                                  nelisp-standalone--reader-control-flow-smoke
                                  nelisp-standalone--reader-malformed-input-smoke
-                                 nelisp-standalone--reader-form-location-smoke))
+                                 nelisp-standalone--reader-form-location-smoke
+                                 nelisp-standalone--reader-frame-stack-pop-desync-smoke
+                                 nelisp-standalone--reader-bounded-backtrace-smoke))
                   (funcall smoke)
                   (setq checked (1+ checked)))
                 (message "GATE-COUNT checked=%d findings=0" checked)
@@ -21588,6 +21773,172 @@ the one line just read, not a running session count)."
         (kill-emacs 0))
     (error
      (message "[standalone-reader] FAIL: form-location smoke: %s"
+              (error-message-string err))
+     (kill-emacs 1))))
+
+(defun nelisp-standalone--reader-frame-stack-pop-desync-smoke ()
+  "Doc 180 Phase 2 item 1: against-the-bug proof for the gc-context frame
+stack's pop/depth-cap desync (`nl_gc_eval_ctx_push' / `nelisp_eval_call_
+recorded_done' in `scripts/nelisp-standalone-build.el').
+
+Arms the frame stack (`(nelisp--debug-switch 5)'), then runs a self-
+recursive, non-tail (so it has real post-recursive-call work to hang a
+mid-unwind checkpoint on) function 3000 levels deep -- three times the
+ring's own 1024-frame capacity (`nl_gc_ctx_max_depth').  The checkpoint
+fires from inside the function's own body, when the unwind has returned
+exactly 1000 of the deepest frames (all of them past the ring's capacity,
+so none of their own pushes ever touched the recorded depth) -- roughly
+2000 shallower frames, pushed early enough during the descent that their
+pushes DID succeed, are still genuinely open on the native call stack at
+that moment, not yet returned.
+
+A correct implementation reports the ring still at its capacity, 1024,
+unchanged since none of the 1000 already-returned frames ever incremented
+it and (post-fix) none of their pops decrement it either.  The pre-fix bug
+-- `nelisp_eval_call_recorded_done' popped unconditionally, whether or not
+its own paired push had actually stored a frame -- \"borrows\" a decrement
+for every one of those 1000 never-pushed frames too, walking the recorded
+depth down to (empirically, on the unfixed tree) single digits while
+~2000 genuinely still-open frames remain unaccounted for.  A mid-form
+collect firing in that window would mark only `[0, depth)' of the ring
+and miss those live frames' env/result/out roots -- this smoke measures
+the counter directly rather than trying to race an actual collection,
+since the corruption is in the bookkeeping itself and does not depend on
+one firing.
+
+Measured against-the-bug (merge-base eb4eb81f3, before this phase's fix):
+DEPTH=5 at the checkpoint.  After the fix (conditional pop, gated on the
+matching push's own 1/0 return): DEPTH=1024."
+  (let* ((total-depth 3000)
+         (checkpoint 1000)
+         (src (concat
+               "(nelisp--debug-switch 5)\n"
+               "(defun nelisp-doc180-h (n)\n"
+               "  (if (= n 0)\n"
+               "      0\n"
+               "    (let ((r (nelisp-doc180-h (- n 1))))\n"
+               "      (if (= n " (number-to-string checkpoint) ")\n"
+               "          (princ (format \"DEPTH=%s;\" (nth 6 (nelisp--debug-switch 0)))))\n"
+               "      (+ 1 r))))\n"
+               "(nelisp-doc180-h " (number-to-string total-depth) ")\n"))
+         (load-file (make-temp-file "nelisp-frame-stack-desync-" nil ".el"))
+         (rc nil) (out nil))
+    (unwind-protect
+        (progn
+          (with-temp-file load-file (insert src))
+          (with-temp-buffer
+            (setq rc (call-process nelisp-standalone--reader-out nil
+                                    (list t nil) nil "--load" load-file))
+            (setq out (buffer-string)))
+          (unless (string-match "DEPTH=\\([0-9]+\\);" out)
+            (error "frame-stack pop-desync smoke: no DEPTH= line: exit=%S stdout=%S"
+                   rc out))
+          (let ((observed (string-to-number (match-string 1 out))))
+            (unless (= observed 1024)
+              (error (concat "frame-stack pop-desync smoke: depth=%d at the "
+                              "checkpoint (want 1024 -- ~2000 genuinely-open "
+                              "frames are still live at this point in the "
+                              "unwind; see nelisp_eval_call_recorded_done)")
+                     observed))))
+      (ignore-errors (delete-file load-file))))
+  (message "[standalone-reader] frame-stack pop-desync smoke PASS"))
+
+;;;###autoload
+(defun nelisp-standalone-reader-frame-stack-pop-desync-test ()
+  "Build the reader binary and run only the frame-stack pop-desync smoke.
+Exits 0/1."
+  (nelisp-standalone-build-reader)
+  (condition-case err
+      (progn
+        (nelisp-standalone--reader-frame-stack-pop-desync-smoke)
+        (kill-emacs 0))
+    (error
+     (message "[standalone-reader] FAIL: frame-stack pop-desync smoke: %s"
+              (error-message-string err))
+     (kill-emacs 1))))
+
+(defun nelisp-standalone--reader-bounded-backtrace-smoke ()
+  "Doc 180 Phase 2 item 3: against-the-bug proof for the bounded backtrace.
+
+Today (frame stack dormant, the default): an uncaught error prints only
+Phase 1's location line -- no trace of the call chain that led to it.
+After (frame stack armed via `(nelisp--debug-switch 22)', the opt-in,
+collector-free arm added by Phase 2 item 2): the same error additionally
+prints a bounded backtrace naming the call chain, innermost first.
+
+The fixture is a known 3-level chain (`level-a' -> `level-b' -> `level-c'
+-> `(error ...)'), so the DoD's \"verify frame names against a known call
+chain\" is checked by asserting the four names -- error, level-c, level-b,
+level-a -- appear after the \"backtrace (innermost first):\" header in
+that exact order (`string-match' from a search position that only ever
+advances), which is what innermost-first means for this chain: the
+`error' call itself is the frame closest to where the signal happened,
+`level-a' (the outermost caller) is furthest.  Also confirms the dormant
+run has no \"backtrace\" text at all, so this is a real before/after
+pair, not just a positive assertion."
+  (let* ((src (concat
+               "(defun nelisp-doc180-level-a () (nelisp-doc180-level-b))\n"
+               "(defun nelisp-doc180-level-b () (nelisp-doc180-level-c))\n"
+               "(defun nelisp-doc180-level-c () (error \"boom\"))\n"
+               "(nelisp-doc180-level-a)\n"))
+         (arm-line "(nelisp--debug-switch 22)\n")
+         (dormant-file (make-temp-file "nelisp-bt-dormant-" nil ".el"))
+         (armed-file (make-temp-file "nelisp-bt-armed-" nil ".el")))
+    (unwind-protect
+        (progn
+          (with-temp-file dormant-file (insert src))
+          (with-temp-file armed-file (insert arm-line) (insert src))
+          ;; Dormant: no backtrace text at all -- today's behavior.
+          (let* ((stderr-file (make-temp-file "nelisp-bt-dormant-stderr-"))
+                 dormant-err)
+            (unwind-protect
+                (progn
+                  (call-process nelisp-standalone--reader-out nil
+                                (list nil stderr-file) nil "--load" dormant-file)
+                  (with-temp-buffer
+                    (insert-file-contents stderr-file)
+                    (setq dormant-err (buffer-string))))
+              (ignore-errors (delete-file stderr-file)))
+            (when (string-match-p "backtrace" dormant-err)
+              (error "bounded-backtrace smoke: dormant run printed a backtrace: %S"
+                     dormant-err)))
+          ;; Armed: bounded backtrace, innermost-first, names matching the
+          ;; known call chain in order.
+          (let* ((stderr-file (make-temp-file "nelisp-bt-armed-stderr-"))
+                 armed-err)
+            (unwind-protect
+                (progn
+                  (call-process nelisp-standalone--reader-out nil
+                                (list nil stderr-file) nil "--load" armed-file)
+                  (with-temp-buffer
+                    (insert-file-contents stderr-file)
+                    (setq armed-err (buffer-string))))
+              (ignore-errors (delete-file stderr-file)))
+            (unless (string-match "backtrace (innermost first):" armed-err)
+              (error "bounded-backtrace smoke: no backtrace header: %S" armed-err))
+            (let ((pos (match-end 0)))
+              (dolist (name '("error" "nelisp-doc180-level-c"
+                               "nelisp-doc180-level-b" "nelisp-doc180-level-a"))
+                (unless (string-match (regexp-quote name) armed-err pos)
+                  (error (concat "bounded-backtrace smoke: %S not found after "
+                                  "position %d (innermost-first order broken): %S")
+                         name pos armed-err))
+                (setq pos (match-end 0))))))
+      (ignore-errors (delete-file dormant-file))
+      (ignore-errors (delete-file armed-file))))
+  (message "[standalone-reader] bounded-backtrace smoke PASS"))
+
+;;;###autoload
+(defun nelisp-standalone-reader-bounded-backtrace-test ()
+  "Build the reader binary and run only the bounded-backtrace smoke.
+Exits 0/1."
+  (nelisp-standalone-build-reader)
+  (condition-case err
+      (progn
+        (nelisp-standalone--reader-bounded-backtrace-smoke)
+        (kill-emacs 0))
+    (error
+     (message "[standalone-reader] FAIL: bounded-backtrace smoke: %s"
               (error-message-string err))
      (kill-emacs 1))))
 

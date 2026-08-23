@@ -2089,6 +2089,24 @@ standalone-reader-form-location-smoke:
 	  --eval '(setq load-prefer-newer t)' \
 	  -l nelisp-standalone-build -f nelisp-standalone-reader-form-location-test
 
+# Fast focused loop for Doc 180 Phase 2 item 1 (the gc-context frame stack's
+# pop/depth-cap desync).  Builds/relinks target/nelisp with the incremental
+# unit cache, then runs only the against-the-bug smoke used by the full
+# reader test.
+standalone-reader-frame-stack-pop-desync-smoke:
+	$(EMACS) --batch -Q -L lisp -L src -L scripts \
+	  --eval '(setq load-prefer-newer t)' \
+	  -l nelisp-standalone-build -f nelisp-standalone-reader-frame-stack-pop-desync-test
+
+# Fast focused loop for Doc 180 Phase 2 item 3 (the bounded backtrace on an
+# uncaught error).  Builds/relinks target/nelisp with the incremental unit
+# cache, then runs only the against-the-bug smoke used by the full reader
+# test.
+standalone-reader-bounded-backtrace-smoke:
+	$(EMACS) --batch -Q -L lisp -L src -L scripts \
+	  --eval '(setq load-prefer-newer t)' \
+	  -l nelisp-standalone-build -f nelisp-standalone-reader-bounded-backtrace-test
+
 # Prelude-load breadth test (Wave-1 (A)+(B)).  Builds the reader binary, then
 # runs it on  scripts/nelisp-stdlib-prelude.el  followed by a breadth test that
 # exercises cond / dolist / nth / plist-get / backquote (all backed by the
