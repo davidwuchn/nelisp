@@ -370,7 +370,19 @@ ns-collision-divergent 126
 # is the whole point of the hook existing.  +1, not +0: this is a
 # tracked, explained instance, per this file's own rule, not left for
 # the count to silently absorb.
-ns-prefix-violation 874
+# 874 -> 875 on 2026-08-24 (socket primitives smoke, Doc 184
+# follow-on, feat/socket-primitives-p1): `nelisp-standalone-reader-
+# socket-test' (scripts/nelisp-standalone-build.el) is a public,
+# `;;;###autoload'-marked "build the reader binary and run only this
+# smoke" entry point, the same single-dash `nelisp-standalone-'
+# (not double-dash `nelisp-standalone--') shape as the ten sibling
+# `nelisp-standalone-reader-*-test' functions this baseline already
+# concedes (`-form-location-test'/`-repl-test'/`-malformed-input-
+# test'/etc.) -- backs `standalone-reader-socket-smoke' in the
+# Makefile the same way each of those backs its own fast-focused-loop
+# target.  One more instance of an already-accepted public-entry-point
+# shape, not a new kind of violation.
+ns-prefix-violation 875
 # 611 -> 613 on 2026-08-20: `nelisp--check-string'/`--check-symbol' and the
 # other argument-check helpers are referenced from the lisp/ mirrors that
 # carry copies of the functions using them.  This is the kind this file

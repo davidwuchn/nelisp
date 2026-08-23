@@ -181,7 +181,26 @@
 # it dead weight (every path is exercised by `scripts/standalone-bignum-
 # smoke.el').  Measured with `stat -c %s target/nelisp' after a clean
 # `make standalone-reader' on this branch's own HEAD.
-size 7240384
+#
+# Raised 2026-08-24 (socket primitives, Doc 184 follow-on,
+# feat/socket-primitives-p1), 7240384 -> 7310720, +70336 bytes, +0.97%,
+# well inside the 2% slack -- raised anyway per this file's own rule
+# above, not left for slack to silently absorb.  The six new native
+# units (nelisp-standalone--socket-forms: nl_ipv4_is_localhost,
+# nl_ipv4_octet_walk/-parse_dotted, nl_socket_build_sockaddr,
+# nl_socket_signal_error, nl_socket_listen_impl/-accept_impl/
+# -connect_impl/-send_impl/-recv_impl/-close_impl) plus their six
+# nelisp_apply_function dispatch arms
+# (nelisp-standalone--socket-dispatch-arms) are AOT-compiled directly
+# into the linked binary -- unlike the prelude-source raises earlier in
+# this file's history, this growth is compiled native code, not embedded
+# interpreted source text, so it does not scale with source line count
+# the same way.  Every added unit is exercised by
+# standalone-reader-socket-smoke (loopback round-trip + two catchable-
+# error negatives).  Measured with `stat -c %s target/nelisp' after a
+# clean `make standalone-reader' on this branch's own HEAD (base
+# eb4eb81f3).
+size 7310720
 # Raised 2026-08-23 (7247592 -> 7251688, +4096 bytes, +0.06%, well
 # inside the 2% slack -- raised anyway per this file's own rule above)
 # by docs/design/189-nl-ns-enforced-namespaces.org Phase 0

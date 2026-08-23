@@ -147,7 +147,15 @@ silent-fallback        57
 # only defect was leaving a stale duplicate directive line in the file
 # instead of replacing it. Removed the duplicate; single line below now
 # matches the measured count.
-ignore-errors   54
+# 54 -> 55 on 2026-08-24 (socket primitives smoke, Doc 184 follow-on,
+# feat/socket-primitives-p1): `nelisp-standalone--reader-socket-smoke'
+# (scripts/nelisp-standalone-build.el) cleans up its temp script file
+# via `(ignore-errors (delete-file script))' in its `unwind-protect',
+# the same idiom every sibling `standalone-reader-*-smoke' already
+# uses (see `nelisp-standalone--reader-form-location-smoke' two smokes
+# up).  Not a new fallback shape, one more site of an already-accepted
+# one.
+ignore-errors   55
 # 34 -> 32 on 2026-08-19: the two handlers in
 # `nelisp-artifact--ensure-native-compiler' now record the error instead of
 # discarding it.  Between them they had hidden a chain of six failures --
@@ -341,3 +349,4 @@ pinned-site ignore-errors	nelisp-substrate-parity.el	defun nelisp-substrate-pres
 pinned-site silent-fallback	nelisp-substrate-parity-corpus.el	defconst nelisp-substrate-parity-corpus	704c53a5d34a 1
 pinned-site silent-fallback	nelisp-substrate-parity-corpus.el	defconst nelisp-substrate-parity-corpus	e3f2648caa3a 1
 pinned-site silent-fallback	nelisp-substrate-presence-gen.el	defun nlsp--primitive-symbols	09db60440f5b 1
+pinned-site ignore-errors	nelisp-standalone-build.el	defun nelisp-standalone--reader-socket-smoke	c143a5fded43 1
