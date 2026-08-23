@@ -10597,6 +10597,10 @@ too (they need the dynamic build's PLT/GOT)."
    ;; function's POLICY NOTE for the against-the-bug evidence of why (the
    ;; reader's own `--repl' bookkeeping depends on this exact reachability).
    nelisp-standalone--applyfn-bf-arms
+   ;; Socket primitives (Doc 184 follow-on): real on linux-x86_64, the
+   ;; catchable `nelisp-unsupported-primitive' signal everywhere else -- see
+   ;; `nelisp-standalone--socket-dispatch-arms''s docstring.
+   (nelisp-standalone--socket-dispatch-arms)
    ;; Step C: dynamic builds gain the PLT-backed `nl-ffi-call' arms.
    (if (nelisp-standalone--reader-dynamic-p)
        nelisp-standalone--applyfn-extern-arms
@@ -16835,12 +16839,270 @@ the prelude's source fixes both without a second change."
          ('aarch64 1)
          (_ 0)))))
 
+;; ===================================================================
+;; Socket primitives (Doc 184 follow-on).  Linux x86_64 ONLY: raw SYSCALL,
+;; no libc, matching the `nl_os_*' file-I/O precedent above (socket=41
+;; connect=42 accept4=288 bind=49 listen=50 setsockopt=54 shutdown=48;
+;; read/write/close REUSE `nl_os_read_file_handle'/`nl_os_write_file_handle'/
+;; `nl_os_close_handle' -- a connected socket fd is just an fd on Linux, the
+;; same syscalls that already move bytes for a plain file handle move them
+;; here).  `nelisp-standalone--socket-dispatch-arms' (near
+;; `nelisp-standalone--applyfn-bf-arms') wires these six units into
+;; `nelisp_apply_function'; on every OTHER target it wires the SAME
+;; catchable `nelisp-unsupported-primitive' signal Task A's fix uses instead
+;; of compiling any of this -- never a wrong syscall number issued on a
+;; target this DSL was not taught (arm64 Linux/macOS/Windows all have
+;; DIFFERENT socket syscall numbers or no raw-syscall socket path at all;
+;; extending this is real follow-up work, not attempted here).
+;;
+;; sockaddr construction happens ENTIRELY inside these units, in their own
+;; `alloc-bytes' scratch -- interpreted callers pass a host STRING and a
+;; port INTEGER, never a raw pointer, matching the same POLICY
+;; `nelisp-standalone--applyfn-unsupported-primitive-form' records for
+;; `alloc-bytes'/`ptr-*': raw memory never crosses into user space.
+;;
+;; Host resolution: IPv4 dotted-decimal ("127.0.0.1") and the literal
+;; "localhost" (hardcoded to 127.0.0.1) ONLY.  DNS is explicitly out of
+;; scope for this pass -- `nl_socket_build_sockaddr' returns -1 for
+;; anything else (a bare hostname, IPv6, a malformed dotted quad), which
+;; every caller below turns into a catchable `nelisp-socket-error' rather
+;; than silently binding/connecting to the wrong address or garbage memory.
+(defun nelisp-standalone--socket-forms ()
+  "Return the native socket units for the CURRENT `nelisp-standalone--target'.
+Empty list on every target except `linux-x86_64' -- see this file's socket
+section banner comment just above for why, and
+`nelisp-standalone--socket-dispatch-arms' for the non-Linux-x86_64 gate."
+  (if (not (eq nelisp-standalone--target 'linux-x86_64))
+      nil
+    (append
+     (list
+      ;; Generic byte-range equality walk.  Already defined for the eval
+      ;; combiner's own symbol-name compares
+      ;; (lisp/nelisp-cc-evalport-combiner-cons.el's `nl_sym_name_eq_bytes',
+      ;; identical signature) -- reused here rather than duplicated so the
+      ;; two copies cannot drift.  DECLARED again is unnecessary (Phase47
+      ;; units share one flat native namespace once linked); this comment
+      ;; just records the reuse for the next reader.
+      `(defun nl_ipv4_is_localhost (host_ptr host_len)
+         (if (= host_len 9)
+             (let* ((lit (alloc-bytes 9 1)))
+               (seq
+                ,@(nelisp-standalone--byte-write-forms 'lit "localhost")
+                (nl_sym_name_eq_bytes host_ptr lit 0 9)))
+           0))
+      ;; Recursive dotted-quad walker: writes each parsed octet directly
+      ;; into OUT_BUF[OCTIDX] as it goes (network byte order falls out for
+      ;; free -- the leftmost octet in the string IS the first byte on the
+      ;; wire, no endian juggling needed).  Returns 0 on a clean 4-octet
+      ;; parse that consumes the whole string, -1 on anything else
+      ;; (non-digit/non-dot byte, an octet > 255, more than 3 digits in a
+      ;; run, more or fewer than 4 dot-separated groups, a trailing dot, or
+      ;; an empty group).  CUR/DIGITS/OCTIDX are the walk's own state,
+      ;; threaded through the recursion the same way
+      ;; `nelisp-standalone--reader-defun-redefine-smoke''s sibling walkers
+      ;; (`nl_let_star_walk' et al.) thread theirs.
+      '(defun nl_ipv4_octet_walk (host_ptr i len cur digits octidx out_buf)
+         (if (= i len)
+             (if (= digits 0)
+                 (- 0 1)
+               (if (= octidx 3)
+                   (seq (ptr-write-u8 out_buf octidx cur) 0)
+                 (- 0 1)))
+           (let* ((c (ptr-read-u8 host_ptr i)))
+             (if (if (>= c 48) (if (<= c 57) 1 0) 0)
+                 (let* ((newcur (+ (* cur 10) (- c 48))))
+                   (if (if (> newcur 255) 1 (if (> (+ digits 1) 3) 1 0))
+                       (- 0 1)
+                     (nl_ipv4_octet_walk host_ptr (+ i 1) len newcur
+                                          (+ digits 1) octidx out_buf)))
+               (if (= c 46)
+                   (if (if (= digits 0) 1 (if (>= octidx 3) 1 0))
+                       (- 0 1)
+                     (seq (ptr-write-u8 out_buf octidx cur)
+                          (nl_ipv4_octet_walk host_ptr (+ i 1) len 0 0
+                                               (+ octidx 1) out_buf)))
+                 (- 0 1))))))
+      '(defun nl_ipv4_parse_dotted (host_ptr host_len out_buf)
+         (nl_ipv4_octet_walk host_ptr 0 host_len 0 0 0 out_buf))
+      ;; Zeroes the 16-byte struct sockaddr_in, fills sin_family (AF_INET=2,
+      ;; native u16 -- NOT network order, only the address/port fields are)
+      ;; and sin_port (network/big-endian u16, written as two explicit
+      ;; ptr-write-u8 calls rather than one ptr-write-u16 -- htons() by
+      ;; hand, endian-correct by construction on any host since it never
+      ;; relies on a multi-byte store).  No PORT range validation (0-65535)
+      ;; -- an out-of-range port just truncates to its low 16 bits, matching
+      ;; this pass's scope (host-format validation is the one that matters
+      ;; for the catchable-error smoke; port range is not).  Returns 0 on
+      ;; success, -1 when the host is neither "localhost" nor a valid IPv4
+      ;; dotted quad (DNS is out of scope; see this file's socket section
+      ;; banner comment).
+      '(defun nl_socket_build_sockaddr (host_ptr host_len port out_buf)
+         (seq
+          (ptr-write-u64 out_buf 0 0)
+          (ptr-write-u64 out_buf 8 0)
+          (ptr-write-u8 out_buf 0 2)
+          (ptr-write-u8 out_buf 2 (logand (/ port 256) 255))
+          (ptr-write-u8 out_buf 3 (logand port 255))
+          (if (= (nl_ipv4_is_localhost host_ptr host_len) 1)
+              (seq (ptr-write-u8 out_buf 4 127)
+                   (ptr-write-u8 out_buf 5 0)
+                   (ptr-write-u8 out_buf 6 0)
+                   (ptr-write-u8 out_buf 7 1)
+                   0)
+            (nl_ipv4_parse_dotted host_ptr host_len (+ out_buf 4)))))
+      ;; Catchable `nelisp-socket-error' signal, same flag@268435472 /
+      ;; TAG@268435480 / VAL@268435512 stash `bf_signal' et al. use (see
+      ;; `nelisp-standalone--applyfn-unsupported-primitive-form''s
+      ;; against-the-bug writeup for why that convention -- not a bare
+      ;; print+abort -- is what makes this catchable).  ERRNO is the raw
+      ;; (negative) syscall return value, or the sentinel -9999 for "not an
+      ;; OS errno at all, `nl_socket_build_sockaddr' rejected the host
+      ;; string" (DNS/malformed-address, out of scope).
+      `(defun nl_socket_signal_error (errno)
+         (let* ((tagbuf (alloc-bytes 24 1))
+                (nilslot (alloc-bytes 32 8))
+                (data (alloc-bytes 32 8)))
+           (seq
+            ,@(nelisp-standalone--byte-write-forms 'tagbuf "nelisp-socket-error")
+            (nl_alloc_symbol tagbuf 19 268435480)
+            (wf_write_nil nilslot)
+            (wf_cons_int errno nilslot data)
+            (bf_sig_copy32 268435512 data)
+            (ptr-write-u64 268435472 0 1)
+            (atomic-fetch-add 268435544 1)
+            1)))
+      ;; nelisp-socket-listen HOST PORT -> listen-fd.  socket(2) ->
+      ;; setsockopt(2) SO_REUSEADDR (best-effort: a failure here is not
+      ;; fatal, matching common practice) -> bind(2) -> listen(2), backlog
+      ;; 16.  Any of socket/bind/listen failing (or an unparseable HOST)
+      ;; closes the fd it opened (if any) and signals.
+      '(defun nl_socket_listen_impl (args out)
+         (let* ((host_sx (wf_arg_ptr args 0))
+                (port (wf_argval args 1))
+                (fd (syscall-direct 41 2 1 0 0 0 0)))
+           (if (< fd 0)
+               (nl_socket_signal_error fd)
+             (let* ((optval (alloc-bytes 4 4))
+                    (addr (alloc-bytes 16 1)))
+               (seq
+                (ptr-write-u32 optval 0 1)
+                (syscall-direct 54 fd 1 2 optval 4 0)
+                (let* ((abuild (nl_socket_build_sockaddr
+                                 (nl_bi_strptr host_sx) (nl_bi_strlen host_sx)
+                                 port addr)))
+                  (if (< abuild 0)
+                      (seq (nl_os_close_handle fd)
+                           (nl_socket_signal_error (- 0 9999)))
+                    (let* ((brc (syscall-direct 49 fd addr 16 0 0 0)))
+                      (if (< brc 0)
+                          (seq (nl_os_close_handle fd)
+                               (nl_socket_signal_error brc))
+                        (let* ((lrc (syscall-direct 50 fd 16 0 0 0 0)))
+                          (if (< lrc 0)
+                              (seq (nl_os_close_handle fd)
+                                   (nl_socket_signal_error lrc))
+                            (seq (wf_write_int out fd) 0))))))))))))
+      ;; nelisp-socket-accept LISTEN-FD -> conn-fd.  accept4(2), no peer
+      ;; address requested (NULL/NULL), flags 0 (blocking -- nonblocking
+      ;; accept is out of scope, see this change's report).
+      '(defun nl_socket_accept_impl (args out)
+         (let* ((cfd (syscall-direct 288 (wf_argval args 0) 0 0 0 0 0)))
+           (if (< cfd 0)
+               (nl_socket_signal_error cfd)
+             (seq (wf_write_int out cfd) 0))))
+      ;; nelisp-socket-connect HOST PORT -> fd.  socket(2) -> connect(2).
+      '(defun nl_socket_connect_impl (args out)
+         (let* ((host_sx (wf_arg_ptr args 0))
+                (port (wf_argval args 1))
+                (fd (syscall-direct 41 2 1 0 0 0 0)))
+           (if (< fd 0)
+               (nl_socket_signal_error fd)
+             (let* ((addr (alloc-bytes 16 1))
+                    (abuild (nl_socket_build_sockaddr
+                             (nl_bi_strptr host_sx) (nl_bi_strlen host_sx)
+                             port addr)))
+               (if (< abuild 0)
+                   (seq (nl_os_close_handle fd)
+                        (nl_socket_signal_error (- 0 9999)))
+                 (let* ((crc (syscall-direct 42 fd addr 16 0 0 0)))
+                   (if (< crc 0)
+                       (seq (nl_os_close_handle fd)
+                            (nl_socket_signal_error crc))
+                     (seq (wf_write_int out fd) 0))))))))
+      ;; nelisp-socket-send FD STRING -> bytes-sent (integer).  Reuses
+      ;; `nl_os_write_file_handle' (write(2), syscall 1 on Linux x86_64) --
+      ;; a connected socket fd is just an fd.  STRING's raw bytes go out
+      ;; exactly as `nl_bi_strptr'/`nl_bi_strlen' see them (byte-clean, Doc
+      ;; 161: no re-encoding pass, so UTF-8 multibyte content -- Japanese
+      ;; text included -- round-trips whatever bytes the Lisp string
+      ;; actually holds).
+      '(defun nl_socket_send_impl (args out)
+         (let* ((fd (wf_argval args 0))
+                (str_sx (wf_arg_ptr args 1))
+                (n (nl_os_write_file_handle
+                    fd (nl_bi_strptr str_sx) (nl_bi_strlen str_sx))))
+           (if (< n 0)
+               (nl_socket_signal_error n)
+             (seq (wf_write_int out n) 0))))
+      ;; nelisp-socket-recv FD MAX-BYTES -> string.  Reuses
+      ;; `nl_os_read_file_handle' (read(2), syscall 0).  `nl_alloc_str'
+      ;; wraps the raw received bytes directly, same byte-clean contract as
+      ;; send -- no decode/re-encode round trip, so an invalid-UTF-8 or
+      ;; multibyte payload comes back exactly as the peer sent it.
+      '(defun nl_socket_recv_impl (args out)
+         (let* ((fd (wf_argval args 0))
+                (maxbytes (wf_argval args 1))
+                (buf (alloc-bytes maxbytes 1))
+                (n (nl_os_read_file_handle fd buf maxbytes)))
+           (if (< n 0)
+               (nl_socket_signal_error n)
+             (seq (nl_alloc_str buf n out) 0))))
+      ;; nelisp-socket-close FD -> nil.  shutdown(2) SHUT_RDWR=2 is
+      ;; best-effort (ENOTCONN on an already-idle socket is harmless and
+      ;; ignored, matching common practice) followed by `nl_os_close_handle'
+      ;; (close(2)).  Never signals -- closing an already-closed/invalid fd
+      ;; is not treated as an error here, matching close(2)'s own common
+      ;; usage (idempotent-ish cleanup).
+      '(defun nl_socket_close_impl (args out)
+         (let* ((fd (wf_argval args 0)))
+           (seq
+            (syscall-direct 48 fd 2 0 0 0 0)
+            (nl_os_close_handle fd)
+            (wf_write_nil out)
+            0))))
+     nil)))
+
+(defun nelisp-standalone--socket-dispatch-arms ()
+  "Return the six `nelisp-socket-*' `nelisp_apply_function' dispatch arms.
+Real raw-SYSCALL implementations (`nelisp-standalone--socket-forms') on
+`linux-x86_64'; on every other target, the SAME catchable
+`nelisp-unsupported-primitive' signal Task A's fix installs as the
+unknown-builtin default -- the primitive names exist and are `fboundp',
+calling one just refuses loudly instead of either issuing a wrong syscall
+number for a target this DSL has not been taught, or silently failing to
+link (`nl_socket_listen_impl' et al. are only DEFINED on `linux-x86_64', so
+these dispatch arms must not reference them at all on other targets)."
+  (let ((names '("nelisp-socket-listen" "nelisp-socket-accept"
+                 "nelisp-socket-connect" "nelisp-socket-send"
+                 "nelisp-socket-recv" "nelisp-socket-close")))
+    (if (eq nelisp-standalone--target 'linux-x86_64)
+        (list
+         `((:lit "nelisp-socket-listen") . (nl_socket_listen_impl args out))
+         `((:lit "nelisp-socket-accept") . (nl_socket_accept_impl args out))
+         `((:lit "nelisp-socket-connect") . (nl_socket_connect_impl args out))
+         `((:lit "nelisp-socket-send") . (nl_socket_send_impl args out))
+         `((:lit "nelisp-socket-recv") . (nl_socket_recv_impl args out))
+         `((:lit "nelisp-socket-close") . (nl_socket_close_impl args out)))
+      (let ((sig (nelisp-standalone--applyfn-unsupported-primitive-form)))
+        (mapcar (lambda (nm) (cons (list :lit nm) sig)) names)))))
+
 (defun nelisp-standalone--reader-os-source-forms ()
   "Return target-specific OS helper defuns used by the reader driver/file I/O."
   (append
    (nelisp-standalone--os-syscall-xlat-forms)
    (nelisp-standalone--reader-os-base-forms)
-   (nelisp-standalone--target-os-code-forms)))
+   (nelisp-standalone--target-os-code-forms)
+   (nelisp-standalone--socket-forms)))
 
 (defun nelisp-standalone--reader-os-base-forms ()
   "Return the per-target base OS helper defuns (argv/file/process)."
