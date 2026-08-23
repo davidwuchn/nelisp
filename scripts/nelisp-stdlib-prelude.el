@@ -6842,8 +6842,32 @@ this file was committed).")
 (defvar nelisp--process-props nil)
 (defvar coding-system-for-write nil)
 (defvar coding-system-for-read nil)
-(defvar system-type 'gnu/linux)
-(defvar system-configuration "x86_64-pc-linux-gnu")
+;; `system-type'/`system-configuration' used to be hardcoded Linux-x86_64
+;; literals here regardless of what the binary was actually built for (a
+;; Windows PE build's `system-type' answered `gnu/linux'; real-machine
+;; finding, 2026-08-23).  `nelisp--target-os-code'/`nelisp--target-arch-code'
+;; are per-target COMPILE-TIME constants baked directly into the binary --
+;; see `nelisp-standalone--target-os-code-forms' in
+;; scripts/nelisp-standalone-build.el -- so this now answers for the target
+;; the binary was actually emitted for, on every platform, including ones
+;; this repo's own build host cannot execute to check (Windows/macOS
+;; cross-targets: source-inspected, not run).
+(defvar system-type
+  (let ((nelisp--os-code (nelisp--target-os-code)))
+    (cond ((= nelisp--os-code 1) 'darwin)
+          ((= nelisp--os-code 2) 'windows-nt)
+          (t 'gnu/linux))))
+(defvar system-configuration
+  (let ((nelisp--os-code (nelisp--target-os-code))
+        (nelisp--arch-code (nelisp--target-arch-code)))
+    (cond
+     ((= nelisp--os-code 1) "aarch64-apple-darwin")
+     ((= nelisp--os-code 2) (if (= nelisp--arch-code 1)
+                                "aarch64-pc-windows-msvc"
+                              "x86_64-pc-windows-msvc"))
+     (t (if (= nelisp--arch-code 1)
+            "aarch64-unknown-linux-gnu"
+          "x86_64-pc-linux-gnu")))))
 
 (unless (fboundp 'bufferp)
   (defun bufferp (obj) (nelisp-buffer-p obj)))

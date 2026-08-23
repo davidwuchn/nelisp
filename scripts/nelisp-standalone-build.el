@@ -10338,7 +10338,15 @@ Wave-2 (C) appends bf_ash (shl/sar compose) + bf_str_lt (byte-lexicographic).")
     ((:lit "ptr-call") . (wf_write_int out (call-ptr (wf_argval args 0) (wf_argval args 1) (wf_argval args 2) (wf_argval args 3) (wf_argval args 4) (wf_argval args 5) (wf_argval args 6))))
     ((:lit "thread-spawn") . (bf_thread_spawn args env out))
     ((:lit "thread-join") . (bf_thread_join args env out))
-    ((:lit "fork-spawn") . (bf_fork_spawn args env out)))
+    ((:lit "fork-spawn") . (bf_fork_spawn args env out))
+    ;; nelisp--target-os-code / nelisp--target-arch-code: per-target
+    ;; COMPILE-TIME constants -- see `nl_target_os_code'/`nl_target_arch_code'
+    ;; in `nelisp-standalone--reader-os-source-forms'.  Back `system-type'/
+    ;; `system-configuration' in scripts/nelisp-stdlib-prelude.el, which used
+    ;; to hardcode `gnu/linux'/"x86_64-pc-linux-gnu" for every target
+    ;; including Windows.
+    ((:lit "nelisp--target-os-code") . (wf_write_int out (nl_target_os_code)))
+    ((:lit "nelisp--target-arch-code") . (wf_write_int out (nl_target_arch_code))))
   "B-foundation breadth dispatch arms (Wave-1 (B)): predicates, symbol / vector
 ops, signal/error stubs, structural equal, setcar/setcdr.  Wave-2 (C) appends
 ash/logand/logior/logxor/lognot + string<.")
@@ -14191,7 +14199,14 @@ value (matches the binary's M8 read+eval-loop driver)."
     "nelisp-process-read-output" "nelisp-process-write"
     "nelisp-process-close-stdin" "nelisp-process-poll"
     "nelisp-process-wait" "nelisp-process-delete" "nelisp-portable-syscall"
-    "ptr-call" "thread-spawn" "thread-join" "fork-spawn")
+    "ptr-call" "thread-spawn" "thread-join" "fork-spawn"
+    ;; Per-target compile-time OS/arch tags (Doc 184 follow-on): back
+    ;; `system-type'/`system-configuration' in
+    ;; scripts/nelisp-stdlib-prelude.el.
+    "nelisp--target-os-code" "nelisp--target-arch-code"
+    ;; Socket primitives (Doc 184 follow-on), Linux x86_64 first.
+    "nelisp-socket-listen" "nelisp-socket-accept" "nelisp-socket-connect"
+    "nelisp-socket-send" "nelisp-socket-recv" "nelisp-socket-close")
   "Builtin names installed into the reader binary's mirror.
 Each is dispatched by the pure-elisp `nelisp_apply_function' (see
 `nelisp-standalone--applyfn-source').  Names > 8 bytes (for example
@@ -16798,11 +16813,34 @@ boundary (Doc 151 Phase B):
        (defun nl_os_statx_path (_cpath _flags _buf) (- 0 38))
        (defun nl_os_nanosleep (_ts) (- 0 38))))))
 
+(defun nelisp-standalone--target-os-code-forms ()
+  "Return the `nl_target_os_code' native unit: a per-target COMPILE-TIME
+constant (0=Linux, 1=Darwin, 2=Windows) baked directly into the binary via
+`nelisp-standalone--target-os', the same compile-time branching
+`nelisp-standalone--os-syscall-xlat-forms' already uses for raw syscall
+numbers.  Fixes the 2026-08-23 finding that a Windows PE build's
+`system-type' answered `gnu/linux': `scripts/nelisp-stdlib-prelude.el'
+hardcoded that symbol for every target instead of asking the binary what it
+was actually built for.  `nelisp-sys-current-platform'
+(packages/nelisp-sys/src/nelisp-sys.el) reads `system-type' too, so fixing
+the prelude's source fixes both without a second change."
+  (list
+   `(defun nl_target_os_code ()
+      ,(pcase (nelisp-standalone--target-os)
+         ('darwin 1)
+         ('windows 2)
+         (_ 0)))
+   `(defun nl_target_arch_code ()
+      ,(pcase (nelisp-standalone--target-arch)
+         ('aarch64 1)
+         (_ 0)))))
+
 (defun nelisp-standalone--reader-os-source-forms ()
   "Return target-specific OS helper defuns used by the reader driver/file I/O."
   (append
    (nelisp-standalone--os-syscall-xlat-forms)
-   (nelisp-standalone--reader-os-base-forms)))
+   (nelisp-standalone--reader-os-base-forms)
+   (nelisp-standalone--target-os-code-forms)))
 
 (defun nelisp-standalone--reader-os-base-forms ()
   "Return the per-target base OS helper defuns (argv/file/process)."
