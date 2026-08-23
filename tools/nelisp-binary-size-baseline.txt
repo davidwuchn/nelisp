@@ -181,7 +181,23 @@
 # it dead weight (every path is exercised by `scripts/standalone-bignum-
 # smoke.el').  Measured with `stat -c %s target/nelisp' after a clean
 # `make standalone-reader' on this branch's own HEAD.
-size 7240384
+size 7314288
+# Raised 2026-08-24 (7240384 -> 7314288, +73904 bytes, +1.02%, well
+# inside the 2% slack -- raised anyway per this file's own rule above,
+# not left for slack to silently absorb) by Doc 188 Phase 2 (buffer
+# unification): `current-buffer'/`set-buffer'/`buffer-substring'/
+# `erase-buffer' -- the four standard names P2 wires -- were added to
+# `scripts/nelisp-stdlib-prelude.el' (~150 source lines including
+# docstrings/comments), embedded into the linked binary as executable
+# prelude source, same accounting as every prior prelude-size raise in
+# this file's history (P1's buffer-unification raise directly above is
+# the closest precedent: same file, same mechanism, four more standard
+# names delegating to the already-ported `nelisp-buffer.el' model
+# functions rather than new data-structure code).  Measured with `stat
+# -c %s target/nelisp' after a clean `make standalone-reader' on this
+# phase's own branch (`feat/buffer-unification-p2', base eb4eb81f3);
+# `binary-size-ratchet' passed without a raise being required (well
+# inside slack), same disclosure discipline as every other entry here.
 # Raised 2026-08-23 (7247592 -> 7251688, +4096 bytes, +0.06%, well
 # inside the 2% slack -- raised anyway per this file's own rule above)
 # by docs/design/189-nl-ns-enforced-namespaces.org Phase 0

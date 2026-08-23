@@ -1281,6 +1281,22 @@
        (with-temp-buffer (insert "abcdef") (goto-char 3) (point))
        (with-temp-buffer (insert "ab") (point-min))
        (with-temp-buffer (insert "hi") (point-max))
+       ;; Doc 188 §4.2 (buffer unification P2).  `current-buffer'/
+       ;; `set-buffer'/`buffer-substring'/`erase-buffer' were all
+       ;; void-function before this phase.  Each form is self-contained
+       ;; inside its own `with-temp-buffer', so it cannot disturb the
+       ;; ambient current buffer for anything else in this file (same
+       ;; discipline as the P1 forms just above).
+       (with-temp-buffer
+         (let ((outer (current-buffer)))
+           (with-temp-buffer (set-buffer outer) (eq (current-buffer) outer))))
+       ;; `buffer-substring' accepts START/END in either order -- both
+       ;; answers collected into one form so a single printed value
+       ;; covers both edges.
+       (with-temp-buffer
+         (insert "hello")
+         (list (buffer-substring 2 4) (buffer-substring 4 2)))
+       (with-temp-buffer (insert "abc") (erase-buffer) (buffer-string))
        ;; Doc 186 P0/P1: char-table constructor/accessor layer.  Not a
        ;; native/prelude shadow case (there is no prelude definition to
        ;; shadow -- these two names live only in the standalone's own

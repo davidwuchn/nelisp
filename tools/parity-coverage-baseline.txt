@@ -3,7 +3,19 @@
 # mentions.  Raise it whenever cases are added; it may never go down without a
 # stated reason, so a case cannot be deleted quietly.
 
-covered 264
+covered 265
+
+# 264 -> 265 on 2026-08-23 (Doc 188 P2, buffer unification): the 3 new
+# forms in test/nelisp-shadow-differential-cases.el (current-buffer/
+# set-buffer round trip, buffer-substring argument-order pair, erase-
+# buffer clear) newly mention `current-buffer' -- only 1 above baseline,
+# matching the gate's own "1 above baseline" notice: `set-buffer'/
+# `buffer-substring'/`erase-buffer' are not themselves in docs/emacs-
+# compat-table.txt's tracked shared-name list (that table predates P1's
+# deletion of lisp/nelisp-stdlib-misc.el's dead buffer stubs and was not
+# regenerated then or now -- out of scope for this phase, same call P1
+# made; see that file's own header), the same "not every real fix moves
+# this specific ratchet" shape `point' hit in the P1 note directly below.
 
 # 259 -> 264 on 2026-08-23 (Doc 188 P1, buffer unification): the 4 new
 # forms in test/nelisp-shadow-differential-cases.el (§4.2's `with-temp-
@@ -78,6 +90,7 @@ pinned concat
 pinned cons
 pinned copy-hash-table
 pinned copy-sequence
+pinned current-buffer
 pinned declare
 pinned decode-char
 pinned decode-coding-string
