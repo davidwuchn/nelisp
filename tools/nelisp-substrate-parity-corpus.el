@@ -217,6 +217,51 @@
     ;; default-value fallback (40).
     (39 shared (if (char-table-p (make-char-table 'test)) 1 0))
     (40 shared (if (eq (aref (make-char-table 'test 'D) ?a) 'D) 1 0))
+
+    ;; -- Doc 191 (hot code reload) Phase 1: live `defun' redefinition is
+    ;; ordinary Elisp semantics, not a NeLisp-only claim, so both directions
+    ;; belong in the shared corpus rather than only in the standalone-reader
+    ;; smoke that pins the same case list end-to-end
+    ;; (`nelisp-standalone--reader-defun-redefine-smoke').
+    ;;
+    ;; integration/wave4 merge 7/9: renumbered from this branch's own 39/40
+    ;; to 41/42 -- feat/char-table-elisp-layer (merged 6/9) already claimed
+    ;; 39/40 for its own §6.2 parity pins.  Per the integration playbook,
+    ;; indices are never reused for a different form, so the char-table
+    ;; pair keeps 39/40 and this pair moves up instead of either one being
+    ;; dropped.  See this merge commit's body for the accepted-ledger
+    ;; regeneration this renumbering required.
+    ;;
+    ;; 41: a call BY NAME always re-resolves and sees a later redefinition
+    ;; (`(nelisp-parity-redef-fn)' -> 2), but a function object CAPTURED
+    ;; before the redefinition (`captured', via `symbol-function') is a
+    ;; snapshot and keeps running the old body (`(funcall captured)' -> 1)
+    ;; -- Doc 191 §4's "interesting case", and the one it predicted would
+    ;; NOT see the update.
+    (41 shared (progn
+                 (defun nelisp-parity-redef-fn () 1)
+                 (let ((captured (symbol-function 'nelisp-parity-redef-fn)))
+                   (defun nelisp-parity-redef-fn () 2)
+                   (if (and (= (funcall captured) 1)
+                            (= (nelisp-parity-redef-fn) 2))
+                       1 0))))
+
+    ;; 42: the opposite of 41's stale half -- a closure that calls the
+    ;; redefined name BY NAME internally (rather than holding a captured
+    ;; function object) re-resolves on every call, so it DOES see a later
+    ;; redefinition.  Both 41 and 42 start from "a closure captured before
+    ;; a reload"; which way it goes depends on whether the closure captured
+    ;; the function object itself or only a call to it by name -- Doc 191
+    ;; §4 keeps the two cases separate for exactly this reason.
+    (42 shared (progn
+                 (defun nelisp-parity-redef-target () 10)
+                 (defun nelisp-parity-redef-make-closure ()
+                   (lambda () (nelisp-parity-redef-target)))
+                 (let ((closure (nelisp-parity-redef-make-closure)))
+                   (let ((before (funcall closure)))
+                     (defun nelisp-parity-redef-target () 20)
+                     (if (and (= before 10) (= (funcall closure) 20))
+                         1 0)))))
     ))
 
 (provide 'nelisp-substrate-parity-corpus)

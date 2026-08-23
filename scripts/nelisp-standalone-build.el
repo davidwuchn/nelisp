@@ -19663,6 +19663,8 @@ loader when it is absent."
                                  nelisp-standalone--reader-stdlib-completion-smoke
                                  nelisp-standalone--reader-char-table-smoke
                                  nelisp-standalone--reader-defvaralias-smoke
+                                 nelisp-standalone--reader-defun-redefine-smoke
+                                 nelisp-standalone--reader-defun-redefine-epoch-smoke
                                  nelisp-standalone--reader-temp-outside-cwd-smoke
                                  nelisp-standalone--reader-asm-arm64-byte-identity-smoke
                                  nelisp-standalone--reader-hash-table-literal-smoke
@@ -20384,6 +20386,160 @@ contract this feature was implemented against."
           (unless (string= out "(t t t t t t t)")
             (error "defvaralias four-direction/chain/return-value smoke -> %S (expected (t t t t t t t))" out)))
       (ignore-errors (delete-file tmp)))))
+
+(defun nelisp-standalone--reader-defun-redefine-smoke ()
+  "Assert Doc 191 Phase 1's case list for live `defun'/`fset' redefinition,
+run inside a `--repl' session's own per-line top-level-form boundary -- a
+different boundary than a `--load'd file's, which
+`nelisp-standalone--reader-defun-redefine-epoch-smoke' below uses instead,
+for reasons in its own docstring.
+
+Four cases, verified against a real `--repl' subprocess, not inferred:
+
+- Case A: a FRESH call by name always re-resolves through the mirror, so
+  it sees a later redefinition.  (Already implicit in
+  `nelisp-standalone--reader-repl-smoke'; restated here as its own named
+  claim, per Doc 191 §4/§5.)
+- Case B: a captured `(symbol-function NAME)' reference is a SNAPSHOT of
+  the function object at capture time -- calling it directly bypasses the
+  mirror, so it keeps running the OLD body after NAME is redefined.  Doc
+  191 §4 named this as the interesting case (\"whether *already-existing*
+  references see the update\"); the answer is no, and that is not a
+  defect -- host Emacs has always had this exact snapshot behavior for a
+  captured function object.
+- Case C: a closure that calls NAME BY NAME internally (rather than
+  holding a captured function object) re-resolves through the mirror on
+  every call, the same as Case A, so it DOES see a later redefinition --
+  the opposite of Case B despite both being \"a closure captured before a
+  reload\" in Doc 191 §4's phrasing, which is why the case list keeps
+  them separate.
+- Case E (Doc 191 §6, second open question): a closure over a DYNAMIC
+  (`defvar'd) variable is not a capture at all -- dynamic variables are
+  looked up by name at every reference, lexical closures included -- so a
+  closure over one sees a later `setq' on the global, the same as Case C.
+
+Doc 191 §6's FIRST open question (a `let'-bound dynamic shadow while the
+global default is reloaded out from under it, via `set-default') is NOT
+covered here: `set-default'/`default-value' are `void-function' in this
+standalone reader, measured directly against this binary before writing
+this smoke rather than assumed, so the scenario the open question asks
+about cannot be constructed at all yet -- a primitive gap, not a
+semantics answer.  Recorded in Doc 191 directly."
+  (let ((stdin (concat
+                ;; Case A: fresh call sees redefinition.
+                "(defun p1rd-fresh () 1)\n"
+                "(p1rd-fresh)\n"
+                "(defun p1rd-fresh () 2)\n"
+                "(p1rd-fresh)\n"
+                ;; Case B: captured symbol-function is a snapshot.
+                "(defun p1rd-cap () 10)\n"
+                "(defvar p1rd-cap-ref (symbol-function 'p1rd-cap))\n"
+                "(defun p1rd-cap () 20)\n"
+                "(funcall p1rd-cap-ref)\n"
+                "(p1rd-cap)\n"
+                ;; Case C: an indirect closure (calls by NAME) re-resolves.
+                "(defun p1rd-target () 100)\n"
+                "(defun p1rd-make-closure () (lambda () (p1rd-target)))\n"
+                "(defvar p1rd-closure (p1rd-make-closure))\n"
+                "(funcall p1rd-closure)\n"
+                "(defun p1rd-target () 200)\n"
+                "(funcall p1rd-closure)\n"
+                ;; Case E: closure over a dynamic var is never a capture.
+                "(defvar p1rd-special 5)\n"
+                "(defun p1rd-special-closure () (lambda () p1rd-special))\n"
+                "(defvar p1rd-closure2 (p1rd-special-closure))\n"
+                "(funcall p1rd-closure2)\n"
+                "(setq p1rd-special 6)\n"
+                "(funcall p1rd-closure2)\n"
+                "(exit)\n"))
+        (expected (concat
+                   "p1rd-fresh\n1\np1rd-fresh\n2\n"
+                   "p1rd-cap\np1rd-cap-ref\np1rd-cap\n10\n20\n"
+                   "p1rd-target\np1rd-make-closure\np1rd-closure\n100\np1rd-target\n200\n"
+                   "p1rd-special\np1rd-special-closure\np1rd-closure2\n5\n6\n6\n"))
+        (rc nil) (out nil))
+    (with-temp-buffer
+      (insert stdin)
+      (setq rc (call-process-region (point-min) (point-max)
+                                    nelisp-standalone--reader-out
+                                    t t nil
+                                    "--repl" "--no-prompt"))
+      (setq out (buffer-string)))
+    (unless (and (= rc 0) (equal out expected))
+      (error "defun/fset redefine case-list smoke exit=%S stdout=%S expected=%S"
+             rc out expected))))
+
+(defun nelisp-standalone--reader-defun-redefine-epoch-smoke ()
+  "Regression probe for the dc31b187f mutation-epoch class (Doc 191 §2.2 /
+Hazard A), run against a `--load'd file.
+
+`(fset NAME N)' at top level -- an immediate-integer RESULT with the
+mutation epoch unmoved -- used to let `nl_boundary_maybe_reclaim' rewind
+the per-form arena over the mirror entry `nelisp_mirror_bucket_prepend'
+\(first insert) / `nelisp_mirror_set_function_or_insert' (later
+redefinitions, the hit path) had just installed, corrupting whatever else
+shared its hash bucket and eventually crashing on a later allocation into
+the same reclaimed space.  This probe redefines one shared symbol 3
+times, interleaved with new global bindings each round, then reads back
+EVERY binding created so far (not just the latest) in one trailing form
+-- the corruption this guards against breaks bindings that happen to
+share a bucket with the just-installed entry, not necessarily the most
+recently defined one.
+
+Measured, not assumed: reverting dc31b187f in a scratch clone (`git
+revert -n dc31b187f') and rebuilding turns this exact probe red
+\(`wrong-type-argument: number-or-marker-p nil', starting at round 2 of
+3) while every OTHER existing standalone-reader smoke -- including
+`nelisp-standalone--reader-repl-smoke' -- stayed green; this is not
+redundant with anything already wired.
+
+`--load', not `--repl': the identical construction (same forms, same
+round count) run through `--repl --no-prompt' instead does NOT turn red
+on the same reverted commit, even though both entry points share ONE
+per-form eval loop that calls `nl_boundary_maybe_reclaim' unconditionally
+\(`report_errors' mode 1 for `--load', mode 2 for `--repl' -- see that
+loop's own comment; the reclaim call itself is not gated by mode).  The
+corruption is real either way -- both modes skip the identical epoch bump
+when reverted -- so whether one specific probe happens to OBSERVE it
+looks sensitive to incidental allocation-pattern differences between
+reading a whole file upfront and reading one line at a time, not to a
+difference in the reclaim call itself.  Doc 191 records this as the
+measured answer to its own \"per-line REPL boundary\" question: this
+probe shape is NOT red-provable via `--repl', and IS red-provable via
+`--load'; Case A-E redefinition semantics above were separately confirmed
+unaffected by the revert under `--repl' (still green on the broken
+binary), which is a second, independent data point for the same
+conclusion rather than a contradiction of it."
+  (let* ((rounds 3) (per-round 6) (lines nil) (checks nil))
+    (dotimes (r rounds)
+      (dotimes (j per-round)
+        (let ((name (format "p1re-g%d-%d" r j))
+              (val (+ (* r 1000) j)))
+          (setq lines (append lines (list (format "(defvar %s %d)" name val))))
+          (setq checks (append checks (list (cons name val))))))
+      (setq lines (append lines (list (format "(fset 'p1re-k %d)" (1+ r))))))
+    (setq lines
+          (append lines
+                  (list (format "(if (and (= (symbol-function 'p1re-k) %d) %s) t nil)"
+                                rounds
+                                (mapconcat
+                                 (lambda (c) (format "(= %s %d)" (car c) (cdr c)))
+                                 checks " ")))))
+    (let ((tmp (make-temp-file "nelisp-reader-redefine-epoch-" nil ".el"))
+          (rc nil) (out nil))
+      (unwind-protect
+          (progn
+            (with-temp-file tmp
+              (insert (mapconcat #'identity lines "\n"))
+              (insert "\n"))
+            (with-temp-buffer
+              (setq rc (call-process nelisp-standalone--reader-out nil t nil
+                                     "--load" tmp))
+              (setq out (buffer-string)))
+            (unless (and (= rc 0) (equal out "t\n"))
+              (error "epoch regression probe (dc31b187f class) exit=%S stdout=%S"
+                     rc out)))
+        (ignore-errors (delete-file tmp))))))
 
 (defun nelisp-standalone--reader-hash-table-literal-smoke ()
   "Assert standalone-reader materialises generated reader literals."

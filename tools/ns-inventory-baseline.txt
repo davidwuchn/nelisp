@@ -308,6 +308,20 @@ ns-collision-divergent 126
 # adds this branch's own +1 on top of the merge-3/9 interim: 864 + 1 =
 # 865.  To be reconciled to the measured count in the battery.
 ns-prefix-violation 865
+#
+# 854 -> 855 on 2026-08-23: `nelisp-artifact-reloadable-p' (Doc 191 Phase
+# 2's queryable Hazard-B predicate). Public API by design -- the doc asks
+# for a predicate "callable from the REPL or a future watch-mode
+# wrapper" -- same shape as the 45 other single/no-dash public names this
+# file already carries in this count (`compile-elisp-artifact',
+# `eval-elisp-artifact', `nelisp-artifact-load-file', ...): the file's
+# inferred namespace is the private `nelisp-artifact--' prefix, and its
+# public surface has never matched that by convention here.
+# integration/wave4 (this branch, merge 7/9): disjoint from all prior
+# additions (a new public predicate name), interim ceiling adds this
+# branch's own +1 on top of the merge-5/9 interim: 865 + 1 = 866.  To be
+# reconciled to the measured count in the battery.
+ns-prefix-violation 866
 # 611 -> 613 on 2026-08-20: `nelisp--check-string'/`--check-symbol' and the
 # other argument-check helpers are referenced from the lisp/ mirrors that
 # carry copies of the functions using them.  This is the kind this file

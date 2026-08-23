@@ -113,6 +113,18 @@ only the needed values, falling back to full plist parsing on unexpected input."
 (defvar nelisp-artifact--last-native-compile-report nil
   "Most recent `.neln' native compile coverage report.")
 
+(defvar nelisp-artifact--native-installed-symbols (make-hash-table :test 'eq)
+  "Symbols whose function was ever installed as a native wrapper by
+`nelisp-artifact--install-native-functions'.  Doc 191 (hot code reload)
+Phase 2: once a symbol enters this table it stays there for the rest of
+this process's lifetime, even if a later `defun'/`fset' overwrites its
+function cell -- some OTHER, already-compiled caller may hold a direct
+`call'/`extern-call' instruction resolved against the native code this
+symbol had at install time (Doc 191 §2.3 Hazard B: neither compiled-call
+shape consults the mirror/function-cell at call time), and no amount of
+redefining SYMBOL after the fact can retroactively fix an address already
+baked into someone else's machine code.  See `nelisp-artifact-reloadable-p'.")
+
 (defvar nelisp-artifact-default-native-policy 'opportunistic
   "Default native policy for `.neln' artifact compilation.
 `opportunistic' means every `.el' file can produce a `.neln' artifact:
@@ -1128,6 +1140,16 @@ coverage when a native executor rejects the call."
            sym
            (nelisp-artifact--native-function-wrapper
             artifact-path sym fallback meta))
+          ;; Doc 191 Phase 2: record SYM as early-bound for the rest of
+          ;; this process's lifetime -- see the table's own docstring and
+          ;; `nelisp-artifact-reloadable-p'.  Recorded here, at the one
+          ;; site that actually installs a native wrapper, rather than
+          ;; inferred later from `nelisp--functions' current contents,
+          ;; because a later plain `defun' legitimately overwrites SYM's
+          ;; function-cell entry without undoing the hazard: some caller
+          ;; compiled against SYM's native address before that `defun'
+          ;; ran does not know about it.
+          (puthash sym t nelisp-artifact--native-installed-symbols)
           (setq installed (1+ installed)))))
     (nelisp-artifact--note-native-dispatch
      (list :event 'install
@@ -1135,6 +1157,40 @@ coverage when a native executor rejects the call."
            :installed installed
            :skipped skipped))
     installed))
+
+(defun nelisp-artifact-reloadable-p (symbol)
+  "Return non-nil when redefining SYMBOL is expected to be visible to every
+caller that resolves it by name (Doc 191 Phase 1's verified `defun'/`fset'
+path), and nil when SYMBOL is early-bound (Doc 191 §2.3 Hazard B): SYMBOL
+was, at some point in this process, installed as a native wrapper by
+`nelisp-artifact--install-native-functions', so some caller may already
+hold a direct call to the native code SYMBOL had at that time, and
+redefining SYMBOL now cannot reach that caller.
+
+This answers Doc 191 Phase 2's question for the one Hazard B source a
+running process can actually query: `nelisp-artifact--install-native-
+functions', the native-wrapper install path used when loading a `.neln'
+artifact into a running `nelisp-eval'-hosted process.  It does NOT cover
+the standalone build's own separate hand-curated compile-unit table
+\(`scripts/nelisp-standalone-build.el''s `nelisp-standalone--manifest' and
+friends): that is build-time-only data inside the `nelisp-standalone-
+build.el' Emacs process that BUILDS a freestanding binary, with no handle
+any running process -- Emacs-hosted or the freestanding binary itself --
+can query at runtime.  Making that branch queryable would mean the
+standalone build baking its own compile-unit provenance into the binary
+as new, permanent, queryable state, which is new machinery Doc 191 §3
+says not to build without it earning its way in; recorded here as an
+explicitly bigger follow-on, not silently dropped.
+
+This predicate is per-SYMBOL, matching Doc 191 §4's own sketch, not
+per-CALLER: it does not distinguish \"early-bound for THIS caller\" from
+\"early-bound for some caller, unknown which\" -- Doc 191 §6's third open
+question (symbol-scoped vs. process-lifetime-scoped) is still open.  This
+answers the narrower, symbol-scoped question Doc 191 §5's own Phase 2 ERT
+design actually tests: a plain interpreted `defun' is reloadable, a
+function installed through `nelisp-artifact--install-native-functions' is
+not."
+  (not (gethash symbol nelisp-artifact--native-installed-symbols)))
 
 (defun nelisp-native-function-call (fn args)
   "Call native wrapper FN with ARGS, falling back when native cannot run."
