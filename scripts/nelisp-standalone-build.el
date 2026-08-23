@@ -20943,8 +20943,8 @@ Doc 187); Doc 190 Phase B (2026-08-23) changed the RESPONSE -- checks
 not a bare `should-error', per the memory note on this runtime's past
 `condition-case'/`throw' interaction bugs) and now assert the EXACT
 promoted Bignum result instead, host-verified against GNU Emacs 30.1
-(`bignump'/value equality both checked -- Doc 190 §4's own "verified
-by tag inspection, not just value equality" discipline); checks 17-18
+(`bignump'/value equality both checked -- Doc 190 §4's own `verified
+by tag inspection, not just value equality' discipline); checks 17-18
 remain the fencepost controls a naive off-by-one in the detection
 check could pass right next to (no false-positive promotion one
 below/at the boundary, AND the result must be a plain fixnum again,
