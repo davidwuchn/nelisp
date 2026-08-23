@@ -46,6 +46,32 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
+# Needs a host that can run the configured target; ask the build script's
+# own predicate rather than a bare `[ -x ]' test on $NELISP.  2026-08-23
+# Windows inventory: the build produced target/nelisp (a linux-x86_64 ELF),
+# but `[ -x ]' read false for it there, so this gate reported
+# "missing-nelisp" (GATE-COUNT checked=0) for what is really an unrunnable
+# target rather than a truly absent binary.  Same convention as
+# tools/selfhost-test.sh.
+set +e
+"${EMACS:-emacs}" --batch -Q -L lisp -L src -L scripts -l nelisp-standalone-build \
+  --eval '(kill-emacs (if (nelisp-standalone--target-runnable-on-host-p) 0 3))' \
+  >/dev/null 2>&1
+host_rc=$?
+set -e
+case "$host_rc" in
+  0) ;;
+  3)
+    echo "GATE-SKIP target ${NELISP_STANDALONE_TARGET:-linux-x86_64} cannot run on host $(uname -s)/$(uname -m)"
+    echo "runtime_image_cache_gate_result label=runtime_image_cache_gate rc=0 skipped=1"
+    exit 0
+    ;;
+  *)
+    echo "runtime_image_cache_gate_fail reason=cannot-ask-host-runnability rc=$host_rc" >&2
+    exit 1
+    ;;
+esac
+
 if [ "$BUILD" -eq 1 ]; then
   make standalone-reader
 fi

@@ -368,8 +368,22 @@ standalone-reader:
 # on the binary itself, each package's own examples/ demo included.
 # Conditional prerequisite matches `binary-size-ratchet' above: build
 # only if neither target/nelisp nor target/nelisp.exe exists yet.
+# `[ -f "$$bin" ]' below only proves the build produced a file -- on a host
+# that cannot run the binary's target (e.g. a linux-x86_64 target/nelisp
+# under Windows), the file exists and this check alone would try to exec it
+# anyway (2026-08-23 Windows inventory: `Exec format error').  The runnable-
+# host predicate is asked FIRST, same convention as `standalone-reader-test'
+# (scripts/nelisp-standalone-build.el).
 nl-condition-standalone-smoke: $(if $(wildcard target/nelisp target/nelisp.exe),,standalone-reader)
-	@bin=./target/nelisp; [ -f "$$bin" ] || bin=./target/nelisp.exe; \
+	@NELISP_STANDALONE_TARGET=$(STANDALONE_GATE_TARGET) $(EMACS) --batch -Q -L lisp -L src -L scripts -l nelisp-standalone-build \
+	  --eval '(kill-emacs (if (nelisp-standalone--target-runnable-on-host-p) 0 3))' \
+	  >/dev/null 2>&1; \
+	host_rc=$$?; \
+	if [ "$$host_rc" = 3 ]; then \
+	  echo "GATE-SKIP target $(STANDALONE_GATE_TARGET) cannot run on this host"; \
+	  exit 0; \
+	fi; \
+	bin=./target/nelisp; [ -f "$$bin" ] || bin=./target/nelisp.exe; \
 	if [ ! -f "$$bin" ]; then \
 	  echo "GATE-SKIP no nelisp binary in target/ after build attempt"; \
 	  exit 0; \
@@ -377,7 +391,15 @@ nl-condition-standalone-smoke: $(if $(wildcard target/nelisp target/nelisp.exe),
 	"$$bin" --load packages/nl-condition/test/nl-condition-standalone-smoke.el
 
 nl-safe-standalone-smoke: $(if $(wildcard target/nelisp target/nelisp.exe),,standalone-reader)
-	@bin=./target/nelisp; [ -f "$$bin" ] || bin=./target/nelisp.exe; \
+	@NELISP_STANDALONE_TARGET=$(STANDALONE_GATE_TARGET) $(EMACS) --batch -Q -L lisp -L src -L scripts -l nelisp-standalone-build \
+	  --eval '(kill-emacs (if (nelisp-standalone--target-runnable-on-host-p) 0 3))' \
+	  >/dev/null 2>&1; \
+	host_rc=$$?; \
+	if [ "$$host_rc" = 3 ]; then \
+	  echo "GATE-SKIP target $(STANDALONE_GATE_TARGET) cannot run on this host"; \
+	  exit 0; \
+	fi; \
+	bin=./target/nelisp; [ -f "$$bin" ] || bin=./target/nelisp.exe; \
 	if [ ! -f "$$bin" ]; then \
 	  echo "GATE-SKIP no nelisp binary in target/ after build attempt"; \
 	  exit 0; \
@@ -398,8 +420,17 @@ nl-ns-reader-standalone-smoke: $(if $(wildcard target/nelisp target/nelisp.exe),
 	fi; \
 	"$$bin" --load packages/nl-ns/test/nl-ns-reader-standalone-smoke.el
 
+# Runnable-host guard: see `nl-condition-standalone-smoke' above.
 nl-resource-standalone-smoke: $(if $(wildcard target/nelisp target/nelisp.exe),,standalone-reader)
-	@bin=./target/nelisp; [ -f "$$bin" ] || bin=./target/nelisp.exe; \
+	@NELISP_STANDALONE_TARGET=$(STANDALONE_GATE_TARGET) $(EMACS) --batch -Q -L lisp -L src -L scripts -l nelisp-standalone-build \
+	  --eval '(kill-emacs (if (nelisp-standalone--target-runnable-on-host-p) 0 3))' \
+	  >/dev/null 2>&1; \
+	host_rc=$$?; \
+	if [ "$$host_rc" = 3 ]; then \
+	  echo "GATE-SKIP target $(STANDALONE_GATE_TARGET) cannot run on this host"; \
+	  exit 0; \
+	fi; \
+	bin=./target/nelisp; [ -f "$$bin" ] || bin=./target/nelisp.exe; \
 	if [ ! -f "$$bin" ]; then \
 	  echo "GATE-SKIP no nelisp binary in target/ after build attempt"; \
 	  exit 0; \
@@ -414,8 +445,17 @@ nl-resource-standalone-smoke: $(if $(wildcard target/nelisp target/nelisp.exe),,
 # `insert'/`buffer-string' wiring from Emacs's (Doc 188 §1.8/§4.1).
 # Same conditional-build pattern as the nl-condition/nl-safe smokes
 # above.
+# Runnable-host guard: see `nl-condition-standalone-smoke' above.
 standalone-reader-buffer-smoke: $(if $(wildcard target/nelisp target/nelisp.exe),,standalone-reader)
-	@bin=./target/nelisp; [ -f "$$bin" ] || bin=./target/nelisp.exe; \
+	@NELISP_STANDALONE_TARGET=$(STANDALONE_GATE_TARGET) $(EMACS) --batch -Q -L lisp -L src -L scripts -l nelisp-standalone-build \
+	  --eval '(kill-emacs (if (nelisp-standalone--target-runnable-on-host-p) 0 3))' \
+	  >/dev/null 2>&1; \
+	host_rc=$$?; \
+	if [ "$$host_rc" = 3 ]; then \
+	  echo "GATE-SKIP target $(STANDALONE_GATE_TARGET) cannot run on this host"; \
+	  exit 0; \
+	fi; \
+	bin=./target/nelisp; [ -f "$$bin" ] || bin=./target/nelisp.exe; \
 	if [ ! -f "$$bin" ]; then \
 	  echo "GATE-SKIP no nelisp binary in target/ after build attempt"; \
 	  exit 0; \
@@ -433,8 +473,17 @@ standalone-reader-buffer-smoke: $(if $(wildcard target/nelisp target/nelisp.exe)
 # (regenerate with `make nelisp-actor-cps-baseline') -- proving spawn/
 # mailbox/send/receive/yield/run-until-idle all work on the binary
 # itself.  Same conditional-build shape as the three above.
+# Runnable-host guard: see `nl-condition-standalone-smoke' above.
 nl-actor-standalone-smoke: $(if $(wildcard target/nelisp target/nelisp.exe),,standalone-reader)
-	@bin=./target/nelisp; [ -f "$$bin" ] || bin=./target/nelisp.exe; \
+	@NELISP_STANDALONE_TARGET=$(STANDALONE_GATE_TARGET) $(EMACS) --batch -Q -L lisp -L src -L scripts -l nelisp-standalone-build \
+	  --eval '(kill-emacs (if (nelisp-standalone--target-runnable-on-host-p) 0 3))' \
+	  >/dev/null 2>&1; \
+	host_rc=$$?; \
+	if [ "$$host_rc" = 3 ]; then \
+	  echo "GATE-SKIP target $(STANDALONE_GATE_TARGET) cannot run on this host"; \
+	  exit 0; \
+	fi; \
+	bin=./target/nelisp; [ -f "$$bin" ] || bin=./target/nelisp.exe; \
 	if [ ! -f "$$bin" ]; then \
 	  echo "GATE-SKIP no nelisp binary in target/ after build attempt"; \
 	  exit 0; \
@@ -720,19 +769,43 @@ STANDALONE_READER_SMOKES = \
   standalone-reader-shadow-smoke \
   standalone-reader-tls-smoke
 
+# Every one of the 34 sub-targets below ultimately execs the SAME
+# target/nelisp binary, so if this host cannot run its target none of them
+# can -- asked once here rather than 34 times.  2026-08-23 Windows
+# inventory: without this, the aggregate ran all 34, 32 hit `Exec format
+# error'/permission failures individually, and it reported a plain FAIL
+# instead of a reasoned skip.  Same predicate/convention as
+# `standalone-reader-test'.
+#
+# Per-smoke logs go under target/tmp/, not /tmp/: MSYS2 `make' and Git
+# Bash `tail' disagreed about where `/tmp' lives in that same run (`make'
+# wrote to C:\msys64\tmp, the shell's own `tail /tmp/...' looked
+# elsewhere), so the aggregate could not read or remove its own logs.
+# target/ is inside the repo checkout -- one namespace, not two.
 .PHONY: standalone-reader-smokes
 standalone-reader-smokes:
-	@ran=0; failed=0; failed_names=""; \
+	@NELISP_STANDALONE_TARGET=$(STANDALONE_GATE_TARGET) $(EMACS) --batch -Q -L lisp -L src -L scripts -l nelisp-standalone-build \
+	  --eval '(kill-emacs (if (nelisp-standalone--target-runnable-on-host-p) 0 3))' \
+	  >/dev/null 2>&1; \
+	host_rc=$$?; \
+	if [ "$$host_rc" = 3 ]; then \
+	  echo "GATE-SKIP target $(STANDALONE_GATE_TARGET) cannot run on this host"; \
+	  echo "[reader-smokes] SKIP: target cannot run on this host"; \
+	  exit 0; \
+	fi; \
+	mkdir -p target/tmp; \
+	ran=0; failed=0; failed_names=""; \
 	for t in $(STANDALONE_READER_SMOKES); do \
-	  if $(MAKE) --no-print-directory "$$t" > /tmp/nelisp-smoke-$$t.log 2>&1; then \
+	  log="target/tmp/nelisp-smoke-$$t.log"; \
+	  if $(MAKE) --no-print-directory "$$t" > "$$log" 2>&1; then \
 	    ran=$$((ran + 1)); \
 	  else \
 	    ran=$$((ran + 1)); failed=$$((failed + 1)); \
 	    failed_names="$$failed_names $$t"; \
 	    echo "[reader-smokes] FAIL: $$t"; \
-	    tail -3 /tmp/nelisp-smoke-$$t.log | sed 's/^/    /'; \
+	    tail -3 "$$log" | sed 's/^/    /'; \
 	  fi; \
-	  rm -f /tmp/nelisp-smoke-$$t.log; \
+	  rm -f "$$log"; \
 	done; \
 	echo "GATE-COUNT checked=$$ran findings=$$failed"; \
 	if [ "$$failed" -eq 0 ]; then \
@@ -1041,6 +1114,25 @@ inner: standalone-reader emacs-parity
 # `NELISP_EMACS_PARITY_HOST_VERSION' overrides the detected host version --
 # it exists so this guard can be exercised without a second Emacs install;
 # unset, it always reflects the real `$(EMACS) --version'.
+#
+# The wrapped-corpus file below (target/emacs-parity.el) used to be
+# assembled from three separate shell steps -- `printf ... >', `cat ...
+# >>', `printf ... >>' -- each its own process writing to the same path.
+# 2026-08-23 Windows inventory: on that host the generated file lacked its
+# opening `(princ (format "%S" (progn' wrapper entirely and ended with an
+# unmatched `)))', so Emacs read it as the corpus's own top-level forms
+# followed by a stray close-paren and failed with `invalid-read-syntax'.
+# That exact three-step shell sequence could not be reproduced failing on
+# Linux (a mock run with the same commands under bash still writes a
+# correct file here), so the precise MSYS2/Git-Bash/Windows-Emacs
+# mechanism -- interleaved writes, `\r'-corrupted line continuation, or
+# something else entirely -- is not confirmed from this host. Rather than
+# guess at that mechanism, generation now goes through ONE Emacs process
+# and ONE `write-region' call instead of three separate shell redirects
+# to the same file: this cannot exhibit "some but not all of three
+# sequential writes landed", because there is only one write. Not
+# Windows-verified; the owner's next runbook run on Windows is the actual
+# proof this holds there too.
 emacs-parity: $(if $(wildcard target/nelisp target/nelisp.exe),,standalone-reader)
 	@mkdir -p target; \
 	host_version="$${NELISP_EMACS_PARITY_HOST_VERSION:-$$($(EMACS) --version | head -1 | grep -oE '[0-9]+\.[0-9]+' | head -1)}"; \
@@ -1050,9 +1142,7 @@ emacs-parity: $(if $(wildcard target/nelisp target/nelisp.exe),,standalone-reade
 	     echo "[emacs-parity] SKIP: host Emacs $$host_version is outside the pinned 30.x range"; \
 	     exit 0;; \
 	esac; \
-	printf '%s\n' '(princ (format "%S" (progn' > target/emacs-parity.el; \
-	cat test/nelisp-shadow-differential-cases.el >> target/emacs-parity.el; \
-	printf '%s\n' ')))' >> target/emacs-parity.el; \
+	$(EMACS) --batch -Q --eval '(with-temp-buffer (insert "(princ (format \"%S\" (progn\n") (goto-char (point-max)) (insert-file-contents "test/nelisp-shadow-differential-cases.el") (goto-char (point-max)) (insert ")))\n") (write-region (point-min) (point-max) "target/emacs-parity.el" nil (quote silent)))'; \
 	bin=./target/nelisp; \
 	case "$(NELISP_STANDALONE_TARGET)$$NELISP_STANDALONE_TARGET" in \
 	  windows*) bin=./target/nelisp.exe;; \
