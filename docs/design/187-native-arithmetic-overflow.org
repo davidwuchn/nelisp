@@ -1,7 +1,8 @@
 #+TITLE: Doc 187 — Arithmetic overflow consistency at the native layer
-#+AUTHOR: nelisp / nelisp-emacs (design: Claude Opus 5 + zawatton)
+#+AUTHOR: nelisp / nelisp-emacs (design: Claude Opus 5 + zawatton; implementation: Claude Fable 5)
 #+DATE: 2026-08-22
-#+STATUS: DRAFT — design only, no feature code in this doc.
+#+STATUS: SHIPPED — P0-P4 all implemented and verified (2026-08-23). See §8.
+#+VERIFIED-BY: standalone-reader-test ert-full compile
 
 * §0 TL;DR
 
@@ -547,3 +548,200 @@ them.
   cases should wrap the overflow-triggering form in an explicit
   =condition-case=, not only a bare =should-error=, so a future regression
   in that interaction is caught by this doc's own gate too.
+
+* §8 Implementation report (2026-08-23, branch =feat/native-overflow-checks=)
+
+All of P0-P4 are implemented and verified.  P0 was already on this
+branch's base (=feat/native-observability=, =71d5f17ef=, which has
+=84950ad30=/=cfc3267f5= merged in via =integration/wave3=) — the constants
+were bound, contrary to this doc's own §1.1 probe against ITS OWN branch
+point; that probe's finding was branch-specific and did not carry over.
+P1-P4 landed this session, commits =bb6ada48d= (P1/P2 layer-1 fix) and
+=73b08fa1a= (P4 opt-in AOT flag).
+
+** §8.1 Two things this doc's own design got wrong, measured and corrected
+
+Both are the same shape: a technique proven correct in one execution
+context assumed to transfer to a different one without re-measuring it
+there, which is exactly rule 3 in =AI.md= ("a measurement is invalid
+unless its baseline is").
+
+1. §3.1's proposed sign-flip check (=(and (>= acc 0) (>= v 0) (< sum 0))=
+   applied directly to the fold's own =sum=/=prod=) does not fire on the
+   actual boundary case.  Measured this session: inside =wf_sum='s fold,
+   =(+ most-positive-fixnum 1)= computes exactly =2305843009213693952= in
+   registers — positive, no 64-bit sign flip, because that intermediate
+   value has never round-tripped through =wf_write_int= (the step that
+   narrows to this runtime's 62-bit Int width).  =expt='s own check (§1.5)
+   only works because each of ITS loop steps is a *separate interpreted*
+   =*= call, so =next= has already gone through exactly that round trip by
+   the time =expt= inspects it — a property this doc did not distinguish
+   from the fold's own untagged intermediate arithmetic.  Fixed by bound-
+   checking the OPERANDS (=acc=, =v=, already-narrowed, trustworthy) against
+   the two literal fixnum constants directly, instead of the sum/product's
+   own sign.  =wf_prod= additionally needed the div-round-trip check kept
+   (it correctly catches the TRUE 64-bit overflow case, e.g.
+   =(* 100000000000 100000000000)=) *plus* the same bound check (catches a
+   product that stays inside 64 bits but crosses only the narrower fixnum
+   boundary, e.g. =(* most-positive-fixnum 2)= — the div round trip alone
+   round-trips cleanly on that one and misses it).  §3.3's AOT-path
+   estimate had the same blind spot; the actual P4 codegen uses a
+   different, cheaper, unrelated-to-either technique (§8.3).
+
+2. Nesting =(bf_signal_overflow_error)= inside =wf_write_int='s argument
+   (exactly as §3.1 wrote it) silently drops the signal: =wf_write_int=
+   always returns 0 regardless of what its VALUE argument was, so the
+   dispatch entry's own rc reads "success" even when the fold hit
+   overflow.  New =wf_write_int_checked= reads the THROW flag after the
+   fold and skips the write when set — but the flag also has to be
+   explicitly CLEARED right before the fold call, not just read: a REPL
+   session where a prior, unrelated top-level form had already errored
+   left the flag stale, and the next successful `(+ 40 3)` silently
+   inherited it and printed the FIRST form's stale error instead of "43"
+   — nothing arithmetic about the reproducer's first form at all
+   (=(this-fn-does-not-exist)=).  Caught by =standalone-reader-repl-smoke=,
+   already in the existing 17-item =nelisp-standalone-reader-test= dolist;
+   no new gate needed to catch it, one already did once wired up.
+
+Also uncovered, not originally anticipated by this doc: the stdlib
+=string-to-number= (=scripts/nelisp-stdlib-prelude.el=) accumulated the
+unsigned magnitude first and applied the sign at the end, so parsing
+=most-negative-fixnum='s own canonical literal
+(="-2305843009213693952"=) hit the new =wf_sum= check on the magnitude
+ALONE (=2305843009213693952=, one more than =most-positive-fixnum=) before
+the sign was ever applied — every large negative decimal literal in ANY
+program (not just interactive =+=/=*=) would have stopped parsing.  Fixed
+by folding the sign into each digit as it accumulates (=(* sign d)=
+instead of =d=, dropping the final =(* sign int-part)=), which never
+exceeds the boundary for any literal whose signed value is in range,
+since a signed decimal number's digit prefixes are bounded by its own
+final magnitude.
+
+** §8.2 Against-the-bug, verified on a fresh build (§5.1)
+
+#+begin_example
+BEFORE (base 71d5f17ef, unmodified):
+  (+ most-positive-fixnum 1)      => -2305843009213693952  (wraps)
+AFTER (bb6ada48d):
+  (+ most-positive-fixnum 1)      => signals overflow-error
+  (* 100000000000 100000000000)   => signals overflow-error
+  (* most-positive-fixnum 2)      => signals overflow-error (P1's own correction, §8.1.1)
+  (- most-negative-fixnum)        => signals overflow-error
+  (- most-negative-fixnum 1)      => signals overflow-error
+Fencepost controls, same build:
+  (+ (1- most-positive-fixnum) 1) => 2305843009213693951  (no false positive)
+  (* most-positive-fixnum 1)      => 2305843009213693951
+  (- most-negative-fixnum -1)     => -2305843009213693951
+#+end_example
+
+=standalone-reader-test=: =GATE-COUNT checked=18 findings=0= (17 smokes +
+the exit-code check; was =checked=4 findings=1= before the flag-clear fix
+in §8.1.2, failing on =standalone-reader-repl-smoke=, not on the new
+arithmetic checks themselves).
+
+** §8.3 P4 (opt-in AOT =--checked-arith=): what got built, and its real cost
+
+=nelisp-aot-compiler--checked-arith= (default nil), x86_64 =+=/=-=/=*= only;
+aarch64 signals =nelisp-aot-compiler-error= on the flag rather than
+silently emitting an unchecked op.  Two more corrections against this
+doc's own §3.3 estimate, same "measured, not assumed" discipline as
+§8.1:
+
+- Not a sign-flip and not §8.1's operand-bound check either: =--emit-arith=
+  has no second operand in scope where the checked result is checked
+  (RAX holds the result, R10 the now-dead other operand).  This
+  runtime's Int width is exactly 62 signed bits (§8.1.1's own finding),
+  which is precisely what a =SHL reg,2= / =SAR reg,2= round trip through a
+  64-bit register tests: a value survives it iff it fits in 62 signed
+  bits.  New =nelisp-asm-x86_64-sar-reg-imm8= (same opcode group as the
+  existing =shl-reg-imm8=, differing only in the /digit) plus 2-3 more
+  fixed-width instructions per checked op.  =*='s narrow-boundary case is
+  covered by this same round trip; its TRUE-64-bit-overflow case (the
+  =wf_prod= div-round-trip's OWN reason for existing, §8.1.1) is NOT —
+  documented as a stated gap in the code comment, not silently missed,
+  mirroring §6.3's own division-overflow scoping precedent.
+- §3.3 assumed a "call out to =bf_signal_overflow_error='s path" would be
+  the mechanism.  Measured this session: no such cross-compilation-unit
+  call target exists for AOT-compiled code today —
+  =nelisp-asm-x86_64-resolve-fixups= signals =:unresolved-label= on
+  anything not =define-label='d in the SAME buffer (that function's own
+  comment: "the linker only sees external relocs when we eventually
+  emit them; =v1 has none="), and =bf_signal_overflow_error= lives in a
+  wholly separate compilation (=scripts/nelisp-standalone-build.el=, not
+  anything =nelisp-aot-compile-sexp=/=-to-object= ever touches).  Building
+  cross-unit linking was out of this doc's P4 scope.  Instead, overflow
+  emits =exit(97)= via a raw, self-contained =SYSCALL= — no data section,
+  no external symbol, works identically in a fully standalone ELF
+  (=nelisp-aot-compile-sexp=) or an object linked into the reader
+  (=nelisp-aot-compile-to-object=/=nelisp-artifact-compile-file=, what
+  =bench-aot-tco= exercises).  This is a real, narrower contract than
+  layer 1's =condition-case=-catchable signal — a distinguished exit code,
+  not a Lisp condition — stated as such, not claimed as parity.
+
+Verified end-to-end on compiled-and-executed (not just emitted-bytes)
+programs via =nelisp-aot-compile-sexp=:
+
+#+begin_example
+unchecked, (+ most-positive-fixnum 1) via a defun call: exit 0   (wraps)
+checked,   same program:                                exit 97
+checked,   (- 0 most-negative-fixnum) (negation overflow): exit 97
+checked,   (* most-positive-fixnum 2) (narrow-boundary):   exit 97
+checked,   in-range +/-/* controls:                        correct value, no false positive
+#+end_example
+
+Regression guard (this doc's own P4 exit criterion): =nelisp-aot-compiler-
+test.el= (191 tests) and =nelisp-asm-x86_64-test.el= (97 tests) both still
+pass, 0 unexpected, unchanged (flag defaults nil; the default-path bytes
+this suite pins are untouched).
+
+Bench (P4's own exit criterion + this doc's "measured, not assumed" P3
+discipline applied to layer 2): =tools/ai/bench-compare.sh= on a compiled
+(not interpreted) tight `+` loop, =--checked-arith= on vs off —
+*1.27x* (noise/signal 0.06, limit 0.25, clean pass; report at
+=target/ai/aot-checked-arith-add-bench.txt=).  A constant few extra
+instructions per compiled add site, exactly what §3.3 argued for without
+a number.
+
+** §8.4 P3 (layer-1 bench)
+
+=tools/ai/bench-compare.sh=, native-dispatch (interpreter/reader) path,
+base = pre-P1 binary (=71d5f17ef=, archived in a separate worktree), candidate
+= post-P1 (=bb6ada48d=):
+- =+= loop, 200000 iterations: *0.99x* (noise/signal 0.00) — layer 1's
+  check costs nothing measurable against this path's own interpreter
+  overhead, exactly as §3.2 argued.
+- =*= loop, 200000 iterations: *1.00x* (noise/signal 0.01).
+Reports at =target/ai/reader-arith-overflow-check-bench.txt= and
+=target/ai/reader-arith-overflow-check-mul-bench.txt=.
+
+** §8.5 Gates
+
+Two =standalone-reader-test= rows added to =tools/gate-mutations.txt=
+(deleting =wf_sum='s positive-overflow sign-check half; deleting
+=wf_prod='s div-round-trip check) — both proven to flip the gate red via
+=tools/nelisp-gate-mutation.sh='s existing protocol.  No NEW required gate
+was added (the arithmetic-overflow checks live inside the existing,
+already-required =standalone-reader-test=, extending
+=nelisp-standalone--reader-stdlib-completion-smoke= from 12 checks to 18
+rather than standing up a separate gate/Makefile target), so a mutation
+row was not strictly required by the Definition of Done's own "new
+required gate" trigger — added anyway, since the doc's own §5.3 already
+designed them and an unexercised check is a claim about a checker, not a
+checker (=AI.md= rule 1).
+
+** §8.6 §6's open questions, closed or left open
+
+- §6.1 (Doc 190/bignums): unchanged — =bf_signal_overflow_error='s call
+  sites (§3.1) remain the exact places a bignum-promotion call would go
+  instead, now with a real implementation to read rather than a design.
+- §6.2 (should layer 2 default to checked): still open, now with a real
+  number (§8.3's 1.27x) instead of an estimate to decide against.
+- §6.3 (division overflow): still out of scope, unchanged.
+- §6.4 (=nelisp_jit_add2='s coercion-idiom caller): the mine did not
+  detonate — P4 routes the check through =--emit-arith='s OWN codegen
+  (the lowering of a user =(+ a b)= FORM), never through
+  =nelisp_jit_add2= itself, so =lisp/nelisp-stdlib.el='s =(nl-jit-call-i64-
+  i64 "nelisp_jit_add2" 0 X)= coercion idiom is untouched by construction,
+  not by an after-the-fact audit.  Documented explicitly in the new
+  =nelisp-aot-compiler--checked-arith= dynvar's own docstring so a future
+  caller does not bind it while building those specific leaves.

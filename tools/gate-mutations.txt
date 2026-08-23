@@ -121,3 +121,17 @@ standalone-reader-buffer-smoke|scripts/nelisp-stdlib-prelude.el|s/(nelisp-insert
 # corresponding test, clean on the unmutated file.
 ert-full|lisp/nelisp-cl-macros.el|s/(nelisp-cl-macros--struct-isa (nelisp--record-type val) type))/t)/|every struct instance matches every struct-type specializer regardless of ancestry, so struct-based dispatch order silently collapses (a dog instance would satisfy an unrelated struct's method too)
 ert-full|lisp/nelisp-cl-macros.el|s/(signal 'cl-no-applicable-method (cons name args))/nil/|an unmatched generic-function call silently returns nil instead of signaling cl-no-applicable-method
+# 2026-08-23 (this session, Doc 187 layer-1 fix): standalone-reader-test
+# now covers fixnum-overflow signalling for the native +/-/* dispatch
+# (wf_sum/wf_prod in scripts/nelisp-standalone-build.el, checks 11/13-18
+# of nelisp-standalone--reader-stdlib-completion-smoke) -- these two rows
+# prove the check itself, not just its presence.  Row 1 deletes the
+# positive-overflow half of wf_sum's sign check (unique substring: only
+# wf_sum's own literal-bound comparison shape has this exact text); row 2
+# deletes wf_prod's div-round-trip check (unique substring: `/' makes it
+# safe to use `#' as the sed delimiter instead of `/', since this file's
+# field separator is `|').  Both require `standalone-reader-test' to
+# rebuild target/nelisp (it does so inline, unlike emacs-parity, so no
+# `rebuild_checked' special-case is needed here).
+standalone-reader-test|scripts/nelisp-standalone-build.el|s/(and (> v 0) (> acc (- 2305843009213693951 v)))/(and (> v 0) nil)/|wf_sum's positive-overflow half of the literal-bound check is deleted, (+ most-positive-fixnum 1) wraps silently again instead of signalling overflow-error
+standalone-reader-test|scripts/nelisp-standalone-build.el|s#(/= (/ prod acc) v)#nil#|wf_prod's div-round-trip overflow check is deleted, (* 100000000000 100000000000) wraps silently again instead of signalling overflow-error

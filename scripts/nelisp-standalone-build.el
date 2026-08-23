@@ -3588,21 +3588,24 @@ argument (reachability + in-arena bounds checks).")
                         ;; CALL.  Inside the helpers bits-to-f64 only wraps refs.)
                         (let* ((sc (alloc-bytes 32 8)))
                           (seq (wf_fsum args 0 sc) (wf_copy32 out sc)))
-                      (wf_write_int out (wf_sum args 0))))))
+                      (seq (ptr-write-u64 268435472 0 0)
+                           (wf_write_int_checked out (wf_sum args 0)))))))
     ((:u8 "-") . (let* ((f (wf_any_float args)))
                     (if (= f 2)
                         (bf_wrong_type_number_or_marker (wf_first_non_number args))
                       (if (= f 1)
                         (let* ((sc (alloc-bytes 32 8)))
                           (seq (wf_fdiff args sc) (wf_copy32 out sc)))
-                      (wf_write_int out (wf_diff args))))))
+                      (seq (ptr-write-u64 268435472 0 0)
+                           (wf_write_int_checked out (wf_diff args)))))))
     ((:u8 "*") . (let* ((f (wf_any_float args)))
                     (if (= f 2)
                         (bf_wrong_type_number_or_marker (wf_first_non_number args))
                       (if (= f 1)
                         (let* ((sc (alloc-bytes 32 8)))
                           (seq (wf_fprod args (wf_int_fbits 1 sc) sc) (wf_copy32 out sc)))
-                      (wf_write_int out (wf_prod args 1))))))
+                      (seq (ptr-write-u64 268435472 0 0)
+                           (wf_write_int_checked out (wf_prod args 1)))))))
     ;; One argument is the RECIPROCAL, not the number itself: (/ 7) is 0 and
     ;; (/ 2.0) is 0.5.  Reading a second argument that was not there walked
     ;; off the end of the argument list and segfaulted -- an abort no
@@ -4181,6 +4184,36 @@ unresolved at link time."
     (defun wf_write_int (out v)
       (seq (ptr-write-u64 out 0 2) (ptr-write-u64 out 8 v)
            (ptr-write-u64 out 16 0) (ptr-write-u64 out 24 0) 0))
+    ;; Doc 187: `wf_write_int' ALWAYS returns 0 (its own `seq' ends in 0), so
+    ;; `(wf_write_int out (wf_sum args 0))' would unconditionally write
+    ;; whatever `wf_sum' returned into OUT and report rc=0 "ok" -- even when
+    ;; `wf_sum' hit `bf_signal_overflow_error' mid-fold (which raises the
+    ;; THROW flag @268435472 and returns its own dummy 1, not a real sum).
+    ;; `bf_wrong_type_number_or_marker''s call sites avoid this because they
+    ;; sit in a branch that never reaches `wf_write_int' at all; a fold that
+    ;; can signal PARTWAY THROUGH needs an explicit post-fold flag check
+    ;; instead, or the dummy value gets packed as if it were a real Int and
+    ;; the pending signal is silently dropped by the caller reading a rc=0
+    ;; "success".
+    ;;
+    ;; The caller MUST clear flag@268435472 to 0 immediately before the
+    ;; `(wf_sum ...)'/etc. call this wraps (each `+'/`-'/`*' dispatch arm
+    ;; below does, via a leading `(ptr-write-u64 268435472 0 0)').
+    ;; MEASURED regression this session without that clear: a bare "is the
+    ;; flag 0" read is not scoped to THIS call -- after an unrelated prior
+    ;; top-level form signalled and the REPL printed that error but never
+    ;; reset the flag (nothing before this function ever needed to, since
+    ;; every other success path writes unconditionally), the NEXT form's
+    ;; `(+ 40 3)' read that stale flag=1, skipped its own write, and the
+    ;; REPL re-printed the FIRST form's stale stashed error instead of
+    ;; "43" -- reproduced with `(this-fn-does-not-exist)' then `(+ 40 3)'
+    ;; on standalone-reader-repl-smoke, unrelated to arithmetic at all.
+    ;; Clearing right before the call makes the flag this function reads
+    ;; reflect only what THIS `wf_sum'/`wf_prod'/`wf_diff' call itself did.
+    (defun wf_write_int_checked (out v)
+      (if (= (ptr-read-u64 268435472 0) 0)
+          (wf_write_int out v)
+        1))
     (defun wf_write_t (out)
       (seq (ptr-write-u64 out 0 1) (ptr-write-u64 out 8 0)
            (ptr-write-u64 out 16 0) (ptr-write-u64 out 24 0) 0))
@@ -4770,14 +4803,55 @@ unresolved at link time."
       ;; SeqCst atomic increment so concurrent threads (parallel build) never
       ;; lose a mutation-epoch bump (the old read;+1;write was a racy RMW).
       (atomic-fetch-add 268435544 1))
+    ;; Doc 187 §3.1: overflow check inline in the fold, so the native
+    ;; `+'/`*' dispatch (the entries that call these) signals
+    ;; `overflow-error' instead of silently wrapping past
+    ;; most-positive-fixnum/most-negative-fixnum.
+    ;;
+    ;; MEASURED (this session), not the sign-flip trick `expt' uses: a raw,
+    ;; not-yet-packed `--emit-arith' sum/product is a genuine, un-narrowed
+    ;; i64 in registers -- `(+ most-positive-fixnum 1)' computes exactly
+    ;; 2305843009213693952 there, positive, no 64-bit-level sign flip at
+    ;; all (`(< sum 0)' on it is nil).  `expt''s own check only happens to
+    ;; work because each of its loop steps is a SEPARATE interpreted `*'
+    ;; call, so `next' has already round-tripped through `wf_write_int'
+    ;; (which DOES narrow to this runtime's fixnum width) by the time
+    ;; `expt' inspects it; `wf_sum'/`wf_prod' fold WITHOUT that per-step
+    ;; round trip (the reason they exist as a fold instead of N interpreted
+    ;; calls), so a sign-flip check here never sees a narrowed value to
+    ;; flip.  The correct check instead compares the (still-valid, still
+    ;; in true 64-bit range) OPERANDS against the two literal fixnum
+    ;; bounds directly -- `acc' and `v' are already-stored, already-
+    ;; correctly-narrowed fixnums (confirmed: reading an existing
+    ;; most-positive-fixnum back gives 2305843009213693951, not something
+    ;; wrapped), so a bound comparison on them is trustworthy without
+    ;; needing the sum/product itself to have been packed first.
     (defun wf_sum (list_ptr acc)
       (if (= (ptr-read-u64 list_ptr 0) 7)
           (let* ((car_ptr (nl_cons_car_ptr list_ptr)) (v (ptr-read-u64 car_ptr 8)))
-            (wf_sum (nl_cons_cdr_ptr list_ptr) (+ acc v))) acc))
+            (if (or (and (> v 0) (> acc (- 2305843009213693951 v)))
+                    (and (< v 0) (< acc (- -2305843009213693952 v))))
+                (bf_signal_overflow_error)
+              (wf_sum (nl_cons_cdr_ptr list_ptr) (+ acc v))))
+        acc))
+    ;; `*': the div-round-trip alone (matching `expt''s shape) only catches
+    ;; a product that overflows the TRUE 64-bit register (verified: it
+    ;; correctly flags `(* 100000000000 100000000000)', whose true product
+    ;; needs 74 bits).  A product that stays within 64 bits but crosses
+    ;; only the narrower fixnum boundary -- `(* most-positive-fixnum 2)',
+    ;; true value 2^62-2, round-trips cleanly (prod/acc = 2 = v exactly) --
+    ;; needs the same literal-bound check `wf_sum' uses, applied to the
+    ;; (verified-true, since the round trip above already passed) `prod'.
     (defun wf_prod (list_ptr acc)
       (if (= (ptr-read-u64 list_ptr 0) 7)
-          (let* ((car_ptr (nl_cons_car_ptr list_ptr)) (v (ptr-read-u64 car_ptr 8)))
-            (wf_prod (nl_cons_cdr_ptr list_ptr) (* acc v))) acc))
+          (let* ((car_ptr (nl_cons_car_ptr list_ptr)) (v (ptr-read-u64 car_ptr 8))
+                 (prod (* acc v)))
+            (if (or (and (/= acc 0) (/= (/ prod acc) v))
+                    (> prod 2305843009213693951)
+                    (< prod -2305843009213693952))
+                (bf_signal_overflow_error)
+              (wf_prod (nl_cons_cdr_ptr list_ptr) prod)))
+        acc))
     ;; `/' folds over EVERY divisor: (/ 100 5 2) is 10, and reading only the
     ;; first two arguments answered 20 -- a wrong number, silently.  Integer
     ;; division by zero traps in hardware, so the divisors are scanned for a
@@ -4800,10 +4874,28 @@ unresolved at link time."
               (seq (sexp-write-float scratch (bits-to-f64 result-bits))
                    (wf_fdivtail (nl_cons_cdr_ptr list_ptr) (ptr-read-u64 scratch 8) scratch))))
         acc_bits))
+    ;; Doc 187 §3.1/P2: `a - b' overflows exactly when `a + (-b)' would --
+    ;; same literal-bound check `wf_sum' uses, with `v' (the subtrahend)
+    ;; substituted for `-v': overflow iff (v<0 AND acc>MPF+v) or (v>0 AND
+    ;; acc<MNF+v).  (Same measured reason as `wf_sum': a raw, not-yet-
+    ;; packed `diff' never shows the sign-flip a check on ITS OWN sign
+    ;; would need; `acc'/`v' are the trustworthy, already-narrowed values
+    ;; to bound-check instead.)  This also covers the one-argument
+    ;; negation path below (`(- 0 first)', acc=0) without a separate
+    ;; helper: substituting acc=0 makes the `v>0' branch unreachable (no
+    ;; valid fixnum exceeds most-positive-fixnum, so it can never satisfy
+    ;; `0 < MNF+v') and the `v<0' branch reduces to exactly `first =
+    ;; most-negative-fixnum' -- negating it is the only negation that
+    ;; overflows, since the positive range is one narrower than the
+    ;; negative range.
     (defun wf_subtail (list_ptr acc)
       (if (= (ptr-read-u64 list_ptr 0) 7)
           (let* ((car_ptr (nl_cons_car_ptr list_ptr)) (v (ptr-read-u64 car_ptr 8)))
-            (wf_subtail (nl_cons_cdr_ptr list_ptr) (- acc v))) acc))
+            (if (or (and (< v 0) (> acc (+ 2305843009213693951 v)))
+                    (and (> v 0) (< acc (+ -2305843009213693952 v))))
+                (bf_signal_overflow_error)
+              (wf_subtail (nl_cons_cdr_ptr list_ptr) (- acc v))))
+        acc))
     (defun wf_diff (list_ptr)
       (if (= (ptr-read-u64 list_ptr 0) 7)
           (let* ((car_ptr (nl_cons_car_ptr list_ptr)) (first (ptr-read-u64 car_ptr 8))
@@ -4811,7 +4903,13 @@ unresolved at link time."
             ;; elisp `-': 1-arg `(- x)' = NEGATION (-x), not x; n-arg subtracts
             ;; the tail from the first.  The old `first' fallthrough made `(- 5)'
             ;; return 5, breaking every `(ash v (- (* i 8)))' byte-extraction.
-            (if (= (ptr-read-u64 rest 0) 7) (wf_subtail rest first) (- 0 first))) 0))
+            (if (= (ptr-read-u64 rest 0) 7)
+                (wf_subtail rest first)
+              (if (or (and (< first 0) (> 0 (+ 2305843009213693951 first)))
+                      (and (> first 0) (< 0 (+ -2305843009213693952 first))))
+                  (bf_signal_overflow_error)
+                (- 0 first))))
+        0))
     ;; --- FLOAT-AWARE arithmetic.  The integer wf_sum/wf_prod/wf_subtail/wf_diff
     ;; above read slot+8 as a raw i64 with NO tag check, so a Float operand
     ;; (tag 3, IEEE-754 bits inline at +8) is folded as garbage and written via
@@ -4961,6 +5059,25 @@ unresolved at link time."
          (ptr-write-u64 (+ sbuf 8) 0 7499634)
          (ptr-write-u64 (+ sbuf 16) 0 0)
          (nl_alloc_symbol sbuf 11 268435480)
+         (wf_write_nil 268435512)
+         (ptr-write-u64 268435472 0 1)
+         (atomic-fetch-add 268435544 1)
+         1)))
+    ;; Doc 187: fixnum overflow at the native `+'/`-'/`*' dispatch (wf_sum/
+    ;; wf_prod/wf_subtail/wf_diff below) signals `overflow-error' the same
+    ;; way `expt' already does (scripts/nelisp-stdlib-prelude.el), instead of
+    ;; silently wrapping past most-positive-fixnum/most-negative-fixnum.
+    ;; Same shape as `bf_arith_error' above -- pack the condition SYMBOL
+    ;; ("overflow-error", 14 bytes) into the TAG stash, nil into the VAL
+    ;; stash (matching `(signal 'overflow-error nil)'), raise the THROW
+    ;; flag, and bump the mutation epoch.
+    (defun bf_signal_overflow_error ()
+      (let* ((sbuf (alloc-bytes 24 1)))
+        (seq
+         (ptr-write-u64 sbuf 0 8606216600190023279)
+         (ptr-write-u64 (+ sbuf 8) 0 125822987035949)
+         (ptr-write-u64 (+ sbuf 16) 0 0)
+         (nl_alloc_symbol sbuf 14 268435480)
          (wf_write_nil 268435512)
          (ptr-write-u64 268435472 0 1)
          (atomic-fetch-add 268435544 1)
@@ -19483,13 +19600,19 @@ comment in lisp/nelisp-stdlib-misc.el); `map-keys' over a plist.
 
 Fixnum: `most-positive-fixnum' / `most-negative-fixnum' hold the
 measured values (2305843009213693951 / -2305843009213693952, Emacs's
-own on a 64-bit host); `(+ most-positive-fixnum 1)' wraps to EXACTLY
-`most-negative-fixnum' (the documented, still-silent behavior of the
-shipped binary's native `+' -- see the long comment above
-`nelisp--add2' in lisp/nelisp-jit-strategy.el for why `*'/`+'
-themselves could not be made to signal here without redefining native
-subrs system-wide); `expt' still signals `overflow-error' the way it
-did before this change, unaffected by any of the above."
+own on a 64-bit host).  Doc 187: the native `+'/`-'/`*' dispatch
+(`wf_sum'/`wf_subtail'/`wf_diff'/`wf_prod' in this file) now signals
+`overflow-error' on a fixnum-boundary crossing instead of the old
+silent wrap to `most-negative-fixnum' -- checks 11/13-16 are the
+against-the-bug cases (wrapped in `condition-case', not a bare
+`should-error', per the memory note on this runtime's past
+`condition-case'/`throw' interaction bugs); checks 17-18 are the
+fencepost controls a naive off-by-one in that check could pass right
+next to (no false-positive signal one below/at the boundary).  `expt'
+still signals `overflow-error' the way it did before this change,
+unaffected by any of the above (this runtime has no bignums to
+promote into on overflow, unlike host Emacs since 27 -- a documented
+divergence `expt''s own contract already established, not a new one)."
   (let ((tmp (make-temp-file "nelisp-reader-stdlib-completion-" nil ".el"))
         (out nil))
     (unwind-protect
@@ -19516,16 +19639,37 @@ did before this change, unaffected by any of the above."
              "(defvar nelisp-src-check8 (equal (sort (map-keys nelisp-src-pl) (lambda (a b) (string< (symbol-name a) (symbol-name b)))) '(:a :b)))\n"
              "(defvar nelisp-src-check9 (= most-positive-fixnum 2305843009213693951))\n"
              "(defvar nelisp-src-check10 (= most-negative-fixnum -2305843009213693952))\n"
-             "(defvar nelisp-src-check11 (= (+ most-positive-fixnum 1) most-negative-fixnum))\n"
+             ;; Doc 187 P1 against-the-bug: `(+ most-positive-fixnum 1)' used
+             ;; to wrap silently to `most-negative-fixnum' (the old check11);
+             ;; it must now signal `overflow-error', condition-case-wrapped.
+             "(defvar nelisp-src-add-of (condition-case nil (progn (+ most-positive-fixnum 1) 'no-signal) (overflow-error 'signalled)))\n"
+             "(defvar nelisp-src-check11 (eq nelisp-src-add-of 'signalled))\n"
              "(defvar nelisp-src-expt-overflow (condition-case nil (progn (expt 2 100) 'no-signal) (overflow-error 'signalled)))\n"
-             "(defvar nelisp-src-check12 (eq nelisp-src-expt-overflow 'signalled))\n"))
+             "(defvar nelisp-src-check12 (eq nelisp-src-expt-overflow 'signalled))\n"
+             ;; Doc 187 P1/P2 remaining against-the-bug cases: `*' overflow
+             ;; (the sibling commit's own second reference case, plus a
+             ;; product that stays within the true 64-bit register but
+             ;; crosses only the narrower fixnum boundary), negation of
+             ;; `most-negative-fixnum', and n-ary `-' underflow.
+             "(defvar nelisp-src-mul-of (condition-case nil (progn (* 100000000000 100000000000) 'no-signal) (overflow-error 'signalled)))\n"
+             "(defvar nelisp-src-check13 (eq nelisp-src-mul-of 'signalled))\n"
+             "(defvar nelisp-src-mul-boundary-of (condition-case nil (progn (* most-positive-fixnum 2) 'no-signal) (overflow-error 'signalled)))\n"
+             "(defvar nelisp-src-check14 (eq nelisp-src-mul-boundary-of 'signalled))\n"
+             "(defvar nelisp-src-neg-of (condition-case nil (progn (- most-negative-fixnum) 'no-signal) (overflow-error 'signalled)))\n"
+             "(defvar nelisp-src-check15 (eq nelisp-src-neg-of 'signalled))\n"
+             "(defvar nelisp-src-sub-of (condition-case nil (progn (- most-negative-fixnum 1) 'no-signal) (overflow-error 'signalled)))\n"
+             "(defvar nelisp-src-check16 (eq nelisp-src-sub-of 'signalled))\n"
+             ;; Doc 187 §5.2 fencepost controls: the boundary value itself,
+             ;; and one below it, must NOT false-positive.
+             "(defvar nelisp-src-check17 (= (+ (1- most-positive-fixnum) 1) most-positive-fixnum))\n"
+             "(defvar nelisp-src-check18 (and (= (* most-positive-fixnum 1) most-positive-fixnum) (= (- most-negative-fixnum -1) (1+ most-negative-fixnum))))\n"))
           (with-temp-buffer
             (call-process nelisp-standalone--reader-out nil t nil
                           "eval-elisp-source" tmp
-                          "(list nelisp-src-check1 nelisp-src-check2 nelisp-src-check3 nelisp-src-check4 nelisp-src-check5 nelisp-src-check6 nelisp-src-check7 nelisp-src-check8 nelisp-src-check9 nelisp-src-check10 nelisp-src-check11 nelisp-src-check12)")
+                          "(list nelisp-src-check1 nelisp-src-check2 nelisp-src-check3 nelisp-src-check4 nelisp-src-check5 nelisp-src-check6 nelisp-src-check7 nelisp-src-check8 nelisp-src-check9 nelisp-src-check10 nelisp-src-check11 nelisp-src-check12 nelisp-src-check13 nelisp-src-check14 nelisp-src-check15 nelisp-src-check16 nelisp-src-check17 nelisp-src-check18)")
             (setq out (string-trim (buffer-string))))
-          (unless (string= out "(t t t t t t t t t t t t)")
-            (error "stdlib-completion smoke -> %S (expected (t t t t t t t t t t t t))" out)))
+          (unless (string= out "(t t t t t t t t t t t t t t t t t t)")
+            (error "stdlib-completion smoke -> %S (expected (t t t t t t t t t t t t t t t t t t))" out)))
       (ignore-errors (delete-file tmp)))))
 
 (defun nelisp-standalone--reader-defvaralias-smoke ()

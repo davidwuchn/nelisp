@@ -234,6 +234,42 @@ Selects the raw-syscall convention for `syscall-direct' on aarch64:
   darwin puts NR in x16 and emits SVC #0x80 (macOS / Apple Silicon).
 x86_64 ignores this var (Linux SYSCALL only).")
 
+(defvar nelisp-aot-compiler--checked-arith nil
+  "Doc 187 P4: when non-nil, `--emit-arith' emits a fixnum-boundary
+overflow check after `+'/`-'/`*' and calls out to
+`bf_signal_overflow_error' (the same helper the native reader
+dispatch's `wf_sum'/`wf_prod'/`wf_subtail'/`wf_diff' use, Doc 187 P1)
+on overflow, instead of the bare inline instruction Doc 187 §1.3
+measured as the shipped default.  x86_64 only for now (aarch64 signals
+`nelisp-aot-compiler-error' rather than silently emitting an unchecked
+op under a name that promises a check) -- Doc 187 §3.3's own honest
+cost accounting is why this defaults nil and is exercised via
+`tools/ai/bench-compare.sh'/`bench-aot-tco' rather than assumed cheap.
+
+Doc 187 §6.4's known mine: this flag does NOT redefine
+`nelisp_jit_add2'/`nelisp_jit_mul2' themselves (the raw-i64 leaves
+`lisp/nelisp-cc-jit-arith.el' builds via this same `--emit-arith'
+machinery) -- those stay wrapping-by-contract because
+`lisp/nelisp-stdlib.el' uses `nelisp_jit_add2' as a float-to-int
+truncation idiom with nothing to do with arithmetic overflow.  This
+flag only changes what a user `(+ a b)'/`(- a b)'/`(* a b)' FORM
+lowers to; the raw leaves' own `(defun nelisp_jit_add2 (a b) (+ a
+b))' bodies would ALSO pick up a check if this flag were bound while
+THEY compile, so callers of `--emit-arith' with this flag on must not
+be building those specific leaves.  `scripts/compile-elisp-objects.el'
+(where the leaves are actually built) does not bind this var, so the
+leaves are unaffected by default; this comment exists so a future
+caller does not bind it globally and silently pick the leaves up too.
+
+The overflow-signal call target (`bf_signal_overflow_error') lives in
+the standalone reader runtime (`scripts/nelisp-standalone-build.el'),
+so this flag is only meaningful for AOT output that links against
+that runtime (the reader's own artifact/`.neln' compilation path,
+`nelisp-artifact-compile-file' — what `bench-aot-tco' exercises); a
+fully freestanding ELF via `nelisp-aot-compile-sexp' does not link
+against the reader and the call would be an unresolved symbol at
+link/load time.")
+
 (defvar nelisp-aot-compiler--next-rt-let-slot nil
   "Cons cell `(N)' holding the next free runtime-let frame slot index.
 Bound by the `defun' parser around body parsing; N starts at the
@@ -12100,6 +12136,14 @@ chained calls where rcx held both `d' param and a scratch value)."
         (b (nelisp-aot-compiler--ir-get node :b)))
     (if (eq nelisp-aot-compiler--arch 'aarch64)
         (progn
+          (when (and nelisp-aot-compiler--checked-arith
+                     (memq op '(+ - *)))
+            ;; Doc 187 P4 is x86_64-only for now; signal rather than
+            ;; silently emit an unchecked op under a name that promises
+            ;; a check (see `--emit-checked-arith-guard-x86_64').
+            (signal 'nelisp-aot-compiler-error
+                    (list :checked-arith-unsupported-arch
+                          nelisp-aot-compiler--arch)))
           (nelisp-aot-compiler--emit-value b buf)
           (nelisp-asm-arm64-str-pre-sp-16 buf 'x0)
           (nelisp-aot-compiler--emit-value a buf)
@@ -12127,10 +12171,15 @@ chained calls where rcx held both `d' param and a scratch value)."
       ;; pop r10 (= recover B into r10; r10 not in arg-regs).
       (nelisp-aot-compiler--emit-temp-pop buf 'r10)
       (cond
-       ((eq op '+) (nelisp-asm-x86_64-add-reg-reg buf 'rax 'r10))
-       ((eq op '-) (nelisp-asm-x86_64-sub-reg-reg buf 'rax 'r10))
+       ((eq op '+)
+        (nelisp-asm-x86_64-add-reg-reg buf 'rax 'r10)
+        (nelisp-aot-compiler--emit-checked-arith-guard-x86_64 buf))
+       ((eq op '-)
+        (nelisp-asm-x86_64-sub-reg-reg buf 'rax 'r10)
+        (nelisp-aot-compiler--emit-checked-arith-guard-x86_64 buf))
        ((eq op '*)
-        (nelisp-aot-compiler--imul-reg-reg buf 'rax 'r10))
+        (nelisp-aot-compiler--imul-reg-reg buf 'rax 'r10)
+        (nelisp-aot-compiler--emit-checked-arith-guard-x86_64 buf))
        ((eq op '/)
         (nelisp-aot-compiler--emit-x86_64-div-r10 buf))
        ((eq op 'mod)
@@ -12143,6 +12192,78 @@ chained calls where rcx held both `d' param and a scratch value)."
        (t
         (signal 'nelisp-aot-compiler-error
                 (list :unknown-arith-op op)))))))
+
+(defun nelisp-aot-compiler--emit-checked-arith-guard-x86_64 (buf)
+  "Doc 187 P4 (opt-in, x86_64 only): if
+`nelisp-aot-compiler--checked-arith' is non-nil, emit a fixnum-
+boundary overflow check on the value just computed into RAX by
+`--emit-arith', a no-op otherwise.
+
+MEASURED (this session), not `expt''s sign-flip trick and not a
+bounds check on the operands either: this runtime's Int width is 62
+significant bits (Doc 187 P1's own finding, `ash 1 61' wraps
+negative), which is exactly what a `SHL reg, 2' / `SAR reg, 2' round
+trip through a 64-bit register tests -- a value survives it iff its
+top 2 bits are already a sign-extension of bit 61, i.e. iff it fits
+in 62 signed bits.  Cheaper here than repeating layer 1's own
+operand-bound-check technique (Doc 187 P1's wf_sum/wf_subtail): no
+second operand is in scope at this call site (RAX already holds the
+computed result, R10 the now-dead other operand), and the round trip
+is 2 fixed-width instructions regardless of the op.
+
+Known gap, stated rather than silently missed (mirrors this doc's own
+§6.3 division-overflow scoping precedent): `*' can also overflow the
+TRUE 64-bit register before this round trip ever sees it -- Doc 187
+P1's wf_prod needed a SEPARATE div-round-trip check for exactly this
+(measured: `(* 100000000000 100000000000)' wraps at the true 64-bit
+level to a value that itself happens to fit in 62 bits, i.e. this
+guard alone would miss it).  x86_64 IDIV inline here would cost more
+than this guard's own budget for a case P4's own bench has not yet
+argued is worth it; `*' gets this same boundary-only guard for now,
+documented as narrower than `+'/`-''s full coverage.
+
+No cross-compilation-unit call target exists for AOT-compiled code
+today (MEASURED: `nelisp-asm-x86_64-resolve-fixups' signals
+`:unresolved-label' on anything not `define-label'-defined in the
+SAME buffer -- this assembler has no external-relocation path for
+x86_64, `v1 has none' per its own comment) -- reaching
+`bf_signal_overflow_error' the way the P1 reader dispatch does is
+therefore not available from here without new cross-unit linking
+infrastructure Doc 187 does not build.  On overflow this instead
+emits `exit(97)' via a raw, self-contained `SYSCALL' -- no data
+section, no external symbol, works identically whether this function
+ends up in a fully standalone ELF (`nelisp-aot-compile-sexp') or an
+object linked into the reader (`nelisp-aot-compile-to-object'
+/`nelisp-artifact-compile-file', what `bench-aot-tco' exercises).  97
+is this flag's own distinguished, documented exit code, not
+`overflow-error' delivered as a catchable `condition-case' signal --
+a real, honest, narrower contract than layer 1's, stated as such
+rather than claimed as parity with it."
+  (when nelisp-aot-compiler--checked-arith
+    (unless (eq nelisp-aot-compiler--arch 'x86_64)
+      (signal 'nelisp-aot-compiler-error
+              (list :checked-arith-unsupported-arch
+                    nelisp-aot-compiler--arch)))
+    ;; r11: caller-saved, not an arg register (same property r10 relies
+    ;; on above) -- free to clobber as a scratch copy of rax here.
+    (nelisp-asm-x86_64-mov-reg-reg buf 'r11 'rax)
+    (nelisp-asm-x86_64-shl-reg-imm8 buf 'r11 2)
+    (nelisp-asm-x86_64-sar-reg-imm8 buf 'r11 2)
+    (nelisp-asm-x86_64-cmp-reg-reg buf 'r11 'rax)
+    ;; jz +16: skip the fixed 16-byte overflow handler below when the
+    ;; round trip matches (no overflow).  Hand-written short jump (not
+    ;; `jz-rel32'/a `define-label' target) because the handler's length
+    ;; is a compile-time constant (2x mov-imm32 @ 7 bytes + syscall @ 2
+    ;; bytes = 16) -- no fixup pass needed for a fixed, already-known
+    ;; offset, and this op has no parse-time `:id' to hang a label name
+    ;; on the way `--emit-if'/`--emit-while' do for theirs.
+    (nelisp-asm-x86_64-emit-bytes buf (unibyte-string #x74 16))
+    ;; Overflow: exit(97), a distinguished, documented status code (see
+    ;; this function's docstring for why not a catchable Lisp signal).
+    (nelisp-asm-x86_64-mov-imm32 buf 'rdi 97)
+    (nelisp-asm-x86_64-mov-imm32
+     buf 'rax (if (eq nelisp-aot-compiler--os 'darwin) #x02000001 60))
+    (nelisp-asm-x86_64-syscall buf)))
 
 (defun nelisp-aot-compiler--emit-shift (node buf)
   "Emit a variable-count shift NODE; result in rax (Doc 100 §100.D).

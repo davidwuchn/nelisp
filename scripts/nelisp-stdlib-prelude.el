@@ -1803,13 +1803,27 @@ loop for the exponent (= no `expt' / `float' primitive needed)."
             ;; counted into DEXP rather than accumulated.
             (mant 0)
             (dexp 0))
-        ;; Integer-digit loop.
+        ;; Integer-digit loop.  INT-PART accumulates WITH the sign folded in
+        ;; from the first digit (`(* sign d)', not a separate `(* sign
+        ;; int-part)' after the loop) -- Doc 187 made the native `+'/`*'
+        ;; this loop calls signal `overflow-error' past the fixnum boundary,
+        ;; and the two boundaries are ASYMMETRIC: `most-negative-fixnum''s
+        ;; own canonical literal, "-2305843009213693952", has a MAGNITUDE
+        ;; (2305843009213693952) that by itself exceeds
+        ;; `most-positive-fixnum' by one.  Accumulating unsigned-then-
+        ;; negating hits that overflow check mid-parse on the magnitude
+        ;; alone (regression measured this session: even the bare positive
+        ;; token "2305843009213693952" started signalling); accumulating
+        ;; WITH the sign never exceeds the boundary for any literal whose
+        ;; final signed value is in range, since every digit prefix of a
+        ;; signed decimal number has magnitude no greater than the full
+        ;; number's.
         (let ((continue t))
           (while (and continue (< i n))
             (let ((d (nelisp-stdlib--digit-value (aref s i) r)))
               (cond
                (d
-                (setq int-part (+ (* int-part r) d))
+                (setq int-part (+ (* int-part r) (* sign d)))
                 (if (< mant 100000000000000000)
                     (setq mant (+ (* mant 10) d))
                   (setq dexp (1+ dexp)))
@@ -1870,7 +1884,7 @@ loop for the exponent (= no `expt' / `float' primitive needed)."
             ;; the float branch on the `.' alone returned 1.0, which is a
             ;; different type flowing into whatever the caller does next.
             (if (and (= frac-digits 0) (not has-exp))
-                (* sign int-part)
+                int-part
               ;; Scaling by repeated multiplication by 10.0 or 0.1 drifted --
               ;; 0.1 is not representable, so "1e300" came back
               ;; 1.0000000000000002e+300.  Powers of ten up to 1e22 ARE exact,
@@ -1880,8 +1894,10 @@ loop for the exponent (= no `expt' / `float' primitive needed)."
                           (float mant)
                           (+ dexp (if has-exp (* exp-sign exp-val) 0)))))
                 (if (< sign 0) (- 0.0 val) val)))))
-         ;; Pure integer.
-         ((> int-digits 0) (* sign int-part))
+         ;; Pure integer.  INT-PART already carries the sign (see the
+         ;; digit-loop comment above); re-multiplying by SIGN here would
+         ;; double-apply it.
+         ((> int-digits 0) int-part)
          (t 0))))))
 
 ;; Rust-min (2026-05-06 batch 4): copy-tree + sort.
