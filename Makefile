@@ -122,9 +122,27 @@ wasm-smoke:
 	       (defun g (y) (+ y 1)) \
 	       (defun f () (let ((x (+ (g 3) 4))) (g x)))) \
 	     \"target/wasm-smoke/f-locals.wasm\" \
+	     :arch 'wasm32 :format 'wasm) \
+	    (nelisp-aot-compile-to-object \
+	     '(defun arg-budget-sum8 (a b c d e f g h) \
+	        (extern-call nelisp_aot_wasm_arg_budget_sum8 \
+	                     a b c d e f g h)) \
+	     \"target/wasm-smoke/arg-budget-sum8.wasm\" \
 	     :arch 'wasm32 :format 'wasm))"
 	node tools/wasm-driver.mjs target/wasm-smoke/f.wasm f 42
 	node tools/wasm-driver.mjs target/wasm-smoke/f-locals.wasm f 9
+	# Doc 192 §3 Phase A/B: an 8-GP-argument `extern-call' -- one more
+	# argument than `nelisp_aot_builtin_calln''s own six-argument fixed
+	# ABI prefix takes before a single user argument, Doc 192 §1.2's
+	# measured wall -- routed through a wasm `env' import and run under
+	# Node.  Before the Phase A fix to `--current-arg-regs'
+	# (`lisp/nelisp-aot-compiler.el'), the compile step above signals
+	# `:extern-call-too-many-gp-args' for this defun specifically; see
+	# `tools/wasm-arg-budget-env.mjs' for the full defect-class citation.
+	node tools/wasm-driver.mjs --env-module tools/wasm-arg-budget-env.mjs \
+	  target/wasm-smoke/arg-budget-sum8.wasm arg-budget-sum8 36 \
+	  1 2 3 4 5 6 7 8
+	@echo "GATE-COUNT checked=3 findings=0"
 
 wasm-runtime-image-smoke:
 	mkdir -p target/wasm-runtime-image
