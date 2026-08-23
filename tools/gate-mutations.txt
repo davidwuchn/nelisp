@@ -85,3 +85,18 @@ ert-full|tools/ai/nelisp-ai.sh|s/'nelisp-worker-soak-test\\\.el\$'/'.'/|test_fil
 # Doc 160 (docs/design/160-stdlib-breadth.org) is chosen for the single,
 # short #+VERIFIED-BY: line the sed can match unambiguously.
 doc-claims|docs/design/160-stdlib-breadth.org|s/^#+VERIFIED-BY: reader-surface-audit$/#+VERIFIED-BY-REMOVED: reader-surface-audit/|a compliant SHIPPED doc loses its #+VERIFIED-BY: line and is not in the baseline
+#
+# 2026-08-23 (this session): gate-selfcheck itself had no row -- fixed while
+# making it skip-aware (fix/gate-selfcheck-skip-aware), which changed how it
+# tells a reasoned `GATE-SKIP' apart from a gate that prints NEITHER a count
+# NOR a skip reason, i.e. the exact "PASS while seeing nothing" shape this
+# gate exists to catch.  `bootstrap-contract' is the injection target: its
+# GATE-COUNT print is a single line, so the sed match is unambiguous, and
+# dropping it (replaced with `nil', paren-balanced -- the form it replaces
+# opens and closes exactly two parens) leaves the rest of the gate's checks
+# running and printing "ok"/"PASS" as before -- a silent, fully-fake pass,
+# not a crash.  Confirmed by hand before this row was added: mutated,
+# `make bootstrap-contract' exits 0 with no GATE-COUNT line, and
+# `make gate-selfcheck' (real Emacs 30.x, no skip in play) correctly goes
+# red on it.
+gate-selfcheck|tools/nelisp-bootstrap-contract.el|s/^    (princ (format "GATE-COUNT checked=%d findings=%d.*missing))$/    nil/|bootstrap-contract fake-passes (prints ok/PASS, no GATE-COUNT line); gate-selfcheck must still flag it as a finding, not confuse it with a reasoned skip
