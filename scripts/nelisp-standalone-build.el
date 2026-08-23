@@ -20473,7 +20473,8 @@ loader when it is absent."
                                  nelisp-standalone--reader-repl-smoke
                                  nelisp-standalone--reader-control-flow-smoke
                                  nelisp-standalone--reader-malformed-input-smoke
-                                 nelisp-standalone--reader-form-location-smoke))
+                                 nelisp-standalone--reader-form-location-smoke
+                                 nelisp-standalone--reader-socket-smoke))
                   (funcall smoke)
                   (setq checked (1+ checked)))
                 (message "GATE-COUNT checked=%d findings=0" checked)
@@ -21971,6 +21972,108 @@ the one line just read, not a running session count)."
         (kill-emacs 0))
     (error
      (message "[standalone-reader] FAIL: form-location smoke: %s"
+              (error-message-string err))
+     (kill-emacs 1))))
+
+(defun nelisp-standalone--reader-socket-smoke ()
+  "Against-the-bug proof for the socket primitives (Doc 184 follow-on) AND
+Task A's `nelisp-unsupported-primitive' fix, both exercised in ONE process
+via `--load' on `target/nelisp' itself -- loopback sockets are real kernel
+state, not something a host-Emacs unit test over the generated DSL source
+can stand in for (this smoke's own `tools/gate-mutations.txt' row breaks
+the send/recv byte count and shows this catches it; `emacs-parity'/host ERT
+cannot reach a socket at all).
+
+Positive: listen on 127.0.0.1:55731 (a fixed high port in the IANA dynamic/
+private range 49152-65535 -- true kernel-assigned ephemeral (bind port 0 +
+getsockname) was not implemented; getsockname was not in this change's
+syscall list and the fixed-port collision window for a single-process,
+listen-then-immediately-connect smoke is negligible, see this change's
+report for the full tradeoff) -> connect -> accept -> send/recv BOTH
+directions, including a UTF-8 Japanese payload, byte-exact (Doc 161:
+`nl_alloc_str' wraps received bytes with no re-encode pass) -> close.
+
+Negative 1: connect to a closed port (1, privileged / essentially never
+bound) signals a catchable `nelisp-socket-error', not a process abort.
+
+Negative 2: `nelisp--syscall' from user code -- the exact form the owner's
+2026-08-23 probe found aborting the whole process, uncatchable -- now
+signals a catchable `nelisp-unsupported-primitive' that `condition-case'
+actually runs a handler for.  Re-proving Task A's fix here (not just in
+this smoke's own manual probe history) means a future regression in
+`nelisp-standalone--applyfn-build-dispatch''s default arm fails THIS gate
+too, not only a standalone probe nobody re-runs."
+  (let* ((script (make-temp-file "nelisp-socket-smoke-" nil ".el"))
+         (jp-out "日本語")
+         (jp-in "こんにちは")
+         (src (concat
+               "(condition-case err\n"
+               "    (let* ((lfd (nelisp-socket-listen \"127.0.0.1\" 55731))\n"
+               "           (cfd (nelisp-socket-connect \"127.0.0.1\" 55731))\n"
+               "           (sfd (nelisp-socket-accept lfd))\n"
+               "           (msg (concat \"hello \" \"" jp-out "\"))\n"
+               "           (sent (nelisp-socket-send cfd msg))\n"
+               "           (got (nelisp-socket-recv sfd 4096))\n"
+               "           (reply (concat \"pong \" \"" jp-in "\"))\n"
+               "           (sent2 (nelisp-socket-send sfd reply))\n"
+               "           (got2 (nelisp-socket-recv cfd 4096)))\n"
+               "      (nelisp-socket-close cfd)\n"
+               "      (nelisp-socket-close sfd)\n"
+               "      (nelisp-socket-close lfd)\n"
+               "      (nl-write-file \"/dev/stdout\"\n"
+               "        (format \"ROUNDTRIP=%S\\n\"\n"
+               "                (if (if (integerp sent) (if (integerp sent2)\n"
+               "                        (if (equal got msg) (equal got2 reply) nil) nil) nil)\n"
+               "                    \"OK\" (list sent got sent2 got2)))))\n"
+               "  (error (nl-write-file \"/dev/stdout\" (format \"ROUNDTRIP=ERR:%S\\n\" err))))\n"
+               "(condition-case err\n"
+               "    (progn (nelisp-socket-connect \"127.0.0.1\" 1)\n"
+               "           (nl-write-file \"/dev/stdout\" \"CONNECT-REFUSED=UNCAUGHT\\n\"))\n"
+               "  (error (nl-write-file \"/dev/stdout\"\n"
+               "           (format \"CONNECT-REFUSED=%S\\n\"\n"
+               "                   (if (eq (car err) 'nelisp-socket-error) \"CAUGHT\" err)))))\n"
+               "(condition-case err\n"
+               "    (progn (nelisp--syscall 39 0 0 0 0 0 0)\n"
+               "           (nl-write-file \"/dev/stdout\" \"SYSCALL-GATE=UNCAUGHT\\n\"))\n"
+               "  (error (nl-write-file \"/dev/stdout\"\n"
+               "           (format \"SYSCALL-GATE=%S\\n\"\n"
+               "                   (if (equal err '(nelisp-unsupported-primitive nelisp--syscall))\n"
+               "                       \"CAUGHT\" err)))))\n"
+               "(nl-write-file \"/dev/stdout\" \"SOCKET-SMOKE-DONE\\n\")\n"))
+         (out nil) (rc nil))
+    (unwind-protect
+        (progn
+          (let ((coding-system-for-write 'utf-8-unix))
+            (with-temp-file script (insert src)))
+          (with-temp-buffer
+            (setq rc (call-process nelisp-standalone--reader-out nil t nil
+                                   "--load" script))
+            (setq out (buffer-string)))
+          (unless (= rc 0)
+            (error "socket smoke: exit=%S stdout=%S" rc out))
+          (unless (string-match-p "^ROUNDTRIP=\"OK\"$" out)
+            (error "socket smoke: round-trip failed, stdout=%S" out))
+          (unless (string-match-p "^CONNECT-REFUSED=\"CAUGHT\"$" out)
+            (error "socket smoke: connect-to-closed-port was not a catchable \
+nelisp-socket-error, stdout=%S" out))
+          (unless (string-match-p "^SYSCALL-GATE=\"CAUGHT\"$" out)
+            (error "socket smoke: nelisp--syscall was not a catchable \
+nelisp-unsupported-primitive, stdout=%S" out))
+          (unless (string-match-p "^SOCKET-SMOKE-DONE$" out)
+            (error "socket smoke: did not reach its own end marker, stdout=%S" out))
+          (message "[standalone-reader] socket smoke PASS"))
+      (ignore-errors (delete-file script)))))
+
+;;;###autoload
+(defun nelisp-standalone-reader-socket-test ()
+  "Build the reader binary and run only the socket smoke.  Exits 0/1."
+  (nelisp-standalone-build-reader)
+  (condition-case err
+      (progn
+        (nelisp-standalone--reader-socket-smoke)
+        (kill-emacs 0))
+    (error
+     (message "[standalone-reader] FAIL: socket smoke: %s"
               (error-message-string err))
      (kill-emacs 1))))
 

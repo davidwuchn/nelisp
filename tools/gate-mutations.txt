@@ -173,3 +173,20 @@ nl-actor-standalone-smoke|packages/nelisp-actor/src/nelisp-actor.el|s/^(require 
 # this smoke's own fencepost/printing/GC-stress checks, not by any
 # pre-existing gate (no prior gate constructs a tag-13 Sexp at all).
 standalone-reader-bignum-smoke|scripts/nelisp-standalone-build.el|s/(seq (ptr-write-u8  result_slot 0  13)/(seq (ptr-write-u8  result_slot 0  2)/|a constructed bignum is mis-tagged as a plain Int (its sign word read back as the "value"), corrupting bignump/prin1/comparison for every bignum the reader produces
+# standalone-reader-socket-smoke: added 2026-08-24 (socket primitives,
+# Doc 184 follow-on, feat/socket-primitives-p1).  The injection changes
+# accept4's raw syscall number from 288 (the real Linux x86_64 number)
+# to 289 (unused/EINVAL territory) in `nl_socket_accept_impl'.  Manually
+# verified before adding this row: RED with the injection applied
+# (`[standalone-reader] FAIL: socket smoke: socket smoke: round-trip
+# failed, stdout="ROUNDTRIP=ERR:(nelisp-socket-error -22)...'` --
+# `nelisp-socket-connect' + `nelisp-socket-accept' still run, but
+# accept4 now fails with EINVAL(-22) instead of returning the queued
+# connection), GREEN again with the injection reverted.  Chosen over
+# corrupting the sockaddr byte layout or the connect/listen syscall
+# numbers because those either segfault (wrong offsets) or fail at
+# `nelisp-socket-listen'/`-connect' before ever reaching accept, giving
+# a less specific signal than "this exact syscall number is what
+# matters, and this gate reads it, not just \"a socket call failed
+# somewhere\"".
+standalone-reader-socket-smoke|scripts/nelisp-standalone-build.el|s/(syscall-direct 288 (wf_argval args 0) 0 0 0 0 0)/(syscall-direct 289 (wf_argval args 0) 0 0 0 0 0)/|accept4 issues the wrong raw syscall number, so nelisp-socket-accept fails on every connection instead of returning the queued one

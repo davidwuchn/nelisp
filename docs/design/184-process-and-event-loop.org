@@ -410,6 +410,31 @@ scale, not a small addition to this doc's adapter work. This phase is
 listed so the roadmap does not silently drop it; see §6 for what a
 future doc would need to measure first.
 
+Update (2026-08-24): the raw socket primitive family this phase asked
+for has landed (=feat/socket-primitives-p1=,
+=scripts/nelisp-standalone-build.el='s =nelisp-standalone--socket-forms=
+/ =-socket-dispatch-arms=) — =nelisp-socket-listen/-accept/-connect/
+-send/-recv/-close=, raw SYSCALL on Linux x86_64 (socket/connect/
+accept4/bind/listen/setsockopt/shutdown; send/recv reuse the existing
+=nl_os_read_file_handle=/=nl_os_write_file_handle= byte-IO path), the
+catchable =nelisp-unsupported-primitive= signal (not a wrong syscall
+number) on every other target. IPv4 dotted-decimal + literal
+"localhost" only — DNS, IPv6, and nonblocking I/O are still out of
+scope, and every syscall failure is a catchable =nelisp-socket-error=.
+=standalone-reader-socket-smoke= (own Makefile target, folded into
+=standalone-reader-test='s dolist) proves a loopback round-trip
+including a UTF-8 payload, byte-clean. This is the foundation P4 asked
+for, not the adapter itself: =make-network-process= (a family of
+callbacks, filters, sentinels, and the standard-name argument surface
+=nelisp-process-*='s own adapter already carries for processes) has not
+been built on top of it. The adapter can follow now that the socket
+primitive family it was blocked on exists; see
+=packages/nelisp-sys/src/nelisp-sys.el='s =nelisp-sys--portable-syscall-
+table=, which still has no socket-family entries at all — the new
+primitives bake their Linux x86_64 syscall numbers directly into the
+native unit rather than resolving them through that table, a design
+choice recorded in =nelisp-standalone--socket-forms='s banner comment.
+
 * §5 Verification design
 
 ** §5.1 Against-the-bug
