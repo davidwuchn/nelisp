@@ -21,7 +21,11 @@
 ;; result re-fits -- superseding Phase A's own "no promotion in this
 ;; phase" note.  Every check is a plain value comparison (no host-Emacs
 ;; cross-check here; that lives in `tools/nelisp-substrate-parity-
-;; corpus.el' entries 43/44/45/46/47 and in `test/nelisp-bignum-test.el').
+;; corpus.el' entries 43/44/45/46/47 and in `test/nelisp-read-test.el',
+;; which is where the Phase A bignum-fallback ERT cases actually live --
+;; not a separate `nelisp-bignum-test.el', a naming slip in Phase A's own
+;; original commentary here, corrected in passing since this comment
+;; block was already being rewritten for Phase B).
 ;;
 ;; Also runs a GC stress round (allocate many bignums across several
 ;; garbage-collect cycles, then re-verify every one still compares/prints
