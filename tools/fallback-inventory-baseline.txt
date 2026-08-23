@@ -100,7 +100,7 @@
 # C's two unwind-protect corpus forms each wrap a deliberately-injected
 # test error and discard it after observing cleanup order, plus the
 # presence-sweep generator's end-of-file read-loop terminator).
-silent-fallback 52
+silent-fallback        57
 # 41 -> 42 on 2026-08-23: one new site, reviewed and pinned below (the
 # presence-sweep auto-note's defensive shape-extraction for a report-only
 # string, falls back to "?" on a malformed corpus form -- never on a
@@ -159,7 +159,7 @@ ignore-errors   54
 # 34 -> 37 on 2026-08-23: three new sites, reviewed and pinned below (Task
 # C's two unwind-protect corpus forms' condition-case wrappers, plus the
 # presence-sweep generator's standard "read forms until end-of-file" loop).
-bare-handler    37
+bare-handler    42
 
 # 0, and it should stay 0.  `nl_dbg_note' has no enable flag on purpose --
 # a flag has to be turned off by whoever turned it on, and forgetting is
@@ -179,6 +179,15 @@ dbg-note        0
 # falling is still green (the gate notes it as safe to lower); a key's
 # count rising past its pin, or a key with no pin at all, fails and names
 # the site.  Generated from a clean tree; do not hand-edit into drift.
+# 2026-08-23 batch-3 integration: the bignum smoke (doc 190 Phase A) wraps each
+# overflow-boundary probe in condition-case (overflow-error -> ok) -- a test
+# harness's deliberate handler, same class as the reader smokes' cleanup pins.
+pinned-site bare-handler	standalone-bignum-smoke.el	bignum-smoke--check	1c30e9372f35 1
+pinned-site bare-handler	standalone-bignum-smoke.el	bignum-smoke--check	51a73770028d 1
+pinned-site bare-handler	standalone-bignum-smoke.el	bignum-smoke--check	6db2a096b705 1
+pinned-site bare-handler	standalone-bignum-smoke.el	bignum-smoke--check	d03686d58780 1
+pinned-site bare-handler	standalone-bignum-smoke.el	bignum-smoke--check	cc33bff2a68e 1
+pinned-site silent-fallback	standalone-bignum-smoke.el	bignum-smoke--check	6c140c43eafd 5
 pinned-site bare-handler	nelisp-artifact.el	defun nelisp-artifact--artifact-kind	48f11c96651f 1
 pinned-site bare-handler	nelisp-artifact.el	defun nelisp-artifact--collect-el-files-with-find	606ea325a642 1
 pinned-site bare-handler	nelisp-artifact.el	defun nelisp-artifact--collect-neln-artifacts-with-find	e8bfdb4c0bee 1

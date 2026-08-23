@@ -181,7 +181,7 @@
 # it dead weight (every path is exercised by `scripts/standalone-bignum-
 # smoke.el').  Measured with `stat -c %s target/nelisp' after a clean
 # `make standalone-reader' on this branch's own HEAD.
-size 7273216
+size 7240384
 # Raised 2026-08-23 (7247592 -> 7251688, +4096 bytes, +0.06%, well
 # inside the 2% slack -- raised anyway per this file's own rule above)
 # by docs/design/189-nl-ns-enforced-namespaces.org Phase 0
