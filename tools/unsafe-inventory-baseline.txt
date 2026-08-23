@@ -83,7 +83,20 @@
 # `alloc-bytes' for their scratch buffers) every sibling error path here
 # already uses -- no new kind of unsafe call, more call sites of the kinds
 # already present.
-unsafe-call 562
+#
+# 562 -> 564 on 2026-08-23 (Doc 184 P3, feat/process-standard-names):
+# `scripts/nelisp-standalone-build.el' gained the `--repl' blank-Enter
+# idle-pump wiring (`nl_repl_pump_source', mirroring the existing
+# `nl_repl_make_source' right next to it) -- +1 `ptr-write-u8' call
+# writing the newline byte after the pumped literal source, +1
+# `ptr-read-u64' call reading the QUIT_FLAG word after evaluating the
+# pump form (the new blank-Enter branch of `nl_repl_loop' duplicates the
+# same post-eval QUIT_FLAG check the typed-line branch right below it
+# already has, so `(exit N)'/`(kill-emacs N)' from a pumped form -- or,
+# in practice, from whatever `nelisp--repl-idle-pump' fires -- still
+# works). Both are the same raw-pointer idiom every other `nl_repl_*'
+# helper in this file already uses; neither is new kind of unsafety.
+unsafe-call 564
 
 # `pinned-kernel-call FILE COUNT' pins the per-file unquoted `unsafe-call'
 # count behind `total' above -- the three kernel files that actually carry
@@ -96,4 +109,4 @@ unsafe-call 562
 # Regenerate from a clean tree; do not hand-edit into drift from the scan.
 pinned-kernel-call lisp/nelisp-stdlib-os-int-helpers.el 18
 pinned-kernel-call scripts/nelisp-flat-arena-probe.el 6
-pinned-kernel-call scripts/nelisp-standalone-build.el 538
+pinned-kernel-call scripts/nelisp-standalone-build.el 540

@@ -73,5 +73,23 @@
 #   twelve branches (seven wave-3 branches + feat/native-observability,
 #   feat/dod-doc-claims, docs/design-{short,mid,long}-term) landed and
 #   `make standalone-reader-test' relinked target/nelisp from scratch.
-size 6741200
+#
+# Raised 2026-08-23 (Doc 184 P1-P3, feat/process-standard-names), 6741200
+# -> 6749480, +8280 bytes, +0.12%, well inside the 2% slack -- raised
+# anyway per this file's own rule above.  The event-loop work itself
+# (`packages/nelisp-eventloop/src/nelisp-async-core.el',
+# `packages/nelisp-process-adapter/src/nelisp-process-adapter.el') does
+# NOT touch this number at all -- both are separate files loaded via
+# `--load'/`require' at runtime, never linked into `target/nelisp'.  The
+# +8280 bytes are the two small pieces that ARE baked in: (1) a ~15-line
+# no-op default `nelisp--repl-idle-pump' added to
+# `scripts/nelisp-stdlib-prelude.el' (embedded as prelude source text,
+# same mechanism as every other prelude-size raise in this file's
+# history), and (2) `nl_repl_pump_body'/`nl_repl_pump_source' plus the
+# blank-Enter branch of `nl_repl_loop' in
+# `scripts/nelisp-standalone-build.el' (compiled AOT code wiring the
+# `--repl' idle pump).  An event loop feature growing the binary by a
+# baked-in default hook is expected and small; the growth is this
+# specific, named, and bounded -- not open-ended.
+size 6749480
 slack-pct 2

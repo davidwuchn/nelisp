@@ -16464,6 +16464,16 @@ correctly."
     ,(nelisp-standalone--copy-lit-defun
       'nl_repl_prompt
       "nelisp> ")
+    ;; Doc 184 P3: the literal form `nl_repl_loop' evaluates (via the same
+    ;; eval_prefix/no_print_suffix wrapper `nl_repl_make_source' uses for a
+    ;; typed line) on a blank-Enter, instead of the previous silent no-op.
+    ;; `nelisp--repl-idle-pump' is always defined (a harmless no-op by
+    ;; default, `scripts/nelisp-stdlib-prelude.el') so this never signals
+    ;; void-function; loading `nelisp-process-adapter.el' upgrades it to a
+    ;; real bounded pump.
+    ,(nelisp-standalone--copy-lit-defun
+      'nl_repl_pump_body
+      "(nelisp--repl-idle-pump)")
     ,@(nelisp-standalone--copy-lit-u64-defuns
       'nl_repl_prelude_source
       (nelisp-standalone--reader-repl-prelude-source))
@@ -16899,6 +16909,19 @@ correctly."
                        (nl_repl_eval_suffix fbuf off)
                      (nl_repl_eval_no_print_suffix fbuf off)))
          (nl_alloc_str fbuf off src))))
+    ;; Doc 184 P3: same shape as `nl_repl_make_source', but the "typed
+    ;; line" is the fixed literal `nl_repl_pump_body' ("(nelisp--repl-
+    ;; idle-pump)") instead of user input, and the result is never
+    ;; printed (no-print suffix unconditionally) -- a blank-Enter must
+    ;; stay silent by default, exactly as it always has.
+    (defun nl_repl_pump_source (fbuf src)
+      (let* ((off (nl_repl_eval_prefix fbuf 0)))
+        (seq
+         (setq off (nl_repl_pump_body fbuf off))
+         (ptr-write-u8 fbuf off 10)
+         (setq off (+ off 1))
+         (setq off (nl_repl_eval_no_print_suffix fbuf off))
+         (nl_alloc_str fbuf off src))))
     (defun nl_repl_write_prompt (fbuf)
       (let* ((n (nl_repl_prompt fbuf 0)))
         (nl_os_write_stdout fbuf n)))
@@ -16913,7 +16936,19 @@ correctly."
             (if (< n 0)
                 (setq done 1)
               (if (= n 0)
-                  0
+                  ;; Doc 184 P3: blank Enter is the REPL's idle read point --
+                  ;; pump `nelisp--repl-idle-pump' (a no-op by default, a
+                  ;; real bounded timer+process poll once
+                  ;; nelisp-process-adapter.el is loaded) instead of the
+                  ;; previous silent no-op, so a timer armed earlier in the
+                  ;; session or output from a backgrounded process becomes
+                  ;; visible between prompts.  Same report_errors=2 +
+                  ;; QUIT_FLAG handling as a typed form, for consistency.
+                  (seq
+                   (nl_repl_pump_source fbuf src)
+                   (nl_eval_source_all src cursor result pool out ctx builtin_sym 2)
+                   (if (= (ptr-read-u64 268435464 0) 0) 0
+                     (setq done 1)))
                 (seq
                  (nl_repl_make_source linebuf n fbuf src print_p)
                  ;; report_errors=2: print form aborts but keep REPL session

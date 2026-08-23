@@ -586,6 +586,7 @@ reader-surface-audit:
 # keep current is a ledger nobody reads.  The count is the signal -- 29 checked
 # is the claim, and a target that stops existing shows up as a smaller number.
 STANDALONE_READER_SMOKES = \
+  standalone-reader-async-core-smoke \
   standalone-reader-catch-throw-tag-smoke \
   standalone-reader-checked \
   standalone-reader-checked-soak \
@@ -608,9 +609,12 @@ STANDALONE_READER_SMOKES = \
   standalone-reader-pcase-quote-literal-smoke \
   standalone-reader-prelude-equal-reload-smoke \
   standalone-reader-prelude-test \
+  standalone-reader-process-adapter-smoke \
+  standalone-reader-process-adapter-smoke-red \
   standalone-reader-process-smoke \
   standalone-reader-realrt-smoke \
   standalone-reader-recursion-guard-smoke \
+  standalone-reader-repl-idle-pump-smoke \
   standalone-reader-repl-smoke \
   standalone-reader-require-provide-smoke \
   standalone-reader-shadow-smoke \
@@ -1771,6 +1775,153 @@ standalone-reader-process-smoke: standalone-reader
 	  echo "[standalone-reader-process-smoke] PASS: call-process exit=$$cp_rc, read-output -> $$out, cat -> $$cat_out, poll -> $$poll_out"; \
 	else \
 	  echo "[standalone-reader-process-smoke] FAIL: call-process exit=$$cp_rc, read-output -> $$out, cat -> $$cat_out, poll -> $$poll_out"; \
+	  exit 1; \
+	fi
+
+# Doc 184 P0: `packages/nelisp-eventloop/src/nelisp-async-core.el' is the
+# actor/generator-free half of the timer queue (`nelisp-async.el' pulls in
+# `nelisp-actor' -> `generator', which is unreachable standalone -- Doc 184
+# S1.4/S1.5).  This smoke is the doc's own P0 exit criterion: the file
+# loads standalone with no generator error, and a REPEAT timer re-arms and
+# fires more than once across two `--fire-due' calls, closing
+# `tools/partial-accepted.txt''s `run-at-time' entry for anything that
+# loads this module.
+standalone-reader-async-core-smoke: standalone-reader
+	@mkdir -p target
+	@printf '%s\n' \
+	  '(progn (fboundp (quote nelisp-async-core-run-at-time)))' \
+	  > target/standalone-reader-async-core-smoke-load.el
+	@printf '%s\n' \
+	  '(let ((n 0) (tm nil)) (setq tm (nelisp-async-core-run-at-time 0 0.01 (lambda () (setq n (1+ n))))) (nelisp-async-core--fire-due (+ (nelisp-async-core--now) 0.001)) (nelisp-async-core--nanosleep 0.02) (nelisp-async-core--fire-due (nelisp-async-core--now)) (> n 1))' \
+	  > target/standalone-reader-async-core-smoke-repeat.el
+	@load_out="$$(./target/nelisp --eval '(progn (load "packages/nelisp-eventloop/src/nelisp-async-core.el") (load "target/standalone-reader-async-core-smoke-load.el"))')"; \
+	repeat_out="$$(./target/nelisp --eval '(progn (load "packages/nelisp-eventloop/src/nelisp-async-core.el") (load "target/standalone-reader-async-core-smoke-repeat.el"))')"; \
+	if [ "$$load_out" = "t" ] && [ "$$repeat_out" = "t" ]; then \
+	  echo "[standalone-reader-async-core-smoke] PASS: loads standalone (no generator error), REPEAT re-arms and fires >1 across two fire-due calls -> load=$$load_out repeat=$$repeat_out"; \
+	else \
+	  echo "[standalone-reader-async-core-smoke] FAIL: load=$$load_out repeat=$$repeat_out"; \
+	  exit 1; \
+	fi
+
+# Doc 184 P1/P2: `packages/nelisp-process-adapter/src/nelisp-process-adapter.el'
+# closes the measured gaps in the prelude's own partial standard-name
+# adapter (Doc 184 S1.3): `:filter' silently dropped, no
+# process-filter/set-process-filter/process-sentinel/set-process-sentinel,
+# `accept-process-output' ignoring PROCESS/SECONDS/MILLISEC and draining
+# every pending process while collapsing every sentinel status to the
+# literal string "finished\n".  Against-the-bug: RED is `make-network-
+# process' being void-function and this same filter/REPEAT shape failing
+# with target/nelisp built from a tree WITHOUT this adapter loaded (see
+# `standalone-reader-process-adapter-smoke-red' below); GREEN is this
+# target, all against the SAME binary with only the `--eval' load list
+# differing -- the fix is a loadable upgrade layer, not a native/binary
+# change (Doc 184 S2's decided direction).
+NELISP_PROCESS_ADAPTER_LOAD_1 = (load "packages/nelisp-eventloop/src/nelisp-async-core.el")
+NELISP_PROCESS_ADAPTER_LOAD_2 = (load "packages/nelisp-process-adapter/src/nelisp-process-adapter.el")
+standalone-reader-process-adapter-smoke: standalone-reader
+	@mkdir -p target
+	@printf '%s\n' \
+	  '$(NELISP_PROCESS_ADAPTER_LOAD_1)' \
+	  '$(NELISP_PROCESS_ADAPTER_LOAD_2)' \
+	  '(let* (chunks (p (make-process :name "cat" :command (list "/bin/cat") :filter (lambda (_p c) (push c chunks))))) (nelisp-process-write p "first-") (accept-process-output p 0.3) (nelisp-process-write p "second") (accept-process-output p 0.3) (nelisp-process-close-stdin p) (delete-process p) (nreverse chunks))' \
+	  > target/standalone-reader-process-adapter-smoke-filter.el
+	@printf '%s\n' \
+	  '$(NELISP_PROCESS_ADAPTER_LOAD_1)' \
+	  '$(NELISP_PROCESS_ADAPTER_LOAD_2)' \
+	  '(list (let (msgs (p (make-process :name "ok" :command (list "/bin/sh" "-c" "exit 0") :sentinel (lambda (_p m) (push m msgs))))) (accept-process-output p 1) (accept-process-output p 1) (car msgs)) (let (msgs (p (make-process :name "bad" :command (list "/bin/sh" "-c" "exit 7") :sentinel (lambda (_p m) (push m msgs))))) (accept-process-output p 1) (accept-process-output p 1) (car msgs)) (let (msgs (p (make-process :name "sl" :command (list "/bin/sleep" "1") :sentinel (lambda (_p m) (push m msgs))))) (accept-process-output p 0.2) (delete-process p) (car msgs)))' \
+	  > target/standalone-reader-process-adapter-smoke-sentinel.el
+	@printf '%s\n' \
+	  '$(NELISP_PROCESS_ADAPTER_LOAD_1)' \
+	  '$(NELISP_PROCESS_ADAPTER_LOAD_2)' \
+	  '(let* (fired2 (p1 (make-process :name "fast" :command (list "/bin/sh" "-c" "exit 0"))) (p2 (make-process :name "slow" :command (list "/bin/sleep" "1") :sentinel (lambda (_p m) (setq fired2 m))))) (accept-process-output p1 1) (let ((res (list fired2 (process-live-p p2)))) (delete-process p2) res))' \
+	  > target/standalone-reader-process-adapter-smoke-narrow.el
+	@printf '%s\n' \
+	  '$(NELISP_PROCESS_ADAPTER_LOAD_1)' \
+	  '$(NELISP_PROCESS_ADAPTER_LOAD_2)' \
+	  '(condition-case e (progn (make-network-process :name "x") (quote no-error)) (error (car e)))' \
+	  > target/standalone-reader-process-adapter-smoke-netproc.el
+	@printf '%s\n' \
+	  '$(NELISP_PROCESS_ADAPTER_LOAD_1)' \
+	  '$(NELISP_PROCESS_ADAPTER_LOAD_2)' \
+	  '(let ((n 0)) (run-at-time 0 0.02 (lambda () (setq n (1+ n)))) (accept-process-output nil 0.3) (>= n 2))' \
+	  > target/standalone-reader-process-adapter-smoke-repeat.el
+	@filter_out="$$(./target/nelisp --load target/standalone-reader-process-adapter-smoke-filter.el)"; \
+	sentinel_out="$$(./target/nelisp --load target/standalone-reader-process-adapter-smoke-sentinel.el)"; \
+	narrow_out="$$(./target/nelisp --load target/standalone-reader-process-adapter-smoke-narrow.el)"; \
+	netproc_out="$$(./target/nelisp --load target/standalone-reader-process-adapter-smoke-netproc.el)"; \
+	repeat_out="$$(./target/nelisp --load target/standalone-reader-process-adapter-smoke-repeat.el)"; \
+	if [ "$$filter_out" = '("first-" "second")' ] && \
+	   [ "$$sentinel_out" = "$$(printf '(\042finished\n\042 \042exited abnormally with code 7\n\042 \042terminated\n\042)')" ] && \
+	   [ "$$narrow_out" = "(nil t)" ] && \
+	   [ "$$netproc_out" = "error" ] && \
+	   [ "$$repeat_out" = "t" ]; then \
+	  echo "[standalone-reader-process-adapter-smoke] PASS: filter=$$filter_out sentinel=$$sentinel_out narrow(fired2,proc2-live)=$$narrow_out make-network-process=$$netproc_out repeat-through-shared-loop=$$repeat_out"; \
+	else \
+	  echo "[standalone-reader-process-adapter-smoke] FAIL: filter=$$filter_out sentinel=$$sentinel_out narrow=$$narrow_out netproc=$$netproc_out repeat=$$repeat_out"; \
+	  exit 1; \
+	fi
+
+# Against-the-bug RED half of the two smokes above: the SAME binary
+# (target/nelisp is not rebuilt between this and the GREEN targets --
+# Doc 184's fix is an opt-in loadable upgrade layer, not a native/binary
+# change), with NEITHER new file loaded, reproducing exactly Doc 184
+# S1.3's measured defects verbatim: `:filter' silently dropped (no error,
+# no filter call), and `run-at-time' REPEAT ignored (fires once,
+# synchronously, immediately -- not deferred at all).
+standalone-reader-process-adapter-smoke-red: standalone-reader
+	@mkdir -p target
+	@printf '%s\n' \
+	  '(let (got) (make-process :name "t" :command (list "/bin/echo" "hi") :filter (lambda (_p chunk) (push chunk got))) (accept-process-output nil 1) got)' \
+	  > target/standalone-reader-process-adapter-smoke-red-filter.el
+	@printf '%s\n' \
+	  '(let ((n 0)) (run-at-time 0 0.01 (lambda () (setq n (1+ n)))) n)' \
+	  > target/standalone-reader-process-adapter-smoke-red-repeat.el
+	@filter_out="$$(./target/nelisp --load target/standalone-reader-process-adapter-smoke-red-filter.el)"; \
+	repeat_out="$$(./target/nelisp --load target/standalone-reader-process-adapter-smoke-red-repeat.el)"; \
+	if [ "$$filter_out" = "nil" ] && [ "$$repeat_out" = "1" ]; then \
+	  echo "[standalone-reader-process-adapter-smoke-red] PASS: measured-defect reproduced verbatim -- filter=$$filter_out (silently dropped) repeat=$$repeat_out (REPEAT ignored, fired once synchronously)"; \
+	else \
+	  echo "[standalone-reader-process-adapter-smoke-red] FAIL: expected the UNFIXED defect shape (filter=nil repeat=1), got filter=$$filter_out repeat=$$repeat_out -- the prelude's own baked-in adapter changed out from under this smoke"; \
+	  exit 1; \
+	fi
+
+# Doc 184 P3: the `--repl' blank-line idle pump.  RED isolates exactly the
+# wiring question -- `nelisp-async-core.el' ALONE gives real deferred
+# `run-at-time' (so the timer genuinely will not fire until something
+# pumps it, unlike the prelude's synchronous immediate-fire stub) but
+# does NOT define a real `nelisp--repl-idle-pump' (only
+# nelisp-process-adapter.el does), so the baked-in no-op stays in effect
+# and blank-Enter must never print TICK.  GREEN loads
+# nelisp-process-adapter.el too, upgrading the hook to a real bounded
+# pump wired into `nl_repl_loop' (scripts/nelisp-standalone-build.el),
+# and blank-Enter must print TICK.  A `--load' batch run of the identical
+# timer form never reaches `nl_repl_loop' at all, matching Emacs's own
+# batch-mode contract of not pumping outside an explicit wait.
+standalone-reader-repl-idle-pump-smoke: standalone-reader
+	@mkdir -p target
+	@printf '%s\n' \
+	  '$(NELISP_PROCESS_ADAPTER_LOAD_1)' \
+	  '$(NELISP_PROCESS_ADAPTER_LOAD_2)' \
+	  '(run-at-time 0.05 nil (lambda () (princ "TICK")))' \
+	  '(quote batch-no-pump)' \
+	  > target/standalone-reader-repl-idle-pump-smoke-batch.el
+	@red_out="$$(printf '(load "packages/nelisp-eventloop/src/nelisp-async-core.el")\n(run-at-time 0.05 nil (lambda () (princ "TICK")))\n\n\n\n\n' | timeout 5 ./target/nelisp --repl --no-prompt --no-print 2>&1)"; \
+	green_out="$$(printf '(load "packages/nelisp-eventloop/src/nelisp-async-core.el")\n(load "packages/nelisp-process-adapter/src/nelisp-process-adapter.el")\n(run-at-time 0.05 nil (lambda () (princ "TICK")))\n\n\n\n\n\n\n\n\n\n' | timeout 5 ./target/nelisp --repl --no-prompt --no-print 2>&1)"; \
+	batch_out="$$(./target/nelisp --load target/standalone-reader-repl-idle-pump-smoke-batch.el 2>&1)"; \
+	case "$$red_out" in \
+	  *TICK*) red_ok=0 ;; \
+	  *) red_ok=1 ;; \
+	esac; \
+	case "$$green_out" in \
+	  *TICK*) green_ok=1 ;; \
+	  *) green_ok=0 ;; \
+	esac; \
+	if [ "$$red_ok" = 1 ] && [ "$$green_ok" = 1 ]; then \
+	  echo "[standalone-reader-repl-idle-pump-smoke] PASS: unloaded REPL blank-Enter never pumps (no TICK), loaded REPL blank-Enter pumps a due timer (TICK), batch --eval of the same timer never reaches the pump at all -> batch=$$batch_out"; \
+	else \
+	  echo "[standalone-reader-repl-idle-pump-smoke] FAIL: red(no-adapter)-had-tick=$$([ $$red_ok = 1 ] && echo no || echo YES-BAD) green(adapter-loaded)-had-tick=$$([ $$green_ok = 1 ] && echo YES || echo NO-BAD)"; \
+	  echo "  red_out=$$red_out"; \
+	  echo "  green_out=$$green_out"; \
 	  exit 1; \
 	fi
 

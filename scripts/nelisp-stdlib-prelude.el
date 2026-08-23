@@ -6171,6 +6171,21 @@ been killed when none had."
           (when sentinel
             (funcall sentinel proc "finished\n")))))
     t))
+;; Doc 184 P3: hook `nl_repl_loop' (scripts/nelisp-standalone-build.el)
+;; calls on every blank-line Enter in `--repl', so a REPL session can see
+;; deferred timers/backgrounded process output between prompts without
+;; the user calling `accept-process-output' by hand.  This baked-in
+;; default is a NO-OP -- it costs nothing and changes nothing for a REPL
+;; session that never loads the real event loop.  Loading
+;; packages/nelisp-process-adapter/src/nelisp-process-adapter.el (Doc 184
+;; P1-P3) unconditionally redefines this to a real bounded pump sharing
+;; the exact same poll loop as its `accept-process-output'.  A
+;; `--load'/`--eval' batch run never reaches `nl_repl_loop' at all, so
+;; this hook existing or not is invisible there either way -- matching
+;; Emacs's own batch-mode contract of not pumping outside an explicit
+;; wait.
+(unless (fboundp 'nelisp--repl-idle-pump)
+  (defun nelisp--repl-idle-pump () nil))
 (unless (fboundp 'set-file-modes)
   (defun set-file-modes (filename mode &optional _flag)
     "Apply MODE to FILENAME via chmod(2) when a syscall primitive exists.

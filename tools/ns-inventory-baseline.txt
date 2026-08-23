@@ -201,7 +201,22 @@ ns-collision 180
 # ignored, COUNTER as the cons Emacs makes it, the body/docstring split, the
 # float divisor of zero, and the pair-guarded plist walk.  Notes for each in
 # scripts/nl-ns-accepted.el.
-ns-collision-divergent 124
+# 124 -> 129 on 2026-08-23 (Doc 184 P0-P3, feat/process-standard-names):
+# `packages/nelisp-eventloop/src/nelisp-async-core.el' (new, P0) took over
+# `cancel-timer'/`run-at-time'/`sit-for' from `nelisp-async.el' (a rename
+# of which file pins them, not a new divergence -- the pair was already
+# counted); `packages/nelisp-process-adapter/src/nelisp-process-adapter.el'
+# (new, P1-P3) intentionally REDEFINES `make-process'/`delete-process'/
+# `kill-process'/`accept-process-output'/`nelisp--repl-idle-pump' over the
+# prelude's own versions (the doc's whole "upgrade on load" design, same
+# pattern `nelisp-async.el' already used for timers) and adds a third file
+# to the pre-existing `nelisp-make-process' divergent pair.  Net +9 pinned
+# identities (see the `pinned-collision' lines below), +5 in the raw count
+# after 3 old cancel-timer/run-at-time/sit-for identities (pinned against
+# `nelisp-async.el') stopped matching and were replaced by their
+# `nelisp-async-core.el' counterparts.  All 9 reviewed -- every one is this
+# doc's own deliberate standard-name override, not an accidental shadow.
+ns-collision-divergent 129
 # 850 -> 851 on 2026-08-19: `nl-check-file-quoted-unsafe', the entry point
 # that reports the unsafe calls inside quoted forms.  Same situation as the
 # nl-ns pair above -- it is public because tools/nl-check-inventory.el calls
@@ -218,7 +233,22 @@ ns-collision-divergent 124
 # reader-malformed-input-smoke' calls it across the boundary via `-f', and
 # `nelisp-standalone--' would move it into ns-private-escape instead of
 # removing it.
-ns-prefix-violation 854
+# 854 -> 857 on 2026-08-23 (Doc 184 P0-P3, feat/process-standard-names):
+# `packages/nelisp-process-adapter/src/nelisp-process-adapter.el' (new)
+# defines the bare standard Emacs process names by design -- `make-process',
+# `delete-process', `kill-process', `accept-process-output', `process-
+# filter'/`set-process-filter'/`process-sentinel'/`set-process-sentinel',
+# `make-network-process' -- the same "define the real name, not a
+# `nelisp-'-prefixed shadow" shape `scripts/nelisp-stdlib-prelude.el'
+# already carries most of this file's existing count for.  This is
+# CONCEDED, same as the private-escape entries below: making these
+# `nelisp-process-adapter-make-process' etc. would defeat the entire
+# point of a standard-name adapter.  Net movement measured at +3, not the
+# raw count of new bare names, because most of that count is `run-at-
+# time'/`cancel-timer'/`sit-for' RELOCATING from `nelisp-async.el' to the
+# new `nelisp-async-core.el' (P0's extraction) -- already-counted
+# violations changing which file they live in, not new ones.
+ns-prefix-violation 857
 # 611 -> 613 on 2026-08-20: `nelisp--check-string'/`--check-symbol' and the
 # other argument-check helpers are referenced from the lisp/ mirrors that
 # carry copies of the functions using them.  This is the kind this file
@@ -228,7 +258,23 @@ ns-prefix-violation 854
 # 613 -> 611 on 2026-08-20, ratcheted DOWN: the coding-system and
 # `buffer-substring-no-properties' mirrors stopped referencing the private
 # check helpers once they carried the prelude's own text.
-ns-private-escape 611
+# 611 -> 619 on 2026-08-23 (Doc 184 P0-P3, feat/process-standard-names):
+# `packages/nelisp-eventloop/src/nelisp-async.el' (rewritten to `require'
+# the new `nelisp-async-core.el', P0) and
+# `packages/nelisp-process-adapter/src/nelisp-process-adapter.el' (new,
+# P1-P3) both call `nelisp-async-core--now'/`--fire-due'/`--next-
+# deadline'/`--nanosleep' across the file boundary -- 4 names x 2 callers
+# = 8.  These four ARE double-dash ("private to this file") by the
+# original `nelisp-async.el''s own convention, carried over verbatim by
+# Doc 184 P0's own explicit instruction ("this is a cut, not a rewrite");
+# `nelisp-async.el' already called every one of them before the split,
+# just within its own file, where this gate could not see it.  Widening
+# them to single-dash (nl-ns's own suggested fix for a private-escape)
+# would rename load-bearing internals the design doc's own P0 exit
+# criterion names verbatim (`nelisp-async-core--fire-due',
+# `nelisp-async-core--now') -- CONCEDED, same shape as the argument-check
+# helpers above: the alternative is worse.
+ns-private-escape 619
 ns-unreadable 0
 
 # `pinned-collision KEY' pins every ns-collision and ns-collision-divergent
@@ -423,6 +469,7 @@ pinned-collision ns-collision	with-no-warnings	lisp/nelisp-stdlib-eval-special.e
 pinned-collision ns-collision	with-suppressed-warnings	lisp/nelisp-stdlib-eval-special.el scripts/nelisp-stdlib-prelude.el
 pinned-collision ns-collision	zerop	lisp/nelisp-cl-macros.el scripts/nelisp-stdlib-prelude.el
 pinned-collision ns-collision-divergent	abs	lisp/nelisp-stdlib.el scripts/nelisp-stdlib-prelude.el	2922a32d0049
+pinned-collision ns-collision-divergent	accept-process-output	packages/nelisp-process-adapter/src/nelisp-process-adapter.el scripts/nelisp-stdlib-prelude.el	d1b3b715b5b0
 pinned-collision ns-collision-divergent	add-to-list	lisp/nelisp-build-host.el scripts/nelisp-stdlib-prelude.el	2e959e15e953
 pinned-collision ns-collision-divergent	alist-get	lisp/nelisp-stdlib-misc.el scripts/nelisp-stdlib-prelude.el	7f1faf26747a
 pinned-collision ns-collision-divergent	append	lisp/nelisp-stdlib-list.el scripts/nelisp-stdlib-prelude.el	f6e086bde312
@@ -431,7 +478,7 @@ pinned-collision ns-collision-divergent	assoc	lisp/nelisp-stdlib-search.el scrip
 pinned-collision ns-collision-divergent	buffer-string	lisp/nelisp-stdlib-misc.el scripts/nelisp-stdlib-prelude.el	53bd058b84ad
 pinned-collision ns-collision-divergent	butlast	lisp/nelisp-stdlib-list.el scripts/nelisp-stdlib-prelude.el	7d0524ad6c34
 pinned-collision ns-collision-divergent	byte-compile-file	scripts/nelisp-stdlib-prelude.el src/nelisp-bytecode.el	fd60f8468dac
-pinned-collision ns-collision-divergent	cancel-timer	packages/nelisp-eventloop/src/nelisp-async.el scripts/nelisp-stdlib-prelude.el	b0d0791aa3e2
+pinned-collision ns-collision-divergent	cancel-timer	packages/nelisp-eventloop/src/nelisp-async-core.el scripts/nelisp-stdlib-prelude.el	918e01ccc320
 pinned-collision ns-collision-divergent	capitalize	lisp/nelisp-stdlib-plist-str.el scripts/nelisp-stdlib-prelude.el	2e371d19995f
 pinned-collision ns-collision-divergent	ceiling	lisp/nelisp-stdlib.el scripts/nelisp-stdlib-prelude.el	214b796e79a8
 pinned-collision ns-collision-divergent	cl-defstruct	lisp/nelisp-cl-macros.el scripts/nelisp-stdlib-prelude.el	0ec8a4e350d1
@@ -444,6 +491,7 @@ pinned-collision ns-collision-divergent	copy-tree	lisp/nelisp-stdlib-plist-str.e
 pinned-collision ns-collision-divergent	define-error	lisp/nelisp-stdlib-error.el scripts/nelisp-stdlib-prelude.el	23dfe8f3d73f
 pinned-collision ns-collision-divergent	defun	lisp/nelisp-jit-substrate.el lisp/nelisp-stdlib-eval-special.el scripts/nelisp-stdlib-prelude.el	91d01aa6ff27
 pinned-collision ns-collision-divergent	delete-dups	lisp/nelisp-stdlib-plist-str.el scripts/nelisp-stdlib-prelude.el	03fd6070a2df
+pinned-collision ns-collision-divergent	delete-process	packages/nelisp-process-adapter/src/nelisp-process-adapter.el scripts/nelisp-stdlib-prelude.el	2e21575a41b7
 pinned-collision ns-collision-divergent	directory-files	lisp/nelisp-stdlib-misc.el scripts/nelisp-stdlib-prelude.el	5772735e4f7a
 pinned-collision ns-collision-divergent	dotimes	lisp/nelisp-stdlib-eval-special.el scripts/nelisp-stdlib-prelude.el	f4ac7387792a
 pinned-collision ns-collision-divergent	downcase	lisp/nelisp-stdlib-plist-str.el scripts/nelisp-stdlib-prelude.el	675d26029d5d
@@ -467,12 +515,14 @@ pinned-collision ns-collision-divergent	hash-table-values	lisp/nelisp-stdlib-mis
 pinned-collision ns-collision-divergent	insert	lisp/nelisp-stdlib-misc.el scripts/nelisp-stdlib-prelude.el	2f43c6e88852
 pinned-collision ns-collision-divergent	insert-file-contents	lisp/nelisp-stdlib-misc.el scripts/nelisp-stdlib-prelude.el	3e64e56bdd3f
 pinned-collision ns-collision-divergent	keywordp	lisp/nelisp-stdlib-misc.el scripts/nelisp-stdlib-prelude.el	0401bbf5db7b
+pinned-collision ns-collision-divergent	kill-process	packages/nelisp-process-adapter/src/nelisp-process-adapter.el scripts/nelisp-stdlib-prelude.el	28dbf19a8874
 pinned-collision ns-collision-divergent	last	lisp/nelisp-stdlib-list.el scripts/nelisp-stdlib-prelude.el	d3d8fa50dbfe
 pinned-collision ns-collision-divergent	lsh	lisp/nelisp-stdlib-misc.el scripts/nelisp-stdlib-prelude.el	da4995e603d0
 pinned-collision ns-collision-divergent	macroexp-parse-body	lisp/nelisp-stdlib.el scripts/nelisp-stdlib-prelude.el	92dc977d56a1
 pinned-collision ns-collision-divergent	macroexpand-1	lisp/nelisp-stdlib.el scripts/nelisp-stdlib-prelude.el	35290347dca5
 pinned-collision ns-collision-divergent	make-directory	lisp/nelisp-build-host.el scripts/nelisp-stdlib-prelude.el	3c6cc7b600f2
 pinned-collision ns-collision-divergent	make-hash-table	lisp/nelisp-stdlib-hash.el scripts/nelisp-stdlib-prelude.el	e053cb15a128
+pinned-collision ns-collision-divergent	make-process	packages/nelisp-process-adapter/src/nelisp-process-adapter.el scripts/nelisp-stdlib-prelude.el	263817b13682
 pinned-collision ns-collision-divergent	mapc	lisp/nelisp-stdlib-hof.el scripts/nelisp-stdlib-prelude.el	4e87f4a62eba
 pinned-collision ns-collision-divergent	mapcar	lisp/nelisp-stdlib-hof.el scripts/nelisp-stdlib-prelude.el	219ed3e7df2f
 pinned-collision ns-collision-divergent	mapconcat	lisp/nelisp-stdlib-plist-str.el scripts/nelisp-stdlib-prelude.el	08041b57a105
@@ -495,10 +545,11 @@ pinned-collision ns-collision-divergent	nelisp--record-length	lisp/nelisp-heap-i
 pinned-collision ns-collision-divergent	nelisp--record-ref	lisp/nelisp-heap-image.el scripts/nelisp-stdlib-prelude.el	da50f1639220
 pinned-collision ns-collision-divergent	nelisp--record-set	lisp/nelisp-heap-image.el scripts/nelisp-stdlib-prelude.el	cd137b492fcd
 pinned-collision ns-collision-divergent	nelisp--record-type	lisp/nelisp-heap-image.el scripts/nelisp-stdlib-prelude.el	a9d93fcd8442
+pinned-collision ns-collision-divergent	nelisp--repl-idle-pump	packages/nelisp-process-adapter/src/nelisp-process-adapter.el scripts/nelisp-stdlib-prelude.el	b92d582ce214
 pinned-collision ns-collision-divergent	nelisp-cc-runtime-aot-module-init-plan	scripts/nelisp-stdlib-prelude.el src/nelisp-cc-runtime.el	1eb7c8a24c6a
 pinned-collision ns-collision-divergent	nelisp-cl-macros--struct-record	lisp/nelisp-cl-macros.el scripts/nelisp-stdlib-prelude.el	19276a37f75b
 pinned-collision ns-collision-divergent	nelisp-http-get	packages/nelisp-http/src/nelisp-http.el packages/nelisp-network/src/nelisp-network.el	0c3a19563129
-pinned-collision ns-collision-divergent	nelisp-make-process	packages/nelisp-process/src/nelisp-process.el scripts/nelisp-stdlib-prelude.el	695369bff1d6
+pinned-collision ns-collision-divergent	nelisp-make-process	packages/nelisp-process-adapter/src/nelisp-process-adapter.el packages/nelisp-process/src/nelisp-process.el scripts/nelisp-stdlib-prelude.el	8baa20cff7f0
 pinned-collision ns-collision-divergent	nelisp-sys-access	packages/nelisp-process/src/nelisp-process.el packages/nelisp-sys/src/nelisp-sys.el	13cdbaaf0ad0
 pinned-collision ns-collision-divergent	nelisp-sys-executable-find	packages/nelisp-process/src/nelisp-process.el packages/nelisp-sys/src/nelisp-sys.el	f8695bea7be4
 pinned-collision ns-collision-divergent	nelisp-sys-getenv	packages/nelisp-process/src/nelisp-process.el packages/nelisp-sys/src/nelisp-sys.el	5de1d302df1f
@@ -515,11 +566,11 @@ pinned-collision ns-collision-divergent	read-from-string	lisp/nelisp-stdlib-read
 pinned-collision ns-collision-divergent	recordp	lisp/nelisp-stdlib.el scripts/nelisp-stdlib-prelude.el	20096afadd80
 pinned-collision ns-collision-divergent	regexp-quote	lisp/nelisp-stdlib-plist-str.el scripts/nelisp-stdlib-prelude.el	e92681fb0b02
 pinned-collision ns-collision-divergent	round	lisp/nelisp-stdlib.el scripts/nelisp-stdlib-prelude.el	b6b8448a8348
-pinned-collision ns-collision-divergent	run-at-time	packages/nelisp-eventloop/src/nelisp-async.el scripts/nelisp-stdlib-prelude.el	e5d762c18d24
+pinned-collision ns-collision-divergent	run-at-time	packages/nelisp-eventloop/src/nelisp-async-core.el scripts/nelisp-stdlib-prelude.el	2e272350c8bb
 pinned-collision ns-collision-divergent	set-file-modes	lisp/nelisp-stdlib-misc.el scripts/nelisp-stdlib-prelude.el	eb7d7aadd4db
 pinned-collision ns-collision-divergent	setenv	lisp/nelisp-build-host.el scripts/nelisp-stdlib-prelude.el	a6f57b8a53c0
 pinned-collision ns-collision-divergent	setf	lisp/nelisp-cl-macros.el scripts/nelisp-stdlib-prelude.el	d66f82c26c57
-pinned-collision ns-collision-divergent	sit-for	packages/nelisp-eventloop/src/nelisp-async.el scripts/nelisp-stdlib-prelude.el	1dd2d6cc7058
+pinned-collision ns-collision-divergent	sit-for	packages/nelisp-eventloop/src/nelisp-async-core.el scripts/nelisp-stdlib-prelude.el	0402960ed31e
 pinned-collision ns-collision-divergent	sort	lisp/nelisp-stdlib-plist-str.el scripts/nelisp-stdlib-prelude.el	2713c36432ab
 pinned-collision ns-collision-divergent	split-string	lisp/nelisp-stdlib-plist-str.el scripts/nelisp-stdlib-prelude.el	b1a88b89cad5
 pinned-collision ns-collision-divergent	string	lisp/nelisp-stdlib-plist-str.el scripts/nelisp-stdlib-prelude.el	574089ddf026

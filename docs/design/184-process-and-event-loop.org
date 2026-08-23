@@ -1,7 +1,8 @@
 #+TITLE: Doc 184 — processes under standard names, and one event loop
 #+AUTHOR: nelisp / nelisp-emacs (design: Claude Opus 5 + zawatton)
 #+DATE: 2026-08-22
-#+STATUS: DRAFT — design only, no implementation in this doc.
+#+STATUS: SHIPPED (P0-P3, 2026-08-23, branch feat/process-standard-names) — P4 (=make-network-process=) remains explicitly out of scope, documented and loudly refused, per §1.7/§6.
+#+VERIFIED-BY: standalone-reader-async-core-smoke standalone-reader-process-adapter-smoke standalone-reader-process-adapter-smoke-red standalone-reader-repl-idle-pump-smoke standalone-reader-smokes
 
 * §0 TL;DR
 
@@ -459,9 +460,102 @@ a name so common the count does not move.)
 
 ** §5.4 VERIFIED-BY
 
-Left blank in this DRAFT; filled at SHIPPED with the commit SHA(s) per
-phase and the gate report names (=nelisp-process-adapter-smoke= and
-siblings) once P0-P3 land.
+Filled at SHIPPED (branch =feat/process-standard-names=, off
+=feat/native-observability= @ =71d5f17ef=): =standalone-reader-async-core-
+smoke= (P0), =standalone-reader-process-adapter-smoke= +
+=standalone-reader-process-adapter-smoke-red= (P1/P2, red+green pair),
+=standalone-reader-repl-idle-pump-smoke= (P3), and the aggregate
+=standalone-reader-smokes= gate all four now run inside (already a
+required gate, =tools/ai/gates.expected=; no new required gate was
+added — these four join the existing ~29-smoke aggregate the same way
+every other =standalone-reader-*-smoke= target already does, per that
+gate's own "one gate rather than N entries" design). No new
+=tools/gate-mutations.txt= row: the aggregate is explicitly exempted
+from per-member mutation rows by its own header comment, and this
+session's own =-smoke-red= target is itself a standing red/green pair
+against the exact measured defect (not a sed injection, but the same
+evidentiary shape).
+
+* §5.5 Landed (2026-08-23) — what shipped and where
+
+- *P0*: =packages/nelisp-eventloop/src/nelisp-async-core.el= (new). A
+  byte-for-byte cut of §1's actor-free timer-queue functions, renamed to
+  the =nelisp-async-core-= prefix (=-run-at-time=, =-cancel-timer=,
+  =-fire-due=, =-next-deadline=, =-sit-for=, =--now=, =--nanosleep=,
+  =-reset-timers=); loads standalone with no =generator= error.
+  =packages/nelisp-eventloop/src/nelisp-async.el= now =(require
+  'nelisp-async-core)= instead of duplicating the queue, keeping only its
+  actor/TTY driver (=nelisp-async-run=/=-run-tty=/=-run-tty-raw=, still
+  gated on =generator= exactly as before) — its own ERT suite
+  (=packages/nelisp-eventloop/test/nelisp-async-test.el=) passes
+  unchanged.
+- *P1/P2*: =packages/nelisp-process-adapter/src/nelisp-process-adapter.el=
+  (new) — the "Layer B" §2 describes, built directly on the native
+  =nelisp-process-*= primitives (§1.1) plus =nelisp-async-core=, not on
+  =packages/nelisp-process/src/nelisp-process.el= (§1.4, reference only).
+  Loading it upgrades =make-process= (real =:filter=), adds
+  =process-filter=/=set-process-filter=/=process-sentinel=/
+  =set-process-sentinel=, rewrites =accept-process-output= (PROCESS
+  narrows the poll set, SECONDS/MILLISEC bound the wait via
+  =nelisp-async-core='s deadline machinery, JUST-THIS-ONE honoured),
+  rewrites =delete-process=/=kill-process= (prunes the registry, fires a
+  real sentinel exactly once), and defines =make-network-process= to
+  loudly signal a named =error= (§1.7/P4, unchanged: still no native
+  socket primitive to build on).
+- *P3*: =scripts/nelisp-stdlib-prelude.el= gained one baked-in default,
+  =(defun nelisp--repl-idle-pump () nil)= (a no-op, ~15 lines including
+  comment); =scripts/nelisp-standalone-build.el='s =nl_repl_loop= blank-
+  Enter branch (previously a bare =0=, doing nothing) now evaluates
+  =(nelisp--repl-idle-pump)= through the same =nl_repl_make_source=-style
+  literal-source injection a typed line uses. Loading
+  =nelisp-process-adapter.el= inside a =--repl= session upgrades the hook
+  to a real bounded (50ms) pump sharing the exact same wait loop
+  =accept-process-output= uses — proving "run-at-time honours REPEAT
+  through the SAME loop" literally, not just for two separate
+  mechanisms that happen to agree. Binary-size cost: +8280 bytes
+  (6741200 -> 6749480, +0.12%, see =tools/nelisp-binary-size-baseline.txt=)
+  — entirely from these two small baked-in pieces; neither new package
+  file is linked into =target/nelisp= at all.
+- *Two honest deviations from this doc's own illustrative text*,
+  measured rather than assumed:
+  1. §1.3/P1's exit criterion says a killed process's sentinel should
+     report *"killed"*. Measured against host Emacs 30.1
+     (=signal-process=/=process-sentinel=): SIGTERM produces
+     ="terminated\n"=, SIGKILL produces ="killed\n"=. This substrate's
+     native =nl_bi_process_delete_object= (the primitive backing
+     =delete-process=/=kill-process=, unchanged — out of this doc's
+     elisp-adapter scope) hardcodes SIGTERM(15), not SIGKILL(9). The
+     shipped sentinel formatter (=nelisp-process-adapter--signal-name=)
+     is a real signal-number -> name table, not a single hardcoded
+     string, so it honestly reports ="terminated\n"= for what this
+     runtime's =delete-process= actually does — the fix that matters
+     (§1.3's real defect) is reading the TRUE exit status at all, not
+     which of two English words gets printed for one specific signal.
+     A future doc changing the native primitive to SIGKILL would need
+     no elisp-layer change to then report "killed\n" correctly.
+  2. §5.1's own illustrative =accept-process-output-does-not-drain-
+     unrelated-processes= test doesn't specify a return-value contract;
+     measured against host Emacs 30.1: a status-only change with no
+     output bytes returns nil from =accept-process-output=, even when
+     the process being waited on has already exited. The shipped
+     implementation matches this (returns non-nil only when real output
+     bytes were delivered), not "anything happened."
+- =test/nelisp-process-adapter-test.el= (new): the §5.1 illustrative
+  cases plus five more (filter increments, sentinel status strings,
+  return-value contract, REPEAT-through-shared-loop,
+  =make-network-process='s error), all =skip-unless (fboundp
+  'nelisp-process-start)= — real coverage once/if a host-bridge or a
+  standalone =ert= port exists, skip (not fail) under plain host Emacs
+  today, matching this doc's own §5.1 rationale for why the Makefile
+  smokes are the authoritative evidence here, not this file alone.
+- =tools/partial-accepted.txt='s =run-at-time|scripts/nelisp-stdlib-
+  prelude.el|_repeat|...= and =accept-process-output|...|_args|...=
+  entries are UNCHANGED: they describe the baked-in prelude's own
+  default functions, which this doc's fix does not rewrite in place
+  (§2's decided direction: an opt-in loadable upgrade layer, matching
+  the precedent =nelisp-async.el= already set for =run-at-time= before
+  this doc existed) — both entries remain accurate descriptions of what
+  a script gets when it loads neither new file.
 
 * §6 Open questions
 
