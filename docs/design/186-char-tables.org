@@ -1,7 +1,15 @@
 #+TITLE: Doc 186 — Char-tables
-#+AUTHOR: nelisp / nelisp-emacs (design: Claude Opus 5 + zawatton)
+#+AUTHOR: nelisp / nelisp-emacs (design: Claude Opus 5 + zawatton; P0-P2
+implementation: Claude Fable 5, branch feat/char-table-elisp-layer,
+2026-08-23)
 #+DATE: 2026-08-22
-#+STATUS: DRAFT — design only, no implementation in this change.
+#+STATUS: SHIPPED (P0/P1/P2 — §4). P3 (regex \sC data-backed rewrite) and
+P4 (base64 dead-code correction) were NOT undertaken this pass — out of
+this branch's assigned scope (Elisp-visible constructor/accessor layer
+only; a consumer rewrite is separate work) — and remain open, same as
+before this branch. See §9 for what changed against §1-§3's own
+description of the tree, found while implementing rather than assumed.
+#+VERIFIED-BY: standalone-reader-test emacs-parity substrate-parity-smoke
 
 * §0 TL;DR
 
@@ -371,34 +379,67 @@ exist.
 Effort estimates are engineer-days for an implementer following this doc,
 on the pattern of Doc 164 §6.
 
-** P0 — =nl_char_table_new= + =make-char-table=/=char-table-p=  (1 d)
-- New allocation kernel (§3.1), wired through =compile-elisp-objects.el=
-  the same way =nlchartable-clone.o=/=-drop.o= already are
-  (=scripts/nelisp-standalone-build.el:12838= is the existing sibling
-  entry to extend).
-- =char-table-p= as a tag-9 check (mirrors any existing =*-p= predicate
-  over a Sexp tag, e.g. =bufferp=/=processp='s shape — same one-line
-  pattern, no new mechanism).
-- *Exit*: =(char-table-p (make-char-table 'test nil))= is =t= on
-  =target/nelisp=; =(aref (make-char-table 'test 'DEFAULT) ?a)= returns
-  =DEFAULT= (proves the constructor's default_val write and the already-
-  working =aref= fallback path compose correctly).
+** P0 — =nl_char_table_new= + =make-char-table=/=char-table-p=  (1 d) — SHIPPED
+- The allocation kernel landed as =nl_char_table_alloc=, NOT via
+  =compile-elisp-objects.el= (§9.1: that file turned out to be dead code,
+  unreferenced by any Makefile target) and not as its own =nl_char_table_
+  new= link unit either. §9.2 explains why: the actual production
+  interpreter behind =target/nelisp= has its own closed, self-contained
+  builtin-dispatch table (=nelisp_apply_function='s =bf_*= arms in
+  =scripts/nelisp-standalone-build.el=), not the =nelisp-jit-strategy.el=
+  =nl-jit-call-out-N= bridge §1.2/§3.1 described. =nl_char_table_alloc=
+  and =bf_make_char_table=/=bf_char_table_p= are new =defun=s inside that
+  same file's =nelisp-standalone--applyfn-bf-helpers=/=-bf-arms= blocks,
+  using plain =ptr-write-u64= to write tag 9 + box pointer (mirroring
+  =record-make='s own x86_64 codegen at the machine-code level — no new
+  AOT-compiler grammar op needed, contra §7.1's open question).
+- =char-table-p= as a tag-9 check, exactly as designed.
+- *Exit, run not asserted*: =(char-table-p (make-char-table 'test nil))=
+  is =t= and =(aref (make-char-table 'test 'DEFAULT) ?a)= returns
+  =DEFAULT= on =target/nelisp=, both via the new
+  =nelisp-standalone--reader-char-table-smoke= (wired into the
+  =standalone-reader-test= gate's dolist, GATE-COUNT checked=19
+  findings=0) and cross-checked in =test/nelisp-char-table-test.el=
+  under host Emacs. Against-the-bug: =(fboundp 'make-char-table)= was
+  =nil= on this branch's own pre-change =target/nelisp= (probed directly
+  before writing any code), =t= after.
 
-** P1 — parent/extra-slot/subtype accessors  (0.5–1 d)
-- The four read/write pairs in §3.2's second half.
-- *Exit*: =(set-char-table-parent child parent)= followed by =(aref child
-  CHAR-NOT-IN-CHILD)= returns the value =aref='d from =parent= directly
-  (proves the fallback chain §1.2 already implements natively is now
-  reachable end-to-end from Elisp).
+** P1 — parent/extra-slot/subtype accessors  (0.5–1 d) — SHIPPED
+- The four read/write pairs in §3.2's second half, plus =char-table-
+  subtype=. Extra slots use a fixed 10-slot buffer (Emacs's own
+  =MAX_CHAR_TABLE_EXTRA_SLOTS= ceiling) rather than a per-subtype-
+  registered count: this tree has no =char-table-extra-slots= property
+  machinery, so every char-table is more permissive on extra-slot count
+  than Emacs would be for a subtype registered with fewer — an accepted
+  simplification, documented at the =bf_char_table_extra_slot= site.
+- *Exit*: =(set-char-table-parent child parent)= followed by =(aref
+  child CHAR-NOT-IN-CHILD)= returns the value =aref='d from =parent=
+  directly — verified on =target/nelisp= (the smoke above) and under
+  host Emacs (=test/nelisp-char-table-test.el='s
+  =nelisp-char-table/parent-fallback=).
 
-** P2 — =char-table-range=/=set-char-table-range=, ceiling-guarded  (1–1.5 d)
+** P2 — =char-table-range=/=set-char-table-range=, ceiling-guarded  (1–1.5 d) — SHIPPED
 - The expand-to-individual-=aset= implementation plus the
-  =char-table-range-too-large= ceiling (§3.3).
-- *Exit*: =(set-char-table-range table '(?a . ?z) 'lower)= populates 26
-  entries correctly; a range exceeding the ceiling signals the new error
-  symbol rather than silently truncating or silently accepting.
+  =char-table-range-too-large= ceiling (§3.3), for the single-char and
+  =(FROM . TO)= cons forms. =t= signals the same error, per §3.3's own
+  direction. RANGE = =nil= was tried as "the default slot" (the most
+  natural reading of Emacs's third form) and DROPPED after checking host
+  Emacs directly: =(set-char-table-range tbl nil V)= does not change
+  what =aref= falls back to afterward, so this flat, non-block-structured
+  table has no faithful implementation of that form and signals
+  =char-table-range-too-large= for it too rather than shipping a
+  confident, wrong parity claim.
+- *Exit*: =(set-char-table-range table (cons ?a ?c) 'lower)= populates 3
+  entries correctly (measured with a 3-char range rather than the doc's
+  sketched 26-char one — same mechanism, smaller fixture); a range
+  exceeding the 4096 ceiling signals =char-table-range-too-large= rather
+  than truncating or silently accepting. =char-table-range= on a
+  =(FROM . TO)= cons returns the value AT FROM, verified against host
+  Emacs including a non-uniform range (§9.3) — the multi-level sub-
+  char-table docstring's "nil unless uniform" framing does not describe
+  what a small, hand-built test actually observes.
 
-** P3 — regex =\sC=/=\SC= data-backed rewrite  (1–2 d)
+** P3 — regex =\sC=/=\SC= data-backed rewrite  (1–2 d) — NOT UNDERTAKEN
 - The =nlre--syntax-table= default table (§3.4) and the class-lookup
   rewrite in =lisp/nelisp-stdlib-regexp.el=, replacing =nlre--syntax-p='s
   =cond= with a table lookup.
@@ -409,13 +450,25 @@ on the pattern of Doc 164 §6.
   join the =emacs-parity= cases file (§6.2) specifically so a future
   change to the table cannot silently regress classification that
   already works.
+- Left undone by the P0-P2 branch: the assigned scope was the Elisp-
+  visible constructor/accessor layer, not a consumer rewrite, and §1.4's
+  own finding stands unchanged (=nlre--word-p=/=-syntax-p= already match
+  Emacs; this phase trades code for data, not a correctness fix) — still
+  a reasonable next step for whoever picks it up, using the API this
+  branch shipped.
 
-** P4 — dead-code correction: =packages/nelisp-base64=  (0.25 d, optional)
+** P4 — dead-code correction: =packages/nelisp-base64=  (0.25 d, optional) — NOT UNDERTAKEN
 - Now that =make-char-table= exists, =nelisp-base64--ensure-decode-table=
   (§1.3) stops being a latent void-function trap if the package is ever
   wired in. No behavior change to anything currently shipped (§1.3
   confirmed it is unreached); this phase is bookkeeping, not a fix to a
   live bug, and can be dropped from a minimal cut without affecting P0-P3.
+- Left undone by the P0-P2 branch (optional per its own estimate, and
+  out of the assigned scope); =packages/nelisp-base64/src/nelisp-base64.el:31=
+  still calls =make-char-table=, which is real now instead of void —
+  worth re-checking whether the package's decode table actually builds
+  correctly before calling this phase done, not assumed from P0's own
+  exit criterion alone.
 
 * §5 Cost
 
@@ -508,7 +561,7 @@ a hand-written claim. No phase is SHIPPED without one.
 
 * §7 Open questions
 
-** §7.1 Where exactly does allocation belong
+** §7.1 Where exactly does allocation belong — RESOLVED (§9.2), neither guess was right
 
 §3.1's =nl_char_table_new= needs a home in the =nelisp-sys= DSL frontend/
 backend (=packages/nelisp-sys/src/nelisp-sys-frontend.el=/=-backend.el=,
@@ -519,6 +572,15 @@ This doc does not resolve which — the DSL path gets ERT coverage "for
 free" via the pattern at =nelisp-sys-backend-test.el:197-213=, the direct
 kernel path is less code. Left to the implementer, flagged so it is a
 choice rather than an accident.
+
+RESOLVED during implementation: neither. Both options assumed the
+=nelisp-sys= DSL and the =nelisp-jit-strategy.el=/=nl-jit-call-out-N=
+bridge are on the path that produces =target/nelisp=; §9.2 found they are
+not. =nl_char_table_alloc= lives as a plain =defun= inside =scripts/
+nelisp-standalone-build.el='s own =nelisp-standalone--applyfn-bf-helpers=
+block, called from a new =bf_make_char_table= dispatch arm — the same
+place =bf_make_record=/=bf_make_vector= already live, which is the
+actual, load-bearing precedent this doc did not know to look for.
 
 ** §7.2 Real range compression, deferred
 
@@ -609,3 +671,99 @@ for a materially smaller gap than first assumed.
 - Doc 188 — buffer unification; §3.5/§7.3 note the handoff (syntax-table/
   case-table objects, =forward-word=, per-buffer =with-syntax-table=)
   without claiming its content.
+
+* §9 Implementation notes (2026-08-23, feat/char-table-elisp-layer)
+
+Filed because the task that implemented P0-P2 was explicitly told "tree
+has moved since the doc — re-locate by symbol," and what moved was not
+line numbers. §1.2's own evidence (=lisp/nelisp-sexp-layout.el=, the
+=nelisp-cc-*.el= kernel files, =nelisp-jit-strategy.el='s dispatch cond
+arms) is all real, current, byte-identical to what this doc quotes — but
+it describes a *different* execution architecture than the one that
+actually produces =target/nelisp=. Recording this precisely because §0
+already had to correct one confident wrong framing (the "hash-backed
+interim" question) before this doc existed at all, and this is the same
+shape of correction, one layer further down.
+
+** §9.1 =scripts/compile-elisp-objects.el= is dead code
+
+Not referenced by any Makefile target (confirmed by grep across the
+whole repo) — a leftover from the pre-Rust-removal build (its own
+docstring still says "Invoked by =build-tool/build.rs=", and that file
+does not exist; =find . -name '*.rs'= returns nothing, matching §1.2's
+own observation). §3.1/§4 P0's plan to extend it does nothing for the
+binary this doc's own §1.1 probe was run against.
+
+** §9.2 The real dispatcher: =nelisp_apply_function='s =bf_*= arms, not =nl-jit-call-out-N=
+
+=make standalone-reader= (the target this doc's own §1.1 probe ran
+against) does not compile =nelisp-jit-strategy.el= into =target/nelisp=
+at all. That file's =nl-jit-call-out-N=-bridged =fset= wrappers —
+including the =nelisp--char-table-aref=/=-aset= §1.2 cites at
+=lisp/nelisp-jit-strategy.el:308-320= — belong to a parallel, apparently
+now largely dormant execution architecture (probably the one =make
+standalone-eval= exercises; not investigated further, out of this
+branch's scope). Measured directly: on a freshly built pre-change
+=target/nelisp=, =(fboundp 'make-record)= is =t= and =(make-record 'foo
+3 nil)= runs without error, but =(type-of (make-record 'foo 3 nil))=
+answers =cons=, not =record= — the "record" family §1.2 draws its
+=record-make=/=record-slot-set= evidence from is itself not the mechanism
+backing =make-record= in the actual shipped binary; something else
+(=bf_make_record=, only found by reading =scripts/nelisp-standalone-
+build.el= directly) is.
+
+The real mechanism: =target/nelisp='s own reader/evaluator installs a
+CLOSED, self-contained builtin-name dispatch table
+(=nelisp-standalone--applyfn-reader-table=, built from
+=nelisp-standalone--applyfn-dispatch-table= plus the
+=nelisp-standalone--applyfn-bf-arms= breadth arms, all in =scripts/
+nelisp-standalone-build.el=), matched by literal string name
+(=(:lit "NAME") . BODY=) against a call's function-cell lookup — a
+completely different code path from the general AOT compiler
+(=nelisp-aot-compiler.el=) and its grammar-op vocabulary (=record-make=,
+=vector-make=, =cons-make=, ...) that §1.2/§3.1's =nl_char_table_new=
+plan assumed it would extend. The grammar ops are real and DO exist (and
+this doc's own new =nl_char_table_alloc= reuses two of them,
+=ptr-write-u64=/=alloc-bytes=, directly) — they are just not reached by
+calling =make-char-table= from ordinary Elisp on =target/nelisp=; that
+call goes through =nelisp_apply_function='s literal-name dispatch
+instead, which is what actually needed a new arm.
+
+A second, independent confirmation: neither =nl_char_table_get_raw=/
+=set_raw= (the storage kernel §1.2 correctly identifies as
+pre-existing and correct) nor the =nl_jit_char_table_aref=/=aset=
+trampolines were linked into any =target/nelisp= manifest before this
+branch (confirmed by grep across =scripts/nelisp-standalone-build.el='s
+three manifest =defconst=s — only the Clone kernel, ="chartable-
+clone.o"=, was present). §1.2's "fully wired through aref/aset dispatch"
+claim is true of the *source*, sitting inert and unlinked; it was never
+actually exercised against a running binary, because nothing could
+construct a CharTable value to exercise it with. The storage kernel
+itself needed no changes — reusing it directly from the new
+=bf_aref_checked=/=bf_aset= tag-9 arms is exactly what §2's "expose,
+don't rebuild" decision called for, just wired from a different call
+site than assumed.
+
+** §9.3 =char-table-range= on a cons: measured, not designed
+
+§3.2 lists =char-table-range=/=set-char-table-range= without specifying
+GET's exact return for a =(FROM . TO)= span; the implementation checked
+host Emacs directly (=make-char-table='d table, non-uniform =aset=
+values across the span) and found it answers the value AT FROM, not
+"nil unless uniform" as the general sub-char-table docstring might
+suggest for the real, block-structured implementation. This flat entries-
+array table has no sub-table concept to do otherwise, and matching FROM's
+value is the one behavior measured (not merely plausible) from both a
+uniform and a non-uniform host-Emacs probe — see =test/nelisp-char-table-
+test.el='s =nelisp-char-table/range-single-and-cons=.
+
+RANGE = nil was tried as "the default slot" (the natural reading of
+Emacs's third RANGE form, and briefly implemented that way) and dropped
+after the same kind of direct check: =(set-char-table-range tbl nil V)=
+on host Emacs does NOT change what =aref= falls back to afterward
+(=test/nelisp-char-table-test.el='s =nelisp-char-table/range-nil-not-
+default-slot= pins this). Whatever nil actually targets in Emacs's real
+implementation is not the =default_val= field =aref= reads — scoped out
+(signals =char-table-range-too-large=, same bucket as =t=) rather than
+shipping a confident, wrong parity claim.
+
