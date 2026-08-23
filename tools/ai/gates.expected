@@ -265,6 +265,24 @@ binary-size-ratchet
 # `binary-size-ratchet' uses), so it is out of `check' for the same
 # reason every other binary-tier gate is, and is wired into `nelisp-ai.sh
 # standalone' alongside the other two rather than given its own command.
+#
+# Version-pinned since fix/emacs-parity-version-guard (2026-08-23): the
+# "host Emacs already on this machine" above is the reference side of the
+# diff, computed live, but the corpus and the standalone's own answers were
+# both built against Emacs 30.1 (docs/emacs-compat-table.txt's header;
+# packages/nl-ns/baseline/emacs-30.1.el for the separate nl-ns pin).  CI's
+# 29.4 lane (GitHub Actions run 32606582250) failed this gate with a
+# 1,844-line diff that was real Emacs 29.4-vs-30.x behavior, not a NeLisp
+# defect -- the 30.1 lane, same commit, passed.  The Makefile target now
+# probes `$(EMACS) --version' first and reports a reasoned GATE-SKIP on any
+# host outside 30.x rather than failing on a version gap it cannot close;
+# `NELISP_EMACS_PARITY_HOST_VERSION' overrides the probe for exercising the
+# guard itself.  Also fixed in the same change: the target used to print a
+# hardcoded `GATE-COUNT ... findings=0' even on a FAIL, which this ledger's
+# own contract (a checked-out gate's count and verdict must agree) did not
+# actually require until a CI log showed the two disagreeing in the same
+# breath -- `findings' is now 1 exactly when the byte-diff fails, matching
+# the shape `binary-size-ratchet' above already used.
 emacs-parity
 
 # ===================================================================
