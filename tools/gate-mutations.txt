@@ -163,3 +163,13 @@ standalone-reader-form-location-smoke|scripts/nelisp-standalone-build.el|s/(setq
 # fails at the very first `load' statement, before any scheduling code
 # runs, so it cannot hit that class of problem.
 nl-actor-standalone-smoke|packages/nelisp-actor/src/nelisp-actor.el|s/^(require 'generator nil t)$/(require 'generator)/|nelisp-actor becomes unloadable standalone again (file-missing: generator), the exact pre-Doc-193-§4 defect
+# standalone-reader-bignum-smoke: added 2026-08-23 (Doc 190 Phase A,
+# feat/bignum-p1).  The injection flips the tag byte `nl_bignum_write'
+# stamps into a freshly-constructed Bignum Sexp from 13 (Bignum) to 2
+# (Int) -- every bignum this session's reader/`nl--read-int' constructs
+# is thereafter mis-tagged as a plain Int whose "value" is actually the
+# sign word (0 or 1), so `bignump' answers nil, `prin1' prints "0"/"1"
+# instead of the real digits, and comparisons read garbage.  Caught by
+# this smoke's own fencepost/printing/GC-stress checks, not by any
+# pre-existing gate (no prior gate constructs a tag-13 Sexp at all).
+standalone-reader-bignum-smoke|scripts/nelisp-standalone-build.el|s/(seq (ptr-write-u8  result_slot 0  13)/(seq (ptr-write-u8  result_slot 0  2)/|a constructed bignum is mis-tagged as a plain Int (its sign word read back as the "value"), corrupting bignump/prin1/comparison for every bignum the reader produces

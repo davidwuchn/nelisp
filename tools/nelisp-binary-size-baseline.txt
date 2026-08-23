@@ -165,5 +165,21 @@
 # arithmetic, none of which was accounted for by summing only the first
 # three branches' own deltas -- this measurement supersedes all of the
 # interim arithmetic above, as intended.
-size 7247592
+#
+# Raised 2026-08-23 (Doc 190 Phase A, feat/bignum-p1), 7247592 -> 7273216,
+# +25624 bytes, +0.35%, well inside the 2% slack -- raised anyway per this
+# file's own rule above, not left for slack to silently absorb.  A new
+# box type (Sexp tag 13, Bignum) is exactly the shape of change this
+# ratchet exists to make visible: new native construction/comparison/
+# printing code in `scripts/nelisp-standalone-build.el' (`nelisp-
+# standalone--applyfn-bignum-helpers' plus the `nl_num_cmp' family and
+# the `wf_sum'/`wf_prod'/`wf_subtail'/`wf_diff' tag-13 guards, both in
+# `nelisp-standalone--applyfn-core-helpers'), a GC mark/clone arm
+# (`nelisp-standalone--gc-source', `lisp/nelisp-cc-sexp-clone-into.el'),
+# and the reader-parser leaf-materialization change (`lisp/nelisp-cc-
+# reader-parser.el') -- all AOT-compiled into the linked binary, none of
+# it dead weight (every path is exercised by `scripts/standalone-bignum-
+# smoke.el').  Measured with `stat -c %s target/nelisp' after a clean
+# `make standalone-reader' on this branch's own HEAD.
+size 7273216
 slack-pct 2

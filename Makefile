@@ -671,6 +671,7 @@ reader-surface-audit:
 # is the claim, and a target that stops existing shows up as a smaller number.
 STANDALONE_READER_SMOKES = \
   standalone-reader-async-core-smoke \
+  standalone-reader-bignum-smoke \
   standalone-reader-catch-throw-tag-smoke \
   standalone-reader-checked \
   standalone-reader-checked-soak \
@@ -1391,6 +1392,25 @@ standalone-reader-number-token-smoke: standalone-reader
 	  echo "[standalone-reader-number-token-smoke] PASS"; \
 	else \
 	  echo "[standalone-reader-number-token-smoke] FAIL"; \
+	  exit 1; \
+	fi
+
+# Doc 190 Phase A (bignums): reading (a literal past most-positive-fixnum/
+# most-negative-fixnum promotes to a Sexp tag-13 Bignum instead of
+# wrapping), printing (prin1/read round-trip), comparison (eql/=/</> across
+# bignum-bignum and bignum-fixnum), integerp/numberp/type-of, the
+# deliberate non-boundary (arithmetic still signals overflow-error, no
+# promotion), and a GC stress round.  ulimit mirrors the number-token
+# smoke's own bound -- generous for this workload (500 short-lived
+# bignums), tight enough to fail loudly on a real leak.
+.PHONY: standalone-reader-bignum-smoke
+standalone-reader-bignum-smoke: standalone-reader
+	@out="$$(ulimit -v 4194304; timeout 30 ./target/nelisp --load scripts/standalone-bignum-smoke.el)"; \
+	echo "$$out"; \
+	if echo "$$out" | grep -q 'BIGNUM-SMOKE cases=37 mismatches=0'; then \
+	  echo "[standalone-reader-bignum-smoke] PASS"; \
+	else \
+	  echo "[standalone-reader-bignum-smoke] FAIL"; \
 	  exit 1; \
 	fi
 

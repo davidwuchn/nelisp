@@ -262,6 +262,21 @@
                      (defun nelisp-parity-redef-target () 20)
                      (if (and (= before 10) (= (funcall closure) 20))
                          1 0)))))
+
+    ;; -- Doc 190 Phase A (bignums): a numeric literal one past
+    ;; `most-positive-fixnum' is host-comparable -- real GNU Emacs (27+)
+    ;; promotes it to a genuine bignum, `integerp'/comparison included,
+    ;; the same contract Doc 190 Phase A gives NeLisp.  2305843009213693952
+    ;; = 2^61 is `most-positive-fixnum' + 1 on BOTH substrates' 64-bit
+    ;; builds (Doc 190 §1.1: matching Emacs's own 61-bit-magnitude fixnum
+    ;; width bit for bit), so this is not a NeLisp-specific constant.
+    ;;
+    ;; 43: comparison across the fixnum/bignum boundary.
+    (43 shared (if (> 2305843009213693952 most-positive-fixnum) 1 0))
+    ;; 44: prin1/read round-trip preserves the exact value.
+    (44 shared (if (equal 2305843009213693952
+                          (car (read-from-string (prin1-to-string 2305843009213693952))))
+                   1 0))
     ))
 
 (provide 'nelisp-substrate-parity-corpus)
