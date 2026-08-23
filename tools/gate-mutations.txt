@@ -135,3 +135,13 @@ ert-full|lisp/nelisp-cl-macros.el|s/(signal 'cl-no-applicable-method (cons name 
 # `rebuild_checked' special-case is needed here).
 standalone-reader-test|scripts/nelisp-standalone-build.el|s/(and (> v 0) (> acc (- 2305843009213693951 v)))/(and (> v 0) nil)/|wf_sum's positive-overflow half of the literal-bound check is deleted, (+ most-positive-fixnum 1) wraps silently again instead of signalling overflow-error
 standalone-reader-test|scripts/nelisp-standalone-build.el|s#(/= (/ prod acc) v)#nil#|wf_prod's div-round-trip overflow check is deleted, (* 100000000000 100000000000) wraps silently again instead of signalling overflow-error
+# 2026-08-23 (this session): Doc 180 Phase 1 (form-located errors) row.
+# `(setq form_index (+ form_index 1))' appears twice in `nl_eval_source_all'
+# (the successful-parse branch and the reader-error branch); the sed has no
+# `/g' but matches the whole line so both occurrences (one per line) are
+# replaced -- FORM_INDEX is pinned to 1 everywhere, so an error in the
+# fixture's second top-level form is reported as "top-level form #1", not
+# "#2".  `standalone-reader-form-location-smoke''s "load form #2 signals"
+# row (`nelisp-standalone--reader-form-location-smoke') asserts the literal
+# substring "top-level form #2 (byte ...", so this must fail it.
+standalone-reader-form-location-smoke|scripts/nelisp-standalone-build.el|s/(setq form_index (+ form_index 1))/(setq form_index 1)/|every uncaught error reports "top-level form #1" regardless of which form actually failed

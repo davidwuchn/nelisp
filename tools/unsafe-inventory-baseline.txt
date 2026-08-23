@@ -97,6 +97,28 @@
 # works). Both are the same raw-pointer idiom every other `nl_repl_*'
 # helper in this file already uses; neither is new kind of unsafety.
 unsafe-call 564
+#
+# 562 -> 590 on 2026-08-23: Doc 180 Phase 1 (form-located errors), all in
+# `scripts/nelisp-standalone-build.el' (538 -> 566 for that file, measured
+# red/green against merge-base 71d5f17ef: `make unsafe-inventory' on the
+# unmodified tree reports 538/562 PASS, on this change 566/590).  The new
+# location-prefix renderer (`nelisp-standalone--eval-source-location-
+# prefix-forms') stashes three raw u64s (form-index/byte-offset/line) as
+# tagged Ints the same way the existing bare-abort printer already stashes
+# FORM_RC -- 12 `ptr-write-u64' across the three -- plus its own five
+# `alloc-bytes' scratch buffers and the new `nl_eval_source_all' cursor
+# snapshot/whitespace-skip/line-count helpers' `ptr-read-u8'/`ptr-read-u64'
+# reads of the reader's already-live cursor and source bytes.  Same shape
+# as the 538 -> 562 note above: no new kind of unsafe call, more sites of
+# the kinds already present, all on the same low-level arena/cursor state
+# every sibling diagnostic here already touches.
+# integration/wave4 (this branch, merge 5/9): both raises above touch
+# scripts/nelisp-standalone-build.el with disjoint new call sites (repl
+# idle-pump wiring vs. form-location diagnostics), so the interim total
+# is the arithmetic union against the shared 562 base: 562 + (564-562) +
+# (590-562) = 592.  To be reconciled to the measured count in the
+# battery.
+unsafe-call 592
 
 # `pinned-kernel-call FILE COUNT' pins the per-file unquoted `unsafe-call'
 # count behind `total' above -- the three kernel files that actually carry
@@ -109,4 +131,8 @@ unsafe-call 564
 # Regenerate from a clean tree; do not hand-edit into drift from the scan.
 pinned-kernel-call lisp/nelisp-stdlib-os-int-helpers.el 18
 pinned-kernel-call scripts/nelisp-flat-arena-probe.el 6
-pinned-kernel-call scripts/nelisp-standalone-build.el 540
+# integration/wave4 (this branch, merge 5/9): 538 base + 2 (process-
+# standard-names repl idle-pump) + 28 (form-located-errors) = 568,
+# interim, both branches' additions to this file being disjoint call
+# sites; to be reconciled to the measured count in the battery.
+pinned-kernel-call scripts/nelisp-standalone-build.el 568

@@ -297,7 +297,17 @@ ns-collision-divergent 126
 # ceiling is the arithmetic union against the shared 854 base: 854 +
 # (861-854) + (857-854) = 864.  To be reconciled to the measured count
 # in the battery.
-ns-prefix-violation 864
+#
+# 854 -> 855 on 2026-08-23: `nelisp-standalone-reader-form-location-test'
+# (Doc 180 Phase 1), same shape and same reason as the entry immediately
+# above -- `make standalone-reader-form-location-smoke' calls it across
+# the boundary via `-f'.
+#
+# integration/wave4 (this branch, merge 5/9): disjoint from both prior
+# additions (a new standalone entry-point name), so the interim ceiling
+# adds this branch's own +1 on top of the merge-3/9 interim: 864 + 1 =
+# 865.  To be reconciled to the measured count in the battery.
+ns-prefix-violation 865
 # 611 -> 613 on 2026-08-20: `nelisp--check-string'/`--check-symbol' and the
 # other argument-check helpers are referenced from the lisp/ mirrors that
 # carry copies of the functions using them.  This is the kind this file

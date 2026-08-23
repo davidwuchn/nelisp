@@ -1978,6 +1978,15 @@ standalone-reader-malformed-input-smoke:
 	  --eval '(setq load-prefer-newer t)' \
 	  -l nelisp-standalone-build -f nelisp-standalone-reader-malformed-input-test
 
+# Fast focused loop for Doc 180 Phase 1 (form-located errors): the
+# uncaught-error printer names FILE, top-level form #N and a byte/line
+# offset.  Builds/relinks target/nelisp with the incremental unit cache,
+# then runs only the against-the-bug smoke used by the full reader test.
+standalone-reader-form-location-smoke:
+	$(EMACS) --batch -Q -L lisp -L src -L scripts \
+	  --eval '(setq load-prefer-newer t)' \
+	  -l nelisp-standalone-build -f nelisp-standalone-reader-form-location-test
+
 # Prelude-load breadth test (Wave-1 (A)+(B)).  Builds the reader binary, then
 # runs it on  scripts/nelisp-stdlib-prelude.el  followed by a breadth test that
 # exercises cond / dolist / nth / plist-get / backquote (all backed by the
