@@ -407,6 +407,9 @@ that was not run is not a claim).
   assertions' substance.
 - *VERIFIED-BY*: =standalone-reader-form-location-smoke standalone-
   reader-test= (also see this file's top =#+VERIFIED-BY:= line).
+  Shipping commit: =648819f4ec8b72c09200c6946d2d4e421651a1eb= on
+  =feat/form-located-errors= (2026-08-23), the commit this whole §3.3/§4/
+  §5 account describes.
 
 ** Phase 2
 DoD is necessarily softer at design time, since it is a multi-week item
