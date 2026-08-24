@@ -410,5 +410,26 @@
 # 184 and Doc 194 compose in the one binary.  Measured with `stat -c %s
 # target/nelisp' after a clean `make standalone-reader' on this exact
 # merge commit.
-size 7784728
+# integration/wave7 battery reconciliation (post merge 7/7, full tree, 3
+# code branches + 4 additive doc branches landed): reset ONCE per this
+# file's own rule and the integration playbook, to the real measured
+# size on the merged binary -- `stat -c %s target/nelisp' after a clean
+# `make standalone-reader-test' on the fully-merged tree: 7867128 bytes,
+# +82400 over the 7784728 base (+1.06%), well inside the 2% slack --
+# raised anyway per this file's own rule above, not left for slack to
+# silently absorb.  feat/network-process-p345 (Doc 194 P3-P5: nonblocking
+# socket primitives, the poll loop, `:nowait'/`:server' adapter support)
+# is the only one of the three code branches that touches anything
+# AOT-baked into the linked binary -- `scripts/nelisp-standalone-build.el'
+# gained new native forms for the nonblocking/poll/getsockopt primitives,
+# same accounting as every prior socket-primitives raise in this file's
+# history.  feat/nl-clj-lazy and feat/nl-clj-async do NOT move this
+# number: both are ordinary `packages/nl-clj/' library files loaded via
+# `require'/`--load' at runtime, never linked into `target/nelisp' (see
+# docs/design/195-clojure-compat-library.org's own #+STATUS narrative,
+# which measures each against a byte-identical binary for exactly this
+# reason).  The four docs/design-* branches are additive doc-only and
+# touch nothing that links in.  `binary-size-ratchet' passes against
+# this exact pin.
+size 7867128
 slack-pct 2
