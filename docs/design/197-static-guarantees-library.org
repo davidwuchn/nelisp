@@ -1,20 +1,18 @@
 #+TITLE: Doc 197 — Static guarantees for NeLisp: what a macroexpansion-time library can honestly check, lifted from nl-safe's runtime borrow checks
 #+AUTHOR: Claude (design), zawatton (direction)
 #+DATE: 2026-08-24
-#+STATUS: DRAFT — read-only design survey.  No source touched, nothing
-#+STATUS: built, nothing measured against a running =target/nelisp=.  Every
-#+STATUS: citation below is a file:line read from the tree at =3bab0fe88=
-#+STATUS: (=origin/feat/native-observability=); none is a claim this doc
-#+STATUS: verified by running anything.  Where the tree already contains a
-#+STATUS: gate's verdict on an adjacent question (Doc 170 §7.2/§8's Stage 5
-#+STATUS: go/no-go), that verdict is quoted, not re-derived.
+#+STATUS: PARTIAL — build-first =nl-total=, shared walker extraction,
+#+STATUS: =nl-borrow-scope=, and =nl-typed= implemented and measured on host
+#+STATUS: Emacs and =target/nelisp=.  The Tier 2/3 ceiling and CI gate/adoption
+#+STATUS: work remain explicitly outside this landing; see §10.
+#+VERIFIED-BY: compile parens-check
 
 * Status
 
 | item     | value                                                                |
 |----------+-----------------------------------------------------------------------|
 | Doc #    | 197                                                                   |
-| State    | DRAFT — survey and recommendation, nothing implemented               |
+| State    | PARTIAL — build-first Tier 1 annotation library implemented; deeper flow and CI/adoption work remain out of scope |
 | Parent   | Doc 168 (extension libraries: layer discipline §3.1, dynamic-before-static §3.2, non-invasiveness gate §6) |
 | Sibling  | Doc 169 (nl-prelude/nl-condition), Doc 170 (nl-safe/nl-contract/nl-check, Stage 5 gate), Doc 189 (nl-ns, advisory-static precedent), Doc 171 (AOT TCO blueprint, a different L2 proposal already gated behind L1 evidence) |
 | Reads    | =packages/nl-safe/src/nl-safe.el=, =packages/nl-safe/src/nl-resource.el=, =packages/nl-contract/src/nl-contract.el=, =packages/nl-prelude/src/nl-prelude.el=, =packages/nl-check/src/nl-check.el=, =packages/nl-check/README.org=, =packages/nl-ns/src/nl-ns.el= (via Doc 189), =lisp/nelisp-aot-compiler.el=, =scripts/nl-check-gate.el=, =scripts/nl-ns-gate.el=, =tools/ai/gates.expected=, =docs/design/168-extension-libraries.org=, =docs/design/170-nl-safe.org=, =docs/design/189-nl-ns-enforced-namespaces.org=, =AI.md=, =AGENTS.md= |
@@ -679,7 +677,87 @@ own output against.
 
 | Date       | Decision                                                                 | State |
 |------------+----------------------------------------------------------------------------+-------|
-| 2026-08-24 | Crux resolved: macroexpansion-time library (Option A), not an AOT-pass hook (Option B) | DRAFT |
-| 2026-08-24 | =nl-total= identified as already ~shipped inside =nl-match=/=nl-defdata=; scoped as a thin naming/wrapper layer, not a new algorithm | DRAFT |
-| 2026-08-24 | =nl-borrow-scope= and =nl-typed= gated behind real =nl-safe= adoption in non-test code, mirroring Doc 170 §8's Stage 5 gate reasoning applied to a different mechanism | DRAFT |
-| 2026-08-24 | Shared =nl-check= walker primitives to be extracted toward =nl-prelude= before =nl-borrow-scope= implementation, to keep Doc 168 §4.1's one-way dependency rule intact | DRAFT |
+| 2026-08-24 | Crux resolved: macroexpansion-time library (Option A), not an AOT-pass hook (Option B) | IMPLEMENTED |
+| 2026-08-24 | =nl-total= identified as already ~shipped inside =nl-match=/=nl-defdata=; scoped as a thin naming/wrapper layer, not a new algorithm | IMPLEMENTED |
+| 2026-08-24 | =nl-borrow-scope= and =nl-typed= originally gated behind real =nl-safe= adoption; the explicit build-first request authorized their bounded Tier 1 implementations without changing the Stage 5 verdict | PARTIAL |
+| 2026-08-24 | Shared =nl-check= walker primitives extracted to =nl-prelude= before =nl-borrow-scope= implementation, keeping Doc 168 §4.1's one-way dependency rule intact | IMPLEMENTED |
+
+* 10. Build-first implementation and measurements (2026-08-24)
+
+** 10.1 What landed in the work tree
+
+=packages/nl-static/= is an opt-in, pure-Elisp package with no advice,
+compiler hook, or global reading pass.  Merely requiring it does not
+touch another form's expansion; checking begins only at the explicit
+=nl-total=, =nl-borrow-scope=, or =nl-typed= macro invocation.  Its
+=nl-static--enabled= expansion-time flag makes the disabled annotation
+expand to the corresponding plain =defun= or =progn= form.
+
+The phase order from §7.3 was followed:
+
+1. =nl-total= runs the already-shipped =nl-match= checker with strict
+   registry resolution while its own body expands, re-signalling any
+   failure as =nl-total-error= with the rule and offending form.  It
+   emits the ordinary =defun=; no runtime checking machinery was added.
+2. The package-agnostic proper-list, quote, backquote, and live-unquote
+   walker primitives formerly private to =nl-check= were extracted to
+   =nl-prelude=.  =nl-check= and =nl-static= now use the same functions,
+   so =nl-static= does not depend on =nl-check= and Doc 168 §4.1's
+   dependency direction remains intact.
+3. =nl-borrow-scope= rejects literally nested borrows of the same
+   lexical cell symbol when either borrow is mutable, signalling
+   =nl-borrow-scope-error= from the macro expander.  It respects
+   =let=/=let*= shadowing and emits only =(progn BODY...)=.
+4. =nl-typed= registers explicit function argument shapes, emits
+   runtime =cl-check-type= assertions, and under =nl-strict= rejects
+   provably incompatible visible literals or unshadowed/unmodified
+   declared arguments at expansion, signalling =nl-typed-error=.  It
+   performs no local inference and treats overlap/unknown as unchecked.
+
+The request for this build-first landing explicitly authorized phases
+2 and 3 after phase 1 was green, so they were exercised here despite
+§7.3's future real-adoption start gates.  That does not change the
+soundness claim or promote either checker into the whole-tree Stage 5
+linearity gate declined in §3.3.
+
+** 10.2 Expansion-time mechanism and reached tier
+
+All three failures are named conditions below =nl-static-error= and are
+signalled directly inside the annotation macro's expander.  No AOT pass
+or byte-compiler hook exists.  The reached ceiling is §4 Tier 1 only:
+literal syntax in the one annotated form.  Macro-produced borrows,
+aliases, opaque callees, and cross-function lifetime/ownership flow are
+not accepted as statically proved.  A measured opaque-callee fixture
+expands successfully and then signals the existing =nl-borrow-error=
+when run, which pins the intended Tier 3 fallthrough rather than merely
+documenting it.
+
+** 10.3 Verification evidence
+
+Measured in this work tree on 2026-08-24:
+
+| check | result |
+|-------+--------|
+| Focused =nl-static= ERT | 24/24 expected, 0 unexpected |
+| Existing =nl-check= ERT after walker extraction | 44/44 expected, 0 unexpected |
+| =make compile= | clean with =byte-compile-error-on-warn=; its =nl-check= gate reported =checked=3 findings=0= |
+| =make parens-check= | =GATE-COUNT checked=450 findings=0= |
+| =target/nelisp --load packages/nl-static/test/nl-static-standalone-smoke.el= | =GATE-COUNT checked=24 findings=0= |
+
+The against-the-bug corpus includes unregistered/non-exhaustive total
+matches, all conflicting shared/mutable nesting directions, literal and
+declared-binding shape mismatches, clean counterparts, disabled
+expansion identity, unannotated call sites, and the runtime-only opaque
+borrow case.
+
+** 10.4 Assumption corrected by source measurement
+
+§5.1's illustrative form puts =(x integer)= pairs directly in
+=nl-defun='s argument list.  The shipped =nl-defun= delegates that list
+unchanged to stock =defun= and has no typed-argument parser, so that
+surface is not executable as written.  The build-first API therefore
+uses the explicit wrapper =(nl-typed defun NAME ((ARG TYPE) ...) ...)=
+(also accepting =nl-defun= as the definition kind), strips the pairs to
+an ordinary argument list, and documents the restriction.  This keeps
+the feature opt-in without modifying =nl-defun= or the behavior of any
+unannotated function.

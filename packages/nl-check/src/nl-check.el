@@ -93,57 +93,6 @@ deliberate discard in `ignore' to silence it, the way Rust uses
 Passing a tracked resource to anything else is treated as a move and
 reported as `resource-untracked'.")
 
-(defun nl-check--proper-list (tail)
-  "Return the proper-list prefix of TAIL (drops a dotted terminator).
-Real source files contain dotted forms (alist literals in macro
-positions and the like); iterating them with `dolist' signals
-wrong-type-argument, so every walk over user form tails goes through
-this."
-  (let ((out nil))
-    (while (consp tail)
-      (push (car tail) out)
-      (setq tail (cdr tail)))
-    (nreverse out)))
-
-(defun nl-check--quoted-p (form)
-  "Return non-nil when FORM is a quoted constant the walker must skip."
-  (and (consp form) (memq (car form) '(quote function))
-       ;; (function (lambda ...)) still needs walking for capture checks.
-       (not (and (eq (car form) 'function)
-                 (consp (car (cdr form)))
-                 (eq (car (car (cdr form))) 'lambda)))))
-
-(defun nl-check--backquote-p (form)
-  "Return non-nil when FORM is a backquote template."
-  (and (consp form) (memq (car form) '(\` backquote))))
-
-(defun nl-check--unquoted (template acc)
-  "Collect TEMPLATE's unquote-position forms onto ACC.
-A backquote template is data except where `,' and `,@' put live code,
-so those are the only parts a checker may walk.  Walking the whole
-template treats a macro's output as if it ran at the definition site --
-which reported a resource `let' inside every `defmacro' that builds
-one, and, worse, said nothing about the expansion where the resource
-actually appears."
-  (cond
-   ((not (consp template)) acc)
-   ((memq (car template) '(\, \,@ unquote unquote-splicing))
-    (cons (car (cdr template)) acc))
-   (t
-    (let ((rest template))
-      (while (consp rest)
-        (setq acc (nl-check--unquoted (car rest) acc))
-        (setq rest (cdr rest)))
-      acc))))
-
-(defun nl-check--live-parts (form)
-  "Return the parts of FORM a walker should treat as code.
-For a backquote template that is its unquote positions; for anything
-else it is the form itself."
-  (if (nl-check--backquote-p form)
-      (nreverse (nl-check--unquoted (car (cdr form)) nil))
-    (list form)))
-
 (defun nl-check--body-of (form)
   "Return (BODY . VALUE-INDEX) description for FORM, or nil.
 BODY is the list of forms evaluated in sequence; every element but the
@@ -164,9 +113,9 @@ last sits in statement position."
 STATEMENT-P is non-nil when FORM's value is discarded."
   (cond
    ((not (consp form)) findings)
-   ((nl-check--quoted-p form) findings)
-   ((nl-check--backquote-p form)
-    (dolist (part (nl-check--live-parts form) findings)
+   ((nl--walk-quoted-p form) findings)
+   ((nl--walk-backquote-p form)
+    (dolist (part (nl--walk-live-parts form) findings)
       (setq findings (nl-check--must-use-scan part t findings))))
    ;; `ignore' is the sanctioned discard, like Rust's `let _ ='.
    ((eq (car form) 'ignore) findings)
@@ -194,7 +143,7 @@ STATEMENT-P is non-nil when FORM's value is discarded."
     (cond
      ;; Binding inits are value positions; the body is a sequence.
      ((memq head '(let let*))
-      (dolist (binding (nl-check--proper-list (car (cdr form))))
+      (dolist (binding (nl--walk-proper-list (car (cdr form))))
         (when (consp binding)
           (setq findings (nl-check--must-use-seq (cdr binding) findings))))
       (nl-check--must-use-seq body findings))
@@ -204,7 +153,7 @@ STATEMENT-P is non-nil when FORM's value is discarded."
      ((eq head 'while)
       (setq findings (nl-check--must-use-scan (nth 1 form) nil findings))
       ;; Every form in a `while' body is a statement.
-      (dolist (sub (nl-check--proper-list (cdr (cdr form))))
+      (dolist (sub (nl--walk-proper-list (cdr (cdr form))))
         (setq findings (nl-check--must-use-scan sub t findings)))
       findings)
      ((eq head 'if)
@@ -212,19 +161,19 @@ STATEMENT-P is non-nil when FORM's value is discarded."
       (setq findings (nl-check--must-use-scan (nth 2 form) nil findings))
       (nl-check--must-use-seq (nthcdr 3 form) findings))
      ((eq head 'cond)
-      (dolist (clause (nl-check--proper-list (cdr form)))
+      (dolist (clause (nl--walk-proper-list (cdr form)))
         (when (consp clause)
           (setq findings (nl-check--must-use-scan (car clause) nil findings))
           (setq findings (nl-check--must-use-seq (cdr clause) findings))))
       findings)
      ((eq head 'prog1)
       (setq findings (nl-check--must-use-scan (nth 1 form) nil findings))
-      (dolist (sub (nl-check--proper-list (cdr (cdr form))))
+      (dolist (sub (nl--walk-proper-list (cdr (cdr form))))
         (setq findings (nl-check--must-use-scan sub t findings)))
       findings)
      ((eq head 'unwind-protect)
       (setq findings (nl-check--must-use-scan (nth 1 form) nil findings))
-      (dolist (sub (nl-check--proper-list (cdr (cdr form))))
+      (dolist (sub (nl--walk-proper-list (cdr (cdr form))))
         (setq findings (nl-check--must-use-scan sub t findings)))
       findings)
      ((eq head 'setq)
@@ -237,7 +186,7 @@ STATEMENT-P is non-nil when FORM's value is discarded."
      (body (nl-check--must-use-seq body findings))
      ;; Ordinary call: every argument is a value position.
      (t
-      (dolist (sub (nl-check--proper-list (cdr form)))
+      (dolist (sub (nl--walk-proper-list (cdr form)))
         (setq findings (nl-check--must-use-scan sub nil findings)))
       findings))))
 
@@ -248,7 +197,7 @@ STATEMENT-P is non-nil when FORM's value is discarded."
   (cond
    ((eq form var) t)
    ((not (consp form)) nil)
-   ((nl-check--quoted-p form) nil)
+   ((nl--walk-quoted-p form) nil)
    (t (let ((tail form) (found nil))
         (while (and (consp tail) (not found))
           (setq found (nl-check--mentions-p (car tail) var))
@@ -261,9 +210,9 @@ Capture by a lambda, or being handed to any call other than the
 resource observers, counts as an escape (Doc 170 section 6.3)."
   (cond
    ((not (consp form)) nil)
-   ((nl-check--quoted-p form) nil)
-   ((nl-check--backquote-p form)
-    (nl-check--escapes-seq (nl-check--live-parts form) var))
+   ((nl--walk-quoted-p form) nil)
+   ((nl--walk-backquote-p form)
+    (nl-check--escapes-seq (nl--walk-live-parts form) var))
    ((memq (car form) '(lambda closure))
     (nl-check--mentions-p (cdr form) var))
    ((and (eq (car form) 'function) (consp (car (cdr form))))
@@ -320,9 +269,9 @@ Branches take the maximum of their arms; sequences take the sum.  A
 its body more than once."
   (cond
    ((not (consp form)) 0)
-   ((nl-check--quoted-p form) 0)
-   ((nl-check--backquote-p form)
-    (nl-check--consumes-seq (nl-check--live-parts form) var))
+   ((nl--walk-quoted-p form) 0)
+   ((nl--walk-backquote-p form)
+    (nl-check--consumes-seq (nl--walk-live-parts form) var))
    ((and (memq (car form) '(nl-drop nl-forget))
          (eq (car (cdr form)) var))
     1)
@@ -332,7 +281,7 @@ its body more than once."
             (nl-check--consumes-seq (nthcdr 3 form) var))))
    ((eq (car form) 'cond)
     (let ((worst 0))
-      (dolist (clause (nl-check--proper-list (cdr form)))
+      (dolist (clause (nl--walk-proper-list (cdr form)))
         (when (consp clause)
           (setq worst (max worst (nl-check--consumes-seq clause var)))))
       worst))
@@ -365,14 +314,14 @@ its body more than once."
   "Collect resource findings in FORM onto FINDINGS and return it."
   (cond
    ((not (consp form)) findings)
-   ((nl-check--quoted-p form) findings)
-   ((nl-check--backquote-p form)
-    (dolist (part (nl-check--live-parts form) findings)
+   ((nl--walk-quoted-p form) findings)
+   ((nl--walk-backquote-p form)
+    (dolist (part (nl--walk-live-parts form) findings)
       (setq findings (nl-check--resource-scan part findings))))
    (t
     (when (memq (car form) '(let let*))
       (let ((body (cdr (cdr form))))
-        (dolist (binding (nl-check--proper-list (car (cdr form))))
+        (dolist (binding (nl--walk-proper-list (car (cdr form))))
           (when (and (consp binding)
                      (symbolp (car binding))
                      (nl-check--fresh-resource-p (car (cdr binding))))
@@ -409,7 +358,7 @@ its body more than once."
   "Collect unsafe-primitive calls in FORM outside `nl-unsafe' blocks."
   (cond
    ((not (consp form)) findings)
-   ((nl-check--quoted-p form) findings)
+   ((nl--walk-quoted-p form) findings)
    ((eq (car form) 'nl-unsafe)
     (let ((tail (cdr form)))
       (while (consp tail)
