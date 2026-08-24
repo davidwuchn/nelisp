@@ -2135,6 +2135,14 @@ standalone-reader-bounded-backtrace-smoke:
 	$(EMACS) --batch -Q -L lisp -L src -L scripts \
 	  --eval '(setq load-prefer-newer t)' \
 	  -l nelisp-standalone-build -f nelisp-standalone-reader-bounded-backtrace-test
+# Fast focused loop for the socket primitives (Doc 184 follow-on) and Task A's
+# nelisp-unsupported-primitive fix.  Builds/relinks target/nelisp with the
+# incremental unit cache, then runs only the loopback round-trip + two
+# catchable-error negatives used by the full reader test.
+standalone-reader-socket-smoke:
+	$(EMACS) --batch -Q -L lisp -L src -L scripts \
+	  --eval '(setq load-prefer-newer t)' \
+	  -l nelisp-standalone-build -f nelisp-standalone-reader-socket-test
 
 # Prelude-load breadth test (Wave-1 (A)+(B)).  Builds the reader binary, then
 # runs it on  scripts/nelisp-stdlib-prelude.el  followed by a breadth test that

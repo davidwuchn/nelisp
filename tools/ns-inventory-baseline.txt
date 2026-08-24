@@ -388,7 +388,28 @@ ns-collision-divergent 126
 # desync fix, the backtrace capture/render, the new debug-switch codes)
 # live inside quoted data this checker does not descend into, so they
 # do not add to this count at all.
-ns-prefix-violation 876
+# 874 -> 875 on 2026-08-24 (socket primitives smoke, Doc 184
+# follow-on, feat/socket-primitives-p1): `nelisp-standalone-reader-
+# socket-test' (scripts/nelisp-standalone-build.el) is a public,
+# `;;;###autoload'-marked "build the reader binary and run only this
+# smoke" entry point, the same single-dash `nelisp-standalone-'
+# (not double-dash `nelisp-standalone--') shape as the ten sibling
+# `nelisp-standalone-reader-*-test' functions this baseline already
+# concedes (`-form-location-test'/`-repl-test'/`-malformed-input-
+# test'/etc.) -- backs `standalone-reader-socket-smoke' in the
+# Makefile the same way each of those backs its own fast-focused-loop
+# target.  One more instance of an already-accepted public-entry-point
+# shape, not a new kind of violation.
+# integration/wave6 (merge 6/9): the two raises above were measured
+# on non-overlapping trees (error-backtraces 874->876, socket-
+# primitives-p1 874->875, both off the same shared 874 base) and do
+# not compose additively as separate directive lines -- only the
+# FIRST `ns-prefix-violation' line in file order is read.  Interim
+# pin: 874 + 2 + 1 = 877 (sum of the two disjoint new-name sets: this
+# branch's two Doc 180 Phase 2 entry points, the socket branch's one
+# Doc 184 follow-on entry point), pending the RE-RUN of this gate on
+# the fully merged tree per the integration playbook.
+ns-prefix-violation 877
 # 611 -> 613 on 2026-08-20: `nelisp--check-string'/`--check-symbol' and the
 # other argument-check helpers are referenced from the lisp/ mirrors that
 # carry copies of the functions using them.  This is the kind this file

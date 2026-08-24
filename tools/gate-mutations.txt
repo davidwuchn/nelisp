@@ -234,3 +234,20 @@ standalone-reader-frame-stack-pop-desync-smoke|scripts/nelisp-standalone-build.e
 # position (the smoke's own ordered-position check); GREEN with it
 # removed.
 standalone-reader-bounded-backtrace-smoke|scripts/nelisp-standalone-build.el|s/(ptr-write-u64 (+ (data-addr nl_bt_snapshot) (+ 16 (\* i 8))) 0/(ptr-write-u64 (+ (data-addr nl_bt_snapshot) (+ 16 (* (- count (+ i 1)) 8))) 0/|the bounded backtrace prints outermost-first instead of innermost-first (the capture write index is reversed)
+# standalone-reader-socket-smoke: added 2026-08-24 (socket primitives,
+# Doc 184 follow-on, feat/socket-primitives-p1).  The injection changes
+# accept4's raw syscall number from 288 (the real Linux x86_64 number)
+# to 289 (unused/EINVAL territory) in `nl_socket_accept_impl'.  Manually
+# verified before adding this row: RED with the injection applied
+# (`[standalone-reader] FAIL: socket smoke: socket smoke: round-trip
+# failed, stdout="ROUNDTRIP=ERR:(nelisp-socket-error -22)...'` --
+# `nelisp-socket-connect' + `nelisp-socket-accept' still run, but
+# accept4 now fails with EINVAL(-22) instead of returning the queued
+# connection), GREEN again with the injection reverted.  Chosen over
+# corrupting the sockaddr byte layout or the connect/listen syscall
+# numbers because those either segfault (wrong offsets) or fail at
+# `nelisp-socket-listen'/`-connect' before ever reaching accept, giving
+# a less specific signal than "this exact syscall number is what
+# matters, and this gate reads it, not just \"a socket call failed
+# somewhere\"".
+standalone-reader-socket-smoke|scripts/nelisp-standalone-build.el|s/(syscall-direct 288 (wf_argval args 0) 0 0 0 0 0)/(syscall-direct 289 (wf_argval args 0) 0 0 0 0 0)/|accept4 issues the wrong raw syscall number, so nelisp-socket-accept fails on every connection instead of returning the queued one
