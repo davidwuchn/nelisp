@@ -11213,13 +11213,51 @@ set, which lacks the reader-only `nl_os_write_stderr')."
 ;; externs), so `make standalone-eval-test' stays green.
 (defconst nelisp-standalone--applyfn-baked-source
   (nelisp-standalone--applyfn-assemble
-   (list nelisp-standalone--applyfn-core-helpers)
+   ;; `m5-helpers' (string/format printer, `m5_prin1' among them) and
+   ;; `ht-helpers' joined 2026-08-24 (integration/wave6 full-battery
+   ;; run): Doc 180 Phase 2 item 3's bounded-backtrace printer
+   ;; (`nl_bt_print_frame' in `nelisp-standalone--shim-source',
+   ;; "shim.o", part of THIS baked eval manifest) calls `m5_prin1' -- a
+   ;; GENERAL S-expression printer -- directly to format a frame's
+   ;; index and operator, and `m5_prin1''s own hash-table print arm
+   ;; needs `ht-helpers'. Confirmed by bisection: feat/error-backtraces
+   ;; fails `standalone-eval-test' built ALONE against its own base
+   ;; with exactly this unresolved symbol (`nl_alloc_mut_str' first,
+   ;; `m5_prin1' once that was fixed).
+   ;;
+   ;; `search-helpers'/`bignum-helpers' also joined: needed by/adjacent
+   ;; to `ht-helpers'/`m5-helpers', no further dependency measured.
+   ;;
+   ;; `fa-file-helpers'/`census-helpers'/`bf-helpers' deliberately
+   ;; EXCLUDED, all three confirmed reader-only by measurement (fa-file
+   ;; pulls in `nl_os_write_file_handle' and further real OS-syscall
+   ;; file-I/O surface; `bf-helpers' is explicitly documented reader-
+   ;; only at its own definition site above -- "they use... nl_alloc_
+   ;; symbol / nl_alloc_str, nelisp_env_lookup_function and
+   ;; nelisp_mirror_is_bound -- all present only in the reader
+   ;; manifest" -- and measurement found MORE than that one-line list
+   ;; names: `nl_char_table_get_raw'/`nl_ht_meta_count'-adjacent calls
+   ;; too). `ht-helpers' calls into exactly three small, self-contained
+   ;; `bf-helpers' functions (`bf_eq2'/`bf_eq'/`bf_marker_vec_is', none
+   ;; of which touch any of the reader-only names above) --
+   ;; `nelisp-standalone--eval-bt-extra-unit-source' below defines
+   ;; copies of those three directly, rather than pulling in the
+   ;; ~2000-line reader-only block they live inside.
+   (list nelisp-standalone--applyfn-core-helpers
+         nelisp-standalone--applyfn-ht-helpers
+         nelisp-standalone--applyfn-search-helpers
+         nelisp-standalone--applyfn-bignum-helpers
+         nelisp-standalone--applyfn-m5-helpers)
    nelisp-standalone--applyfn-dispatch-table-baked
    ;; Silent rc-1 fallthrough: the baked eval manifest omits the reader-only
    ;; unit defining `nl_os_write_stderr', so the stderr diagnostic default
    ;; would be an unresolved symbol at link time.
    1)
-  "Arithmetic/list-only applyfn for the baked-form eval build.")
+  "Full-helper-set applyfn for the baked-form eval build (same helper
+functions the reader's `nelisp-standalone--applyfn-source' compiles,
+same baked/minimal dispatch table) -- widened 2026-08-24 from the
+original arithmetic/list-only subset once shim.o's own bounded-
+backtrace printer needed `m5_prin1' and its own transitive closure.")
 
 ;; Reader applyfn: core + HT (M4) + string/format (M5) + B-foundation breadth
 ;; helpers + the reader dispatch table (= the FULL table with nil-safe car/cdr +
@@ -14460,6 +14498,150 @@ KERNEL32!ExitProcess with the driver return already in x0/w0."
     ("arena.o"            :glue   nelisp-standalone--arena-source))
   "Ordered standalone-eval unit manifest.")
 
+;; Fixed 2026-08-24 (integration/wave6 full-battery run): `standalone-eval-
+;; test' failed to LINK at all (`nelisp-link--unresolved-symbol' on
+;; `nl_alloc_mut_str', then (once that was resolved) on `m5_prin1', then on
+;; `nl_os_write_stderr' -- unit "shim.o" for all three) once Doc 180 Phase 2
+;; item 3's bounded-backtrace printer landed (feat/error-backtraces) --
+;; confirmed by bisection: the branch fails this exact gate built ALONE
+;; against its own base, not a merge-order artifact. `nelisp-standalone--
+;; shim-source' (backing "shim.o", part of the base manifest above -- shared
+;; with the reader build) gained `nl_bt_print_frame'/`nl_bt_print_backtrace',
+;; which call `mut-str-make-empty'/`mut-str-finalize' (lowering to
+;; `nl_alloc_mut_str'/its finalize counterpart), `m5_prin1' (the S-expression
+;; printer, for a frame's index and operator), and `nl_os_write_stderr'
+;; (writing the rendered line) -- none of which the small eval build's
+;; helper set or unit list ever needed before.
+;;
+;; NOT added to the base `nelisp-standalone--manifest' directly (the
+;; mistake `nelisp-standalone--reader-extra-manifest''s own header comment
+;; below already documents once, for `nelisp_alloc_bytes'/chartable-getset.o
+;; -- putting a reader-only unit in the base manifest instead of reader-
+;; extra breaks nothing for `standalone-reader' but silently duplicate-
+;; defines the SAME symbol for the reader once the unit is also reachable
+;; through its own separate `reader-extra-manifest' entry, as measured true
+;; here: `alloc-mut-str.o'/`mut-str-finalize.o' are already reader-extra-
+;; manifest entries below). `nl_alloc_mut_str'/`nl_alloc_mut_str''s finalize
+;; counterpart reuse those exact same reader-extra-manifest units --
+;; `nelisp-standalone--eval-extra-manifest' below is this build's own
+;; mirror of that same reader-extra pattern, for units the SMALL build
+;; alone needs and the base manifest must not carry.
+(defun nelisp-standalone--eval-bt-extra-unit-source ()
+  "The small eval build's own bounded-backtrace odds and ends: a minimal
+target-appropriate `nl_os_write_stderr' (mirroring the four per-target
+definitions `nelisp-standalone--reader-os-base-forms' already carries --
+not reused directly, since that function returns a much larger form list
+bundled for the reader's own separate, larger \"reader-fileio.o\" unit),
+plus `nl_bi_strptr'/`nl_bi_strlen' (tiny, self-contained Sexp::Str /
+Sexp::MutStr pointer/length accessors, copied verbatim from
+`nelisp-standalone--fileio-forms-part1' -- also reader-fileio.o-only,
+also too small to justify pulling in that whole large, OS-syscall-heavy
+unit for two pure pointer-arithmetic helpers), plus `bf_eq2'/`bf_eq'/
+`bf_marker_vec_is' (copied verbatim from `nelisp-standalone--applyfn-
+bf-helpers', which `nelisp-standalone--applyfn-ht-helpers' calls for
+hash-table key equality and type-tag checks). `bf-helpers' as a whole
+is excluded from `nelisp-standalone--applyfn-baked-source''s helper
+list -- it is explicitly documented reader-only at its own defconst
+(\"they use... nl_alloc_symbol / nl_alloc_str,
+nelisp_env_lookup_function and nelisp_mirror_is_bound -- all present
+only in the reader manifest\"), confirmed true and non-exhaustive by
+measurement (`nl_char_table_get_raw'/`nl_ht_meta_count'-adjacent calls
+also surfaced). These three functions are the one small, genuinely
+self-contained corner of that ~2000-line reader-only block anything
+outside it needs; copied rather than the whole block pulled in."
+  `(seq
+    ,(pcase nelisp-standalone--target
+       ((or 'windows-x86_64 'windows-aarch64)
+        '(defun nl_os_write_stderr (ptr len)
+           (let* ((h (extern-call GetStdHandle 4294967284))
+                  (sent (alloc-bytes 4 4))
+                  (ok (extern-call WriteFile h ptr len sent 0)))
+             (if (= ok 0) -1 (ptr-read-u32 sent 0)))))
+       ('macos-aarch64
+        '(defun nl_os_write_stderr (ptr len)
+           (syscall-direct 4 2 ptr len 0 0 0)))
+       ('linux-aarch64
+        '(defun nl_os_write_stderr (ptr len)
+           (syscall-direct 64 2 ptr len 0 0 0)))
+       (_
+        '(defun nl_os_write_stderr (ptr len)
+           (syscall-direct 1 2 ptr len 0 0 0))))
+    (defun nl_bi_strptr (sx)
+      (if (= (ptr-read-u64 sx 0) 6)
+          (ptr-read-u64 (ptr-read-u64 sx 8) 8)
+        (ptr-read-u64 sx 16)))
+    (defun nl_bi_strlen (sx)
+      (if (= (ptr-read-u64 sx 0) 6)
+          (ptr-read-u64 (ptr-read-u64 sx 8) 16)
+        (ptr-read-u64 sx 24)))
+    (defun bf_eq2 (a b)
+      (let* ((ta (ptr-read-u64 a 0)) (tb (ptr-read-u64 b 0)))
+        (if (= ta tb)
+            (if (= ta 2) (if (= (ptr-read-u64 a 8) (ptr-read-u64 b 8)) 1 0)
+              (if (= ta 4) (symbol-eq a b)
+                (if (= ta 0) 1
+                  (if (= ta 1) 1
+                    (if (= ta 5) (m5_streq a b)
+                      (if (= ta 6) (m5_streq a b)
+                        (if (= ta 13) (if (= (ptr-read-u64 a 16) (ptr-read-u64 b 16)) 1 0)
+                          (if (= (ptr-read-u64 a 8) (ptr-read-u64 b 8)) 1 0))))))))
+          0)))
+    (defun bf_eq (args out)
+      (if (= (bf_eq2 (wf_arg_ptr args 0) (wf_arg_ptr args 1)) 1)
+          (wf_write_t out) (wf_write_nil out)))
+    (defun bf_marker_vec_is (p w0 w1 len)
+      (if (= (ptr-read-u64 p 0) 8)
+          (if (< (vector-len p) 2)
+              0
+            (let* ((sy (vector-ref-ptr p 0)))
+              (if (= (ptr-read-u64 sy 0) 4)
+                  (let* ((buf (alloc-bytes 16 1)))
+                    (seq (ptr-write-u64 buf 0 w0)
+                         (ptr-write-u64 (+ buf 8) 0 w1)
+                         (wf_sym_eq sy buf len)))
+                0)))
+        0))))
+
+(defconst nelisp-standalone--eval-extra-manifest
+  '(("alloc-mut-str.o"    nelisp-cc-nlstr-direct-ops nelisp-cc-nlstr-direct-ops--alloc-mut-str-source)
+    ("mut-str-finalize.o" nelisp-cc-nlstr-direct-ops nelisp-cc-nlstr-direct-ops--mut-str-finalize-source)
+    ;; `m5_prin1' (joined to `nelisp-standalone--applyfn-baked-source'
+    ;; above, backing "applyfn.o") builds its output byte-by-byte via
+    ;; `nl_mut_str_push_byte'/`nl_mut_str_push_codepoint' -- this unit,
+    ;; also already a `reader-extra-manifest' entry, same duplicate-
+    ;; symbol reasoning as the two above.
+    ("mut-str-push.o"     nelisp-cc-evalport-nonenv-mut-str-push nelisp-cc-evalport-nonenv-mut-str-push--source)
+    ;; `m5_prin1''s float-printing arm calls `nl_shortest' (Doc 159 §10
+    ;; shortest-round-trip printer), which lives in this unit alongside
+    ;; the (unrelated, unused here) string-to-float parser -- also
+    ;; already a `reader-extra-manifest' entry, same reasoning.
+    ("str-to-float.o"     nelisp-cc-evalport-str-to-float nelisp-cc-evalport-str-to-float--source)
+    ;; "mut-str-push.o" itself calls `nelisp_ptr_read_u8'/
+    ;; `nelisp_ptr_write_u8' (atomic single-byte raw-memory ops, distinct
+    ;; from the AOT-primitive `ptr-read-u8'/`ptr-write-u8' forms core-
+    ;; helpers already uses) -- also already `reader-extra-manifest'
+    ;; entries, same reasoning.
+    ("ptr-read-u8.o"      nelisp-cc-atomic-raw-mem   nelisp-cc-atomic-raw-mem--read-u8-source)
+    ("ptr-write-u8.o"     nelisp-cc-atomic-raw-mem   nelisp-cc-atomic-raw-mem--write-u8-source)
+    ;; `nl_msp_grow_and_push' (mut-str-push.o's own realloc-on-grow path)
+    ;; calls `nelisp_alloc_bytes'/`nelisp_dealloc_bytes' -- also already
+    ;; `reader-extra-manifest' entries, same reasoning.
+    ("alloc-bytes-fn.o"   nelisp-cc-alloc-dealloc    nelisp-cc-alloc-dealloc--alloc-bytes-source)
+    ("dealloc-bytes-fn.o" nelisp-cc-alloc-dealloc    nelisp-cc-alloc-dealloc--dealloc-bytes-source))
+  "Units the small `standalone-eval-test' build alone needs, appended in
+`nelisp-standalone-build' rather than listed in the base
+`nelisp-standalone--manifest' -- see the comment above for why (all four
+are ALSO `nelisp-standalone--reader-extra-manifest' entries; listing them
+in the base manifest too would duplicate-define the same symbols for the
+reader build, which reaches them through its own separate list).
+`nl_os_write_stderr'/`nl_bi_strptr'/`nl_bi_strlen'
+(`nelisp-standalone--eval-bt-extra-unit-source') are appended alongside
+these in `nelisp-standalone-build' directly, not listed here, since the
+first needs a target-dispatched `:glue'-shaped unit built
+with `nelisp-standalone--compile-to-unit' rather than the (package
+source-fn) shape every other entry in this list and the base/reader-extra
+manifests use.")
+
 (defun nelisp-standalone--unit-for (entry)
   "Produce the link-unit for a manifest ENTRY."
   (pcase-let ((`(,name ,kind ,src) entry))
@@ -14527,6 +14709,17 @@ Parallelism pays off only once per-unit compilation dominates startup
          (units (if (nelisp-standalone--target-uses-dynamic-arena-base-p)
                     (append units (list (nelisp-standalone--arena-base-slot-unit)))
                   units))
+         ;; Fixed 2026-08-24 (integration/wave6 full-battery run): shim.o's
+         ;; bounded-backtrace printer (Doc 180 Phase 2 item 3) needs these
+         ;; units, none of which the base manifest carries -- see
+         ;; `nelisp-standalone--eval-extra-manifest''s own header comment
+         ;; for why they live here and not in the base manifest.
+         (units (append units
+                        (mapcar #'nelisp-standalone--unit-for
+                                nelisp-standalone--eval-extra-manifest)
+                        (list (nelisp-standalone--compile-to-unit
+                               "bt-extra-eval.o"
+                               (nelisp-standalone--eval-bt-extra-unit-source)))))
          (out (nelisp-standalone--output-path nil)))
     (pcase nelisp-standalone--target
       ('windows-x86_64

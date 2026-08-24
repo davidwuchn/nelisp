@@ -204,7 +204,15 @@
 # `unsafe-call' line in file order is read.  Interim total:
 # 592 + 1 + 11 + 7 = 611, pending the RE-RUN of `unsafe-inventory' on
 # the fully merged tree per the integration playbook.
-unsafe-call 611
+#
+# Raised 2026-08-24 (integration/wave6 full-battery run:
+# scripts/nelisp-standalone-build.el's standalone-eval-test fix),
+# 611 -> 632, +21. `nelisp-standalone--eval-bt-extra-unit-source'
+# (bounded-backtrace dependency copies: nl_os_write_stderr,
+# nl_bi_strptr/nl_bi_strlen, bf_eq2/bf_eq/bf_marker_vec_is) is new
+# raw-memory-inside-a-native-unit source, same shape as every sibling
+# generator already counted here -- no new KIND of unsafe call.
+unsafe-call 632
 
 # `pinned-kernel-call FILE COUNT' pins the per-file unquoted `unsafe-call'
 # count behind `total' above -- the three kernel files that actually carry
@@ -236,4 +244,6 @@ pinned-kernel-call scripts/nelisp-flat-arena-probe.el 6
 # (error-backtraces) + 11 (socket-primitives-p1) + 7
 # (fix/ffi-surface-availability) = 587, pending the RE-RUN of
 # `unsafe-inventory' on the fully merged tree.
-pinned-kernel-call scripts/nelisp-standalone-build.el 587
+# integration/wave6 full-battery run (2026-08-24): 587 -> 608, +21,
+# same reason as the `unsafe-call' total above.
+pinned-kernel-call scripts/nelisp-standalone-build.el 608
