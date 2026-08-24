@@ -44,6 +44,7 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'nl-prelude-trampoline)
 
 ;;;; Errors -----------------------------------------------------------
 
