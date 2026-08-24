@@ -450,6 +450,19 @@ nl-ns-reader-standalone-smoke: $(if $(wildcard target/nelisp target/nelisp.exe),
 	fi; \
 	"$$bin" --load packages/nl-ns/test/nl-ns-reader-standalone-smoke.el
 
+# Doc 198 Phases 2-3: the real standalone substrate runs the hygiene
+# against-the-bug ERT bodies and a one-million-hop mutual trampoline.
+# Declared beside the target to avoid expanding the conflict-prone global
+# .PHONY list (the package-target convention documented near pkg-graph).
+.PHONY: nl-hygiene-standalone-smoke
+nl-hygiene-standalone-smoke: $(if $(wildcard target/nelisp target/nelisp.exe),,standalone-reader)
+	@bin=./target/nelisp; [ -f "$$bin" ] || bin=./target/nelisp.exe; \
+	if [ ! -f "$$bin" ]; then \
+	  echo "GATE-SKIP no nelisp binary in target/ after build attempt"; \
+	  exit 0; \
+	fi; \
+	"$$bin" --load packages/nl-hygiene/test/nl-hygiene-standalone-smoke.el
+
 # Runnable-host guard: see `nl-condition-standalone-smoke' above.
 nl-resource-standalone-smoke: $(if $(wildcard target/nelisp target/nelisp.exe),,standalone-reader)
 	@NELISP_STANDALONE_TARGET=$(STANDALONE_GATE_TARGET) $(EMACS) --batch -Q -L lisp -L src -L scripts -l nelisp-standalone-build \
