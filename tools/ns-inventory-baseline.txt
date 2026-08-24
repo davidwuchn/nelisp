@@ -197,6 +197,11 @@ ns-collision 250
 # files -- the prelude's now signals for a non-string instead of falling
 # through to `equal', and the lisp copy was brought with it.  Ratcheted down
 # rather than left, since the gate offered.
+#
+#   937 -> 941 (ns-prefix-violation), 700 -> 701 (ns-private-escape) on
+#   2026-08-25 for Doc 199 Tier 1 (packages/nl-clj/src/nl-clj-future.el):
+#   the new nl-clj-future/-await/-done-p/-p/-pcalls/-pmap public names and
+#   the nl-clj-future--queue/--run-one/--drain/--future-tag private set.
 # 96 stands on 2026-08-19: `round' and `intern-soft' briefly pushed this to
 # 98 and were resolved in the same commit by making the two texts identical,
 # rather than by conceding the number.
@@ -529,7 +534,7 @@ ns-collision-divergent 127
 # nl-clj notes above concede; renaming them to satisfy file-local prefixes
 # would violate Doc 196's opt-in API decision rather than fix a collision.
 # Measured via `make ns-inventory': exactly 22 new prefix findings.
-ns-prefix-violation 937
+ns-prefix-violation 941
 # 611 -> 613 on 2026-08-20: `nelisp--check-string'/`--check-symbol' and the
 # other argument-check helpers are referenced from the lisp/ mirrors that
 # carry copies of the functions using them.  This is the kind this file
@@ -628,7 +633,7 @@ ns-prefix-violation 937
 # manifest.el still has only nl-prelude as its cross-package dependency.
 # This is the same shared-core/private-engine shape conceded for nl-clj
 # immediately above.  Measured via `make ns-inventory': exactly 39.
-ns-private-escape 700
+ns-private-escape 701
 ns-unreadable 0
 
 # `pinned-collision KEY' pins every ns-collision and ns-collision-divergent
