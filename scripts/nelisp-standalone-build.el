@@ -22754,6 +22754,9 @@ Exits 0/1."
         (kill-emacs 0))
     (error
      (message "[standalone-reader] FAIL: bounded-backtrace smoke: %s"
+              (error-message-string err))
+     (kill-emacs 1))))
+
 (defun nelisp-standalone--reader-socket-smoke ()
   "Against-the-bug proof for the socket primitives (Doc 184 follow-on) AND
 Task A's `nelisp-unsupported-primitive' fix, both exercised in ONE process
