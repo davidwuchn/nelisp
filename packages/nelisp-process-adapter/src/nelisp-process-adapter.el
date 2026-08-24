@@ -59,15 +59,17 @@
 ;; batch-mode contract (Doc 184 S2).
 ;;
 ;; `make-network-process' was OUT of scope under Doc 184 (S1.7/P4: no
-;; native socket primitive family existed yet).  Doc 194 P0-P2 replaces
+;; native socket primitive family existed yet).  Doc 194 P0-P5 replaces
 ;; that stub: `feat/socket-primitives-p1' shipped the six raw-fd
 ;; primitives this file's `make-network-process'/`open-network-stream'
-;; (synchronous CLIENT path only -- no `:server'/`:nowait', Doc 194 P3+)
-;; now build on directly, plus a pure-elisp DNS resolver (`/etc/hosts'
-;; then DNS-over-TCP/53, Doc 194 S3.2) so a caller can pass a hostname,
-;; not only a literal IPv4/`localhost'.  See docs/design/194-network-
-;; process-adapter.org for the full design; this file is P0-P2's own
-;; "measured, not asserted" implementation of that doc's S3.1/S3.2.
+;; build on directly (P0: the synchronous CLIENT path; P4: `:nowait',
+;; driven by THIS FILE's own poll loop via P3's nonblocking primitives;
+;; P5: `:server t' auto-accept, same loop, same primitives), plus a
+;; pure-elisp DNS resolver (`/etc/hosts' then DNS-over-TCP/53, Doc 194
+;; S3.2) so a caller can pass a hostname, not only a literal IPv4/
+;; `localhost'.  See docs/design/194-network-process-adapter.org for the
+;; full design; this file is P0-P5's own "measured, not asserted"
+;; implementation of that doc's S3.1/S3.2/S3.3.
 ;;
 ;;; Code:
 
@@ -79,12 +81,16 @@
 ;; `nelisp-unsupported-primitive' on every other target).  Declared, like
 ;; the native process primitives above, so `make compile' byte-compiles
 ;; this file cleanly; real and reachable at runtime in `target/nelisp'.
-(declare-function nelisp-socket-listen "ext:nelisp-runtime" (host port))
-(declare-function nelisp-socket-accept "ext:nelisp-runtime" (listen-fd))
-(declare-function nelisp-socket-connect "ext:nelisp-runtime" (host port))
+(declare-function nelisp-socket-listen "ext:nelisp-runtime" (host port &optional nowait))
+(declare-function nelisp-socket-accept "ext:nelisp-runtime" (listen-fd &optional nowait))
+(declare-function nelisp-socket-connect "ext:nelisp-runtime" (host port &optional nowait))
 (declare-function nelisp-socket-send "ext:nelisp-runtime" (fd string))
 (declare-function nelisp-socket-recv "ext:nelisp-runtime" (fd max-bytes))
 (declare-function nelisp-socket-close "ext:nelisp-runtime" (fd))
+;; Doc 194 P3: the two nonblocking-I/O additions this file's poll loop
+;; (P4) and auto-accept branch (P5) both drive.
+(declare-function nelisp-socket-poll "ext:nelisp-runtime" (fd want-write timeout))
+(declare-function nelisp-socket-connect-error "ext:nelisp-runtime" (fd))
 ;; Byte-level string access (Doc 161 / Doc 194 P2): NOT prelude functions,
 ;; native dispatch-table entries in scripts/nelisp-standalone-build.el
 ;; (`(:lit "string-byte")'/`(:lit "string-bytes")'), same declare-function
@@ -268,22 +274,15 @@ own `accept-process-output' contract, measured against host Emacs
 30.1: a status-only change with no output produces a nil return; only
 actual bytes produce t).
 
-Doc 194 P0: `make-network-process' adds its `network-process' objects to
-this SAME shared `nelisp-process-adapter--live' registry (Doc 194 S3.1's
-own design), but P0's connect path is purely synchronous -- there is no
-async filter-driven read/accept wiring yet (that is Doc 194 P3/P4's
-`nelisp-socket-poll'/nonblocking-accept work, explicitly not this pass).
-The native `nelisp-process-poll' this function otherwise calls assumes
-the OTHER tagged-vector shape (a fixed-offset native process object) and
-does not know this one, so a network process is guarded out here rather
-than handed to it -- it just sits inert in the registry until
-`delete-process' removes it.  This is a minimal type-dispatch SAFETY
-guard so a caller that also uses ordinary subprocesses cannot crash the
-shared loop by mixing the two process shapes; it is not Doc 194 P3/P4's
-real nonblocking wiring, which still has its own S3.3 branch to add
-here once built."
+Doc 194 P0-P3: `make-network-process' adds its `network-process' objects
+to this SAME shared `nelisp-process-adapter--live' registry (Doc 194
+S3.1's own design).  A `network-process' is dispatched to
+`nelisp-process-adapter--drain-and-fire-network' (P4/P5's own real
+nonblocking wiring, S3.3) instead of the native `nelisp-process-poll'
+path below, which assumes the OTHER tagged-vector shape (a fixed-offset
+native process object) and does not know this one."
   (if (nelisp--network-process-p proc)
-      nil
+      (nelisp-process-adapter--drain-and-fire-network proc)
     (let* ((ev (nelisp-process-poll proc))
            (ready (aref ev 0))
            (exited (aref ev 1))
@@ -307,6 +306,131 @@ here once built."
           (when sentinel
             (funcall sentinel proc (nelisp-process-adapter--sentinel-message proc)))))
       got-bytes)))
+
+;;; network-process nonblocking I/O (Doc 194 P4/P5, S3.3) -----------------
+;; `nelisp-process-adapter--drain-and-fire''s `network-process' branch,
+;; dispatching on STATUS (S3.1's state machine: `connect' -> `open' ->
+;; `closed'/`failed'; `listen' for a `:server t' process's whole
+;; lifetime, P5).  Every check below is a ZERO-TIMEOUT `nelisp-socket-
+;; poll' probe -- the SAME non-blocking-by-construction contract the
+;; native `nelisp-process-poll' path above already has; the OUTER
+;; blocking behaviour still comes entirely from this file's own
+;; `nelisp-process-adapter--wait' poll-and-sleep cycle, unchanged.
+
+(defun nelisp-process-adapter--network-process-close (proc)
+  "Close PROC's fd and prune it from the live registry, WITHOUT firing a
+sentinel (the caller already has, or is about to, with its own specific
+message -- `closed\\n' at delete time via `nelisp--network-process-
+delete', `open\\n'/`failed\\n' at async-connect-completion time via
+`nelisp-process-adapter--drain-and-fire-network' below).  Shared by both
+so the fd-close + registry-prune step itself is not duplicated."
+  (let ((fd (aref proc 3)))
+    (when (integerp fd) (ignore-errors (nelisp-socket-close fd))))
+  (setq nelisp-process-adapter--live (delq proc nelisp-process-adapter--live)))
+
+(defun nelisp-process-adapter--drain-and-fire-network (proc)
+  "The `network-process' counterpart of `nelisp-process-adapter--drain-
+and-fire' (Doc 194 P4/P5).  Dispatches on PROC's STATUS slot (aref 2):
+
+- `open': `nelisp-socket-poll FD nil 0' (readable?); on ready,
+  `nelisp-socket-recv' up to 65536 bytes (matching the native path's own
+  constant just above) and dispatch to `:filter'.  A zero-length `recv'
+  (peer closed, TCP EOF) OR the `recv' call itself signalling
+  `nelisp-socket-error' (e.g. ECONNRESET) both mean the same thing here
+  -- the peer is gone -- and both transition STATUS to `closed' and fire
+  the sentinel with `closed\\n', mirroring (not reusing, S3.1's own
+  design) `nelisp--network-process-delete''s formatting.
+- `connect' (nonblocking connect in flight, P4): `nelisp-socket-poll FD
+  t 0' (writable?); on ready, `nelisp-socket-connect-error FD' -- `0'
+  transitions to `open' and fires the sentinel with `open\\n' (measured
+  against real Emacs 30.1 during this phase's implementation: exactly
+  this string, newline included, no other text); a non-zero errno
+  transitions to `failed', closes the fd, and fires the sentinel with
+  `(format \"failed with code %d\\n\" errno)' -- measured against real
+  Emacs 30.1 the SAME way: a bare `failed\\n' (this doc's own S1.3/S3.3
+  prose) is NOT what real Emacs sends for an async-connect failure; the
+  real string names the errno, and this substrate's own
+  `nelisp-socket-connect-error' already returns that exact integer, so
+  no separate errno-to-message translation is needed.
+- `listen' (P5, `:server t' auto-accept): `nelisp-socket-poll FD nil 0'
+  on the LISTENING fd (POLLIN on a listening socket means \"a connection
+  is pending\", the same generic `poll(2)' semantics the `open' branch's
+  own readable check already relies on); on ready, `nelisp-socket-accept
+  FD t' (nonblocking, P3) -- a real fd wraps a NEW child `network-process'
+  object, status `open', COPYING (not sharing/aliasing anything else)
+  the listener's own `:filter'/`:sentinel' function objects (measured
+  against real Emacs 30.1 during this phase's implementation: `(eq
+  (process-filter child) (process-filter server))' is `t' -- literal
+  reuse of the same function, not a copy of behaviour); calls `:log
+  SERVER CHILD \"accept\\n\"' first if the listener was given one
+  (measured: real Emacs calls `:log' with `\"accept from HOST\\n\"' --
+  simplified here to a bare `\"accept\\n\"', matching this doc's own
+  S3.3 prose exactly, because Phase 1's `nl_socket_accept_impl' requests
+  no peer address at all, S1.1, so this substrate has no HOST string to
+  put there), then fires the CHILD's own sentinel with `\"open\\n\"'
+  (ALSO measured against real Emacs: an accepted child fires its
+  sentinel immediately, with `\"open from HOST\\n\"' -- again simplified
+  to `\"open\\n\"' for the same peer-address-unavailable reason).  The
+  child's NAME is `SERVERNAME <fd:N>' -- real Emacs names it
+  `SERVERNAME <HOST:PORT>' (the peer's own address:port, S1.3), a shape
+  this substrate cannot reproduce for the same reason; `<fd:N>' is
+  still a unique, informative suffix per accepted connection.  A NOWAIT
+  accept racing an empty queue (`-1' sentinel, P3) between the poll
+  check and the accept call -- possible in principle, never observed
+  in this single-process cooperative loop, since nothing else can steal
+  a pending connection between the two calls -- is simply a no-op this
+  pass (nothing to wrap, tried again next pass).
+
+Returns non-nil iff real output BYTES were delivered (`open' status
+only), matching the native branch's own contract."
+  (let ((status (aref proc 2))
+        (fd (aref proc 3)))
+    (cond
+     ((eq status 'open)
+      (if (eq (nelisp-socket-poll fd nil 0) t)
+          (let ((chunk (condition-case nil (nelisp-socket-recv fd 65536) (error ""))))
+            (if (and chunk (> (string-bytes chunk) 0))
+                (progn
+                  (let ((filter (process-get proc :filter)))
+                    (when filter (funcall filter proc chunk)))
+                  t)
+              ;; Zero-length recv (peer closed) or a caught recv error
+              ;; (ECONNRESET etc.) -- both mean the peer is gone.
+              (aset proc 2 'closed)
+              (nelisp-process-adapter--network-process-close proc)
+              (let ((sentinel (process-get proc :sentinel)))
+                (when sentinel (funcall sentinel proc "closed\n")))
+              nil))
+        nil))
+     ((eq status 'connect)
+      (when (eq (nelisp-socket-poll fd t 0) t)
+        (let ((err (nelisp-socket-connect-error fd)))
+          (if (= err 0)
+              (progn
+                (aset proc 2 'open)
+                (let ((sentinel (process-get proc :sentinel)))
+                  (when sentinel (funcall sentinel proc "open\n"))))
+            (aset proc 2 'failed)
+            (nelisp-process-adapter--network-process-close proc)
+            (let ((sentinel (process-get proc :sentinel)))
+              (when sentinel
+                (funcall sentinel proc (format "failed with code %d\n" err)))))))
+      nil)
+     ((eq status 'listen)
+      (when (eq (nelisp-socket-poll fd nil 0) t)
+        (let ((cfd (nelisp-socket-accept fd t)))
+          (unless (eql cfd -1)
+            (let* ((cname (format "%s <fd:%d>" (aref proc 1) cfd))
+                   (child (nelisp--make-network-process-object cname 'open cfd)))
+              (process-put child :filter (process-get proc :filter))
+              (process-put child :sentinel (process-get proc :sentinel))
+              (setq nelisp-process-adapter--live (cons child nelisp-process-adapter--live))
+              (let ((log (process-get proc :log)))
+                (when log (funcall log proc child "accept\n")))
+              (let ((sentinel (process-get child :sentinel)))
+                (when sentinel (funcall sentinel child "open\n")))))))
+      nil)
+     (t nil))))
 
 (defun nelisp-process-adapter--pump-once (targets stop-after-first)
   "One non-blocking pass over TARGETS.  Returns non-nil iff any target
@@ -783,10 +907,11 @@ unchanged, it is not re-wrapped as \"unresolvable\" here."
 ;; poll-loop involvement (measured against real Emacs 30.1, Doc 194 S1.3:
 ;; a blocking connect completes synchronously inside `make-network-
 ;; process' itself, `process-status' reads `open' the instant it
-;; returns, before any `accept-process-output' call).  `:server t'/
-;; `:nowait' are Doc 194 P3-P5, not this pass -- asking for either
-;; signals loudly rather than silently degrading to a blocking connect a
-;; caller did not request.
+;; returns, before any `accept-process-output' call).  `:nowait t'
+;; (Doc 194 P4, `nelisp--network-process-connect-nowait' below) and
+;; `:server t' (Doc 194 P5, `nelisp--network-process-listen' below) are
+;; both real now -- P0-P2's own "signals loudly rather than silently
+;; degrading" guard for each is gone, replaced by the real thing.
 
 (defun nelisp--network-process-signal-refused (plist err)
   "Translate a caught error ERR (`nelisp-socket-error' from a refused/
@@ -805,32 +930,119 @@ every existing `open-network-stream' caller already uses keeps working."
                 :service (plist-get plist :service)
                 :family (or (plist-get plist :family) 'ipv4))))
 
-(defun make-network-process (&rest plist)
-  "Doc 194 P0: standard-name `make-network-process', the synchronous
-CLIENT path built directly on `nelisp-socket-connect' plus `nelisp--
-resolve-host' (Doc 194 S3.1/S3.2).  `:server'/`:nowait' are Doc 194
-P3-P5, not yet supported here."
+(defun nelisp--network-process-populate (proc plist)
+  "Store PLIST's `:host'/`:service'/`:filter'/`:sentinel' onto PROC
+\(shared by every `make-network-process' branch -- synchronous client,
+P4's `:nowait', P5's `:server'/child processes -- so the plist-to-props
+mapping is written once)."
+  (process-put proc :host (plist-get plist :host))
+  (process-put proc :service (plist-get plist :service))
+  (process-put proc :filter (plist-get plist :filter))
+  (process-put proc :sentinel (plist-get plist :sentinel))
+  proc)
+
+(defun nelisp--network-process-connect-nowait (plist)
+  "Doc 194 P4: `make-network-process' with `:nowait t' -- a stream
+client that returns immediately without waiting for the connect to
+complete (measured against real Emacs 30.1 during this phase's
+implementation, S1.3/S3.3): `process-status' reads `connect' the
+instant this function returns; `nelisp-process-adapter--drain-and-fire-
+network''s `connect' branch drives the async connect to completion (via
+`nelisp-socket-poll'/`nelisp-socket-connect-error', P3) and fires the
+SENTINEL exactly once with `open\\n' (success) or, MEASURED against real
+Emacs -- doc 194's own S1.3/S3.3 prose says a bare `failed\\n', which
+this measurement found is NOT what real Emacs actually sends --
+`(format \"failed with code %d\\n\" ERRNO)' (failure).  Host resolution
+(`nelisp--resolve-host', S3.2) still happens SYNCHRONOUSLY here, exactly
+like the non-`:nowait' path just above -- a hostname that cannot be
+resolved at all never reaches a real connect(2) attempt, so it is
+still reported the SAME synchronous `file-error' way (measured Emacs
+does not defer THAT class of failure to a sentinel either, since no
+connection attempt ever began).  A HARD, SYNCHRONOUS `nelisp-socket-
+error' from `nelisp-socket-connect' itself (not the soft EINPROGRESS
+outcome `nl_socket_connect_impl' already treats as success under
+NOWAIT, P3) is the one case genuinely specific to this branch: real
+Emacs's own `:nowait' contract is deferring success/failure reporting
+to the sentinel, not raising a synchronous condition, so this creates
+the `network-process' object anyway (status `failed', no live fd) and
+fires the SAME sentinel shape the async poll-driven path uses,
+immediately rather than on a later poll pass."
+  (let* ((host (plist-get plist :host))
+         (service (plist-get plist :service))
+         (name (or (plist-get plist :name) "network"))
+         (resolved-host (condition-case err
+                             (nelisp--resolve-host (nelisp--net-host-string host))
+                           (error (nelisp--network-process-signal-refused plist err)))))
+    (condition-case err
+        (let* ((fd (nelisp-socket-connect resolved-host service t))
+               (proc (nelisp--make-network-process-object name 'connect fd)))
+          (nelisp--network-process-populate proc plist)
+          (setq nelisp-process-adapter--live (cons proc nelisp-process-adapter--live))
+          proc)
+      (nelisp-socket-error
+       (let* ((errno (- (or (car (cdr err)) 0)))
+              (proc (nelisp--make-network-process-object name 'failed -1)))
+         (nelisp--network-process-populate proc plist)
+         (let ((sentinel (process-get proc :sentinel)))
+           (when sentinel (funcall sentinel proc (format "failed with code %d\n" errno))))
+         proc)))))
+
+(defun nelisp--network-process-listen (plist)
+  "Doc 194 P5: `make-network-process' with `:server t' -- a LISTENING
+`network-process' (status `listen' for its whole lifetime, S3.1/S3.3).
+`:host' is NOT resolved via `nelisp--resolve-host' the way a client's is
+-- a listener binds a LOCAL interface address, it does not connect to a
+remote one, so DNS/`/etc/hosts' resolution does not apply; only
+`nelisp--net-host-string''s nil/`local' -> \"127.0.0.1\" normalization
+runs, matching Phase 1's own bind-time host grammar (S1.1: literal
+`localhost'/IPv4 dotted-decimal only) directly.  Built on `nelisp-
+socket-listen HOST SERVICE t' (P3's NOWAIT extension -- REQUIRED here,
+not optional: P5 depends on P3's nonblocking accept, S4 P5's own text --
+a blocking `:server t' would freeze the whole poll loop on every accept
+attempt).  `:log' (server-only, real Emacs: `(SERVER CLIENT MESSAGE)' on
+each accept, S1.3) is stored on the listener's own props-alist for
+`nelisp-process-adapter--drain-and-fire-network''s `listen' branch to
+read back.  `:service 0' (kernel-assigned ephemeral port) is explicitly
+NOT supported -- `getsockname(2)' to read the real port back does not
+exist yet (S6's own open question); pass an explicit port."
   (let* ((name (or (plist-get plist :name) "network"))
          (host (plist-get plist :host))
          (service (plist-get plist :service))
+         (fd (condition-case err
+                 (nelisp-socket-listen (nelisp--net-host-string host) service t)
+               (error (nelisp--network-process-signal-refused plist err))))
+         (proc (nelisp--make-network-process-object name 'listen fd)))
+    (nelisp--network-process-populate proc plist)
+    (process-put proc :log (plist-get plist :log))
+    (setq nelisp-process-adapter--live (cons proc nelisp-process-adapter--live))
+    proc))
+
+(defun make-network-process (&rest plist)
+  "Doc 194 P0/P4/P5: standard-name `make-network-process'.  The
+synchronous CLIENT path (no `:server', no `:nowait') is built directly
+on `nelisp-socket-connect' plus `nelisp--resolve-host' (S3.1/S3.2).
+`:nowait t' delegates to `nelisp--network-process-connect-nowait' (P4).
+`:server t' delegates to `nelisp--network-process-listen' (P5)."
+  (let* ((service (plist-get plist :service))
          (server (plist-get plist :server))
          (nowait (plist-get plist :nowait)))
     (cond
      (server
-      (signal 'error (list "make-network-process: :server t is not yet supported (Doc 194 P5)")))
+      (unless (integerp service) (signal 'wrong-type-argument (list 'integerp service)))
+      (nelisp--network-process-listen plist))
      (nowait
-      (signal 'error (list "make-network-process: :nowait is not yet supported (Doc 194 P3/P4)")))
+      (unless (integerp service) (signal 'wrong-type-argument (list 'integerp service)))
+      (nelisp--network-process-connect-nowait plist))
      (t
       (unless (integerp service) (signal 'wrong-type-argument (list 'integerp service)))
-      (let* ((fd (condition-case err
+      (let* ((name (or (plist-get plist :name) "network"))
+             (host (plist-get plist :host))
+             (fd (condition-case err
                      (nelisp-socket-connect
                       (nelisp--resolve-host (nelisp--net-host-string host)) service)
                    (error (nelisp--network-process-signal-refused plist err))))
              (proc (nelisp--make-network-process-object name 'open fd)))
-        (process-put proc :host host)
-        (process-put proc :service service)
-        (process-put proc :filter (plist-get plist :filter))
-        (process-put proc :sentinel (plist-get plist :sentinel))
+        (nelisp--network-process-populate proc plist)
         (setq nelisp-process-adapter--live (cons proc nelisp-process-adapter--live))
         proc)))))
 

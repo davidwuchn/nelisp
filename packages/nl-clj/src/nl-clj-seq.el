@@ -4,29 +4,32 @@
 
 ;;; Commentary:
 
-;; Doc 195 §4.7 (minimal slice; laziness itself deferred to a later
-;; phase per this package's own build-first brief) plus the
-;; polymorphic operations Doc 195 §4.1/§4.2 each describe for their
-;; own collection: this file is the single place every nl-clj public
-;; function that works across MORE than one collection type lives --
-;; `nl-clj-seq'/`first'/`rest'/`next'/`cons'/`into'/`map'/`filter'/
-;; `reduce'/`count'/`conj'/`assoc'/`get'/`nth'/`peek'/`pop'/`vec'/
-;; `subvec'/`contains?'/`equal'/`hash', plus the map-only `dissoc' and
-;; set-only `disj' (each needs the OTHER collection modules' internals
-;; to dispatch, so they cannot live in `nl-clj-vector.el'/
-;; `nl-clj-hash.el' themselves without an upward dependency).  Every
-;; function here is a single, real Clojure name -- exactly like real
-;; Clojure, where `conj'/`assoc'/`get'/`count'/`seq'/`first'/`rest'
-;; are themselves single polymorphic functions, not one per collection
-;; type.
+;; Doc 195 §4.7 (now the FULL seq API, eager and lazy alike -- this
+;; package's lazy phase, packages/nl-clj/src/nl-clj-lazy.el, landed
+;; after the initial build-first Tier 1 slice this file's own history
+;; started from) plus the polymorphic operations Doc 195 §4.1/§4.2 each
+;; describe for their own collection: this file is the single place
+;; every nl-clj public function that works across MORE than one
+;; collection type lives -- `nl-clj-seq'/`first'/`rest'/`next'/`cons'/
+;; `into'/`map'/`filter'/`reduce'/`count'/`conj'/`assoc'/`get'/`nth'/
+;; `peek'/`pop'/`vec'/`subvec'/`contains?'/`equal'/`hash', plus the
+;; map-only `dissoc' and set-only `disj' (each needs the OTHER
+;; collection modules' internals to dispatch, so they cannot live in
+;; `nl-clj-vector.el'/`nl-clj-hash.el' themselves without an upward
+;; dependency).  Every function here is a single, real Clojure name --
+;; exactly like real Clojure, where `conj'/`assoc'/`get'/`count'/
+;; `seq'/`first'/`rest' are themselves single polymorphic functions,
+;; not one per collection type.
 ;;
-;; Eager, not lazy (this package's own build-first brief, following
-;; Doc 195 §6's own ranking): `nl-clj-seq' materializes a plain Elisp
-;; list up front rather than returning a lazy view.  `nl-clj-map'/
-;; `nl-clj-filter'/`nl-clj-reduce' walk that list with a plain `while'
-;; loop -- inherently stack-safe with zero recursion, so unlike Doc
-;; 194 §4.7's (deferred) lazy-seq walk, `nl-loop'/`nl-recur' are not
-;; needed here to avoid blowing the interpreter's own call stack.
+;; Eager BY DEFAULT, lazy where COLL itself is lazy: `nl-clj-seq'
+;; materializes a plain Elisp list up front for every eager COLL
+;; (unchanged since before the lazy phase), and forces one step at a
+;; time for a lazy COLL (see the "Lazy-seq integration" paragraph
+;; below).  `nl-clj-map'/`nl-clj-filter'/`nl-clj-reduce' walk with a
+;; plain `while' loop -- inherently stack-safe with zero recursion, so
+;; `nl-loop'/`nl-recur' are not needed here to avoid blowing the
+;; interpreter's own call stack, for the eager walk OR, per
+;; nl-clj-lazy.el's own Commentary, for the lazy one either.
 ;;
 ;; A named, documented divergence from Clojure (Doc 195 §4.7's own
 ;; discipline: name it, do not hide it): Clojure's `rest' and `next'
@@ -49,6 +52,41 @@
 ;; is void-function on this substrate (Doc 195 §2.3), so there is no
 ;; way to register the right one as a real hash-table `:test' at all;
 ;; this is a named, accepted footgun, not solved here.
+;;
+;; Lazy-seq integration (packages/nl-clj/src/nl-clj-lazy.el, Doc 195
+;; §4.7's lazy phase): a lazy-tagged value is a `vectorp' like every
+;; other nl-clj collection, so `nl-clj-seq'/`nl-clj-count' and any
+;; walker below that has a generic `(vectorp coll)' or raw-list
+;; fallback MUST check the lazy tag explicitly before falling into that
+;; bonus branch, or it silently mis-measures a lazy cell's own 2-slot
+;; ENVELOPE as if it were the (unrelated) seq it represents -- exactly
+;; the "silent wrong result" failure class this repo's own AI.md names.
+;; This file cannot `(require 'nl-clj-lazy)' to get the real predicate/
+;; force function without a require cycle (nl-clj-lazy.el needs THIS
+;; file's own generic `nl-clj-seq'/`first'/`rest' to pull from arbitrary,
+;; possibly-eager sources) -- see nl-clj-core.el's Commentary for the
+;; forward-reference vars (`nl-clj--lazy-force-fn' et al) that break it.
+;;
+;; Every walker below that used to manipulate a `(nl-clj-seq coll)'
+;; result's `cdr' directly (`nl-clj-nth', `nl-clj-into', `nl-clj-reduce')
+;; now re-derives each step through `nl-clj-seq' again instead
+;; (`(nl-clj-seq (cdr s))', not bare `(cdr s)') -- behaviorally identical
+;; for every already-eager COLL (`nl-clj-seq' on a cons or nil is a
+;; no-op, per the `seq'/`first'/`rest'/`next' clause below), but it is
+;; what makes those three walkers correct, not merely non-crashing, the
+;; moment COLL is lazy or ends in a lazy tail: each step forces exactly
+;; one more cell on demand instead of tripping over an unrealized
+;; `[nl-clj--lazy ...]' envelope as though it were a cons.  `nl-clj-map'/
+;; `nl-clj-filter' branch instead of walking at all when COLL is lazy --
+;; they hand off to `nl-clj-lazy-map'/`nl-clj-lazy-filter' (via the same
+;; forward-reference vars) so mapping/filtering a lazy seq STAYS lazy,
+;; per this package's own lazy-phase brief, rather than eagerly forcing
+;; it (which would hang forever on an infinite source).  `nl-clj-reduce'
+;; is deliberately NOT given this branch -- Clojure's own `reduce' always
+;; forces its whole input, lazy or not, so walking it one step at a time
+;; through `nl-clj-seq' (hanging, faithfully, on an unbounded lazy seq,
+;; exactly like real Clojure's own `(reduce f init (range))') IS the
+;; correct lazy-aware behavior, not a gap.
 
 ;;; Code:
 
@@ -60,16 +98,29 @@
 ;;;; seq / first / rest / next / cons --------------------------------------
 
 (defun nl-clj-seq (coll)
-  "Return a seq (a plain Elisp list) over COLL, or nil if COLL is empty.
-COLL may be an nl-clj vector, map, set, an ordinary Elisp list (or
-nil), or -- a deliberate bonus, costing nothing given this dispatch --
-a plain Elisp vector.  A map's seq is a list of (KEY . VAL) conses; a
-set's seq is a list of its elements."
+  "Return a seq over COLL, or nil if COLL is empty.
+COLL may be an nl-clj vector, map, set, lazy seq, an ordinary Elisp
+list (or nil), or -- a deliberate bonus, costing nothing given this
+dispatch -- a plain Elisp vector.  A map's seq is a list of (KEY . VAL)
+conses; a set's seq is a list of its elements.  For every EAGER COLL
+this returns a genuine, fully materialized plain Elisp list (unchanged
+from before the lazy phase).  For a LAZY COLL this forces and returns
+only the next realized step, a cons (HEAD . REST) whose REST may
+itself still be an unrealized `[nl-clj--lazy ...]' value -- callers
+that need to walk the whole thing must re-`nl-clj-seq' each step
+(`nl-clj-first'/`nl-clj-rest'/`nl-clj-next' below do this correctly by
+construction; see this file's Commentary for why every OTHER walker
+in this file that used to assume a flat list re-derives its own
+`cdr'-walk through `nl-clj-seq' too)."
   (cond
    ((null coll) nil)
    ((nl-clj-vector-p coll) (nl-clj-vector--to-list coll))
    ((nl-clj-map-p coll) (nl-clj-hash--map-entries coll))
    ((nl-clj-set-p coll) (nl-clj-hash--set-elements coll))
+   ((nl-clj--tagged-p coll nl-clj--lazy-tag)
+    (unless nl-clj--lazy-force-fn
+      (signal 'nl-clj-error (list 'nl-clj-seq "nl-clj-lazy.el not loaded" coll)))
+    (funcall nl-clj--lazy-force-fn coll))
    ((nl-clj-atom-p coll) (signal 'nl-clj-type-error (list 'nl-clj-seq "atoms are not seqable" coll)))
    ((consp coll) coll)
    ((vectorp coll) (append coll nil))
@@ -96,11 +147,21 @@ Commentary for the named, deliberate divergence from Clojure this is."
 ;;;; count -------------------------------------------------------------------
 
 (defun nl-clj-count (coll)
-  "Return the number of elements in COLL."
+  "Return the number of elements in COLL.
+For a lazy COLL this walks and forces the ENTIRE seq (Clojure's own
+`count' contract) -- faithfully hangs on an unbounded lazy seq, same
+as real Clojure's own `(count (range))'; nothing can make counting
+infinity finite."
   (cond
    ((null coll) 0)
    ((or (nl-clj-vector-p coll) (nl-clj-map-p coll) (nl-clj-set-p coll)) (aref coll 1))
    ((consp coll) (length coll))
+   ((nl-clj--tagged-p coll nl-clj--lazy-tag)
+    (let ((n 0) (s (nl-clj-seq coll)))
+      (while s
+        (setq n (1+ n))
+        (setq s (nl-clj-seq (cdr s))))
+      n))
    ((vectorp coll) (length coll))
    (t (signal 'nl-clj-type-error (list 'nl-clj-count coll)))))
 
@@ -144,7 +205,9 @@ contract -- unlike `nl-clj-get', out of range is an error by default)."
         (nl-clj-vector--nth coll n)
       (or default (signal 'nl-clj-index-error (list 'nl-clj-nth n (aref coll 1))))))
    (t (let ((s (nl-clj-seq coll)) (i n))
-        (while (and s (> i 0)) (setq s (cdr s)) (setq i (1- i)))
+        (while (and s (> i 0))
+          (setq s (nl-clj-seq (cdr s)))
+          (setq i (1- i)))
         (if (and s (= i 0))
             (car s)
           (or default (signal 'nl-clj-index-error (list 'nl-clj-nth n))))))))
@@ -161,12 +224,17 @@ contract -- unlike `nl-clj-get', out of range is an error by default)."
 
 (defun nl-clj-conj-1 (coll x)
   "Add the single item X to COLL, per COLL's own type: vector appends,
-list/nil prepends, map takes a (k . v)/[k v] entry, set adds X itself."
+list/nil/lazy-seq prepends, map takes a (k . v)/[k v) entry, set adds X
+itself.  Prepending onto a lazy COLL forces nothing beyond the single
+`nl-clj-seq' step `nl-clj-cons' itself already does -- the result is
+an ordinary eager cons, matching Clojure's own `conj' on a seq (always
+O(1) eager, never itself lazy, regardless of COLL's own laziness)."
   (cond
    ((nl-clj-vector-p coll) (nl-clj-vector--conj coll x))
    ((nl-clj-map-p coll) (nl-clj-hash--map-conj-entry coll x))
    ((nl-clj-set-p coll) (nl-clj-hash--set-conj coll x))
-   ((or (null coll) (consp coll)) (cons x coll))
+   ((or (null coll) (consp coll) (nl-clj--tagged-p coll nl-clj--lazy-tag))
+    (nl-clj-cons x coll))
    (t (signal 'nl-clj-type-error (list 'nl-clj-conj coll)))))
 
 (defun nl-clj-conj (coll &rest xs)
@@ -233,9 +301,15 @@ first.  Signals `nl-clj-index-error' on an empty vector or nil list
 ;;;; into / vec / subvec ----------------------------------------------------
 
 (defun nl-clj-into (to from)
-  "Conj every element of FROM's seq into TO, in order; return the result."
-  (let ((result to))
-    (dolist (x (nl-clj-seq from)) (setq result (nl-clj-conj-1 result x)))
+  "Conj every element of FROM's seq into TO, in order; return the result.
+FROM may be lazy (including unbounded, so long as TO is not itself
+being asked to hold infinitely many elements -- the natural way to
+realize a bounded lazy pipeline into a concrete nl-clj collection,
+e.g. `(nl-clj-into (nl-clj-vector) (nl-clj-lazy-take 5 (nl-clj-lazy-range)))')."
+  (let ((result to) (s (nl-clj-seq from)))
+    (while s
+      (setq result (nl-clj-conj-1 result (car s)))
+      (setq s (nl-clj-seq (cdr s))))
     result))
 
 (defun nl-clj-vec (coll)
@@ -261,31 +335,60 @@ optimization; this is an eager O(k) rebuild, correctness-first."
         (setq i (1+ i)))
       result)))
 
-;;;; map / filter / reduce (eager) ------------------------------------------
+;;;; map / filter / reduce (eager for an eager COLL, lazy for a lazy one) ---
 
 (defun nl-clj-map (f coll)
-  "Eagerly apply F to every element of COLL's seq; return a plain Elisp
-list of the results.  Eager for this phase -- Doc 195 §4.7 defers a
-lazy version to a later phase."
-  (mapcar f (nl-clj-seq coll)))
+  "Apply F to every element of COLL's seq.
+When COLL is EAGER (the common case, and this function's whole
+original contract before the lazy phase): eager, returns a plain
+Elisp list of the results, unchanged from before.  When COLL is
+itself a LAZY seq: returns a NEW lazy seq of (F x) for each x, pulled
+from COLL one element at a time only as the result is forced -- `map'
+over a lazy seq STAYS lazy (this package's own lazy-phase brief),
+which also means F is never called for an element nothing downstream
+ever forces, and mapping over an UNBOUNDED lazy COLL returns
+immediately rather than hanging (delegates to `nl-clj-lazy-map';
+nl-clj-core.el's Commentary explains why this is a forward-reference
+funcall rather than a direct call)."
+  (if (nl-clj--tagged-p coll nl-clj--lazy-tag)
+      (progn
+        (unless nl-clj--lazy-map-fn
+          (signal 'nl-clj-error (list 'nl-clj-map "nl-clj-lazy.el not loaded" coll)))
+        (funcall nl-clj--lazy-map-fn f coll))
+    (mapcar f (nl-clj-seq coll))))
 
 (defun nl-clj-filter (pred coll)
-  "Return a plain Elisp list of COLL's elements for which PRED is non-nil."
-  (let (acc)
-    (dolist (x (nl-clj-seq coll)) (when (funcall pred x) (push x acc)))
-    (nreverse acc)))
+  "Return COLL's elements for which PRED is non-nil.
+Same eager/lazy split as `nl-clj-map', for the same reason: an EAGER
+COLL returns a plain Elisp list (unchanged); a LAZY COLL returns a new
+lazy seq (delegates to `nl-clj-lazy-filter'), so filtering an unbounded
+source returns immediately instead of hanging trying to fully walk it."
+  (if (nl-clj--tagged-p coll nl-clj--lazy-tag)
+      (progn
+        (unless nl-clj--lazy-filter-fn
+          (signal 'nl-clj-error (list 'nl-clj-filter "nl-clj-lazy.el not loaded" coll)))
+        (funcall nl-clj--lazy-filter-fn pred coll))
+    (let (acc)
+      (dolist (x (nl-clj-seq coll)) (when (funcall pred x) (push x acc)))
+      (nreverse acc))))
 
 (defun nl-clj-reduce (f init coll)
   "Left fold: (f (f (f INIT x1) x2) x3) ... over COLL's seq.
-A plain `while' walk, not recursion -- stack-safe over an arbitrarily
-long seq for free, with no need for `nl-loop'/`nl-recur' (those are
-load-bearing only for Doc 195 §4.7's deferred *lazy* walk, whose
-producer closures cannot be flattened into an ordinary loop the way an
-already-eager seq can)."
+Always forces (Clojure's own `reduce' contract: forcing its input,
+lazy or not, is the whole point of a fold) -- faithfully hangs on an
+unbounded lazy COLL, same as real Clojure's own `(reduce f init
+(range))'.  A plain `while' walk, re-deriving each step through
+`nl-clj-seq' (so a lazy COLL is forced one cell at a time, on demand,
+rather than tripping over an unrealized cell) -- not recursion, so
+this is already stack-safe over an arbitrarily long (or, for a
+BOUNDED lazy seq, arbitrarily long once fully realized) seq for free,
+with no need for `nl-loop'/`nl-recur': see nl-clj-lazy.el's own
+Commentary for why the LAZY producers this walks over do not need
+them either, refining Doc 195 §4.7's own text on this point."
   (let ((acc init) (s (nl-clj-seq coll)))
     (while s
       (setq acc (funcall f acc (car s)))
-      (setq s (cdr s)))
+      (setq s (nl-clj-seq (cdr s))))
     acc))
 
 ;;;; Content equality / hash (Doc 195 §3.2) ---------------------------------

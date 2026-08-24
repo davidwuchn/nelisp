@@ -26,6 +26,12 @@
 ;;   persistent list:   ordinary cons cells, nil-terminated -- already
 ;;                      Clojure's own representation, no wrapper needed
 ;;   atom:              [nl-clj--atom VALUE WATCHES]
+;;   lazy-seq cell:     [nl-clj--lazy CELL]  CELL an `nl-cell' (`nl-safe',
+;;                      packages/nl-clj/src/nl-clj-lazy.el) wrapping
+;;                      (THUNK . REALIZED-VALUE-OR-NIL), exactly Doc 195
+;;                      §3.2's own sketch -- see nl-clj-lazy.el's
+;;                      Commentary for the realize-once/reentrancy engine
+;;                      built on it.
 ;;
 ;; Doc 195 §3.2 itself describes the set representation as literally
 ;; sharing the map's `nl-clj--pmap' tag ("a map whose values are all
@@ -57,10 +63,43 @@
 ;; This file depends only on `nl-prelude', for the `nl-error' error
 ;; condition every nl-clj error derives from (the same convention
 ;; `nl-safe' and `nl-condition' already use).
+;;
+;; Forward-reference slots for the lazy-seq phase (packages/nl-clj/src/
+;; nl-clj-lazy.el): `nl-clj-seq.el' is the single place every generic,
+;; cross-type nl-clj function lives (`nl-clj-seq'/`first'/`rest'/`next'/
+;; `map'/`filter'/`reduce'/`count'/`into'/`conj', Doc 195 §4.7), and a
+;; lazy value must dispatch through every one of those exactly like a
+;; vector/map/set/list does.  But `nl-clj-lazy.el' itself needs the
+;; OTHER direction -- a lazy producer (`map'/`filter'/`take'/`range'/...)
+;; pulls from an arbitrary source, lazy or eager, via `nl-clj-seq.el''s
+;; own generic `nl-clj-seq'/`nl-clj-first'/`nl-clj-rest' -- so
+;; `nl-clj-seq.el' cannot `(require 'nl-clj-lazy)' without a require
+;; cycle.  These three vars are the break: `nl-clj-lazy.el' sets them,
+;; by name, once, right after defining the functions they point at;
+;; `nl-clj-seq.el' only ever reads them, and only for the one tag it
+;; cannot otherwise recognize (`nl-clj--lazy-tag', above).  All three
+;; stay nil until `nl-clj-lazy.el' loads, at which point every value
+;; tagged `nl-clj--lazy-tag' was necessarily built by a function in
+;; that same file, so a real lazy value existing at all already implies
+;; these are populated -- see nl-clj-seq.el's own callers for the loud
+;; (not silent) guard on that invariant.
 
 ;;; Code:
 
 (require 'nl-prelude)
+
+(defvar nl-clj--lazy-force-fn nil
+  "(FUNCALL this COLL) forces lazy-tagged COLL down to a non-lazy seq
+view (nil or a cons); installed by `nl-clj-lazy.el' as `nl-clj-lazy--force'.
+See this file's Commentary for why this forward-reference lives here.")
+
+(defvar nl-clj--lazy-map-fn nil
+  "(FUNCALL this F COLL) returns a new lazy seq of (F x) for each x in
+lazy-tagged COLL; installed by `nl-clj-lazy.el' as `nl-clj-lazy-map'.")
+
+(defvar nl-clj--lazy-filter-fn nil
+  "(FUNCALL this PRED COLL) returns a new lazy seq of lazy-tagged COLL's
+elements matching PRED; installed by `nl-clj-lazy.el' as `nl-clj-lazy-filter'.")
 
 (define-error 'nl-clj-error "nl-clj error" 'nl-error)
 (define-error 'nl-clj-index-error "nl-clj index out of bounds" 'nl-clj-error)
@@ -74,6 +113,8 @@
   "Tag symbol (slot 0) of a persistent set envelope.")
 (defconst nl-clj--atom-tag 'nl-clj--atom
   "Tag symbol (slot 0) of an atom envelope.")
+(defconst nl-clj--lazy-tag 'nl-clj--lazy
+  "Tag symbol (slot 0) of a lazy-seq envelope.")
 
 (defconst nl-clj--set-member 'nl-clj--set-member
   "Sentinel value stored for every key of a persistent set's backing map.")
