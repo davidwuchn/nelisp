@@ -728,6 +728,21 @@ as `(VAR DEFAULT [SUPPLIEDP])'."
     ;; Arithmetic
     + - * / mod /= < <= > >= =
     1+ 1- abs max min zerop numberp integerp float
+    ;; Phase 2B/2C (integration/wave6 audit hardening): `bignump' was
+    ;; missing here while `natnump' (a plain top-level `defun' in
+    ;; `scripts/nelisp-stdlib-prelude.el', needing no borrow at all) was
+    ;; already present -- an inconsistency, not a deliberate omission.
+    ;; Real Emacs has had `bignump' as a native predicate since bignum
+    ;; support landed (confirmed: host Emacs 30.1's `(fboundp
+    ;; 'bignump)' answers `t'); on the standalone target it is its own
+    ;; native dispatch arm (`scripts/nelisp-standalone-build.el's
+    ;; `(:lit "bignump")' entry), not an elisp `defun' anywhere, so
+    ;; the self-hosted-under-real-Emacs evaluator this list serves had
+    ;; no source for it at all and would read it void. Added here so
+    ;; `symbol-function' borrows host Emacs's own real implementation,
+    ;; the same mechanism every other predicate in this list already
+    ;; uses.
+    bignump
     ;; Bit arithmetic
     ash logand logior
     ;; String / format

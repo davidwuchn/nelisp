@@ -319,5 +319,17 @@
 # longer reproduce on any build, to proving the default-bootstrap FIX
 # shape instead) all pass. Measured with `stat -c %s target/nelisp'
 # after a clean `make standalone-reader' on this exact change.
-size 7566672
+#
+# Raised 2026-08-24 (integration/wave6 phase 2C: bignump added to
+# nelisp--primitive-symbols, src/nelisp-eval.el), 7566672 -> 7570768,
+# +4096 bytes, +0.05%, well inside the 2% slack -- raised anyway per
+# this file's own rule above, not left for slack to silently absorb.
+# One more symbol in a borrow-list that already had ~130 entries;
+# the growth is `nelisp--primitive-symbols' itself (compiled into
+# src/nelisp-eval.el, one of the AOT-compiled reader units) plus a
+# few bytes of comment text, not new dispatch logic -- `bignump'
+# itself is unchanged, already a native dispatch arm since Doc 190.
+# Measured with `stat -c %s target/nelisp' after a clean `make
+# standalone-reader' on this exact change.
+size 7570768
 slack-pct 2
