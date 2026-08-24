@@ -377,5 +377,38 @@
 # this file's own defalias had already fired in the same Emacs
 # process, used to hit the wrong-shape branch and signal
 # incorrectly instead of delegating to the real cancel-timer).
-size 7603704
+
+# Raised 2026-08-24 (integration/netproc-on-wave6 merge reconciliation,
+# feat/network-process-p0 onto integration/wave6's own tip 5e5e29cd4),
+# 7603704 -> 7784728, +181024 bytes, +2.38%, EXCEEDING this file's 2%
+# slack against the stale interim pin above -- the gate correctly
+# failed and this is the required same-commit raise, not slack
+# silently absorbing it.  netproc's own isolated-branch measurement
+# (the paragraph two above this one, 7310720 -> 7331256, +20536 bytes)
+# assumed `packages/nelisp-process-adapter/src/nelisp-process-adapter.el'
+# stays loaded only via `--load'/`require' and never links into
+# `target/nelisp' -- true on that branch alone, but wave6's own Phase 2A
+# (the raise three paragraphs above this one, 7393896 -> 7566672) had
+# already changed that: `scripts/nelisp-standalone-build.el' reads this
+# exact file with `insert-file-contents' at build time and concatenates
+# its source directly into the default binary's prelude. Since git's
+# merge combined both branches' edits to that one file with no conflict,
+# the build now embeds ALL of it -- not just the cond-arm widening in
+# `scripts/nelisp-stdlib-prelude.el' netproc's own note accounted for,
+# but the full `make-network-process'/`open-network-stream'/
+# `process-send-string'/`process-contact' implementation, the `/etc/
+# hosts' Phase B lookup, and the entire DNS-over-TCP/53 Phase C wire
+# encoder/decoder (roughly 480 new source lines over what Phase 2A
+# already embedded) as executable prelude text, same accounting as
+# every other prelude-size raise in this file's history. Verified this
+# is the real mechanism, not a guess: `(fboundp (quote process-filter))'
+# and `(fboundp (quote make-network-process))' both read `t' on this
+# exact binary with NO `--load' of either source file, a loopback
+# `open-network-stream' round-trips immediately (`open' status, no
+# `accept-process-output' call), and a real `/bin/echo' subprocess's
+# `:filter' still fires and captures its output -- both halves of Doc
+# 184 and Doc 194 compose in the one binary.  Measured with `stat -c %s
+# target/nelisp' after a clean `make standalone-reader' on this exact
+# merge commit.
+size 7784728
 slack-pct 2

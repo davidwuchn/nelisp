@@ -475,7 +475,17 @@ ns-collision-divergent 127
 # DNS wire-format encode/decode) -- all measured, none renamed to game
 # this ratchet; raised per this file's own rule, same as every other
 # raise below.
-ns-prefix-violation 890
+
+# integration/netproc-on-wave6 (merge of feat/network-process-p0 onto
+# integration/wave6's own tip, 5e5e29cd4): the two disjoint interim
+# deltas immediately above (881 from wave6's own history, 890 from
+# feat/network-process-p0's own isolated-branch measurement, both off
+# a shared 875/874 base) do not compose additively -- same non-additive-
+# composition caveat this file's own wave6 reconciliation note already
+# carries.  Measured via `make ns-inventory' on the fully-merged, built
+# tree: 896.  Reset ONCE to the measured value per the integration
+# playbook; `ns-inventory' PASSes with this exact baseline.
+ns-prefix-violation 896
 # 611 -> 613 on 2026-08-20: `nelisp--check-string'/`--check-symbol' and the
 # other argument-check helpers are referenced from the lisp/ mirrors that
 # carry copies of the functions using them.  This is the kind this file
