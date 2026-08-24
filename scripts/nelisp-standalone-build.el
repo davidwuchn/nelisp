@@ -11053,22 +11053,111 @@ defconst reading `getenv' is evaluated at byte-COMPILE time and would bake the
 static answer into the .elc (breaking the dynamic build that loads it)."
   (and (getenv "NELISP_READER_DYNAMIC") t))
 
+(defun nelisp-standalone--reader-ffi-live-p ()
+  "Non-nil only where the real `nl-ffi-call' extern dispatcher can actually
+link: `nelisp-standalone--reader-dynamic-p' AND the linux-x86_64 target --
+`nelisp-standalone-build-reader''s target `pcase' sends every OTHER target
+(windows-x86_64/-aarch64 to `nelisp-link-units-pe32', macos-aarch64/
+linux-aarch64 to their own static branches) down a path that never
+consults NELISP_READER_DYNAMIC at all, so forcing the flag there used to
+still try to emit the extern-call units and fail the LINK with
+`nelisp-link--unresolved-symbol' (no PE/Mach-O import-table machinery for
+them yet -- confirmed 2026-08-23, see
+docs/design/100-phase-47-dynamic-link-elisp.org section 7).  This predicate
+is what `nelisp-standalone--applyfn-reader-table' below uses to choose the
+`nl-ffi-call' arm, so that combination now degrades to the
+`nelisp-unsupported-primitive' arm at BUILD time instead of failing the
+link -- `nelisp-standalone--reader-dynamic-p' itself is unchanged (it still
+drives the ELF PT_INTERP/PT_DYNAMIC path and the unit-cache split for the
+one target where dynamic linking is real)."
+  (and (nelisp-standalone--reader-dynamic-p)
+       (eq nelisp-standalone--target 'linux-x86_64)))
+
+(defun nelisp-standalone--applyfn-ffi-unsupported-form ()
+  "Codegen IR for the `nl-ffi-call' dispatch arm when the real extern
+dispatcher is not linked in (`nelisp-standalone--reader-ffi-live-p' nil --
+the static default build, any non-linux-x86_64 target, or both): raises the
+catchable `nelisp-unsupported-primitive' condition with data `(nl-ffi-call)'
+instead of falling through to an unhandled `void-function', so `fboundp'
+answers `t' uniformly and a caller can `condition-case' on WHY instead of
+guessing.  Builds the two boxed Symbols by hand from packed name bytes via
+`nelisp-standalone--name-words', the same technique
+`nelisp-standalone--reader-install-builtins-forms' uses for arbitrary-length
+builtin names and the `bf_wrong_type_*' family
+\(nelisp-standalone--applyfn-core-helpers) uses to raise a fixed condition
+with fixed data -- this is that same shape, once, for a NeLisp-specific
+condition instead of a stock Emacs one.
+
+Lives HERE and not in `scripts/nelisp-stdlib-prelude.el' on purpose:
+`nl-ffi-call' is listed in `nl-safe-unsafe-primitives'
+\(packages/nl-safe/src/nl-safe.el), and `tools/unsafe-kernel.txt' only grants
+this file (and its siblings there) leave to mention an unsafe-primitive
+name at all, quoted or not -- `unsafe-inventory' correctly flagged the
+first version of this fix, which spelled `nl-ffi-call' in the prelude, as a
+new escape.  `nelisp-unsupported-primitive' itself is NOT a listed unsafe
+primitive, so its `error-conditions'/`error-message' bootstrap stays in the
+prelude (shared with whatever branch `feat/socket-primitives-p1' lands with
+the same symbol)."
+  (let* ((tag-name "nelisp-unsupported-primitive")
+         (tag-words (nelisp-standalone--name-words tag-name))
+         (tag-len (length (encode-coding-string tag-name 'utf-8 t)))
+         (fn-name "nl-ffi-call")
+         (fn-words (nelisp-standalone--name-words fn-name))
+         (fn-len (length (encode-coding-string fn-name 'utf-8 t))))
+    `(let* ((tbuf (alloc-bytes ,(* 8 (length tag-words)) 1))
+            (nbuf (alloc-bytes ,(* 8 (length fn-words)) 1))
+            (namesym (alloc-bytes 32 8))
+            (nilslot (alloc-bytes 32 8)))
+       (seq
+        ,@(let ((w 0) (forms nil))
+            (dolist (word tag-words)
+              (push `(ptr-write-u64 tbuf ,(* w 8) ,word) forms)
+              (setq w (1+ w)))
+            (nreverse forms))
+        (nl_alloc_symbol tbuf ,tag-len 268435480)
+        ,@(let ((w 0) (forms nil))
+            (dolist (word fn-words)
+              (push `(ptr-write-u64 nbuf ,(* w 8) ,word) forms)
+              (setq w (1+ w)))
+            (nreverse forms))
+        (nl_alloc_symbol nbuf ,fn-len namesym)
+        (wf_write_nil nilslot)
+        (nelisp_cons_construct namesym nilslot 268435512)
+        (ptr-write-u64 268435472 0 1)
+        (atomic-fetch-add 268435544 1)
+        1))))
+
+(defun nelisp-standalone--applyfn-extern-arms-unsupported ()
+  "The `nl-ffi-call' dispatch arm for a build where the real extern
+dispatcher cannot link (see `nelisp-standalone--reader-ffi-live-p').  A
+FUNCTION, not a `defconst': it calls `nelisp-standalone--name-words', which
+is defined LATER in this file (load order), so evaluating this eagerly at
+`defconst'-load time would signal `void-function' -- same reasoning as
+`nelisp-standalone--reader-dynamic-p' above being a function."
+  (list (cons '(:lit "nl-ffi-call")
+              (nelisp-standalone--applyfn-ffi-unsupported-form))))
+
 (defun nelisp-standalone--reader-extern-builtin-names ()
-  "Builtin name(s) for the Step C external FFI dispatcher (`nl-ffi-call'),
-present only in dynamic builds.  Derived from `nelisp-standalone--applyfn-extern-arms'
-so registration and dispatch stay in lockstep.  Build-time (see
-`nelisp-standalone--reader-dynamic-p')."
-  (if (nelisp-standalone--reader-dynamic-p)
-      (mapcar (lambda (e) (cadr (car e)))
-              nelisp-standalone--applyfn-extern-arms)
-    nil))
+  "Builtin name(s) for the Step C external FFI dispatcher (`nl-ffi-call').
+Installed on EVERY build now (2026-08-23 fix, fix/ffi-surface-availability):
+`fboundp' must answer honestly on every substrate, not just the one where
+the real dispatcher links -- see `nelisp-standalone--reader-ffi-live-p' for
+which arm `nelisp-standalone--applyfn-reader-table' pairs this with.
+Derived from `nelisp-standalone--applyfn-extern-arms' so the LIVE case's
+registration and dispatch stay in lockstep; the two arm sets name the same
+single builtin (`nl-ffi-call') either way, so which one supplies the name
+here does not matter, only that it is always supplied."
+  (mapcar (lambda (e) (cadr (car e)))
+          nelisp-standalone--applyfn-extern-arms))
 
 (defun nelisp-standalone--applyfn-reader-table ()
   "Build the reader dispatch table: the base table with the buggy stock
 `car'/`cdr'/`eq' arms REPLACED (nil-safe car/cdr + tag-aware eq) and `length'
-made vector-aware, then the B-foundation breadth arms APPENDED.  When
-NELISP_READER_DYNAMIC is set, the Step C `nl-ffi-call' extern arms are appended
-too (they need the dynamic build's PLT/GOT)."
+made vector-aware, then the B-foundation breadth arms APPENDED.  The Step C
+`nl-ffi-call' arm is ALWAYS appended now (2026-08-23 fix): the real
+PLT/GOT-backed dispatcher when `nelisp-standalone--reader-ffi-live-p' (the
+dynamic linux-x86_64 build), else the `nelisp-unsupported-primitive'-
+signalling arm -- never simply absent, so `fboundp' cannot go void again."
   (append
    (mapcar
     (lambda (entry)
@@ -11093,10 +11182,17 @@ too (they need the dynamic build's PLT/GOT)."
    ;; catchable `nelisp-unsupported-primitive' signal everywhere else -- see
    ;; `nelisp-standalone--socket-dispatch-arms''s docstring.
    (nelisp-standalone--socket-dispatch-arms)
-   ;; Step C: dynamic builds gain the PLT-backed `nl-ffi-call' arms.
-   (if (nelisp-standalone--reader-dynamic-p)
+   ;; Step C: the PLT-backed real `nl-ffi-call' arm where it can link,
+   ;; otherwise the `nelisp-unsupported-primitive'-signalling arm -- always
+   ;; one or the other, never neither.  Uses `reader-ffi-live-p', NOT the
+   ;; broader `reader-dynamic-p' (fix/ffi-surface-availability, merge 7/9):
+   ;; dynamic-but-not-linux-x86_64 builds used to still try to emit the
+   ;; extern-call units under plain `reader-dynamic-p' and fail the link
+   ;; with `nelisp-link--unresolved-symbol'; `reader-ffi-live-p' narrows to
+   ;; the target that can actually link them.
+   (if (nelisp-standalone--reader-ffi-live-p)
        nelisp-standalone--applyfn-extern-arms
-     nil)))
+     (nelisp-standalone--applyfn-extern-arms-unsupported))))
 
 (defun nelisp-standalone--applyfn-assemble (helper-groups table &optional default-form)
   "Assemble an applyfn `(seq ...)' unit from HELPER-GROUPS (lists of defun forms,

@@ -8136,6 +8136,26 @@ are numbers; `1.' is the integer 1."
 (put 'setting-constant 'error-conditions '(setting-constant error))
 (put 'user-error 'error-conditions '(user-error error))
 
+;; `nelisp-unsupported-primitive': a NeLisp-specific (not an Emacs-standard)
+;; condition for a primitive that exists on this substrate but cannot do its
+;; job here -- as opposed to `void-function', which means the name itself was
+;; never defined.  First consumer: the standalone reader's native `nl-ffi-
+;; call' fallback arm (`nelisp-standalone--applyfn-ffi-unsupported-form',
+;; scripts/nelisp-standalone-build.el) for a build with no dynamic FFI
+;; linkage -- see docs/design/100-phase-47-dynamic-link-elisp.org section 7.
+;; Registered here, not there, because `nelisp-unsupported-primitive' is NOT
+;; itself a listed `nl-safe-unsafe-primitives' name (unlike `nl-ffi-call'),
+;; so this file -- loaded by every entry path uniformly -- is the ordinary,
+;; unrestricted place for it.  Coordinated with branch
+;; `feat/socket-primitives-p1', which introduces the same symbol for the
+;; same purpose on a different primitive family.  Plain `put' (matching the
+;; block above) rather than `define-error' so this still seeds correctly if
+;; a future edit moves it above that defun.
+(put 'nelisp-unsupported-primitive 'error-conditions
+     '(nelisp-unsupported-primitive error))
+(put 'nelisp-unsupported-primitive 'error-message
+     "Primitive not supported by this NeLisp build")
+
 ;; Doc 152 gate-G: polyfill standard Emacs builtins missing from standalone
 ;; NeLisp so the anvil-pkg ERT suite's helpers (with-mock, registry-clear, ...)
 ;; run for real instead of signalling void-function.  All guarded so a real

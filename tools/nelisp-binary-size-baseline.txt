@@ -253,19 +253,38 @@
 # (grown from 37 to 54 cases this same commit).  Measured with `stat -c
 # %s target/nelisp' after a clean `make standalone-reader' on this
 # branch's own HEAD (eb4eb81f3 base).
+# Raised 2026-08-23 (fix/ffi-surface-availability), 7240384 -> 7265024,
+# +24640 bytes, +0.34%, well inside the 2% slack -- raised anyway per this
+# file's own rule above.  Fixes the owner's real-machine finding that
+# `nl-ffi-call' was void on the default static build (a Windows PE build
+# and a WSL Debian Linux ELF build, both built the ordinary way -- see
+# docs/design/100-phase-47-dynamic-link-elisp.org section 7).  `nl-ffi-
+# call' is now always installed and dispatched
+# (`nelisp-standalone--reader-extern-builtin-names' unconditional,
+# `nelisp-standalone--applyfn-reader-table' always appends an arm): a
+# build that cannot link the real extern dispatcher gets a new arm
+# (`nelisp-standalone--applyfn-ffi-unsupported-form') that raises
+# `nelisp-unsupported-primitive' instead of falling through to an
+# unresolved builtin name -- packing two boxed Symbols from name bytes, a
+# small fixed amount of new native code in `scripts/nelisp-standalone-
+# build.el' (AOT-compiled into every standalone build; same reason
+# `tools/unsafe-inventory-baseline.txt''s `pinned-kernel-call' for this
+# same file grew alongside this raise).  Measured with `stat -c %s
+# target/nelisp' after a clean `make standalone-reader'
+# (NELISP_READER_DYNAMIC unset) on this branch's own HEAD.
 #
-# integration/wave6 (this branch, merges 2/9 through 6/9): three
+# integration/wave6 (this branch, merges 2/9 through 7/9): four
 # independent branches each raised this same `size' line off the
 # shared eb4eb81f3 base, each measured on its own non-overlapping
 # tree: buffer-unification-p2 (merge 1/9) -> 7314288, bignum-p2-arith
-# (merge 2/9) -> 7310768, socket-primitives-p1 (merge 6/9) -> 7310720.
-# None compose additively as separate directive lines; a file may
-# have only one machine-read `size'.  Interim pin left at the highest
-# of the three (7314288, buffer-unification-p2's own raise) so the
-# ratchet does not spuriously fail mid-merge against a binary that
-# already carries all three branches' growth.  RESET ONCE to the
-# actual measured size on the fully-merged, fully-built 9-branch
-# integration/wave6 tree at the end of phase 1, per the integration
-# playbook.
+# (merge 2/9) -> 7310768, socket-primitives-p1 (merge 6/9) -> 7310720,
+# fix/ffi-surface-availability (merge 7/9) -> 7265024. None compose
+# additively as separate directive lines; a file may have only one
+# machine-read `size'.  Interim pin left at the highest of the four
+# (7314288, buffer-unification-p2's own raise) so the ratchet does
+# not spuriously fail mid-merge against a binary that already carries
+# all four branches' growth.  RESET ONCE to the actual measured size
+# on the fully-merged, fully-built 9-branch integration/wave6 tree at
+# the end of phase 1, per the integration playbook.
 size 7314288
 slack-pct 2
