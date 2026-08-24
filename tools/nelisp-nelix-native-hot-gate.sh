@@ -45,6 +45,35 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
+# Needs a host that can run the configured target; ask the build script's
+# own predicate rather than keeping a uname table here (same convention as
+# tools/selfhost-test.sh).  This must run BEFORE the missing-nelisp check
+# below: on an unrunnable host (2026-08-23 Windows inventory) `target/
+# nelisp' is a linux-x86_64 ELF that a bare `[ -x ]' test cannot tell apart
+# from a working binary, so without this check the gate reported
+# "missing-nelisp" -- a hard FAIL -- for what is really an unrunnable
+# target, before ever reaching the (already-correct) `../nelix' absence
+# skip below.
+set +e
+"$EMACS" --batch -Q -L "$REPO_ROOT/lisp" -L "$REPO_ROOT/src" -L "$REPO_ROOT/scripts" \
+  -l nelisp-standalone-build \
+  --eval '(kill-emacs (if (nelisp-standalone--target-runnable-on-host-p) 0 3))' \
+  >/dev/null 2>&1
+host_rc=$?
+set -e
+case "$host_rc" in
+  0) ;;
+  3)
+    echo "GATE-SKIP target ${NELISP_STANDALONE_TARGET:-linux-x86_64} cannot run on host $(uname -s)/$(uname -m)"
+    echo "nelix_native_hot_gate_result label=nelix_native_hot_gate rc=0 skipped=1"
+    exit 0
+    ;;
+  *)
+    echo "nelix_native_hot_gate_fail reason=cannot-ask-host-runnability rc=$host_rc" >&2
+    exit 1
+    ;;
+esac
+
 if [ ! -x "$NELISP" ]; then
   echo "nelix_native_hot_gate_fail reason=missing-nelisp path=$NELISP" >&2
   exit 1

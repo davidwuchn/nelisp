@@ -32,3 +32,18 @@ prelude-toplevel-check 200 3000
 # pkg-graph reads 34 packages.  Guessed bands would have had to be widened
 # on first run, which teaches people to widen without reading -- the same
 # failure the unsafe-inventory baseline file warns about for ratchets.
+#
+# emacs-parity's floor (1000): the 2026-08-23 Windows gate-battery
+# inventory measured `checked=652' there, below this floor -- investigated
+# and NOT a reason to lower it.  That run hit a since-fixed generation bug
+# (Makefile's `emacs-parity' target; see tools/ai/gates.expected's
+# emacs-parity note) that corrupted the wrapped corpus file Emacs reads;
+# 652 is consistent with a handful of the corpus's own top-level forms
+# evaluating before the corruption's stray trailing `)))' aborted the read,
+# not with a legitimately smaller Windows corpus -- the corpus and its
+# reference answers are the same Lisp data on every platform. This
+# session's own Linux measurement after the generation fix reads
+# `checked=19949', comfortably inside this band. Left unchanged rather
+# than made platform-aware; if a Windows re-run after that fix still reads
+# far from ~19949, that is new evidence for a fresh investigation, not
+# grounds to retroactively read this one differently.

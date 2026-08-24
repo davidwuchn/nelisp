@@ -290,3 +290,77 @@ the inventory process rather than to a single check.
    does not yet say whether ERROR rows get the same posix-tool/logic-gap
    split as FAIL rows, or whether every ERROR is provisionally a
    posix-tool suspect until proven otherwise.
+
+* §10 2026-08-23: fixes landed for this inventory's findings — re-run needed
+
+This runbook produced =target/ai/windows-inventory-2026-08-23.md= (branch
+=feat/windows-gate-inventory=, qualified commit =eb4eb81f3=): 23 PASS, 16
+FAIL, 7 SKIP against the exact command battery (59 rows counting the 13
+optional/not-attempted gates). Branch =fix/windows-gate-conformance=
+(based on =feat/native-observability=, same tip) landed fixes for every
+FAIL row that could be fixed or usefully investigated from a Linux-only
+session; the classification below matches §7's fix/skip/investigate
+split. None of this has been re-verified on an actual Windows machine —
+that is the point of this note: the fixes are a hypothesis about what
+the next Windows run of this same runbook will show, not a substitute
+for running it.
+
+- *Nine =expected-skip= FAILs, now reasoned-skips*: =standalone-chunk-
+  growth-test=, =standalone-parallel-compile-test=, =standalone-
+  selfhost-mt-test=, =nelisp-nelix-native-hot-gate= (reordered so the
+  runnable-host check runs before its =missing-nelisp= check, not just
+  before the already-working =../nelix= absence check), =nl-condition-
+  standalone-smoke=, =nl-safe-standalone-smoke=, =nl-resource-
+  standalone-smoke=, =standalone-reader-buffer-smoke=, =nl-actor-
+  standalone-smoke=. All nine now ask
+  =nelisp-standalone--target-runnable-on-host-p= first and print a
+  =GATE-SKIP= line, the same convention =standalone-reader-test= already
+  used and the inventory itself credits as already correct.
+- *=standalone-reader-smokes= (aggregate =logic-gap=, 32 of 34 sub-smokes
+  failing)*: fixed at the aggregate level with the same runnable-host
+  check, asked once for the whole batch since every sub-smoke execs the
+  same binary; per-smoke logs moved from =/tmp= to a repo-local
+  =target/tmp/= to remove the MSYS2-=make=-vs-Git-Bash =/tmp=-namespace
+  disagreement §6's evidence column named.
+- *=nelisp-runtime-image-cache-gate= (=logic-gap=, bare =[ -x ]= test)*:
+  replaced with the same runnable-host predicate.
+- *=nelisp-source-command-substrate-gate= (=logic-gap=, Git-Bash
+  =mktemp= path opaque to native Windows Emacs)*: its temp directory is
+  now repo-local (=mktemp -d -p target=) instead of defaulting into
+  =/tmp=, so the paths it embeds in a separate Emacs =--eval= resolve
+  identically from both sides; its own =$NELISP=-executing step also
+  gained the runnable-host guard.
+- *=emacs-parity= (=logic-gap=, corrupted generated file, unmatched
+  =)))=)*: the three-shell-step file assembly (=printf >=, =cat >>=,
+  =printf >>=) was replaced with one Emacs =--batch= process doing one
+  =write-region= call, structurally immune to "some but not all of
+  several sequential writes landed" because there is only one write. The
+  exact Windows corruption mechanism was not reproduced on Linux and is
+  not confirmed.
+- *=gate-selfcheck= (=logic-gap=, emacs-parity band floor 1000 vs
+  measured 652)*: investigated, not changed — the evidence points at the
+  652 being a symptom of the emacs-parity corruption above, not a
+  legitimately smaller Windows corpus; see this file's own note in
+  =tools/ai/gates.expected= and =tools/gate-count-bands.txt= for the
+  reasoning. The band stays at 1000; a Windows re-run after the
+  emacs-parity fix should read close to this session's Linux measurement
+  of =checked=19949=.
+- *=ns-inventory=/=ns-gate= (=logic-gap=, 19-20 changed divergent-
+  collision fingerprints)*: investigated and NOT fixed — CRLF-vs-LF file
+  content and path-separator sort order were both tested/checked on
+  Linux and neither reproduces a fingerprint change; see
+  =packages/nl-ns/src/nl-ns.el='s =nl-ns--definition-shape= comment for
+  what was tried and what to capture on the actual Windows machine (the
+  =:heads= diff for the 19-20 moved symbols) to close this one.
+
+Every change above was verified on Linux only: the full relevant gate
+battery (compile, parens, gen-parse, scoped =check=, =standalone=,
+=smokes=, =extras=, =nelisp-ai.sh test=) stayed green, and each Class-A
+skip was additionally mock-verified by forcing
+=NELISP_STANDALONE_TARGET= to a target this Linux host cannot run
+(=windows-x86_64=) and confirming the =GATE-SKIP= line fires — the same
+seam =NELISP_EMACS_PARITY_HOST_VERSION= already established for the
+emacs-parity version guard. **None of this is Windows-verified.** The
+next action this doc calls for is exactly what §0-§9 always called for:
+run the runbook again, on the actual machine, and see whether these nine
++ five fixes actually turned red rows green there.
