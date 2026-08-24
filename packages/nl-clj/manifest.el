@@ -1,2 +1,2 @@
 (:name "nl-clj"
- :requires ("nl-prelude"))
+ :requires ("nl-prelude" "nl-safe"))
