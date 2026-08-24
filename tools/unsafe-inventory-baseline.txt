@@ -117,7 +117,102 @@
 # is the arithmetic union against the shared 562 base: 562 + (564-562) +
 # (590-562) = 592.  To be reconciled to the measured count in the
 # battery.
-unsafe-call 592
+# 592 -> 593 on 2026-08-23 (Doc 180 Phase 2 item 3): one new site, in
+# `nl_eval_source_print_error''s own backquote generator (`nelisp-
+# standalone--eval-source-report-error-form') -- the one `ptr-read-u64'
+# gating whether to call `nl_bt_print_backtrace' after the location line.
+# Everything else Phase 2 added (the capture/render helpers themselves,
+# the desync fix, the new debug-switch codes) lives inside `nelisp-
+# standalone--shim-source''s plain-quoted block, so it falls in the
+# "inside quoted forms" bucket above, not this gated one -- same shape as
+# every other addition to that block already does.
+#
+# 592 -> 603 on 2026-08-24 (socket primitives, Doc 184 follow-on,
+# feat/socket-primitives-p1), all in scripts/nelisp-standalone-build.el
+# (568 -> 579 for that file).  Measured by the per-primitive breakdown
+# (`nl-check-file' filtered to :kind unsafe-call, subject tallied), diffed
+# against merge-base eb4eb81f3 with the working tree otherwise unchanged:
+# +7 `alloc-bytes', +2 `ptr-write-u64', +2 `ptr-read-u64', everything else
+# unchanged.  All seven `alloc-bytes' are small scratch buffers
+# (`nl_ipv4_is_localhost''s 9-byte "localhost" literal; the catchable-
+# signal helpers `nelisp-standalone--applyfn-unsupported-primitive-form'
+# and the new `nl_socket_signal_error' each build a TAG name buffer plus
+# two 32-byte Sexp slots) -- same shape as every other signal-stashing
+# helper already counted here (`bf_signal'/`bf_wrong_type_consp' et al.).
+# The `ptr-write-u64'/`ptr-read-u64' pairs are `nl_socket_build_sockaddr'
+# zeroing the 16-byte `sockaddr_in' struct before filling it, and
+# `nelisp-standalone--applyfn-unsupported-primitive-form' reading the
+# calling primitive's name bytes out of `name_ptr' (ptr@16/len@24, the
+# same accessor `nl_bi_strptr'/`nl_bi_strlen' already use) to put the
+# offending name in the signal's data.  No new KIND of unsafe call --
+# more sites of alloc-bytes/ptr-read-u64/ptr-write-u64, the same raw-
+# memory-inside-a-native-unit shape every sibling generator in this file
+# already has, all of it building either scratch Sexp boxes or a
+# sockaddr struct that never leaves this file's own native units (see
+# `nelisp-standalone--socket-forms''s banner comment: this is precisely
+# the "raw memory never crosses into user space" policy the whole change
+# is built around, not the pointer arithmetic the policy is written
+# against).  `syscall-direct' did NOT rise despite six new socket-syscall
+# call sites (socket/connect/accept4/bind/listen/setsockopt/shutdown,
+# `nl_socket_listen_impl'/`-accept_impl'/`-connect_impl'/`-close_impl')
+# because those four defuns are wrapped in a plain `quote', not a
+# backquote -- they need no build-time-computed value spliced in, unlike
+# the tag-byte-writing helpers above, so there was no reason to reach for
+# backquote at all.  `nl-check--quoted-p' (packages/nl-check/src/nl-
+# check.el) recognizes `quote'/`function' and skips them entirely; it
+# does NOT recognize backquote, which is why the tag-byte helpers above
+# (which DO need one, for the build-time byte-write-forms splice) show up
+# and these four do not -- the same asymmetry this file's own 2026-08-19
+# note above ("Splicing the walker in turned them into backquotes...")
+# already describes for `nl_os_open_read' and friends.  These six syscall
+# sites are real and are exactly what `unsafe-call-quoted' (reported, not
+# gated: 5142 -> more after this change, not separately measured here)
+# exists to make visible without lying about what the gated number covers.
+#
+# 592 -> 599 on 2026-08-23 (fix/ffi-surface-availability): all in
+# scripts/nelisp-standalone-build.el (568 -> 575 for that file).  The
+# owner's real-machine probe found `nl-ffi-call' void on a Windows PE
+# build and a WSL Debian Linux ELF build -- the default (non-`NELISP_
+# READER_DYNAMIC') standalone reader never installed the name at all.
+# The fix makes `nl-ffi-call' always `fboundp', raising the catchable
+# `nelisp-unsupported-primitive' condition on a build that cannot link
+# the real dispatcher instead.  A first version defined that fallback in
+# scripts/nelisp-stdlib-prelude.el as ordinary elisp -- `unsafe-inventory'
+# correctly rejected it, since `nl-ffi-call' is itself a listed
+# `nl-safe-unsafe-primitives' name and that file is not a kernel file
+# (see docs/design/100-phase-47-dynamic-link-elisp.org section 7).  The
+# shipped fix instead builds the condition natively in
+# `nelisp-standalone--applyfn-ffi-unsupported-form' (this file, already a
+# kernel file, already `nl-ffi-call''s real home), packing the two boxed
+# Symbols (`nelisp-unsupported-primitive', `nl-ffi-call') from name bytes
+# via `nelisp-standalone--name-words' the same way `nelisp-standalone--
+# reader-install-builtins-forms' already does for arbitrary-length
+# builtin names -- 2 `alloc-bytes' scratch buffers (name-byte packing +
+# the boxed data-list cons) plus 7 `ptr-write-u64' (packing "nelisp-
+# unsupported-primitive", 29 bytes = 4 words, and "nl-ffi-call", 11 bytes
+# = 2 words, plus the raise-flag write), same shape as every existing
+# `bf_wrong_type_*' helper in this file that raises a fixed condition
+# with fixed data -- no new kind of unsafe call, one more site of the
+# kind already present throughout this file.  Measured red/green: the
+# unmodified tree (this branch's own base, eb4eb81f3) reports 568/592
+# PASS; this change reports 575/599.
+# integration/wave6 (merges 6/9-7/9): the three raises above were
+# measured on non-overlapping trees (error-backtraces 592->593,
+# socket-primitives-p1 592->603, fix/ffi-surface-availability
+# 592->599, all off the shared 592 base) and do not compose
+# additively as separate directive lines -- only the FIRST
+# `unsafe-call' line in file order is read.  Interim total:
+# 592 + 1 + 11 + 7 = 611, pending the RE-RUN of `unsafe-inventory' on
+# the fully merged tree per the integration playbook.
+#
+# Raised 2026-08-24 (integration/wave6 full-battery run:
+# scripts/nelisp-standalone-build.el's standalone-eval-test fix),
+# 611 -> 632, +21. `nelisp-standalone--eval-bt-extra-unit-source'
+# (bounded-backtrace dependency copies: nl_os_write_stderr,
+# nl_bi_strptr/nl_bi_strlen, bf_eq2/bf_eq/bf_marker_vec_is) is new
+# raw-memory-inside-a-native-unit source, same shape as every sibling
+# generator already counted here -- no new KIND of unsafe call.
+unsafe-call 632
 
 # `pinned-kernel-call FILE COUNT' pins the per-file unquoted `unsafe-call'
 # count behind `total' above -- the three kernel files that actually carry
@@ -134,4 +229,21 @@ pinned-kernel-call scripts/nelisp-flat-arena-probe.el 6
 # standard-names repl idle-pump) + 28 (form-located-errors) = 568,
 # interim, both branches' additions to this file being disjoint call
 # sites; to be reconciled to the measured count in the battery.
-pinned-kernel-call scripts/nelisp-standalone-build.el 568
+# 568 -> 569 on 2026-08-23 (Doc 180 Phase 2 item 3): the one new
+# unquoted call noted above.
+# 568 -> 579 on 2026-08-24 (socket primitives, see the `unsafe-call' note
+# above for the full +11 breakdown).  Measured via `make unsafe-inventory'
+# on this change: total=603 baseline=592 before this row's update.
+#
+# 568 -> 575 on 2026-08-23 (fix/ffi-surface-availability): see the
+# `unsafe-call' note above for the full explanation (`nl-ffi-call'
+# availability fix's native `nelisp-unsupported-primitive' signal
+# construction).
+# integration/wave6 (merges 6/9-7/9): same non-additive interim
+# caveat as the `unsafe-call' total above -- 568 + 1
+# (error-backtraces) + 11 (socket-primitives-p1) + 7
+# (fix/ffi-surface-availability) = 587, pending the RE-RUN of
+# `unsafe-inventory' on the fully merged tree.
+# integration/wave6 full-battery run (2026-08-24): 587 -> 608, +21,
+# same reason as the `unsafe-call' total above.
+pinned-kernel-call scripts/nelisp-standalone-build.el 608

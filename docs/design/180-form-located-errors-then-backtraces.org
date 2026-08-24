@@ -10,12 +10,22 @@
 #+STATUS: for what landing found that this doc's original text did not
 #+STATUS: anticipate (call-site count, a GC-safety fix, the byte-offset
 #+STATUS: refinement) and §5 for the two open questions this phase resolves.
-#+VERIFIED-BY: standalone-reader-form-location-smoke standalone-reader-test
-#+STATUS2: Phase 2 (a real frame-stack backtrace) is UNCHANGED from DRAFT: a
-#+STATUS2: multi-week sketch, the reusable machinery exists but is dormant,
-#+STATUS2: undersized for the interpreter's own recursion limit, and has a
-#+STATUS2: real pop/depth defect that must be fixed before it is
-#+STATUS2: trustworthy.  No Phase 2 code exists yet.
+#+VERIFIED-BY: standalone-reader-form-location-smoke standalone-reader-frame-stack-pop-desync-smoke standalone-reader-bounded-backtrace-smoke standalone-reader-test
+#+STATUS2: Phase 2 items 1 (the pop/depth-cap desync fix) and 3 (a bounded,
+#+STATUS2: opt-in backtrace on an uncaught error) SHIPPED 2026-08-23 on
+#+STATUS2: feat/error-backtraces, landed on top of Phase 1.  Item 2 (arming
+#+STATUS2: as an error-reporting source) also SHIPPED: a new,
+#+STATUS2: collector-independent arm bit (debug-switch codes 22/23) lets the
+#+STATUS2: push run without Doc 152's mid-form collector; the measured armed
+#+STATUS2: cost is small but real (~1%, not the doc's originally-hoped
+#+STATUS2: "single branch"), so the decision is OPT-IN, not default-on.
+#+STATUS2: Item 4 (the depth-cap-vs-rec_max mismatch) is NOT aligned:
+#+STATUS2: documented instead, because the real gap turned out far larger
+#+STATUS2: than this doc originally assumed (rec_max is 100000 today, not
+#+STATUS2: the 2000 §3.2 point 2 cited) and growing the ring to match is
+#+STATUS2: operationally unnecessary at that scale.  See §3.4 for what this
+#+STATUS2: landing found and measured, and §5 for the two open questions it
+#+STATUS2: resolves.
 
 * §0 TL;DR
 
@@ -359,6 +369,251 @@ that was not run is not a claim).
    =void-function=/=uncaught error:= anywhere in the line rather than
    anchoring at its start, so both tolerate the new prefix unmodified.
 
+* §3.4 What Phase 2 (items 1, 2, 3) landed, measured, and decided
+
+Scoped to what §3.2's own honest caveats allow: the desync defect first
+(it is a standalone-worthy fix even alone), then the smallest honest
+increment of arming and rendering a real backtrace, then a measurement-
+driven call on the depth-cap mismatch rather than inventing work §3.2
+never sized.  All four items landed; none were deferred.
+
+** §3.4.1 Item 1 — the pop/depth-cap desync, fixed
+
+§3.2 point 2 named the defect: =nl_gc_eval_ctx_push= silently no-ops
+(returns 0, does not touch =depth@+0=) once =depth >=
+nl_gc_ctx_max_depth= (1024), but =nelisp_eval_call_recorded_done= called
+=nl_gc_ctx_pop= *unconditionally* — regardless of whether its own paired
+push had actually stored a frame.
+
+Reading the fix required first understanding why the bug does NOT show up
+as a wrong value at rest: for one isolated top-level form, the number of
+pop *calls* always equals the number of push *attempts* (1:1, by
+construction — every =nelisp_eval_call= that pushes also, eventually,
+pops), and =nl_gc_ctx_pop='s own floor guard (never decrements below 0)
+means a run of excess pop calls, however many, always drains the counter
+to exactly 0 by the time the whole call tree has unwound.  The corruption
+is real but *transient*: during the unwind, once enough of the deepest
+(never-pushed) frames' pops have fired, the counter reads far below the
+true count of frames still genuinely open on the native call stack —
+frames whose own push DID succeed, are NOT yet returned, and would be
+missed by a mid-form collect (=nl_gc_mark_recorded_contexts= only walks
+=[0, depth)=) firing in that exact window.
+
+*Against-the-bug, measured* (=nelisp-standalone--reader-frame-stack-pop-
+desync-smoke=): arm the stack (=(nelisp--debug-switch 5)=), run a non-
+tail-recursive function 3000 levels deep (3x the ring's 1024-frame
+capacity), and read the recorded depth from a checkpoint hung on the
+1000th level to unwind (deep enough into the unwind that, on the buggy
+build, every pop so far comes from a never-pushed frame; shallow enough
+that ~2000 genuinely-still-open frames — pushed early in the descent,
+before the ring filled — remain live at that exact moment).  A correct
+implementation reports the ring still at its capacity, 1024 (unchanged,
+since none of the 1000 already-returned frames ever incremented it).
+RED (merge-base =eb4eb81f3=, the unconditional-pop code path, verified by
+temporarily reverting the fix and rebuilding): =DEPTH=5= at the
+checkpoint.  GREEN (this phase, the fix below): =DEPTH=1024=.  The
+=tools/gate-mutations.txt= row for this smoke (reverting the exact same
+line) was run by hand before being committed: RED — =depth=5 at the
+checkpoint (want 1024)=, =make= exit 1; restored, GREEN — =[standalone-
+reader] frame-stack pop-desync smoke PASS=, =make= exit 0.
+
+*Fix*: thread =nl_gc_eval_ctx_push='s own 1/0 return (PUSHED) through to
+=nelisp_eval_call_recorded_done=, which now pops only when
+=PUSHED = 1= — the pop is exactly as conditional as the push it undoes.
+The same shape existed a second place: =nl_driver_eval_with_recorded_
+roots= (the per-top-level-form driver push wrapping =nelisp_eval_call=
+itself) had the identical unconditional-pop pattern around
+=nl_gc_ctx_push=, fixed the same way — lower-probability in practice
+(one push per top-level form, not per nested call, so only a chain of
+1024+ *nested* driver-level evals, e.g. =load= recursively =load=-ing
+itself, would trigger it), but the same defect shape, fixed for the same
+reason rather than left as a known-but-unaddressed sibling.
+
+** §3.4.2 Item 2 — arming, decoupled and measured
+
+§3.2's Costs item 2 named the problem precisely: the existing arm bit
+(=nl_gc_loop_ctx+8=, toggled by =(nelisp--debug-switch 5)=) arms *both*
+the per-call push *and* Doc 152's mid-form collector at once — a
+combination Doc 152 itself never measured, since it was never the
+intended always-on state.  A backtrace-only use needs the push without
+the collector, and the two were not separable in the existing code.
+
+*Decoupling*: a second, independent arm bit at =nl_gc_loop_ctx+48=
+(unused padding inside the existing 64-byte header — no BSS layout
+shift, no offset renumbering downstream), toggled by two NEW debug-
+switch codes (22 = arm push-only, 23 = disarm).  =nelisp_eval_call='s
+push gate now checks either bit (=nl_gc_frame_record_armed_p=, an OR);
+=nl_gc_midform_collect='s own gate is untouched — still =ctx+8= only —
+so arming the new bit alone never permits the collector to fire.  Codes
+5/6 keep their exact pre-existing meaning (both bits together), so
+nothing that already used them changes behavior.
+
+*Measurement*: naive recursive =fib(25)= (242785 calls to =fib=, roughly
+3 raw =nelisp_eval_call= invocations per level by direct count — the
+densest, most call-heavy shape this interpreter can be asked to run, and
+purely recursive, so it also isolates the push cost from Doc 152's
+collector, which only has a chance to fire from a =while=-loop backedge
+this benchmark never takes), 5 repetitions per condition, wall-clock via
+=target/nelisp --load=, background load otherwise idle:
+
+  | condition                    | times (s)                        | mean (s) |
+  |-------------------------------+-----------------------------------+----------|
+  | dormant (unarmed)             | 5.286 5.301 5.291 5.277 5.286      |    5.288 |
+  | armed, push-only (code 22)    | 5.317 5.316 5.384 5.337 5.333      |    5.337 |
+  | armed, push+collector (code 5)| 5.299 5.312 5.289 5.323 5.288      |    5.302 |
+
+Armed/dormant ratio (push-only): *1.009* — about *0.9%*.  Small, and
+within the range where a handful more repetitions could move it a few
+tenths of a point either way, but it is a real, reproducible cost, not
+noise at the level of dormant's own run-to-run spread (dormant's own
+five runs span 0.024s; the dormant-vs-armed gap is 0.049s, roughly twice
+that spread).  =nl_gc_frame_record_armed_p= itself costs slightly more
+than the pre-existing single-branch dormant check (a second =ptr-read-
+u64= + compare when the first bit is unset) — "single branch when
+dormant" is now "up to two reads, two compares", still integer-ALU-
+cheap, but not literally the same one-instruction shape Doc 152's own
+dormant-cost claim described for =ctx+8= alone.  Push+collector (code 5)
+measured statistically indistinguishable from push-only here (5.302 vs
+5.337, smaller than the spread across either condition's own five runs)
+— expected, since this benchmark has no =while= loop for the collector
+to ever fire from; the decoupling's value is for workloads that DO have
+one, where code 5 would additionally pay the collector's own cost and
+code 22 would not.
+
+*Decision: OPT-IN, not default-on.*  ~1% is not free, it is an always-on
+tax on every =nelisp_eval_call= in interpreted execution (--eval/--load/
+REPL and the standalone toolchain's own self-hosting bootstrap, all of
+which run through this exact path — AOT-compiled code never does, see
+§3.2 point 5), for a benefit (a backtrace) that only matters on the
+already-cold, already-rare uncaught-error path.  Flipping the default
+risks a real regression to every one of those workloads for a debugging
+feature nobody asked to pay for by default.  The opt-in surface IS the
+debug-switch mechanism itself (codes 22/23) — no new CLI flag or boot-
+time env-var probe was added: doing so would mean choosing and building
+one of the two options §5 point 3 (below) left open, which is more
+machinery than this phase's own cost/benefit supports.  A user who wants
+a trace puts =(nelisp--debug-switch 22)= at the top of their =--load=d
+file (or as the first thing evaluated over =--eval=/=--repl=); this is
+exactly how this phase's own against-the-bug and backtrace smokes drive
+it.  =nelisp-performance-gate= (9/9, unarmed by construction) and
+=bench-aot-tco= (ratio 0.999x, entirely host-Emacs/AOT-path, never
+touches =nl_gc_loop_ctx= at all) both re-ran clean against this decision
+— neither exercises the armed path, which is exactly the point of
+leaving it opt-in.
+
+** §3.4.3 Item 3 — a bounded backtrace on an uncaught error
+
+*Capture point*: NOT at each of the ~30 individual signal-raising sites
+§3.2's sketch implicitly assumed (=bf_signal=, =bf_error=,
+=bf_wrong_type_consp=, ... — instrumenting each would have been a large,
+error-prone diff for no added correctness).  Instead: inside
+=nelisp_eval_call_recorded_done= itself, the SAME function item 1 fixed,
+gated on rc != 0 AND a per-top-level-form "already captured" flag (reset
+once per form by =nl_driver_eval_with_recorded_roots=, so a later,
+shallower re-propagating call never overwrites the first/innermost
+capture).  This works for both a real signal and an uncaught =throw=
+without separate instrumentation at =nl_ct_throw_after_val=, because
+both propagate through the exact same rc!=0 mechanism the doc's own §3.2
+point 3 already established is unconditional and frame-preserving.
+
+*Storage*: =nl_bt_snapshot=, a new 176-byte BSS region appended after
+=nl_alloc_check= in the same link unit (no existing offset shifted) —
+a has-snapshot flag, a captured-frame count, and up to 20 =form_ptr=
+words copied straight out of the live ring at capture time, before any
+pop can erase them.  20, not something larger: this doc's own §5 point 3
+called the bound "arbitrary and unmeasured" and left it open; this phase
+answers it by simply keeping the number §3.2's Full-version sketch
+already proposed (matching Emacs's own practical backtrace-display
+habits) rather than measuring a "better" number with nothing yet
+depending on the choice — a decision, not an oversight, and cheap to
+revisit later since the bound is a single constant.
+
+*Render*: after Phase 1's location line, when =nl_bt_snapshot='s
+has-snapshot flag is set (i.e. always when dormant/unarmed — one extra
+=ptr-read-u64= + branch on the cold error path, no cost to the
+success path or the armed-but-no-error path), print
+="backtrace (innermost first):"= then each captured frame, deepest
+first, as ="  N: NAME"=.  NAME is the frame's own operator (=car= of the
+=form_ptr= when it is a call-shaped Cons; the =form_ptr= itself
+otherwise, e.g. a bare variable reference) — not a true function-call
+stack (=nelisp_eval_call= is universal-recursion-entry for every sub-
+expression, not only calls, so intervening =if=/=let=/arg-evaluation
+frames appear too, exactly like Emacs's own backtrace shows special
+forms alongside calls).
+
+*Against-the-bug, known call chain* (=nelisp-standalone--reader-bounded-
+backtrace-smoke=): =level-a -> level-b -> level-c -> (error "boom")=.
+Today (dormant): no backtrace text at all.  Armed
+(=(nelisp--debug-switch 22)=):
+
+  #+begin_example
+  nelisp: uncaught error: in FILE, top-level form #5 (byte N, line 5): error: ("boom")
+  backtrace (innermost first):
+    4: error
+    3: level-c
+    2: level-b
+    1: level-a
+    0: level-a
+  #+end_example
+
+names matching the known chain, correctly innermost-first (=error= closest
+to the signal, =level-a= — the outermost caller — furthest; the smoke
+checks exactly this ordering via successive =string-match= from an
+advancing position, not just presence).  A deeper (50-level) recursive
+fixture confirmed the 20-frame bound truncates cleanly (no crash, exactly
+20 lines, innermost frames shown) rather than either overflowing or
+silently dropping the innermost/most-useful end.  RED/GREEN for the
+=tools/gate-mutations.txt= row (reversing the capture's write order, so
+frames print outermost-first): RED — ="nelisp-doc180-level-c" not found
+after "error"'s position=; GREEN — restored, PASS.
+
+** §3.4.4 Item 4 — the depth-cap-vs-rec_max mismatch: documented, not aligned
+
+§3.2 point 2 cited =rec_max (env+104, default 2000 per Doc 137)= as the
+comparison for the ring's 1024-frame capacity.  Reading the actual boot
+path (=driver (sp)='s own =(ptr-write-u64 ctx 104 100000)=, the real
+production entry point — NOT the alternate template at line ~13650,
+which is a throwaway micro-benchmark driver generator, not the shipped
+binary's entry) found this is stale: =rec_max= was raised from 2000 to
+100000 at some point after Doc 137 was written (per its own in-file
+comment, for native-stack-overflow safety — so the guard fires as
+=excessive-lisp-nesting= before the process SIGSEGVs, not because 2000
+was ever too small for real recursion depths) and nothing updated this
+doc's citation of it.  The real mismatch (1024 vs 100000, ~98x) is far
+larger than the ~2x this doc originally sized the problem against.
+
+Given that, "align" (grow the ring to 100000, or make it dynamic) would
+be a large, mechanically risky change for this phase's budget: growing
+the ring's static size means shifting every symbol offset packed after
+it in the same BSS link unit (=nl_fa_tbl_base= through =nl_alloc_check=,
+eleven symbols) by the size delta, a change that touches code well
+outside backtrace/desync scope for a benefit that does not hold up under
+scrutiny: 1024 already exceeds both Emacs's own default =max-lisp-eval-
+depth= (800) and the =2000= this doc originally assumed was the ceiling
+worth designing against.  =rec_max='s current 100000 is a native-stack-
+overflow SAFETY MARGIN, not an expectation that real interpreted code
+recurses anywhere near that deep — reaching push-index 1024 already
+means the interpreter is 1024+ levels into its OWN native C call stack,
+well past where most real programs' recursion would naturally end.  The
+practical consequence of leaving the ring at 1024 is a truncation, not a
+correctness gap (item 1's fix already makes any depth safe against
+corruption): a call chain deeper than 1024 will not include its own
+innermost/erroring frame in the recorded window, so its captured
+backtrace — should the collector or (once armed) this phase's own
+capture need frames that deep — silently stops one level early rather
+than reaching the actual error site.  This is the same shape as any
+bounded backtrace's own truncation (§3.4.3's 20-frame render bound is a
+second instance of the identical trade), stated as a documented limit
+here rather than papered over.
+
+*Decision*: leave =nl_gc_ctx_max_depth= at 1024, unchanged.  Documented
+here (per §5's open question, now resolved) rather than aligned, because
+the measurement (the real rec_max value, and the operational irrelevance
+of matching it) does not support the cost of the mechanical change for
+this phase.  Revisit if a real workload is ever observed recursing
+(through the interpreter, not AOT-compiled code, which never touches
+this ring at all) anywhere near 1024 levels deep.
+
 * §4 Verification design (DoD)
 
 ** Phase 1
@@ -411,16 +666,30 @@ that was not run is not a claim).
   =feat/form-located-errors= (2026-08-23), the commit this whole §3.3/§4/
   §5 account describes.
 
-** Phase 2
-DoD is necessarily softer at design time, since it is a multi-week item
-with no code yet: name the milestone-level red-proof rather than a
-numeric threshold. The milestone gate is the test matrix in §3.2's Full-
-version sketch (depth-cap recursion, cross-frame throw, nested condition-
-case, native/interpreter split), each run once against a deliberately
-broken build (the unfixed pop-imbalance, specifically) to confirm the
-smoke that exercises it goes red before the fix and green after — the
-same red-then-green discipline as every other gate in this repository,
-deferred to implementation time rather than invented now against no code.
+** Phase 2 (item 1 and item 3 red/green, item 2's own measurement)
+The milestone gate named at design time — the test matrix in §3.2's
+Full-version sketch (depth-cap recursion, cross-frame throw, nested
+condition-case, native/interpreter split) — is narrower than what this
+phase actually needed once §3.4.1-§3.4.3 above were built: cross-frame
+=throw= and nested =condition-case= are covered by construction (§3.4.3:
+the capture point is agnostic to signal vs. throw, and =condition-case=
+catching before the top level means no capture/print happens at all,
+which is the correct, unexercised-by-design behavior — not separately
+smoke-tested, since there is nothing to assert beyond "no crash", which
+every other smoke in this file's own battery already exercises
+incidentally); the native/interpreter split is §3.2 point 5's existing,
+unchanged hard scope limit (AOT-compiled =defun=s never touch
+=nl_gc_loop_ctx=), re-confirmed rather than re-tested since nothing in
+this phase changes that boundary.  Depth-cap recursion (both item 1's
+desync and item 3's 20-frame render bound) is exactly what §3.4.1's and
+§3.4.3's smokes each red/green-prove, verbatim, above.
+- *VERIFIED-BY*: =standalone-reader-frame-stack-pop-desync-smoke
+  standalone-reader-bounded-backtrace-smoke standalone-reader-test=
+  (also see this file's top =#+VERIFIED-BY:= line).  Item 4 has no gate
+  of its own — it changed no code, only this doc and the corrected
+  =rec_max= citation above.  Shipping commit: =c5778d190= on
+  =feat/error-backtraces= (2026-08-23), the commit this whole §3.4/§4
+  Phase 2/§5 account describes.
 
 * §5 Open questions
 
@@ -467,12 +736,24 @@ deferred to implementation time rather than invented now against no code.
    own length) would fix that, but is additional machinery this doc's
    narrow, signature-only Phase 1 scope does not include; noted here as
    a candidate follow-up rather than implemented speculatively.
-3. Phase 2's frame-render bound (20 innermost frames) is arbitrary and
-   unmeasured; whether it should be configurable, and via what surface
-   (an env var the way =NELISP_ALLOC_CHECK= already works, or a
-   =debug-switch= code), is open.
+3. *RESOLVED (Phase 2 landing, 2026-08-23).*  Phase 2's frame-render
+   bound (20 innermost frames) is arbitrary and unmeasured; whether it
+   should be configurable, and via what surface (an env var the way
+   =NELISP_ALLOC_CHECK= already works, or a =debug-switch= code), is
+   open.  Decision: kept fixed at 20 (§3.2's own original number, not
+   re-derived), not configurable.  The surface question this resolves
+   too, by not building either one: arming itself is a =debug-switch=
+   code (22/23, §3.4.2), not an env var — chosen as the smaller-scope
+   option, since a boot-time env-var probe (mirroring
+   =NELISP_ALLOC_CHECK='s own UTF-16LE-aware, cross-platform boot
+   parsing) would have been substantially more machinery for a value
+   this phase has no evidence yet needs tuning.
 4. Whether Phase 2 is worth doing at all *before* the native path gets
    its own, entirely different backtrace story (which this doc does not
    design) — since a user hitting a crash in AOT-compiled code gets
    nothing from Phase 2 either way — is a sequencing question for the
-   owner, not something this doc resolves.
+   owner, not something this doc resolves.  UNCHANGED by this landing:
+   items 1/2/3 shipped anyway (item 1 alone is standalone-worthy
+   regardless of the answer, per this doc's own framing when the phase
+   was scoped), so this question was not blocking, only relevant to
+   whether a *future* native-path story is worth designing next.

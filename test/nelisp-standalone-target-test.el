@@ -821,8 +821,10 @@ Windows uses the target-correct `.obj' unit name; linux/macOS keep `.o'."
             (should (equal (cdr expected) (plist-get sym :value)))
             (should (eq 'bss (plist-get sym :section)))))
         ;; Doc 170 Stage 2: +96 bytes for the `nl_alloc_check' checked-
-        ;; allocator control block appended after `nl_fvcache_*'.
-        (should (equal (+ 57616 1048576 96)
+        ;; allocator control block appended after `nl_fvcache_*'.  Doc 180
+        ;; Phase 2 item 3 (2026-08-23): +176 more bytes for `nl_bt_snapshot'
+        ;; (the bounded backtrace capture buffer) appended after that.
+        (should (equal (+ 57616 1048576 96 176)
                        (cdr (assq 'bss (plist-get u :sections)))))))))
 
 (ert-deftest nelisp-standalone-target-stage8-build-appends-arena-base-slot-unit ()
@@ -839,6 +841,20 @@ Windows uses the target-correct `.obj' unit name; linux/macOS keep `.o'."
                    (nelisp-link-unit-make
                     (nelisp-standalone--target-object-name "arena-base.o")
                     (list (cons 'bss 8)) nil nil)))
+                ;; Fixed 2026-08-24 (integration/wave6 full-battery run,
+                ;; standalone-eval-test's bounded-backtrace dependency
+                ;; fix): `nelisp-standalone-build' now ALSO appends
+                ;; `nelisp-standalone--eval-extra-manifest''s units
+                ;; (mapped through the already-mocked `unit-for' above,
+                ;; harmlessly producing more fake "probe.o" units) and
+                ;; one real `nelisp-standalone--compile-to-unit' call
+                ;; for "bt-extra-eval.o" -- mocked here too, so this
+                ;; test still exercises only the arena-base-slot-unit
+                ;; behavior it names, not a real AOT compile of
+                ;; unrelated new source.
+                ((symbol-function 'nelisp-standalone--compile-to-unit)
+                 (lambda (name &optional _source _abi)
+                   (nelisp-link-unit-make name nil nil nil)))
                 ((symbol-function 'nelisp-standalone--output-path)
                  (lambda (&optional _reader-p) "/tmp/nelisp-target-test"))
                 ((symbol-function 'nelisp-link-units)
@@ -858,9 +874,18 @@ Windows uses the target-correct `.obj' unit name; linux/macOS keep `.o'."
                  (lambda (&rest _) nil)))
         (nelisp-standalone-build)
         (should captured)
-        (should (equal
-                 (nelisp-standalone--target-object-name "arena-base.o")
-                 (plist-get (car (last captured)) :name)))))))
+        ;; Membership, not tail position: fixed 2026-08-24 (integration/
+        ;; wave6 full-battery run) -- `nelisp-standalone-build' now
+        ;; appends `nelisp-standalone--eval-extra-manifest''s units and
+        ;; "bt-extra-eval.o" AFTER the arena-base-slot-unit append this
+        ;; test names, so arena-base.o is no longer the last element,
+        ;; only a member. The feature this test verifies (the slot unit
+        ;; gets appended at all, once per dynamic-arena-base target) is
+        ;; unaffected by where in the list it ends up.
+        (should (cl-find (nelisp-standalone--target-object-name "arena-base.o")
+                          captured
+                          :key (lambda (u) (plist-get u :name))
+                          :test #'equal))))))
 
 (ert-deftest nelisp-standalone-target-stage8-chunk-arena-rewrite-cross-platform ()
   "Doc 140 Stage 8: chunk-arena rewrite fires for linux, windows, and macOS.

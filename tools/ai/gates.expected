@@ -33,6 +33,9 @@ parens-check
 generated-source-parse
 
 unsafe-inventory
+# ns-inventory: 2026-08-23 Windows inventory finding -- see the ns-gate
+# note further down (same `nl-ns--definition-shape' fingerprint, same
+# investigation, same unconfirmed-from-Linux status).
 ns-inventory
 reader-surface-audit
 pkg-graph
@@ -283,6 +286,23 @@ binary-size-ratchet
 # actually require until a CI log showed the two disagreeing in the same
 # breath -- `findings' is now 1 exactly when the byte-diff fails, matching
 # the shape `binary-size-ratchet' above already used.
+#
+# 2026-08-23 Windows gate-battery inventory: on a 30.x host (Windows had
+# Emacs 30.2, inside the pinned range, so the version guard above did not
+# fire) this gate FAILED with `invalid-read-syntax (")" 1295 1)' --
+# target/emacs-parity.el lacked its opening `(princ (format "%S" (progn'
+# wrapper and ended with an unmatched `)))'.  The Makefile recipe used to
+# assemble that file from three separate shell steps writing to the same
+# path (`printf ... >', `cat ... >>', `printf ... >>'); it now goes
+# through ONE Emacs `--batch' process and ONE `write-region' call instead,
+# which cannot exhibit "some but not all of several sequential writes
+# landed" because there is only one write.  Verified on Linux (this
+# session) byte-identical to the old three-step output for the current
+# corpus; the exact Windows corruption mechanism could not be reproduced
+# on Linux and is not confirmed.  gate-selfcheck's emacs-parity band (see
+# its own note below) is the same file's `checked=' count and is expected
+# to move back into band once this fix lands on Windows. Not Windows-
+# verified -- the owner's next runbook run is the actual proof.
 emacs-parity
 
 # ===================================================================
@@ -424,11 +444,77 @@ emacs-parity
 #
 prelude-toplevel-check
 partial-inventory
+#
+# gate-selfcheck: 2026-08-23 Windows inventory measured this gate's own
+# emacs-parity band check FAILING with `emacs-parity checked=652' below
+# the pinned floor of 1000 (tools/gate-count-bands.txt).  Investigated,
+# not changed: 652 is almost certainly a symptom of the emacs-parity
+# generation bug fixed above (a corrupted target/emacs-parity.el would
+# make Emacs read a handful of the corpus's own top-level forms before
+# hitting the stray trailing `)))' and erroring out, printing whatever
+# partial output those forms produced before failing rather than the
+# full ~20000-byte %S dump the wrapped corpus produces) -- the corpus and
+# reference answers do not depend on the OS in any way that would
+# legitimately shrink the byte count by a third, and this session's own
+# Linux measurement after the emacs-parity fix reads `GATE-COUNT
+# checked=19949 findings=0', comfortably inside the existing 1000-100000
+# band.  The band is therefore left unchanged; a platform-aware band
+# would have been the wrong fix for a generation defect.  If a Windows
+# re-run after the emacs-parity fix lands still reports a `checked' value
+# far from ~19949 (or fails again), that is new evidence and should be
+# investigated on its own, not folded into this reasoning after the fact.
 gate-selfcheck
+#
+# ns-gate / ns-inventory: 2026-08-23 Windows inventory measured 19-20
+# `ns-collision-divergent' fingerprints (packages/nl-ns/src/nl-ns.el's
+# `nl-ns--definition-shape', a sha1 of each colliding definition's `%S'
+# print form) differing from the Linux-pinned baseline, with the
+# underlying collisions themselves apparently unchanged (same finding
+# counts, only the fingerprints moved) -- see packages/nl-ns/src/nl-ns.el
+# for the investigation this session ran and could not close: CRLF-vs-LF
+# file content was tested directly (a CRLF-converted copy of a multi-line-
+# docstring fixture read through `nl-ns--read-file-entry' and produced a
+# BYTE-IDENTICAL parsed form and sha1 to the LF original, because Emacs's
+# own `insert-file-contents' coding-system detection strips `\r' before
+# `read' ever sees it), and file-path separators were checked structurally
+# (both `directory-files-recursively' and `file-expand-wildcards' are
+# pure Elisp and always return `/'-separated paths, on any host).  Neither
+# hypothesis reproduces the divergence.  Not fixed; the mechanism is
+# unconfirmed from Linux and needs the actual Windows measurement (which
+# 19-20 symbols, their exact `:heads' diff) to narrow further.
 ns-gate
 nl-check-gate
 fallback-inventory-selftest
 wasm-dtw-skeleton-smoke
+# 2026-08-23 Windows gate-battery inventory (target/ai/windows-inventory-
+# 2026-08-23.md on feat/windows-gate-inventory) found nine of these gates
+# FAILING instead of reasoned-skipping on an unrunnable target -- eight by
+# trying to build or exec a Linux-only ELF/syscall path and getting `Exec
+# format error'/exit 127/126, and `nelisp-runtime-image-cache-gate' by a
+# bare `[ -x $NELISP ]' test misreading a built-but-foreign-architecture
+# binary as simply missing.  All nine now ask
+# `nelisp-standalone--target-runnable-on-host-p' (scripts/nelisp-
+# standalone-build.el) FIRST, the same convention `standalone-reader-test'
+# already used, and print a `GATE-SKIP' line instead: nelisp-runtime-
+# image-cache-gate, nelisp-source-command-substrate-gate, standalone-
+# chunk-growth-test, standalone-parallel-compile-test, standalone-
+# selfhost-mt-test, standalone-reader-smokes (checked once for the whole
+# 34-smoke batch, since every sub-smoke execs the same binary),
+# nelisp-nelix-native-hot-gate (see its own note below), and the nl-
+# condition/nl-safe/nl-resource/standalone-reader-buffer/nl-actor smokes
+# further down.  `nelisp-source-command-substrate-gate' also stopped using
+# `mktemp -d' (which defaults into `/tmp', a namespace Git Bash and native
+# Windows Emacs read differently) for the temp paths it hands to a
+# separate Emacs `--eval'; it now uses a repo-local `target/tmp.XXXXXX'
+# dir, which resolves identically from both sides.  `standalone-reader-
+# smokes' also moved its per-smoke logs from `/tmp' to `target/tmp/' for
+# the same reason (MSYS2 `make' and Git Bash `tail' disagreed about where
+# `/tmp' lived in the same inventory run).  Verified on Linux (this
+# session): mocked unrunnable via `NELISP_STANDALONE_TARGET=windows-
+# x86_64', each of the nine prints its `GATE-SKIP' line and exits 0; with
+# the real linux-x86_64 target, `standalone-reader-smokes' still reports
+# `GATE-COUNT checked=34 findings=0'. Not Windows-verified -- the owner's
+# next runbook run on Windows is the actual proof.
 nelisp-runtime-image-cache-gate
 nelisp-source-command-substrate-gate
 standalone-chunk-growth-test
@@ -440,6 +526,14 @@ standalone-reader-smokes
 # nelisp-nelix-native-hot-gate: promoted 2026-08-21, see "THE nelix GATES,
 # PART 2" below -- also `nelisp-ai.sh extras' (needs target/nelisp built,
 # does not build it).
+#
+# 2026-08-23: this gate's `[ ! -x "$NELISP" ]' check used to run BEFORE
+# the (already-correct) `../nelix' absence check, so on an unrunnable
+# target (Windows inventory: a built linux-x86_64 target/nelisp) it
+# reported a hard `missing-nelisp' FAIL instead of a reasoned skip -- the
+# wrong one of two legitimately different "cannot run" reasons.  The
+# runnable-host predicate is now asked first (see the block above); the
+# nelix-absence check is unchanged and still runs second.
 nelisp-nelix-native-hot-gate
 #
 # substrate-parity-smoke: promoted 2026-08-22, see "SUBSTRATE PARITY" at the
@@ -465,6 +559,12 @@ substrate-parity-smoke
 # (packages/nl-condition/src/nl-condition.el): the gate went from
 # `GATE-COUNT checked=33 findings=0' to `checked=15 findings=18',
 # reverted after confirming the failure.
+#
+# 2026-08-23: all three used to check only `[ -f "$$bin" ]' (did the build
+# produce a file), not whether the file could run on this host -- see the
+# runnable-host block above `nelisp-runtime-image-cache-gate'.  Each now
+# asks the predicate first; unchanged on a runnable host (verified PASS on
+# Linux this session).
 nl-condition-standalone-smoke
 nl-safe-standalone-smoke
 nl-resource-standalone-smoke
@@ -480,6 +580,9 @@ nl-resource-standalone-smoke
 # implementations of every name involved (Doc 188 §1.8/§4.1).
 # Red-proven 2026-08-23 by injecting the row in tools/gate-mutations.txt
 # that names this gate.
+#
+# Same runnable-host guard added 2026-08-23 as the nl-condition/nl-safe/
+# nl-resource trio above.
 standalone-reader-buffer-smoke
 # nl-actor-standalone-smoke: added 2026-08-23 (Doc 193 §4.4 Phase 1).
 # nelisp-actor could not have a standalone smoke before this -- loading
@@ -495,6 +598,9 @@ standalone-reader-buffer-smoke
 # spawn/mailbox/send/receive/yield/run-until-idle.  Red-proven the same
 # day the same way the nl-condition/nl-safe trio above was: see
 # tools/gate-mutations.txt's nl-actor-standalone-smoke row.
+#
+# Same runnable-host guard added 2026-08-23 as the nl-condition/nl-safe/
+# nl-resource trio above.
 nl-actor-standalone-smoke
 #
 # nl-ns-reader-standalone-smoke: added 2026-08-23, Doc 189 Phase 0
@@ -509,6 +615,23 @@ nl-actor-standalone-smoke
 # tree depends on it running -- promote alongside Phase 1, or sooner if
 # a real defect surfaces here first.
 nl-ns-reader-standalone-smoke?
+#
+# nl-clj-standalone-smoke: added 2026-08-24, Doc 195
+# (docs/design/195-clojure-compat-library.org) build-first Tier 1 (atom,
+# persistent vector, persistent hash-map/hash-set, minimal eager seq
+# API).  Same shim/load-by-path pattern as nl-condition-standalone-smoke
+# above, plus a print/read round-trip check on a tagged persistent
+# vector -- proving Doc 195 §2.1's own measured print/read asymmetry
+# for `cl-defstruct'/`record' on this substrate does NOT apply to this
+# package's chosen representation (a tagged plain vector, the same
+# idiom `nl-cell' already ships).  Listed optional (not promoted to
+# required, no tools/gate-mutations.txt row yet, not wired into
+# `nelisp-ai.sh extras'): this is this package's own first landing,
+# following the identical "just shipped, not yet promoted"
+# nl-ns-reader-standalone-smoke precedent immediately above -- promote
+# once observed green across more than one session, or sooner if a
+# real defect surfaces here first.
+nl-clj-standalone-smoke?
 #
 # substrate-presence-sweep (Task A, added same day as the addendum above):
 # own tier, `nelisp-ai.sh presence', not `extras' (see "SUBSTRATE PARITY"'s

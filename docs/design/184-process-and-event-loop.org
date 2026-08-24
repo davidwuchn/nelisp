@@ -1,7 +1,7 @@
 #+TITLE: Doc 184 — processes under standard names, and one event loop
 #+AUTHOR: nelisp / nelisp-emacs (design: Claude Opus 5 + zawatton)
 #+DATE: 2026-08-22
-#+STATUS: SHIPPED (P0-P3, 2026-08-23, branch feat/process-standard-names) — P4 (=make-network-process=) remains explicitly out of scope, documented and loudly refused, per §1.7/§6.
+#+STATUS: SHIPPED (P0-P3, 2026-08-23, branch feat/process-standard-names) — P4 (=make-network-process=) remains explicitly out of scope, documented and loudly refused, per §1.7/§6. UPDATE 2026-08-24 (integration/wave6 phase 2A audit hardening): P1/P2's fix, landed as an opt-in =--load=able layer never reachable from a shipped binary (see §5.5's original text below), is now wired into the DEFAULT standalone bootstrap — every =target/nelisp= carries it with no =--load= required. See the note appended to §5.5.
 #+VERIFIED-BY: standalone-reader-async-core-smoke standalone-reader-process-adapter-smoke standalone-reader-process-adapter-smoke-red standalone-reader-repl-idle-pump-smoke standalone-reader-smokes
 
 * §0 TL;DR
@@ -410,6 +410,31 @@ scale, not a small addition to this doc's adapter work. This phase is
 listed so the roadmap does not silently drop it; see §6 for what a
 future doc would need to measure first.
 
+Update (2026-08-24): the raw socket primitive family this phase asked
+for has landed (=feat/socket-primitives-p1=,
+=scripts/nelisp-standalone-build.el='s =nelisp-standalone--socket-forms=
+/ =-socket-dispatch-arms=) — =nelisp-socket-listen/-accept/-connect/
+-send/-recv/-close=, raw SYSCALL on Linux x86_64 (socket/connect/
+accept4/bind/listen/setsockopt/shutdown; send/recv reuse the existing
+=nl_os_read_file_handle=/=nl_os_write_file_handle= byte-IO path), the
+catchable =nelisp-unsupported-primitive= signal (not a wrong syscall
+number) on every other target. IPv4 dotted-decimal + literal
+"localhost" only — DNS, IPv6, and nonblocking I/O are still out of
+scope, and every syscall failure is a catchable =nelisp-socket-error=.
+=standalone-reader-socket-smoke= (own Makefile target, folded into
+=standalone-reader-test='s dolist) proves a loopback round-trip
+including a UTF-8 payload, byte-clean. This is the foundation P4 asked
+for, not the adapter itself: =make-network-process= (a family of
+callbacks, filters, sentinels, and the standard-name argument surface
+=nelisp-process-*='s own adapter already carries for processes) has not
+been built on top of it. The adapter can follow now that the socket
+primitive family it was blocked on exists; see
+=packages/nelisp-sys/src/nelisp-sys.el='s =nelisp-sys--portable-syscall-
+table=, which still has no socket-family entries at all — the new
+primitives bake their Linux x86_64 syscall numbers directly into the
+native unit rather than resolving them through that table, a design
+choice recorded in =nelisp-standalone--socket-forms='s banner comment.
+
 * §5 Verification design
 
 ** §5.1 Against-the-bug
@@ -515,7 +540,10 @@ evidentiary shape).
   mechanisms that happen to agree. Binary-size cost: +8280 bytes
   (6741200 -> 6749480, +0.12%, see =tools/nelisp-binary-size-baseline.txt=)
   — entirely from these two small baked-in pieces; neither new package
-  file is linked into =target/nelisp= at all.
+  file is linked into =target/nelisp= at all. *[STALE as of
+  integration/wave6 phase 2A, see the note appended to this section —
+  both new package files ARE now embedded into every standalone
+  binary.]*
 - *Two honest deviations from this doc's own illustrative text*,
   measured rather than assumed:
   1. §1.3/P1's exit criterion says a killed process's sentinel should
@@ -555,7 +583,72 @@ evidentiary shape).
   (§2's decided direction: an opt-in loadable upgrade layer, matching
   the precedent =nelisp-async.el= already set for =run-at-time= before
   this doc existed) — both entries remain accurate descriptions of what
-  a script gets when it loads neither new file.
+  a script gets when it loads neither new file. *[Still textually true
+  as of integration/wave6 phase 2A below — =scripts/nelisp-stdlib-
+  prelude.el='s OWN source is untouched — but "a script gets when it
+  loads neither new file" no longer describes what a default STANDALONE
+  BINARY does; see the note immediately below.]*
+
+** UPDATE 2026-08-24 (integration/wave6 phase 2A audit hardening): wired into the default bootstrap
+
+A read-only wave audit (measured, not assumed) found this section's own
+"opt-in loadable upgrade layer" framing had become a real gap: Doc 184
+P1/P2's fix is loaded ONLY by its own Makefile smoke recipes
+(=NELISP_PROCESS_ADAPTER_LOAD_2= above), NEVER by the default standalone
+bootstrap — so =make-process='s real =:filter=, =accept-process-output='s
+real PROCESS/SECONDS/MILLISEC args, and the real sentinel exit status
+never reached a shipped =target/nelisp= at all. Every claim of "fixed"
+in §5.5 above was true only for a binary built with an extra =--load=
+flag no normal invocation of =target/nelisp= ever passes.
+
+*Fixed*: =nelisp-standalone--reader-repl-prelude-source=
+(=scripts/nelisp-standalone-build.el=) now concatenates
+=packages/nelisp-eventloop/src/nelisp-async-core.el= and
+=packages/nelisp-process-adapter/src/nelisp-process-adapter.el='s
+source onto the embedded prelude blob, in dependency order, after the
+existing =lisp/nelisp-stdlib-regexp.el= + =string-match=-family
+insertion it already did for Doc 143. Both files are pure elisp with
+no native/binary change (exactly §2's own decided direction); the one
+=(require 'nelisp-async-core)= in =nelisp-process-adapter.el= is
+satisfied because =(provide 'nelisp-async-core)= registers the feature
+the moment its own source is evaluated, a few forms earlier in the same
+blob — =require= never touches =load-path= once a feature is already
+provided. This is the SAME "upgrade-on-load" replacement mechanism both
+files' own headers already described (later =defun=s override the
+prelude's own weaker defaults at evaluation time); the only change is
+that the load now always happens, at boot, instead of needing an opt-in
+flag.
+
+*Verified* against a clean =make standalone-reader= build, no
+=--load= of either file: =(fboundp 'process-filter)= -> ~t~,
+=(fboundp 'process-sentinel)= -> ~t~, a real =:filter= fires and
+captures =("first-" "second")= for a two-write =cat= process, a process
+that exits 7 reports =sentinel = "exited abnormally with code 7\n"=
+(not the old literal ="finished\n"=), and =run-at-time='s REPEAT still
+honours the shared poll loop (=(>= n 2)= after one =accept-process-
+output= wait). =make-network-process= still loudly signals its named
+=error= (§1.7/P4 unchanged, no native socket primitive to build on
+yet).
+
+*Cost*: +172776 bytes (7393896 -> 7566672, +2.34%, see
+=tools/nelisp-binary-size-baseline.txt=) — the two files' combined
+~540 source lines, embedded as executable prelude text exactly like
+every other prelude-size raise this file's own history already
+documents (hooks/map.el/fixnum, buffer-unification, cl-generic-subset,
+...), just landing all at once instead of incrementally.
+
+*Smokes repurposed, not broken*: =standalone-reader-process-adapter-
+smoke-red= and =standalone-reader-repl-idle-pump-smoke= both existed
+to prove the PRE-fix defect shape reproduced on an unmodified binary —
+a shape that can no longer exist on ANY standalone build now that the
+fix is unconditional. Both were rewritten (Makefile) to assert the
+opposite, now-correct claim instead: the fix ships on the default
+binary with NO explicit =--load=. =standalone-reader-process-adapter-
+smoke= (GREEN, still explicitly loads both files) is unaffected — a
+redundant re-load of an already-provided feature is a no-op, not an
+error. All three, plus =standalone-reader-async-core-smoke= and the
+full =standalone-reader-test= battery (25 internal smokes), pass on
+the wired binary.
 
 * §6 Open questions
 

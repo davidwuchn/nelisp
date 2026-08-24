@@ -16,6 +16,31 @@ set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$here"
 
+# Needs a host that can run the configured target; the build script's own
+# predicate decides, not a uname table here.  Same convention as
+# tools/selfhost-test.sh.  2026-08-23 Windows inventory: this Linux-only
+# fork(2)/mmap/ELF path exited 127 while building the reader instead of
+# reporting a reasoned skip.
+set +e
+emacs --batch -Q -L lisp -L src -L scripts -l nelisp-standalone-build \
+  --eval '(kill-emacs (if (nelisp-standalone--target-runnable-on-host-p) 0 3))' \
+  >/dev/null 2>&1
+host_rc=$?
+set -e
+case "$host_rc" in
+  0) ;;
+  3)
+    printf 'GATE-SKIP target %s cannot run on host %s/%s\n' \
+      "${NELISP_STANDALONE_TARGET:-linux-x86_64}" "$(uname -s)" "$(uname -m)"
+    echo "[parallel] SKIP: target cannot run on this host"
+    exit 0
+    ;;
+  *)
+    echo "[parallel] FAIL: cannot ask host runnability (rc=$host_rc)" >&2
+    exit 1
+    ;;
+esac
+
 RB="target/nelisp"
 if [ ! -x "$RB" ]; then
   echo "[parallel] building reader binary..."

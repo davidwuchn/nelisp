@@ -2052,7 +2052,29 @@ loop for the exponent (= no `expt' / `float' primitive needed)."
            (let ((r 1) (i 0))
              (while (< i e)
                (let ((next (* r b)))
-                 (when (and (/= b 0) (/= (/ next b) r))
+                 ;; Doc 190 Phase B regression, found by the fencepost check
+                 ;; ("expt overflow-check unaffected") this same phase's own
+                 ;; smoke inherited from Phase A: `*' now PROMOTES a fixnum-
+                 ;; boundary crossing to an exact Bignum instead of
+                 ;; signalling, so `next' can genuinely be a Bignum here now
+                 ;; -- something the div-round-trip check below was never
+                 ;; written to expect (it assumes NEXT is always a plain
+                 ;; fixnum).  `/' does not support a Bignum operand (Phase
+                 ;; A's own recorded, still-unchanged gap), so falling
+                 ;; through to `(/ next b)' on a promoted `next' signalled
+                 ;; the WRONG condition, `wrong-type-argument', instead of
+                 ;; `overflow-error'.  `expt' itself is OUT OF SCOPE for
+                 ;; Phase B's promotion (this doc's own task brief: `+'/`-'/
+                 ;; `*' only) -- it still signals `overflow-error' exactly
+                 ;; as it did before, just via an explicit `bignump' guard
+                 ;; now instead of (coincidentally, pre-Phase-B) always
+                 ;; being pre-empted by the native `*''s OWN overflow signal
+                 ;; before `next' could ever be bound to anything else.  The
+                 ;; div-round-trip half stays as defense in depth for a true
+                 ;; 64-bit-register wrap, even though `*' promoting rather
+                 ;; than wrapping means it should no longer be reachable in
+                 ;; practice.
+                 (when (or (bignump next) (and (/= b 0) (/= (/ next b) r)))
                    (signal 'overflow-error nil))
                  (setq r next))
                (setq i (1+ i)))
@@ -6842,8 +6864,32 @@ this file was committed).")
 (defvar nelisp--process-props nil)
 (defvar coding-system-for-write nil)
 (defvar coding-system-for-read nil)
-(defvar system-type 'gnu/linux)
-(defvar system-configuration "x86_64-pc-linux-gnu")
+;; `system-type'/`system-configuration' used to be hardcoded Linux-x86_64
+;; literals here regardless of what the binary was actually built for (a
+;; Windows PE build's `system-type' answered `gnu/linux'; real-machine
+;; finding, 2026-08-23).  `nelisp--target-os-code'/`nelisp--target-arch-code'
+;; are per-target COMPILE-TIME constants baked directly into the binary --
+;; see `nelisp-standalone--target-os-code-forms' in
+;; scripts/nelisp-standalone-build.el -- so this now answers for the target
+;; the binary was actually emitted for, on every platform, including ones
+;; this repo's own build host cannot execute to check (Windows/macOS
+;; cross-targets: source-inspected, not run).
+(defvar system-type
+  (let ((nelisp--os-code (nelisp--target-os-code)))
+    (cond ((= nelisp--os-code 1) 'darwin)
+          ((= nelisp--os-code 2) 'windows-nt)
+          (t 'gnu/linux))))
+(defvar system-configuration
+  (let ((nelisp--os-code (nelisp--target-os-code))
+        (nelisp--arch-code (nelisp--target-arch-code)))
+    (cond
+     ((= nelisp--os-code 1) "aarch64-apple-darwin")
+     ((= nelisp--os-code 2) (if (= nelisp--arch-code 1)
+                                "aarch64-pc-windows-msvc"
+                              "x86_64-pc-windows-msvc"))
+     (t (if (= nelisp--arch-code 1)
+            "aarch64-unknown-linux-gnu"
+          "x86_64-pc-linux-gnu")))))
 
 (unless (fboundp 'bufferp)
   (defun bufferp (obj) (nelisp-buffer-p obj)))
@@ -6911,6 +6957,79 @@ anything (Doc 188 §2.2)."
 (unless (fboundp 'buffer-string)
   (defun buffer-string ()
     (nelisp-buffer-string nelisp--current-buffer)))
+
+;; ---- Doc 188 P2: current-buffer / set-buffer / buffer-substring /
+;; erase-buffer -- the four names §3's P2 bullet lists as still void
+;; after P1 (`with-current-buffer'/`with-temp-buffer' shipped early,
+;; as part of P1's own coherent lifecycle set; see the P1 record's
+;; "Not wired" list).  Same threading discipline as `point'/`goto-
+;; char' above: `nelisp--current-buffer' only, never the ported
+;; file's own ambient `nelisp-buffer--current', so the two "current
+;; buffer" trackers cannot desync for this standard-name path.
+
+(unless (fboundp 'current-buffer)
+  (defun current-buffer ()
+    "Return the current NeLisp buffer object."
+    nelisp--current-buffer))
+
+(unless (fboundp 'set-buffer)
+  (defun set-buffer (buffer-or-name)
+    "Make BUFFER-OR-NAME current and return it.
+
+Error wording probed against Emacs 30.1 (Doc 188 P2): a NAME that
+resolves to no buffer signals `(error \"No buffer named %s\")'; a
+buffer object that has since been killed signals `(error \"Selecting
+deleted buffer\")' even though `get-buffer' happily returns a dead
+buffer object unchanged.  Wrong-type input (`(set-buffer 42)') is
+handled by `get-buffer' itself re-used below -- Emacs's own error
+there, `(wrong-type-argument stringp 42)', already matches what
+`get-buffer' already signals (Doc 188 P1)."
+    (let ((b (get-buffer buffer-or-name)))
+      (cond
+       ((null b)
+        (signal 'error (list (format "No buffer named %s" buffer-or-name))))
+       ((not (buffer-live-p b))
+        (signal 'error (list "Selecting deleted buffer")))
+       (t
+        (setq nelisp--current-buffer b)
+        b)))))
+
+(unless (fboundp 'buffer-substring)
+  (defun buffer-substring (start end)
+    "Return the text between START and END in the current buffer.
+
+Real Emacs accepts START/END in EITHER order and signals
+`args-out-of-range' (data = current buffer, START, END -- in that
+original, unsorted order) outside [`point-min', `point-max'] -- both
+probed against Emacs 30.1 (Doc 188 P2).  The underlying `nelisp-
+buffer-substring' (ported verbatim from src/nelisp-buffer.el, kept
+byte-identical for `ns-gate') assumes START <= END and does no range
+check at all, so both real-Emacs behaviors are handled in this
+wrapper instead of touching that file."
+    (unless (integerp start)
+      (signal 'wrong-type-argument (list 'integer-or-marker-p start)))
+    (unless (integerp end)
+      (signal 'wrong-type-argument (list 'integer-or-marker-p end)))
+    (let* ((b nelisp--current-buffer)
+           (lo (nelisp-point-min b))
+           (hi (nelisp-point-max b))
+           (s (min start end))
+           (e (max start end)))
+      (when (or (< s lo) (> e hi))
+        (signal 'args-out-of-range (list b start end)))
+      (nelisp-buffer-substring s e b))))
+
+(unless (fboundp 'erase-buffer)
+  (defun erase-buffer ()
+    "Delete all text in the current buffer.  Returns nil (Emacs 30.1
+probe, Doc 188 P2).  Real Emacs widens first; the ported `nelisp-
+erase-buffer' does not reset narrowing -- but no standard name in
+this tree can SET narrowing yet (`narrow-to-region'/`widen' are not
+wired to standard names by any phase through P2), so that gap is
+unreachable from the surface this phase builds, not silently papered
+over."
+    (nelisp-erase-buffer nelisp--current-buffer)))
+
 (unless (fboundp 'with-temp-file)
   (defmacro with-temp-file (file &rest body)
     "Real buffer-backed `with-temp-file' (Doc 188 P1): BODY runs with a
@@ -8016,6 +8135,26 @@ are numbers; `1.' is the integer 1."
 (put 'file-missing 'error-conditions '(file-missing file-error error))
 (put 'setting-constant 'error-conditions '(setting-constant error))
 (put 'user-error 'error-conditions '(user-error error))
+
+;; `nelisp-unsupported-primitive': a NeLisp-specific (not an Emacs-standard)
+;; condition for a primitive that exists on this substrate but cannot do its
+;; job here -- as opposed to `void-function', which means the name itself was
+;; never defined.  First consumer: the standalone reader's native `nl-ffi-
+;; call' fallback arm (`nelisp-standalone--applyfn-ffi-unsupported-form',
+;; scripts/nelisp-standalone-build.el) for a build with no dynamic FFI
+;; linkage -- see docs/design/100-phase-47-dynamic-link-elisp.org section 7.
+;; Registered here, not there, because `nelisp-unsupported-primitive' is NOT
+;; itself a listed `nl-safe-unsafe-primitives' name (unlike `nl-ffi-call'),
+;; so this file -- loaded by every entry path uniformly -- is the ordinary,
+;; unrestricted place for it.  Coordinated with branch
+;; `feat/socket-primitives-p1', which introduces the same symbol for the
+;; same purpose on a different primitive family.  Plain `put' (matching the
+;; block above) rather than `define-error' so this still seeds correctly if
+;; a future edit moves it above that defun.
+(put 'nelisp-unsupported-primitive 'error-conditions
+     '(nelisp-unsupported-primitive error))
+(put 'nelisp-unsupported-primitive 'error-message
+     "Primitive not supported by this NeLisp build")
 
 ;; Doc 152 gate-G: polyfill standard Emacs builtins missing from standalone
 ;; NeLisp so the anvil-pkg ERT suite's helpers (with-mock, registry-clear, ...)

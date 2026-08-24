@@ -32,7 +32,18 @@ NELISP="${NELISP:-$REPO_ROOT/target/nelisp}"
 BUILD=1
 HEAVY=0
 HEAVY_TIMEOUT_SECONDS="${NELISP_SUBSTRATE_HEAVY_TIMEOUT_SECONDS:-180}"
-TMP_DIR="$(mktemp -d)"
+# Repo-local, not `mktemp -d' (which defaults to $TMPDIR/`/tmp'): the paths
+# under TMP_DIR get embedded as literal Lisp strings in `--eval' below and
+# handed to a SEPARATE Emacs process.  2026-08-23 Windows inventory: Git
+# Bash's `mktemp -d' returned a `/tmp/...' path in the MSYS namespace;
+# native Windows Emacs has no knowledge of that mount table and resolved
+# the same literal text as `c:/tmp/...', which does not exist
+# (`file-missing').  A path under the repo's own `target/' directory
+# resolves identically from both sides -- there is no separate namespace
+# to disagree about -- so this sidesteps the problem structurally rather
+# than trying to translate one namespace into the other.
+mkdir -p "$REPO_ROOT/target"
+TMP_DIR="$(mktemp -d -p target)"
 
 cleanup() {
   gate_report_count
@@ -52,6 +63,35 @@ while [ "$#" -gt 0 ]; do
       ;;
   esac
 done
+
+# Needs a host that can run the configured target; ask the build script's
+# own predicate rather than a bare `[ -x $NELISP ]' test, which cannot tell
+# a built-but-foreign-architecture binary apart from a missing one.  Same
+# convention as tools/selfhost-test.sh.  Non-heavy mode below never
+# executes $NELISP (only host Emacs), so it does not need this gate; it is
+# asked once up front and reused by both the `--heavy' early check and the
+# default-mode profile_smoke step further down.
+set +e
+"$EMACS" --batch -Q -L lisp -L src -L scripts -l nelisp-standalone-build \
+  --eval '(kill-emacs (if (nelisp-standalone--target-runnable-on-host-p) 0 3))' \
+  >/dev/null 2>&1
+target_runnable_rc=$?
+set -e
+TARGET_RUNNABLE=0
+case "$target_runnable_rc" in
+  0) TARGET_RUNNABLE=1 ;;
+  3) TARGET_RUNNABLE=0 ;;
+  *)
+    echo "substrate_gate_fail reason=cannot-ask-host-runnability rc=$target_runnable_rc" >&2
+    exit 1
+    ;;
+esac
+
+if [ "$HEAVY" -eq 1 ] && [ "$TARGET_RUNNABLE" -eq 0 ]; then
+  echo "GATE-SKIP target ${NELISP_STANDALONE_TARGET:-linux-x86_64} cannot run on host $(uname -s)/$(uname -m)"
+  echo "substrate_gate_result label=source_command_substrate_gate rc=0 skipped=1"
+  exit 0
+fi
 
 if [ "$BUILD" -eq 1 ]; then
   make standalone-reader
@@ -131,7 +171,10 @@ cat >"$PROFILE_SRC" <<'EOF'
 (provide 'substrate-profile-smoke)
 EOF
 
-if [ -x "$NELISP" ]; then
+# `-x' alone cannot tell "missing" apart from "built for a target this host
+# cannot run" (2026-08-23 Windows inventory finding for the sibling gates
+# above) -- $TARGET_RUNNABLE covers the second case.
+if [ "$TARGET_RUNNABLE" -eq 1 ] && [ -x "$NELISP" ]; then
   run_timed profile_smoke \
     "$NELISP" compile-elisp-artifact --kind nelc --module-policy eval-only \
     --profile-stages --profile-forms --input "$PROFILE_SRC" --output "$PROFILE_ART"
@@ -147,6 +190,8 @@ if [ -x "$NELISP" ]; then
     echo "substrate_gate_fail reason=missing-profile-total" >&2
     exit 1
   fi
+elif [ "$TARGET_RUNNABLE" -eq 0 ]; then
+  echo "substrate_gate_result label=profile_smoke rc=77 skipped=1 reason=target-unrunnable"
 else
   echo "substrate_gate_result label=profile_smoke rc=77 skipped=1 reason=missing-nelisp"
 fi

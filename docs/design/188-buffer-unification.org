@@ -1,9 +1,9 @@
 #+TITLE: Doc 188 — Buffer unification
 #+AUTHOR: nelisp / nelisp-emacs (design: Claude Opus 5 + zawatton)
 #+DATE: 2026-08-22
-#+STATUS: P1 SHIPPED (2026-08-23) — §3's remaining phases (P0 add-hook, P2 current-buffer/set-buffer/buffer-substring/erase-buffer, P3 search, P4 markers, P5 overlays, P6 package attach) are still DRAFT, not started by this change.
-#+VERIFIED-BY: standalone-reader-buffer-smoke emacs-parity ns-gate ns-inventory parity-coverage partial-inventory prelude-toplevel-check gate-mutation compile
-#+STATUS2: P1 = generate-new-buffer/get-buffer/buffer-live-p/kill-buffer/with-current-buffer/with-temp-buffer/insert/buffer-string/insert-file-contents/point/goto-char/point-min/point-max wired to the ported src/nelisp-buffer.el model, standalone. P0 (add-hook) and P2-P6 remain DRAFT; see §8.
+#+STATUS: P2 SHIPPED (2026-08-24) — P0 (add-hook) confirmed already-landed (84950ad30, predates this doc; see §9.1), not by this change. §3's remaining phases (P3 search, P4 markers, P5 overlays, P6 package attach) are still DRAFT, not started by this change.
+#+VERIFIED-BY: standalone-reader-buffer-smoke emacs-parity ns-gate ns-inventory parity-coverage partial-inventory prelude-toplevel-check gate-mutation compile substrate-parity-smoke standalone-reader-shadow-smoke binary-size-ratchet
+#+STATUS2: P1 = generate-new-buffer/get-buffer/buffer-live-p/kill-buffer/with-current-buffer/with-temp-buffer/insert/buffer-string/insert-file-contents/point/goto-char/point-min/point-max wired to the ported src/nelisp-buffer.el model, standalone (see §8). P2 = current-buffer/set-buffer/buffer-substring/erase-buffer wired the same way, plus the P2 exit criterion (nelisp-textprop-hook.el's public entry points against a real buffer, standalone); see §9. P0 (add-hook) independently confirmed already-shipped (§9.1). P3-P6 remain DRAFT.
 
 * §0 TL;DR
 
@@ -885,3 +885,207 @@ wired into =extras=), =tools/ai/gates.expected=,
 =scripts/nl-ns-accepted.el=, =tools/ns-inventory-baseline.txt=,
 =tools/parity-coverage-baseline.txt=,
 =tools/nelisp-binary-size-baseline.txt=.
+
+* §9 P2 implementation record (SHIPPED 2026-08-24)
+
+** §9.1 What shipped
+
+Per §3's own P2 scope ("=current-buffer=/=set-buffer=/=with-current-
+buffer=/=with-temp-buffer=/=buffer-substring=/=erase-buffer= wired to
+P1's real object; =misc.el='s three stub copies (§1.4) replaced with
+guarded delegates... Exit: the four packages' own =(current-buffer)=
+call sites (§1.5) return a real buffer object standalone for the
+first time"):
+
+- =current-buffer=, =set-buffer=, =buffer-substring=, =erase-buffer=
+  are new standard-name wrappers in =scripts/nelisp-stdlib-prelude.el=,
+  thin delegates onto P1's already-ported =nelisp-current-buffer=/
+  =nelisp-set-buffer=/=nelisp-buffer-substring=/=nelisp-erase-buffer=
+  (same threading discipline as P1's =point=/=goto-char=: only
+  =nelisp--current-buffer=, never the ported file's own ambient
+  =nelisp-buffer--current=). =with-current-buffer=/=with-temp-buffer=
+  are unchanged -- P1 shipped both ahead of §3's original schedule, as
+  part of its own "coherent lifecycle set" (top =#+STATUS2=); §3's P2
+  bullet re-lists them only because §3 was drafted before P1 landed.
+- =set-buffer='s error wording and =buffer-substring='s argument-order
+  handling and out-of-range signal are probed against Emacs 30.1
+  (§9.2), not guessed: a missing name signals =(error "No buffer named
+  %s")=, a killed buffer object signals =(error "Selecting deleted
+  buffer")= (distinct cases -- =get-buffer= already returns a dead
+  buffer object unchanged per P1, so =set-buffer= has to check
+  liveness itself), and =buffer-substring= accepts START/END in either
+  order and signals =args-out-of-range= (data = buffer, START, END, in
+  the caller's original unsorted order) outside [=point-min=,
+  =point-max=]. The underlying =nelisp-buffer-substring= (ported
+  verbatim from =src/nelisp-buffer.el=, kept byte-identical for
+  =ns-gate=) does neither of those on its own, so both are handled in
+  the wrapper instead of touching the ported file.
+- =erase-buffer='s one known gap, disclosed rather than silently
+  papered over: real Emacs widens before deleting (probed: erasing a
+  narrowed buffer resets =point-min= back to 1); the ported =nelisp-
+  erase-buffer= does not reset narrowing. Unreachable from this
+  phase's own surface, since no standard name through P2 can SET
+  narrowing (=narrow-to-region=/=widen= are still unwired) -- named
+  here so a future phase that DOES wire narrowing standard names knows
+  to check this, not so it goes unnoticed.
+- P0 (generic =add-hook=/=run-hooks=) turned out to already be
+  shipped, not by this change: =84950ad30= ("stdlib: hooks, a map.el
+  subset, and fixnum overflow completions", merged into
+  =integration/wave3= at =6931ac380=) landed it *before* Doc 188 itself
+  was even authored (=48eff162b=, later in the same log). The top
+  =#+STATUS= line's "P0 add-hook... still DRAFT" was stale from §3's
+  original draft, not re-checked against the tree; this phase's own
+  probe (§9.2) confirms P0's exact §3 exit criterion passes today.
+- =lisp/nelisp-stdlib-misc.el='s "three stub copies" (§2.2) needed no
+  further edit this phase: P1 already deleted its =with-current-
+  buffer=/=with-temp-buffer= copies as dead code (never =require=d, per
+  §1.4's own research), the same disposition §6.4 left open as an
+  implementer's call. =buffer-substring-no-properties= (both
+  =lisp/nelisp-stdlib-misc.el= and a second, independent copy already
+  in =scripts/nelisp-stdlib-prelude.el=) remains an honest-but-wrong
+  stub (unconditional =""=) -- named here as a residual gap, not fixed:
+  it is not in §3's P2 name list, and fixing it is a one-function,
+  independently scoped change that belongs with whatever phase wires
+  text properties (its correct behavior needs to strip properties
+  =buffer-substring= newly returns).
+- The P2 exit criterion itself: =packages/nelisp-textprop-hook/src/
+  nelisp-textprop-hook.el= (§1.5's crash-risk package) now loads
+  standalone and its =(current-buffer)=-consuming public entry points
+  work against a real buffer, not just "the file loads without
+  erroring" -- verified in the standalone smoke (§9.3), not merely
+  attempted.
+
+** §9.2 Against-the-bug (verbatim)
+
+Red, reproduced live before any fix, via =tools/ai/nelisp-ai.sh probe=
+against a clean pre-P2 build (=target/nelisp= sha =102697e453b7e127=,
+size 7281408):
+
+#+begin_example
+(current-buffer)
+=> nelisp: uncaught error: ... void-function: (current-buffer)
+(set-buffer "*scratch*")
+=> nelisp: uncaught error: ... void-function: (set-buffer)
+(with-temp-buffer (insert "hello") (buffer-substring 2 4))
+=> nelisp: uncaught error: ... void-function: (buffer-substring)
+(with-temp-buffer (insert "abc") (erase-buffer) (buffer-string))
+=> nelisp: uncaught error: ... void-function: (erase-buffer)
+#+end_example
+
+Green, same shapes, after the fix (=target/nelisp= sha
+=49662f0b9af8e37c=, size 7314288):
+
+#+begin_example
+(with-temp-buffer (insert "hello") (list (buffer-substring 2 4)
+                                          (buffer-substring 4 2)))
+=> ("el" "el")
+(with-temp-buffer (insert "abc") (erase-buffer) (buffer-string))
+=> ""
+(let ((a (generate-new-buffer "a")) (b (generate-new-buffer "b")))
+  (set-buffer a) (set-buffer b) (eq b (current-buffer)))
+=> t
+#+end_example
+
+P0 (=add-hook=/=run-hooks=), confirmed already-shipped rather than
+assumed (§9.1): =(let ((ran nil)) (add-hook 'kill-buffer-hook (lambda
+() (setq ran t))) (run-hooks 'kill-buffer-hook) ran)= => =t=, probed on
+the same P2 build.
+
+** §9.3 Verification
+
+- *Standalone smoke*: =test/nelisp-buffer-unification-standalone-
+  smoke.el= grew from 6 (P1) to 18 =ert-deftest= cases, run via =make
+  standalone-reader-buffer-smoke= against =target/nelisp= itself --
+  the same Doc 187 §6.1 rationale P1 used (a host-ERT run of these
+  forms cannot distinguish this tree's own wiring from host Emacs's
+  real implementations). The 9 P2 additions cover: =current-buffer=
+  tracking =with-current-buffer='s dynamic extent in and back out;
+  =set-buffer= persisting past the statement that made it (unlike
+  =with-current-buffer=, and a corrected test -- see below);
+  =with-current-buffer= restoring the buffer active on ENTRY even when
+  its body reassigns via =set-buffer=, not "chasing" the reassignment;
+  =set-buffer='s return value, and its two distinct error shapes
+  (missing name vs. killed buffer object); =buffer-substring='s normal
+  range, reversed-argument order, full-span/empty-span fenceposts, and
+  out-of-range signal; =erase-buffer= clearing content AND resetting
+  point to 1 (point-clamping edge case); and the P2 exit-criterion
+  test loading =nelisp-textprop-hook.el= standalone, registering a
+  handler via =nelisp-textprop-hook-add=, firing it via =nelisp-
+  textprop-hook-run= against a real buffer, and checking the depth
+  counter unwinds back to 0. All 18 pass.
+  - One test was caught wrong by running it, not by inspection: an
+    early draft of the =set-buffer=-persistence test nested the
+    assertion inside =with-current-buffer= and expected =set-buffer=
+    inside its body to "stick" past the macro's own exit -- probing
+    real Emacs 30.1 first (§9.2's own discipline, applied to test
+    authorship too) showed =with-current-buffer= restores whatever was
+    current on ENTRY regardless of what the body does, so the test's
+    own expectation, not the implementation, was wrong. Fixed by
+    testing persistence with a bare =set-buffer= (no enclosing dynamic
+    extent) and adding a second test that pins down and documents the
+    ENTRY-restoring behavior explicitly.
+- *Host-ERT companion*: =test/nelisp-buffer-unification-test.el= grew
+  by 3 cases (=current-buffer=/=set-buffer= round trip, =buffer-
+  substring= both argument orders, =erase-buffer=), the readable-spec
+  subset per P1's own established split (edge cases live in the
+  standalone smoke, which is the one that can actually fail on this
+  tree's own defect, not this file).
+- *Parity forms* (§4.2, host-comparable): 3 new forms in =test/nelisp-
+  shadow-differential-cases.el= -- a =current-buffer=/=set-buffer=
+  round trip through a nested =with-temp-buffer=, a =buffer-substring=
+  pair collecting both argument orders into one printed value, and an
+  =erase-buffer= clear. =make emacs-parity= passes byte-identical
+  against stock Emacs 30.1 (19964 bytes, up from P1's 19942). =make
+  standalone-reader-shadow-smoke= (native vs. prelude within the
+  binary itself) also agrees. =make parity-coverage= rose from 264 to
+  265 covered names (=current-buffer= newly mentioned; =set-buffer=/
+  =buffer-substring=/=erase-buffer= are not themselves in the stale,
+  not-regenerated =docs/emacs-compat-table.txt= shared-name list --
+  same "not every real fix moves this specific ratchet" shape P1's own
+  =point= hit); baseline and =pinned current-buffer= line raised in
+  =tools/parity-coverage-baseline.txt= in the same commit.
+- *Mutation row* (new, targeting a P2 call site specifically, not only
+  P1's pre-existing =insert= row): =tools/gate-mutations.txt= gained a
+  row mutating =erase-buffer='s call to =nelisp-erase-buffer= into
+  =ignore=. Confirmed by =make gate-mutation= itself (which mutates,
+  rebuilds, and reverts every row automatically): the grown smoke went
+  from 18/18 to 14 passed/1 failed -- exactly =nelisp-buffer/erase-
+  buffer-clears-and-resets-point=, the one test whose assertions that
+  call site backs -- then reverted and rebuilt clean.
+- *Housekeeping gates touched*: =make ns-gate=/=make ns-inventory=
+  found no new collisions (the four new names are defined nowhere else
+  in the tree -- confirmed by grep before landing, not assumed) so
+  neither baseline needed a change. =make partial-inventory= likewise
+  unaffected: none of the four new functions ignore an argument.
+
+** §9.4 Battery
+
+=make compile=, =make parens-check=, =make generated-source-parse=,
+=tools/ai/nelisp-ai.sh check= (scoped verify, VERDICT: PASS, 22
+gates), =tools/ai/nelisp-ai.sh standalone= (=standalone-reader-test=
+22/22, =binary-size-ratchet= pass, =emacs-parity= 19964 bytes
+identical), =tools/ai/nelisp-ai.sh smokes= (34/34), =tools/ai/nelisp-
+ai.sh test= (full host ERT: 4994 ran, 0 failed, 151 skipped, 76s),
+=tools/ai/nelisp-ai.sh extras= (=substrate-parity-smoke= 269 checked,
+0 unaccepted findings -- the 7 divergences it reports are the
+pre-existing, already-accepted baseline entries, unrelated to this
+phase; =nl-condition=/=nl-safe=/=nl-resource=/=nl-actor= standalone
+smokes all pass; =standalone-reader-buffer-smoke= 18/18), =make
+standalone-reader-shadow-smoke=, and =make parity-coverage= (PASS, no
+"ratchet available" notice after the baseline raise) all pass.
+
+Binary size: =target/nelisp= grew 7240384 -> 7314288 (+73904 bytes,
++1.02%), inside the existing 2% slack but raised anyway per =tools/
+nelisp-binary-size-baseline.txt='s own disclosure rule -- the four new
+wrappers add ~150 source lines to the embedded prelude, the same
+accounting P1's own raise used for the same file.
+
+** §9.5 Files touched
+
+=scripts/nelisp-stdlib-prelude.el= (the four P2 standard-name
+wrappers), =test/nelisp-buffer-unification-standalone-smoke.el= (6 ->
+18 cases), =test/nelisp-buffer-unification-test.el= (+3 host-ERT
+cases), =test/nelisp-shadow-differential-cases.el= (§4.2 forms),
+=tools/gate-mutations.txt= (new P2-targeted row), =tools/parity-
+coverage-baseline.txt= (264 -> 265, =pinned current-buffer=), =tools/
+nelisp-binary-size-baseline.txt= (7240384 -> 7314288).
