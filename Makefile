@@ -2837,6 +2837,21 @@ standalone-reader-socket-smoke:
 	  --eval '(setq load-prefer-newer t)' \
 	  -l nelisp-standalone-build -f nelisp-standalone-reader-socket-test
 
+# Fast focused loop for the Doc 194 IPv6 phase (P7): AF_INET6 sockaddr_in6
+# construction, IPv6 literal parsing (native raw primitives AND the
+# separate pure-elisp parser), AAAA DNS resolution, and the
+# make-network-process/open-network-stream :family 'ipv6 path -- ALL
+# alongside a same-process IPv4 round trip proving the addition did not
+# disturb the unchanged IPv4 path.  Builds/relinks target/nelisp with the
+# incremental unit cache, then runs only this smoke.  Same shape as
+# `standalone-reader-socket-smoke' immediately above (Doc 194 IPv6 phase's
+# own precedent, not the shell-heredoc pattern the network-process-*
+# smokes further down this file use).
+standalone-reader-ipv6-socket-smoke:
+	$(EMACS) --batch -Q -L lisp -L src -L scripts \
+	  --eval '(setq load-prefer-newer t)' \
+	  -l nelisp-standalone-build -f nelisp-standalone-reader-ipv6-socket-test
+
 # Prelude-load breadth test (Wave-1 (A)+(B)).  Builds the reader binary, then
 # runs it on  scripts/nelisp-stdlib-prelude.el  followed by a breadth test that
 # exercises cond / dolist / nth / plist-get / backquote (all backed by the

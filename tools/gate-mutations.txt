@@ -326,3 +326,20 @@ standalone-reader-network-process-nowait-smoke|packages/nelisp-process-adapter/s
 # measured RED at `(listen 5 2 t nil nil t listen closed t)' (positions
 # 4 and 5, expected both `t'), GREEN again with the real copy restored.
 standalone-reader-network-process-server-smoke|packages/nelisp-process-adapter/src/nelisp-process-adapter.el|s/(process-put child :filter (process-get proc :filter))/(process-put child :filter nil)/|an auto-accepted child's filter is dropped instead of inherited from the :server t listener, so per-connection data never reaches the caller's filter
+# Doc 194 P7 (feat/socket-ipv6): manually verified RED-with-injection /
+# GREEN-with-injection-reverted before adding.  `nl_socket_build_
+# sockaddr6' writes sin6_family = AF_INET(2) instead of AF_INET6(10) --
+# the constructed 28-byte struct is used for a socket the caller already
+# created with `domain = AF_INET6' (`nl_socket_listen_impl'/-connect_impl
+# decide the syscall's own domain argument independently, upstream of
+# this call, so that part stays correct), but the struct's OWN family
+# field now disagrees with it, and the kernel rejects the mismatch --
+# measured RED: every IPv6-literal listen/connect in the smoke
+# (::1 loopback round trip, the bracketed/full-form check, `:family
+# 'ipv6'/open-network-stream over ::1) fails with `(nelisp-socket-error
+# -97)' (EAFNOSUPPORT), while the parts needing no live IPv6 socket
+# (the pure-elisp literal table, the AAAA DNS fixture, the /etc/hosts
+# typed lookup) still pass -- exactly the shape a sockaddr_in6 family-byte
+# defect should have, not a wholesale crash.  GREEN again with `10'
+# restored.
+standalone-reader-ipv6-socket-smoke|scripts/nelisp-standalone-build.el|s/(ptr-write-u8 out_buf 0 10)/(ptr-write-u8 out_buf 0 2)/|nl_socket_build_sockaddr6 writes AF_INET(2) instead of AF_INET6(10) into sin6_family, so every real IPv6 socket call fails with EAFNOSUPPORT even though domain=AF_INET6 was still passed to socket(2) correctly

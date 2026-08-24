@@ -1,8 +1,39 @@
 #+TITLE: Doc 194 — make-network-process: sockets under the process adapter, nonblocking I/O, and DNS without libc
 #+AUTHOR: Claude (design), zawatton (direction)
 #+DATE: 2026-08-24
-#+STATUS: SHIPPED (P0-P5, 2026-08-24, branch =feat/network-process-p345=,
-#+STATUS: base =feat/network-process-p0= / =feat/socket-primitives-p1=) —
+#+STATUS: SHIPPED (P0-P7, 2026-08-24, P7 IPv6 on branch =feat/socket-ipv6=,
+#+STATUS: base =feat/native-observability= tip =976343ee5=) — §4's own P7
+#+STATUS: section has the full IPv6 phase writeup: AF_INET6 sockaddr_in6
+#+STATUS: construction, an IPv6-literal parser (native AND a separate
+#+STATUS: pure-elisp one), AAAA DNS resolution, dual-stack ordering, and
+#+STATUS: =:family 'ipv6= routing through =make-network-process=/=open-
+#+STATUS: network-stream=, all additive — every P0-P5 external contract,
+#+STATUS: name, and the entire IPv4 code path are unchanged, proven by the
+#+STATUS: ORIGINAL, untouched =standalone-reader-socket-smoke= and every
+#+STATUS: smoke this doc's own =#+VERIFIED-BY= line already names staying
+#+STATUS: green verbatim, plus a same-process IPv4 round trip reproduced
+#+STATUS: inside the new =standalone-reader-ipv6-socket-smoke= itself. One
+#+STATUS: more substrate defect found doing this: plain =string= (the
+#+STATUS: multi-arg codepoint constructor =nelisp--dns-u16-be= (§3.2 Phase
+#+STATUS: C, P2) already uses and whose own docstring claims "round-trips
+#+STATUS: the full 0-255 range correctly") UTF-8-multibyte-encodes an
+#+STATUS: individual argument >= 128 when read back through =string-byte=/
+#+STATUS: =string-bytes= — measured fresh on =target/nelisp= building this
+#+STATUS: phase's own AAAA-answer RDATA bytes (=(string 13 184)= reads
+#+STATUS: back as THREE bytes, not two): that claim holds only for the
+#+STATUS: narrow value range every EXISTING P2 call site restricts itself
+#+STATUS: to (every field < 128 by construction, per =nelisp--dns-next-
+#+STATUS: id='s own docstring), not in general. =unibyte-string= is what
+#+STATUS: actually round-trips the full 0-255 range through =string-byte=/
+#+STATUS: =string-bytes= (measured on the same binary, including composed
+#+STATUS: under =concat= with itself and with plain =string= fragments) —
+#+STATUS: used here (=nelisp--ipv6-groups-to-bytes-string=, this phase's
+#+STATUS: own new function) since it is the
+#+STATUS: first thing in this file to actually need bytes >= 128; nothing
+#+STATUS: upstream (P0-P5's own DNS wire code) was touched. Below this
+#+STATUS: point, everything already SHIPPED for P0-P5 (branch =feat/
+#+STATUS: network-process-p345=, base =feat/network-process-p0=/=feat/
+#+STATUS: socket-primitives-p1=) is unchanged and reproduced verbatim —
 #+STATUS: the synchronous client path
 #+STATUS: (=make-network-process=/=open-network-stream=, §3.1), =/etc/hosts=
 #+STATUS: resolution (§3.2 Phase B), DNS-over-TCP/53 (§3.2 Phase C), the P3
@@ -93,7 +124,7 @@
 #+STATUS: poll pass, not literally in parallel — expected, not a defect,
 #+STATUS: and =standalone-reader-network-process-server-smoke= calls
 #+STATUS: =accept-process-output= twice for exactly this reason.
-#+VERIFIED-BY: standalone-reader-network-process-smoke standalone-reader-hosts-file-smoke standalone-reader-dns-smoke standalone-reader-nonblocking-socket-smoke standalone-reader-network-process-nowait-smoke standalone-reader-network-process-server-smoke standalone-reader-smokes
+#+VERIFIED-BY: standalone-reader-network-process-smoke standalone-reader-hosts-file-smoke standalone-reader-dns-smoke standalone-reader-nonblocking-socket-smoke standalone-reader-network-process-nowait-smoke standalone-reader-network-process-server-smoke standalone-reader-smokes standalone-reader-socket-smoke standalone-reader-ipv6-socket-smoke standalone-reader-test
 
 * §0 TL;DR
 
@@ -1011,6 +1042,141 @@ contract, process-list-equivalent count) holding exactly as measured.
   rather than re-deriving it, exactly Doc 184 P4's own "documented,
   not built" shape for =make-network-process= itself one doc ago.
 
+** P7 — IPv6 (1-2 d) — DONE 2026-08-24, branch =feat/socket-ipv6=
+
+§1.1's own banner text ("Host resolution: IPv4 dotted-decimal... and the
+literal =\"localhost\"=... ONLY. DNS is explicitly out of scope") named
+IPv6 as explicitly out of scope for P0-P5 alongside DNS; this phase adds
+it as a new native/elisp pair sitting directly on top of everything
+P0-P5 already shipped, with NO change to P0-P5's own external contract
+(=nelisp-socket-listen/-accept/-connect/-send/-recv/-close/-poll/-connect-
+error= keep their exact eight names and arities; =make-network-process=/
+=open-network-stream=/=process-*= keep their exact signatures) and NO new
+=nelisp_apply_function= dispatch-table entry (§5.3 below).
+
+*Native (=scripts/nelisp-standalone-build.el=, =nelisp-standalone--socket-
+forms=, right after =nl_socket_build_sockaddr=)*: =struct sockaddr_in6=
+(28 bytes, RFC 3493 sec 3.3) is built the SAME way §1.1's own
+=sockaddr_in= already is — entirely inside the native unit's own
+=alloc-bytes= scratch, raw memory never crossing into user space — by a
+new =nl_socket_build_sockaddr6=, alongside a self-contained IPv6-literal
+parser family (=nl_ipv6_has_colon_walk=/=nl_ipv6_find_dcolon=/=nl_hex_
+nibble=/=nl_ipv6_hex_group_walk=/=nl_ipv6_parse_literal=/=nl_bytes_copy=)
+mirroring §1.1's own =nl_ipv4_octet_walk= recursive-walker style exactly:
+1-4 hex digits per colon-separated group, RFC 4291 sec 2.2 =::=
+zero-compression at any position (a LEFT half written directly into the
+output, a RIGHT half parsed into a small scratch buffer first since its
+final offset depends on its own length, then =nl_bytes_copy='d into
+place), and an embedded dotted-IPv4 tail (=::ffff:1.2.3.4=) re-using the
+EXISTING, UNCHANGED =nl_ipv4_octet_walk= over the tail's own sub-range.
+=nl_socket_listen_impl=/=nl_socket_connect_impl= each gained ONE
+side-effect-free =':' =-byte scan (=nl_ipv6_has_colon_walk=), run ONCE
+before =socket(2)=, deciding =AF_INET(2)=/=AF_INET6(10)= — neither
+=nl_socket_build_sockaddr= (v4) nor any of its own callers' syscall
+arguments changed for a host that scan finds no colon in, which is
+EVERY host §1.1's own two literal forms (=localhost=, dotted-decimal)
+ever produce.
+
+*Pure elisp (=packages/nelisp-process-adapter/src/nelisp-process-
+adapter.el=, right after =nelisp--net-host-string=)*: a SEPARATE,
+independent IPv6-literal parser/unparser (=nelisp--ipv6-parse=/=-unparse=,
+plus =-literal-p=/=-strip-brackets=/=-parse-groups=/=-parse-segment=/
+=-group-value=/=-find-dcolon-pos=/=-take=/=-bytes-to-groups=/=-groups-to-
+bytes-string=) — a genuine second implementation of the SAME RFC 4291 sec
+2.2 grammar, not shared with the native family above, matching this doc's
+own §1.1 precedent of Phase 1's IPv4 dotted-quad grammar ALSO already
+having two independent checkers (=nl_ipv4_parse_dotted=, authoritative
+for the raw primitives, and =nelisp--ipv4-dotted-p=, "close enough to
+decide whether resolution is needed at all"). =nelisp--ipv6-unparse=
+implements RFC 5952's own canonical =::=-compression (longest run of
+zero groups); =nelisp--ipv6-parse=/=-unparse= composed is this doc's own
+round-trip test (=test/nelisp-process-adapter-test.el=). DNS (§3.2 Phase
+C) gained AAAA: =nelisp--dns-encode-query=/=nelisp--dns-parse-response=
+both gained a backward-compatible optional QTYPE argument (default 1/A,
+every existing caller omits it and is unaffected), and a new
+=nelisp--dns-resolve-aaaa= (a SEPARATE function reusing the same wire
+encoder/decoder, not a parameterized rewrite of =nelisp--dns-resolve-a=)
+queries type 28. =nelisp--hosts-file-lookup-typed= (Phase B) scans
+=/etc/hosts= for a NAME restricted to one address family, independent of
+=nelisp--hosts-file-lookup='s own untyped, first-line-wins convention
+(unchanged). Dual-stack order for a NAME with no family hint: AAAA
+before A — a deliberate, documented simplification of RFC 6724 (real
+=getaddrinfo(3)= with =AF_UNSPEC= sorts a combined candidate list by RFC
+6724 sec 6's destination-address-selection rules, which need real
+interface/route introspection this substrate does not have; RFC 6724 sec
+10.3 itself notes AAAA-first is the simpler convention many
+implementations already use) — see =nelisp--resolve-host-family='s own
+docstring for the full citation. =nelisp--net-effective-family= decides
+=ipv4=/=ipv6= from a =make-network-process= PLIST: an explicit =:family
+'ipv6=, or a =:host= that is ALREADY an IPv6 literal (Emacs's own
+=:family= auto-detection-from-host, measured convention this doc extends
+rather than newly invents) — every other PLIST shape (every caller before
+this phase, and every =:family 'ipv4=/no-=:family= caller after it) gets
+=ipv4=, which routes through the EXACT SAME code every one of P0-P5's own
+functions already ran, unmodified. =nelisp--net-host-string= gained a
+backward-compatible optional FAMILY argument (nil/omitted unchanged,
+=\\='ipv6= makes the nil/=\\='local= loopback default =\"::1\"= instead of
+=\"127.0.0.1\"=).
+
+*Non-linux-x86_64 (SCOPE item 6, confirmed)*: no new proof was needed and
+none was added. =nelisp-standalone--socket-dispatch-arms='s NAMES list is
+UNCHANGED (still exactly the same eight =nelisp-socket-*= names §1.1/P3
+already had) — this phase adds NO new dispatchable primitive name, so
+the existing per-target gate (§1.1's own banner, §5.3 below) already
+covers it with zero edits.
+=test/nelisp-standalone-target-test.el='s =nelisp-standalone-target-
+socket-dispatch-linux-x86-64-real=/=-non-linux-x86-64-unsupported= pair —
+which already asserts ALL EIGHT names, on every non-linux-x86_64 target,
+share one =eq=-identical =nelisp-unsupported-primitive= signal form
+mentioning none of the eight real =nl_socket_*_impl= native call
+targets — passes UNCHANGED, still green, confirming this by construction
+rather than by inspection alone.
+
+*Exit* (DoD-shaped, this doc's own §4 convention): (a) IPv4 unchanged —
+=standalone-reader-socket-smoke= (the ORIGINAL, UNTOUCHED P1 smoke) and
+every P0-P5 smoke this doc's own =#+VERIFIED-BY= line already names stay
+green VERBATIM, plus =nelisp-standalone-target-socket-dispatch-*= (above)
+and =emacs-parity=; a same-process IPv4 round trip is ALSO reproduced
+inside the new smoke itself (part 2 of 7, immediately after the IPv6
+round trip), against-the-bug evidence that adding IPv6 did not disturb
+IPv4 in the SAME binary, not merely in a separate one. (b) IPv6 loopback
+round trip (listen/connect/accept/send/recv both directions, UTF-8
+Japanese payload, byte-exact, close) on =::1=, at the raw primitive
+level, one process. (c) The reference table (=::=, =::1=, a full
+8-group form, an embedded =::ffff:v4= tail, the bracketed form) parses
+correctly via BOTH the raw primitives (bracketed/full-form loopback
+connect) and the pure-elisp =nelisp--ipv6-parse=, round-tripped through
+=nelisp--ipv6-unparse=; a malformed literal (=gggg::1=) signals the
+catchable =nelisp-socket-error=/=nelisp-dns-error= at each layer
+respectively, never an uncaught error and never a silent wrong parse.
+(d) AAAA resolution: =/etc/hosts= (a fixture mapping one hostname to
+=::1=, resolved via =nelisp--hosts-file-lookup-typed= QTYPE =aaaa= and
+confirmed ABSENT under QTYPE =a=, proving the typed lookup actually
+discriminates rather than returning whatever it finds) and a
+captured/hand-built DNS-over-TCP response with one AAAA/IN answer
+(QTYPE 28 extracts the canonical string; the SAME fixture under QTYPE 1
+finds nothing, proving QTYPE gates extraction) — this sandbox's own
+DNS-over-TCP/53 smoke (=standalone-reader-dns-smoke=) already documents
+no live external resolver egress here, so the fixture path is this
+phase's own authoritative evidence, matching DoD's own "if network
+egress exists one real AAAA lookup, else unit-test the AAAA parser
+against a captured response" clause exactly. All of (a)-(d) are ONE
+Makefile target, =standalone-reader-ipv6-socket-smoke= — own focused
+loop AND a member of =nelisp-standalone-reader-test='s own dolist (this
+doc's own DoD, matching Phase 1's own =standalone-reader-socket-smoke=
+precedent for that exact "dolist + own make target" shape).
+
+- Files: =scripts/nelisp-standalone-build.el= (native sockaddr_in6/
+  literal-parser family + =nl_socket_listen_impl=/=-connect_impl=
+  family-dispatch edit + the new smoke, all in the same socket section
+  §1.1/§3.3 already occupy), =packages/nelisp-process-adapter/src/
+  nelisp-process-adapter.el= (pure-elisp literal parser + AAAA DNS +
+  =:family= routing), =test/nelisp-process-adapter-test.el= (ERT,
+  =skip-unless (fboundp 'nelisp-process-start)=, this doc's own §5.1
+  precedent for a case documentary under host Emacs and authoritative
+  against the built binary), =Makefile= (the new target),
+  =tools/gate-mutations.txt= (one new row).
+
 * §5 Verification design (cross-cutting)
 
 ** §5.1 Against-the-bug
@@ -1136,6 +1302,35 @@ nelisp-network-process-smoke|packages/nelisp-process-adapter/src/nelisp-process-
 - =scripts/nelisp-standalone-build.el:10476-10603= (=fix/ffi-surface-
   availability=) — =nelisp-standalone--reader-ffi-live-p=, the
   target+build-flag predicate behind §1.4's availability matrix.
+- =scripts/nelisp-standalone-build.el= (=feat/socket-ipv6=,
+  P7) — the native IPv6 family: =nl_ipv6_has_colon_walk=/=nl_hex_nibble=/
+  =nl_ipv6_find_dcolon=/=nl_bytes_copy=/=nl_ipv6_hex_group_walk=/
+  =nl_ipv6_parse_literal=/=nl_socket_build_sockaddr6=, all defined right
+  after =nl_socket_build_sockaddr= in =nelisp-standalone--socket-forms=;
+  the family-dispatch edits to =nl_socket_listen_impl=/=nl_socket_
+  connect_impl=; =nelisp-standalone--reader-ipv6-socket-smoke=/
+  =nelisp-standalone-reader-ipv6-socket-test= (the new smoke, own
+  Makefile target AND a =nelisp-standalone-reader-test= dolist member,
+  same shape as P1's own =nelisp-standalone--reader-socket-smoke=).
+- =packages/nelisp-process-adapter/src/nelisp-process-adapter.el=
+  (=feat/socket-ipv6=, P7) — the pure-elisp IPv6 literal parser
+  (=nelisp--ipv6-parse=/=-unparse= and their helpers, right after
+  =nelisp--net-host-string=); the AAAA extension to =nelisp--dns-encode-
+  query=/=nelisp--dns-parse-response= (backward-compatible optional
+  QTYPE) plus the new =nelisp--dns-resolve-aaaa=; =nelisp--hosts-file-
+  lookup-typed= (Phase B, AAAA-aware); =nelisp--net-effective-family=/
+  =nelisp--resolve-host-family= (the =:family= decision + AAAA-first
+  dual-stack order); the family-routing edits to =make-network-process=/
+  =nelisp--network-process-connect-nowait=/=nelisp--network-process-
+  listen=.
+- =test/nelisp-process-adapter-test.el= (=feat/socket-ipv6=, P7) —
+  =nelisp-ipv6-parse-unparse-round-trip=/=-rejects-malformed-literals=/
+  =nelisp-ipv6-literal-p-family-detection=/=nelisp-net-effective-family-
+  detection=/=nelisp-dns-encode-query-aaaa-qtype-byte=/=nelisp-dns-parse-
+  response-aaaa-fixture=, gated =skip-unless (fboundp 'nelisp-process-
+  start)= exactly like every sibling case in this file (§5.1's own
+  documentary-under-host-Emacs/authoritative-against-the-binary
+  convention).
 
 ** §7.2 Docs
 

@@ -172,5 +172,130 @@ process object."
       (nelisp-async-core--fire-due (nelisp-async-core--now))
       (should (> n 1)))))
 
+;; ---- Doc 194 IPv6 phase (P7) --------------------------------------------
+;; `nelisp--ipv6-parse'/`-unparse' and friends are pure elisp (no
+;; `alloc-bytes'/native primitive involved at all, unlike everything
+;; above) -- but they live in the SAME file this test file's own header
+;; comment explains NOT `require'-ing unconditionally under host Emacs
+;; (it redefines `make-process'/`accept-process-output'/etc., clobbering
+;; sibling test files sharing one batch process).  So these cases use the
+;; SAME `skip-unless (fboundp 'nelisp-process-start)' convention every
+;; other case in this file already uses: documentary under host Emacs
+;; (skipped), real coverage once this package is actually loaded (a
+;; standalone-binary/host-bridge context).  The AUTHORITATIVE red/green
+;; evidence for this phase is `standalone-reader-ipv6-socket-smoke'
+;; (Makefile), which runs the SAME functions for real inside
+;; `target/nelisp' against a reference table plus a live loopback round
+;; trip -- exactly this file's own header comment's established
+;; precedent for every sibling case above.
+
+(ert-deftest nelisp-ipv6-parse-unparse-round-trip ()
+  "`nelisp--ipv6-parse' composed with `nelisp--ipv6-unparse' returns to
+the SAME 8-group value for every literal in the reference table (Doc 194
+IPv6 phase DoD item (c)): a bare `::', `::1', a full 8-group form with no
+compression, an embedded-IPv4 `::ffff:1.2.3.4' tail, and the bracketed
+`open-network-stream' form.  Byte values checked directly (not just
+`equal' round-trip) against RFC 4291's own worked examples."
+  (skip-unless (fboundp 'nelisp-process-start))
+  (let ((cases '(("::" . (0 0 0 0 0 0 0 0))
+                 ("::1" . (0 0 0 0 0 0 0 1))
+                 ("2001:db8:0:0:0:0:0:1" . (8193 3512 0 0 0 0 0 1))
+                 ("::ffff:1.2.3.4" . (0 0 0 0 0 65535 258 772))
+                 ("[::1]" . (0 0 0 0 0 0 0 1))
+                 ("fe80::1" . (65152 0 0 0 0 0 0 1)))))
+    (dolist (case cases)
+      (let ((groups (nelisp--ipv6-parse (car case))))
+        (should (equal groups (cdr case)))
+        ;; Round trip: unparse then re-parse must return the SAME groups,
+        ;; regardless of exactly which `::'-compressed text form the
+        ;; unparser chose to emit.
+        (should (equal (nelisp--ipv6-parse (nelisp--ipv6-unparse groups)) groups))))))
+
+(ert-deftest nelisp-ipv6-parse-rejects-malformed-literals ()
+  "Malformed IPv6 literals signal the catchable `nelisp-dns-error', never
+an uncaught error or a wrong-but-silent parse (Doc 194 IPv6 phase, same
+against-the-bug convention as `nelisp--dns-byte''s own bounds guard)."
+  (skip-unless (fboundp 'nelisp-process-start))
+  (dolist (bad '("" ":::" "1:2:3:4:5:6:7:8:9" "1::2::3" "gggg::1" "1:2:3"
+                  "::1.2.3.4.5"))
+    (should-error (nelisp--ipv6-parse bad) :type 'nelisp-dns-error)))
+
+(ert-deftest nelisp-ipv6-literal-p-family-detection ()
+  "Family auto-detection (Doc 194 IPv6 phase SCOPE item 2): a colon means
+IPv6, matching the native `nl_ipv6_has_colon_walk' convention -- neither
+an IPv4 dotted-quad nor \"localhost\" ever contains one."
+  (skip-unless (fboundp 'nelisp-process-start))
+  (should (nelisp--ipv6-literal-p "::1"))
+  (should (nelisp--ipv6-literal-p "fe80::1"))
+  (should-not (nelisp--ipv6-literal-p "127.0.0.1"))
+  (should-not (nelisp--ipv6-literal-p "localhost"))
+  (should-not (nelisp--ipv6-literal-p "example.com")))
+
+(ert-deftest nelisp-net-effective-family-detection ()
+  "`nelisp--net-effective-family' returns `ipv6' only for an explicit
+`:family \\='ipv6' or an already-IPv6 `:host' literal -- every other
+PLIST shape (the overwhelming majority, every pre-existing caller) gets
+`ipv4', the TOP CONSTRAINT this whole phase is built on."
+  (skip-unless (fboundp 'nelisp-process-start))
+  (should (eq (nelisp--net-effective-family '(:family ipv6 :host "example.com")) 'ipv6))
+  (should (eq (nelisp--net-effective-family '(:host "::1")) 'ipv6))
+  (should (eq (nelisp--net-effective-family '(:host "[::1]")) 'ipv6))
+  (should (eq (nelisp--net-effective-family '(:host "127.0.0.1")) 'ipv4))
+  (should (eq (nelisp--net-effective-family '(:host "localhost")) 'ipv4))
+  (should (eq (nelisp--net-effective-family '(:host nil)) 'ipv4))
+  (should (eq (nelisp--net-effective-family '(:family ipv4 :host "127.0.0.1")) 'ipv4)))
+
+(ert-deftest nelisp-dns-encode-query-aaaa-qtype-byte ()
+  "`nelisp--dns-encode-query' with QTYPE 28 (AAAA) differs from the
+default (QTYPE 1, A) ONLY in the QTYPE field's own two bytes -- same
+length, same header, same QNAME encoding (Doc 194 IPv6 phase: the A
+query's own wire bytes, the default/omitted-QTYPE case, are unchanged)."
+  (skip-unless (fboundp 'nelisp-process-start))
+  (let* ((a (nelisp--dns-encode-query "example.com"))
+         (aaaa (nelisp--dns-encode-query "example.com" 28))
+         (n (string-bytes a)))
+    (should (= n (string-bytes aaaa)))
+    ;; QTYPE occupies the 2 bytes immediately before the trailing 2-byte
+    ;; QCLASS field.
+    (should (equal (list (string-byte a (- n 4)) (string-byte a (- n 3))) '(0 1)))
+    (should (equal (list (string-byte aaaa (- n 4)) (string-byte aaaa (- n 3))) '(0 28)))
+    ;; Everything else -- flags/counts/QNAME/QCLASS -- is byte-identical
+    ;; except the QTYPE field just checked and the query ID (bytes 2-3,
+    ;; right after the 2-byte TCP length prefix; `nelisp--dns-next-id'
+    ;; increments on every call, so it necessarily differs between these
+    ;; two consecutive calls -- by how many OF ITS OWN two bytes depends
+    ;; on whether the low byte happened to wrap, which this test does not
+    ;; assume either way).
+    (dotimes (i n)
+      (unless (or (memq i '(2 3)) (= i (- n 4)) (= i (- n 3)))
+        (should (= (string-byte a i) (string-byte aaaa i)))))))
+
+(ert-deftest nelisp-dns-parse-response-aaaa-fixture ()
+  "A hand-built DNS-over-TCP response with one AAAA/IN answer (RDATA = 16
+raw bytes for `2001:db8::1') parses to the canonical IPv6 string via
+`nelisp--dns-parse-response' QTYPE 28 -- against-the-bug: the SAME fixture
+parsed with the default QTYPE (1, A) finds no matching answer (nil, not
+a wrong value and not an error), proving QTYPE actually gates which
+record type is extracted."
+  (skip-unless (fboundp 'nelisp-process-start))
+  (let* ((header (concat (string 0 1)             ; ID
+                          (string 1 0)             ; flags: RD=1
+                          (string 0 1)             ; QDCOUNT=1
+                          (string 0 1)             ; ANCOUNT=1
+                          (string 0 0) (string 0 0))) ; NS/ARCOUNT=0
+         (qname (concat (string 7) "example" (string 3) "com" (string 0)))
+         (question (concat qname (string 0 28) (string 0 1))) ; QTYPE=28 QCLASS=1
+         (rdata (nelisp--ipv6-groups-to-bytes-string
+                 (nelisp--ipv6-parse "2001:db8::1")))
+         (answer (concat (unibyte-string 192 12)    ; NAME = compression ptr to qname@12
+                          (string 0 28)             ; TYPE = 28 (AAAA)
+                          (string 0 1)              ; CLASS = 1 (IN)
+                          (string 0 0 0 60)         ; TTL
+                          (string 0 16)             ; RDLENGTH = 16
+                          rdata))
+         (msg (concat header question answer)))
+    (should (equal (nelisp--dns-parse-response msg 28) "2001:db8::1"))
+    (should (null (nelisp--dns-parse-response msg 1)))))
+
 (provide 'nelisp-process-adapter-test)
 ;;; nelisp-process-adapter-test.el ends here

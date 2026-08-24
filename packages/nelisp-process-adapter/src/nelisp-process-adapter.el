@@ -606,16 +606,229 @@ parser, which still runs, unchanged, after this decision either way."
          (and (= (length parts) 4)
               (not (memq nil (mapcar (lambda (p) (string-match-p "\\`[0-9]+\\'" p)) parts)))))))
 
-(defun nelisp--net-host-string (host)
+(defun nelisp--net-host-string (host &optional family)
   "Normalize the `:host' plist value HOST the way real Emacs's own
 `make-network-process' does before resolution (measured Doc 194 S1.3):
 nil or the symbol `local' both mean the loopback interface.  Anything
 else must already be a string; the ACTUAL resolution -- literal passthrough,
-`/etc/hosts', or DNS -- happens one level up, in `nelisp--resolve-host'."
+`/etc/hosts', or DNS -- happens one level up, in `nelisp--resolve-host'.
+
+FAMILY (Doc 194 IPv6 phase, P7) is an optional new argument: when
+`\\='ipv6', the nil/`local' loopback default becomes \"::1\" instead of
+\"127.0.0.1\".  Every call site before this phase omits FAMILY, so this
+addition changes nothing for them -- `(nelisp--net-host-string host)'
+with no second argument behaves exactly as it always has."
   (cond
-   ((or (null host) (eq host 'local)) "127.0.0.1")
+   ((or (null host) (eq host 'local)) (if (eq family 'ipv6) "::1" "127.0.0.1"))
    ((stringp host) host)
    (t (signal 'wrong-type-argument (list 'stringp host)))))
+
+;;; IPv6 literal parsing, pure elisp (Doc 194 IPv6 phase (P7), SCOPE item 3)
+;;; -------------------------------------------------------------------------
+;; Independent of, and NOT shared with, the native `nl_ipv6_*' family in
+;; `scripts/nelisp-standalone-build.el' -- that native layer builds the
+;; 28-byte `sockaddr_in6' struct directly from a raw host STRING passed to
+;; `nelisp-socket-listen'/-connect (mirroring how `nl_socket_build_
+;; sockaddr' already handles IPv4 literals natively, unchanged).  THIS
+;; layer exists for everything that needs to REASON about an IPv6 address
+;; at the elisp level without a socket call: `:family' auto-detection
+;; below, the dual-stack DNS decision (Phase C, further down), and
+;; formatting a raw AAAA answer's 16 RDATA bytes back into a literal
+;; string.  Two independent implementations of the same RFC 4291 sec 2.2
+;; grammar is a real cost, but the raw socket primitives (native, no
+;; elisp involved at the call site at all) and this elisp reasoning layer
+;; are separate SCOPE items by design (see this doc's own P7 section) --
+;; matching how Phase 1's IPv4 dotted-quad grammar ALSO already has two
+;; independent checkers, `nl_ipv4_parse_dotted' (native, authoritative
+;; for what a raw primitive call accepts) and `nelisp--ipv4-dotted-p'
+;; (elisp, above, "close enough to decide whether resolution is needed at
+;; all").
+
+(defun nelisp--ipv6-literal-p (text)
+  "Return non-nil if TEXT (already bracket-stripped) looks like an IPv6
+literal -- contains a colon.  Mirrors the native `nl_ipv6_has_colon_walk'
+family-detection convention (Doc 194 IPv6 phase S1.1): neither
+\"localhost\" nor an IPv4 dotted-decimal literal ever contains one, so
+this check can never mis-route Phase 1's own two literal forms."
+  (and (stringp text) (string-match-p ":" text)))
+
+(defun nelisp--ipv6-strip-brackets (host)
+  "Strip one bracket pair (\"[::1]\" -> \"::1\"), the `open-network-
+stream'/URL display form (Doc 194 IPv6 phase SCOPE item 3).  HOST
+without brackets passes through unchanged."
+  (if (and (stringp host) (> (length host) 1)
+           (string-prefix-p "[" host) (string-suffix-p "]" host))
+      (substring host 1 -1)
+    host))
+
+(defun nelisp--ipv6-take (n list)
+  "First N elements of LIST, or all of LIST if shorter.  A small local
+helper rather than `seq-take' -- this file is embedded as executable
+prelude source into the default standalone binary (`tools/nelisp-
+binary-size-baseline.txt''s own accounting), which does not load
+`seq.el'."
+  (if (or (<= n 0) (null list))
+      nil
+    (cons (car list) (nelisp--ipv6-take (1- n) (cdr list)))))
+
+(defun nelisp--ipv6-group-value (text)
+  "Parse TEXT as 1-4 hex digits -> an integer 0-65535, or nil if TEXT is
+not exactly that shape (empty, too long, or a non-hex character)."
+  (and (stringp text)
+       (> (length text) 0)
+       (<= (length text) 4)
+       (string-match-p "\\`[0-9a-fA-F]+\\'" text)
+       (string-to-number text 16)))
+
+(defun nelisp--ipv6-find-dcolon-pos (text)
+  "Return the character index of the FIRST \"::\" run in TEXT, or nil.
+A SECOND \"::\" later in TEXT is deliberately not special-cased here --
+it lands inside `nelisp--ipv6-parse-segment''s own `split-string' walk
+over whichever half it falls in, which rejects it via an empty group
+between two adjacent colons (mirrors the native `nl_ipv6_find_dcolon''s
+own first-occurrence-only convention, S1.1 above)."
+  (string-match "::" text))
+
+(defun nelisp--ipv6-parse-segment (text)
+  "Parse TEXT -- one side of a \"::\" split, or the whole literal body
+when there is no \"::\" -- into a list of 16-bit GROUP integers.  An
+embedded dotted-IPv4 tail (RFC 4291 sec 2.2, \"::ffff:1.2.3.4\") is only
+valid as the LAST colon-separated part and expands to its own two
+groups, reusing `nelisp--ipv4-dotted-p' (Phase A, above) for its own
+validation.  Returns nil for an EMPTY TEXT (the compressed side of a
+leading/trailing \"::\", or a genuinely empty literal) -- the CALLER
+distinguishes \"empty, valid\" (a `::' compression side) from
+\"malformed\" using TEXT itself, not this return value alone.  Signals
+`nelisp-dns-error' on anything that is not a valid group list -- an
+out-of-range hex value cannot occur (`nelisp--ipv6-group-value' already
+bounds a 1-4 hex digit group to 0-65535, always representable), but a
+malformed group (non-hex, too long, or an empty group from an adjacent
+`::' this TEXT should never itself contain once the caller has already
+removed the real `::') is exactly what this rejects."
+  (if (zerop (length text))
+      nil
+    (let ((parts (split-string text ":"))
+          (groups nil))
+      (while parts
+        (let ((part (car parts)))
+          (cond
+           ((and (null (cdr parts)) (string-match-p "\\." part))
+            (unless (nelisp--ipv4-dotted-p part)
+              (signal 'nelisp-dns-error
+                      (list "malformed IPv6 literal (bad embedded IPv4 tail)" part)))
+            (let ((octets (mapcar #'string-to-number (split-string part "\\."))))
+              (when (memq nil (mapcar (lambda (o) (and (>= o 0) (<= o 255))) octets))
+                (signal 'nelisp-dns-error
+                        (list "malformed IPv6 literal (IPv4 tail octet out of range)" part)))
+              (setq groups (append groups
+                                    (list (+ (* (nth 0 octets) 256) (nth 1 octets))
+                                          (+ (* (nth 2 octets) 256) (nth 3 octets)))))))
+           (t
+            (let ((v (nelisp--ipv6-group-value part)))
+              (unless v
+                (signal 'nelisp-dns-error (list "malformed IPv6 literal (bad group)" part)))
+              (setq groups (append groups (list v)))))))
+        (setq parts (cdr parts)))
+      groups)))
+
+(defun nelisp--ipv6-parse-groups (text)
+  "Parse TEXT -- a complete RFC 4291 sec 2.2 IPv6 address body, no
+brackets -- into a list of exactly 8 16-bit GROUP integers, applying
+`::' zero-compression (at any position, including a bare \"::\") when
+present.  Signals `nelisp-dns-error' on anything malformed: wrong group
+count with no compression, too many groups even WITH compression, or
+anything `nelisp--ipv6-parse-segment' itself already rejects."
+  (let ((dc (nelisp--ipv6-find-dcolon-pos text)))
+    (if (null dc)
+        (let ((groups (nelisp--ipv6-parse-segment text)))
+          (unless (= (length groups) 8)
+            (signal 'nelisp-dns-error
+                    (list "malformed IPv6 literal (wrong group count, no `::')" text)))
+          groups)
+      (let* ((left (substring text 0 dc))
+             (right (substring text (+ dc 2)))
+             (left-groups (nelisp--ipv6-parse-segment left))
+             (right-groups (nelisp--ipv6-parse-segment right))
+             (total (+ (length left-groups) (length right-groups))))
+        (when (> total 8)
+          (signal 'nelisp-dns-error
+                  (list "malformed IPv6 literal (too many groups with `::')" text)))
+        (append left-groups (make-list (- 8 total) 0) right-groups)))))
+
+(defun nelisp--ipv6-parse (host)
+  "Parse HOST (optionally bracketed, e.g. \"[::1]\") as an RFC 4291 sec
+2.2 IPv6 literal, returning a list of 8 16-bit GROUP integers.  Signals
+`nelisp-dns-error' if HOST is not a valid literal.  The full form, `::'
+zero-compression at any position, an embedded dotted-IPv4 tail, and the
+bracket form all parse (Doc 194 IPv6 phase, SCOPE item 3).  The exact
+inverse of `nelisp--ipv6-unparse'; `test/nelisp-process-adapter-test.el'
+composes the two and checks the GROUPS come back unchanged for a
+reference table of literals (\"::\", \"::1\", a full form, \"::ffff:v4\",
+and the bracketed form)."
+  (nelisp--ipv6-parse-groups (nelisp--ipv6-strip-brackets host)))
+
+(defun nelisp--ipv6-unparse (groups)
+  "Format an 8-element GROUPS list (16-bit integers, `nelisp--ipv6-parse's
+own return shape) as a canonical `::'-compressed IPv6 literal string
+(RFC 5952: compress the LONGEST run of two-or-more consecutive zero
+groups; lowercase hex, no leading zeros).  The exact inverse of
+`nelisp--ipv6-parse' -- see that function's own docstring for the
+round-trip test."
+  (let ((best-start nil) (best-len 0) (run-start nil) (run-len 0) (i 0))
+    (dolist (g groups)
+      (if (= g 0)
+          (progn
+            (when (null run-start) (setq run-start i))
+            (setq run-len (1+ run-len))
+            (when (> run-len best-len) (setq best-len run-len best-start run-start)))
+        (setq run-start nil run-len 0))
+      (setq i (1+ i)))
+    (if (and best-start (>= best-len 2))
+        (concat (mapconcat (lambda (g) (format "%x" g))
+                            (nelisp--ipv6-take best-start groups) ":")
+                "::"
+                (mapconcat (lambda (g) (format "%x" g))
+                           (nthcdr (+ best-start best-len) groups) ":"))
+      (mapconcat (lambda (g) (format "%x" g)) groups ":"))))
+
+(defun nelisp--ipv6-bytes-to-groups (bytes)
+  "BYTES a list of 16 raw integers (a DNS AAAA answer's RDATA, Doc 194
+IPv6 phase) -> a list of 8 16-bit GROUP integers, the shared
+representation `nelisp--ipv6-unparse'/`nelisp--ipv6-parse' both use."
+  (let (groups (rest bytes))
+    (while rest
+      (push (+ (* (car rest) 256) (cadr rest)) groups)
+      (setq rest (cddr rest)))
+    (nreverse groups)))
+
+(defun nelisp--ipv6-groups-to-bytes-string (groups)
+  "The inverse of `nelisp--ipv6-bytes-to-groups': an 8-element GROUPS
+list -> a 16-byte raw STRING.  `unibyte-string', NOT `string' -- measured
+against this exact case on `target/nelisp' (not assumed, and not the
+same conclusion `nelisp--dns-u16-be' above reached for ITS OWN narrower
+value range): `(string 13 184)' -- 184 >= 128, a value THIS function
+routinely needs to represent (any IPv6 group byte) but `nelisp--dns-u16-
+be''s own callers never do (every one of THEIR values is < 128 by
+construction, that function's own docstring) -- comes back as THREE
+bytes (13 194 184) through `string-bytes'/`string-byte', not two:
+`string' UTF-8-encodes an integer argument >= 128 as a multi-byte
+CODEPOINT (exactly like it correctly does for `aref'/`length' access,
+which is real Emacs's own ordinary multibyte-string behavior), it does
+NOT store it as one raw byte the way `nl_alloc_str' (received socket
+bytes) does.  `(unibyte-string 13 184)' measured, on the same binary, to
+answer the intended two bytes (13 184) through `string-bytes'/`string-
+byte', and to compose correctly under `concat' with itself and with
+plain `string' fragments (measured together, not assumed).  So
+`nelisp--dns-u16-be''s own docstring claim that plain `string' \"round-
+trips the full 0-255 range correctly\" holds only for the narrow set of
+values every EXISTING P2 call site restricts itself to (ID capped below
+128*256, QTYPE/QCLASS/count fields all small enums) -- not in general;
+this function is the first in this file to actually need the >= 128
+half of that range, and using `unibyte-string' here is this phase's own
+fix for it, out of scope to touch anything upstream of this new
+function."
+  (apply #'concat
+         (mapcar (lambda (g) (unibyte-string (logand (ash g -8) 255) (logand g 255))) groups)))
 
 ;; Phase B -- /etc/hosts, pure elisp, zero native change (Doc 194 S3.2).
 
@@ -655,6 +868,30 @@ matching POSIX/glibc `files' lookup order."
   "Return NAME's IPv4 address string from `/etc/hosts' (or FILE), or nil
 if NAME is not listed there (Doc 194 P1)."
   (cdr (assoc name (nelisp--hosts-file-table file))))
+
+(defun nelisp--hosts-file-lookup-typed (name qtype &optional file)
+  "Doc 194 IPv6 phase: like `nelisp--hosts-file-lookup' but restricted to
+QTYPE's address family -- `a' (IPv4, an address string with no ':') or
+`aaaa' (IPv6, one WITH a ':').  A SEPARATE scan, not built on
+`nelisp--hosts-file-table' (which keeps only the FIRST line per NAME
+regardless of family, Doc 194 P1's own untyped convention, unchanged) --
+this one scans every line for NAME so a file listing e.g. both a
+\"::1 localhost\" AND a \"127.0.0.1 localhost\" line resolves correctly
+for EITHER family regardless of which line comes first, letting `\\='aaaa'
+resolution reach an IPv6 entry even when an earlier IPv4 line for the
+same NAME would otherwise shadow it under the untyped lookup's
+first-line-wins rule."
+  (let ((path (or file nelisp--etc-hosts-file)))
+    (when (file-exists-p path)
+      (with-temp-buffer
+        (insert-file-contents path)
+        (catch 'nelisp--hosts-file-typed-found
+          (dolist (line (split-string (buffer-string) "\n"))
+            (dolist (pair (nelisp--hosts-file-parse-line line))
+              (when (and (equal (car pair) name)
+                         (eq (if (nelisp--ipv6-literal-p (cdr pair)) 'aaaa 'a) qtype))
+                (throw 'nelisp--hosts-file-typed-found (cdr pair)))))
+          nil)))))
 
 ;; Phase C -- DNS-over-TCP/53, pure elisp on Phase 1's own primitives
 ;; (Doc 194 P2/S3.2).  RFC 7766 (mandatory-to-implement in every
@@ -744,19 +981,25 @@ could otherwise appear (every other field -- flags, counts, QTYPE/
 QCLASS, hostname labels -- is already < 128 by construction)."
   (setq nelisp--dns-query-id-counter (mod (1+ nelisp--dns-query-id-counter) 32768)))
 
-(defun nelisp--dns-encode-query (name)
-  "Return the raw DNS-over-TCP QUERY message for NAME's A record: the
-2-byte RFC 7766 length prefix, a 12-byte header (ID, flags = recursion
-desired, QDCOUNT=1, AN/NS/ARCOUNT=0), and one question (QNAME QTYPE=1
-QCLASS=1, RFC 1035 S4.1.1/S4.1.2)."
-  (let* ((header (concat (nelisp--dns-u16-be (nelisp--dns-next-id))
+(defun nelisp--dns-encode-query (name &optional qtype)
+  "Return the raw DNS-over-TCP QUERY message for NAME: the 2-byte RFC
+7766 length prefix, a 12-byte header (ID, flags = recursion desired,
+QDCOUNT=1, AN/NS/ARCOUNT=0), and one question (QNAME QTYPE QCLASS=1,
+RFC 1035 S4.1.1/S4.1.2).
+
+QTYPE defaults to 1 (A); Doc 194 IPv6 phase passes 28 (AAAA,
+`nelisp--dns-resolve-aaaa') for the SAME wire format -- only the two
+QTYPE bytes differ.  Every caller before this phase omits QTYPE, so
+its own A-record query bytes are unchanged."
+  (let* ((qt (or qtype 1))
+         (header (concat (nelisp--dns-u16-be (nelisp--dns-next-id))
                           (string 1 0)             ; flags: RD=1
                           (nelisp--dns-u16-be 1)   ; QDCOUNT
                           (nelisp--dns-u16-be 0)   ; ANCOUNT
                           (nelisp--dns-u16-be 0)   ; NSCOUNT
                           (nelisp--dns-u16-be 0))) ; ARCOUNT
          (question (concat (nelisp--dns-encode-qname name)
-                            (nelisp--dns-u16-be 1)   ; QTYPE = A
+                            (nelisp--dns-u16-be qt)  ; QTYPE = A (1) or AAAA (28)
                             (nelisp--dns-u16-be 1)))  ; QCLASS = IN
          (message (concat header question)))
     (concat (nelisp--dns-u16-be (string-bytes message)) message)))
@@ -813,16 +1056,28 @@ past it."
      ((= (logand len 192) 192) (+ i 2))
      (t (nelisp--dns-skip-name buf (+ i 1 len))))))
 
-(defun nelisp--dns-parse-response (buf)
+(defun nelisp--dns-parse-response (buf &optional qtype)
   "Parse BUF (one complete DNS-over-TCP response message, the 2-byte TCP
 length prefix already stripped by the caller) and return the first
-A/IN-record IPv4 address string, or nil if the answer section has none
-\(NXDOMAIN and an empty ANCOUNT both land here, Doc 194 S3.2 -- neither
-is a parse ERROR).  Every offset computed while walking QDCOUNT/ANCOUNT
-records goes through `nelisp--dns-byte'/`nelisp--dns-skip-name', so a
-truncated or adversarially short RDLENGTH signals the catchable
-`nelisp-dns-error' rather than reading out of bounds."
-  (let* ((qdcount (nelisp--dns-u16-at buf 4))
+matching-QTYPE/IN-record address string, or nil if the answer section
+has none \(NXDOMAIN and an empty ANCOUNT both land here, Doc 194 S3.2 --
+neither is a parse ERROR).  Every offset computed while walking
+QDCOUNT/ANCOUNT records goes through `nelisp--dns-byte'/`nelisp--dns-
+skip-name', so a truncated or adversarially short RDLENGTH signals the
+catchable `nelisp-dns-error' rather than reading out of bounds.
+
+QTYPE defaults to 1 (A, 4-byte RDATA -> a dotted-decimal string, RDATA
+read byte-by-byte exactly as before this phase).  Doc 194 IPv6 phase
+passes 28 (AAAA, 16-byte RDATA -> a canonical IPv6 literal string via
+`nelisp--ipv6-bytes-to-groups'+`nelisp--ipv6-unparse') for
+`nelisp--dns-resolve-aaaa'.  Every caller before this phase omits
+QTYPE, so its own only-type-1-matches condition and its own
+dotted-decimal return shape for that case are both unchanged -- this
+function's control flow and every A-record code path are untouched by
+this addition, only a new sibling condition (QT = 28) sharing the same
+bounds-checked walk."
+  (let* ((qt (or qtype 1))
+         (qdcount (nelisp--dns-u16-at buf 4))
          (ancount (nelisp--dns-u16-at buf 6))
          (pos 12))
     (dotimes (_ qdcount)
@@ -836,13 +1091,19 @@ truncated or adversarially short RDLENGTH signals the catchable
                (rdata-pos (+ pos 10)))
           (when (> (+ rdata-pos rdlength) (string-bytes buf))
             (signal 'nelisp-dns-error (list "RDATA runs past end of message" rdlength)))
-          (when (and (= rtype 1) (= rclass 1) (= rdlength 4))
+          (when (and (= rtype 1) (= rtype qt) (= rclass 1) (= rdlength 4))
             (throw 'nelisp--dns-found
                    (format "%d.%d.%d.%d"
                            (nelisp--dns-byte buf rdata-pos)
                            (nelisp--dns-byte buf (+ rdata-pos 1))
                            (nelisp--dns-byte buf (+ rdata-pos 2))
                            (nelisp--dns-byte buf (+ rdata-pos 3)))))
+          (when (and (= rtype 28) (= rtype qt) (= rclass 1) (= rdlength 16))
+            (throw 'nelisp--dns-found
+                   (nelisp--ipv6-unparse
+                    (nelisp--ipv6-bytes-to-groups
+                     (mapcar (lambda (k) (nelisp--dns-byte buf (+ rdata-pos k)))
+                             (number-sequence 0 15))))))
           (setq pos (+ rdata-pos rdlength))))
       nil)))
 
@@ -884,6 +1145,29 @@ signalled `nelisp-dns-error'."
             (nelisp--dns-parse-response msg)))
       (ignore-errors (nelisp-socket-close fd)))))
 
+(defun nelisp--dns-resolve-aaaa (name)
+  "Doc 194 IPv6 phase: like `nelisp--dns-resolve-a' immediately above but
+queries a type-28 (AAAA) record and returns a canonical IPv6 literal
+string (`nelisp--ipv6-unparse') from the first matching answer, or nil
+if the resolver answered with zero AAAA records -- NOT an error, same
+convention as `nelisp--dns-resolve-a''s own nil case.  A SEPARATE
+function reusing the SAME wire encoder/decoder
+(`nelisp--dns-encode-query'/`nelisp--dns-parse-response', both extended
+with a backward-compatible optional QTYPE above) rather than a
+parameterized rewrite of `nelisp--dns-resolve-a' itself, so that
+function's own control flow and A-record wire bytes stay untouched."
+  (let* ((resolver (nelisp--dns-resolver-ip))
+         (query (nelisp--dns-encode-query name 28))
+         (fd (nelisp-socket-connect resolver nelisp-dns-resolver-port)))
+    (unwind-protect
+        (progn
+          (nelisp-socket-send fd query)
+          (let* ((len-prefix (nelisp--socket-recv-exact fd 2))
+                 (msg-len (+ (ash (string-byte len-prefix 0) 8) (string-byte len-prefix 1)))
+                 (msg (nelisp--socket-recv-exact fd msg-len)))
+            (nelisp--dns-parse-response msg 28)))
+      (ignore-errors (nelisp-socket-close fd)))))
+
 (defun nelisp--resolve-host (host)
   "Return an IPv4 dotted-decimal string or \"localhost\" for HOST, ready
 for `nelisp-socket-connect'/-listen (Doc 194 S3.2).  Fallback chain:
@@ -899,6 +1183,65 @@ unchanged, it is not re-wrapped as \"unresolvable\" here."
    ((nelisp--hosts-file-lookup host))
    ((nelisp--dns-resolve-a host))
    (t (signal 'nelisp-dns-error (list "unresolvable host" host)))))
+
+(defun nelisp--net-effective-family (plist)
+  "Doc 194 IPv6 phase (P7): decide whether a `make-network-process' PLIST
+should route through the IPv6 path.  Real Emacs's own `:family' keyword
+(measured Doc 194 S1.3) plus HOST-STRING auto-detection: an explicit
+`:family \\='ipv6', or a `:host' that is ALREADY an IPv6 literal
+(bracketed or not), both mean `ipv6'.  Anything else -- no `:family', or
+`:family \\='ipv4', with a `:host' that is not an IPv6 literal -- means
+`ipv4', routing through the EXACT SAME, unmodified code every existing
+caller already used before this phase.  This function returning `ipv4'
+must never change what happens next, only NAME what already happens --
+the TOP CONSTRAINT this whole phase is built around."
+  (let ((family (plist-get plist :family))
+        (host (plist-get plist :host)))
+    (if (or (eq family 'ipv6)
+            (and (stringp host)
+                 (nelisp--ipv6-literal-p (nelisp--ipv6-strip-brackets host))))
+        'ipv6
+      'ipv4)))
+
+(defun nelisp--resolve-host-family (host family)
+  "Doc 194 IPv6 phase (P7): like `nelisp--resolve-host' immediately above
+-- Phase A/B/C's own SAME fallback chain and SAME catchable
+`nelisp-dns-error' contract -- but FAMILY-aware, and used ONLY when
+`nelisp--net-effective-family' has already decided `ipv6' (never called
+for the default/`ipv4' case, so `nelisp--resolve-host' itself needs no
+change and every existing caller's behavior is untouched).  FAMILY here
+is always `\\='ipv6' in this phase's own callers, but the general
+`a'/`aaaa' machinery below (typed hosts-file lookup, separate AAAA/A DNS
+queries) is written to support `\\='ipv4' too, for symmetry and so a
+`nelisp--net-effective-family' extension never needs to touch this
+function's own logic again.
+
+Dual-stack order for a NAME with no family hint reaching this function
+at all would be AAAA-then-A (see the ordering below) -- but Doc 194 IPv6
+phase's own callers (`make-network-process'/`nelisp--network-process-
+connect-nowait') only ever invoke this with FAMILY bound, exactly
+`\\='ipv6', because `nelisp--net-effective-family' has already gated the
+call; this is recorded here as the general policy this function
+implements, not as a currently-reachable no-hint code path.  This is a
+deliberate, documented simplification of RFC 6724 (Default Address
+Selection for IPv6) -- real `getaddrinfo(3)' with `AF_UNSPEC' queries
+BOTH families and SORTS the combined candidate list by RFC 6724 sec 6's
+destination-address-selection rules (source-address availability,
+policy-table match, longest matching prefix, ...), which needs real
+interface/route introspection this substrate does not have.
+AAAA-first-then-A is the simpler convention RFC 6724 sec 10.3 itself
+notes many implementations already use, and is what this substrate can
+implement with only the primitives Doc 194 already has."
+  (let ((stripped (nelisp--ipv6-strip-brackets host)))
+    (cond
+     ((nelisp--ipv6-literal-p stripped) stripped)
+     ((and (not (eq family 'ipv6)) (or (equal host "localhost") (nelisp--ipv4-dotted-p host)))
+      host)
+     ((and (not (eq family 'ipv4)) (nelisp--hosts-file-lookup-typed host 'aaaa)))
+     ((and (not (eq family 'ipv6)) (nelisp--hosts-file-lookup host)))
+     ((and (not (eq family 'ipv4)) (nelisp--dns-resolve-aaaa host)))
+     ((and (not (eq family 'ipv6)) (nelisp--dns-resolve-a host)))
+     (t (signal 'nelisp-dns-error (list "unresolvable host" host family))))))
 
 ;;; make-network-process / open-network-stream: the synchronous client
 ;;; path (Doc 194 P0) -------------------------------------------------------
@@ -966,12 +1309,22 @@ Emacs's own `:nowait' contract is deferring success/failure reporting
 to the sentinel, not raising a synchronous condition, so this creates
 the `network-process' object anyway (status `failed', no live fd) and
 fires the SAME sentinel shape the async poll-driven path uses,
-immediately rather than on a later poll pass."
+immediately rather than on a later poll pass.
+
+Doc 194 IPv6 phase (P7): `nelisp--net-effective-family' decides `ipv4'
+vs `ipv6' from PLIST exactly as the synchronous client path does
+(`make-network-process' below) -- the `ipv4' branch here is the
+UNMODIFIED original call, `(nelisp--resolve-host (nelisp--net-host-
+string host))', byte-identical to every build before this phase."
   (let* ((host (plist-get plist :host))
          (service (plist-get plist :service))
          (name (or (plist-get plist :name) "network"))
+         (family (nelisp--net-effective-family plist))
          (resolved-host (condition-case err
-                             (nelisp--resolve-host (nelisp--net-host-string host))
+                             (if (eq family 'ipv6)
+                                 (nelisp--resolve-host-family
+                                  (nelisp--net-host-string host 'ipv6) 'ipv6)
+                               (nelisp--resolve-host (nelisp--net-host-string host)))
                            (error (nelisp--network-process-signal-refused plist err)))))
     (condition-case err
         (let* ((fd (nelisp-socket-connect resolved-host service t))
@@ -1004,12 +1357,23 @@ each accept, S1.3) is stored on the listener's own props-alist for
 `nelisp-process-adapter--drain-and-fire-network''s `listen' branch to
 read back.  `:service 0' (kernel-assigned ephemeral port) is explicitly
 NOT supported -- `getsockname(2)' to read the real port back does not
-exist yet (S6's own open question); pass an explicit port."
+exist yet (S6's own open question); pass an explicit port.
+
+Doc 194 IPv6 phase (P7): `nelisp--net-effective-family' decides `ipv4'
+vs `ipv6' from PLIST (an explicit `:family \\='ipv6', or an already-IPv6
+`:host' literal); the resulting FAMILY is passed to `nelisp--net-host-
+string' so the nil/`local' loopback default becomes \"::1\" instead of
+\"127.0.0.1\" -- the only behavior change; an explicit `:host' string
+(v4 or v6 literal) passes straight through exactly as before, since
+`nelisp-socket-listen' itself now decides AF_INET vs AF_INET6 natively
+from the string (Doc 194 IPv6 phase, `scripts/nelisp-standalone-
+build.el')."
   (let* ((name (or (plist-get plist :name) "network"))
          (host (plist-get plist :host))
          (service (plist-get plist :service))
+         (family (nelisp--net-effective-family plist))
          (fd (condition-case err
-                 (nelisp-socket-listen (nelisp--net-host-string host) service t)
+                 (nelisp-socket-listen (nelisp--net-host-string host family) service t)
                (error (nelisp--network-process-signal-refused plist err))))
          (proc (nelisp--make-network-process-object name 'listen fd)))
     (nelisp--network-process-populate proc plist)
@@ -1022,7 +1386,17 @@ exist yet (S6's own open question); pass an explicit port."
 synchronous CLIENT path (no `:server', no `:nowait') is built directly
 on `nelisp-socket-connect' plus `nelisp--resolve-host' (S3.1/S3.2).
 `:nowait t' delegates to `nelisp--network-process-connect-nowait' (P4).
-`:server t' delegates to `nelisp--network-process-listen' (P5)."
+`:server t' delegates to `nelisp--network-process-listen' (P5).
+
+Doc 194 IPv6 phase (P7): `:family \\='ipv6' (real Emacs's own keyword,
+S1.3), OR a `:host' string that is already an IPv6 literal (Emacs's own
+`:family' AUTO-DETECTION from the host, SCOPE item 5) routes the
+synchronous client path through `nelisp--resolve-host-family'/`::1'
+instead of `nelisp--resolve-host'/`127.0.0.1' -- decided once by
+`nelisp--net-effective-family', shared with the `:nowait'/`:server'
+branches (each function's own docstring above).  Every call that does
+NOT trigger either condition takes the exact `ipv4' branch below,
+UNCHANGED from before this phase."
   (let* ((service (plist-get plist :service))
          (server (plist-get plist :server))
          (nowait (plist-get plist :nowait)))
@@ -1037,9 +1411,15 @@ on `nelisp-socket-connect' plus `nelisp--resolve-host' (S3.1/S3.2).
       (unless (integerp service) (signal 'wrong-type-argument (list 'integerp service)))
       (let* ((name (or (plist-get plist :name) "network"))
              (host (plist-get plist :host))
+             (family (nelisp--net-effective-family plist))
              (fd (condition-case err
-                     (nelisp-socket-connect
-                      (nelisp--resolve-host (nelisp--net-host-string host)) service)
+                     (if (eq family 'ipv6)
+                         (nelisp-socket-connect
+                          (nelisp--resolve-host-family
+                           (nelisp--net-host-string host 'ipv6) 'ipv6)
+                          service)
+                       (nelisp-socket-connect
+                        (nelisp--resolve-host (nelisp--net-host-string host)) service))
                    (error (nelisp--network-process-signal-refused plist err))))
              (proc (nelisp--make-network-process-object name 'open fd)))
         (nelisp--network-process-populate proc plist)
