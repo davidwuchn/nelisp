@@ -305,6 +305,7 @@ cmd_extras() {
              nl-safe-standalone-smoke \
              nl-resource-standalone-smoke \
              nl-num-standalone-smoke \
+             nelisp-thread-standalone-smoke \
              standalone-reader-buffer-smoke \
              nl-actor-standalone-smoke; do
         printf '\n=== %s ===\n' "$g"
