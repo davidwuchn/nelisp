@@ -1,16 +1,30 @@
 #+TITLE: Doc 194 — make-network-process: sockets under the process adapter, nonblocking I/O, and DNS without libc
 #+AUTHOR: Claude (design), zawatton (direction)
 #+DATE: 2026-08-24
-#+STATUS: DRAFT — design only, no implementation.  Written against
-#+STATUS: =feat/socket-primitives-p1= (Phase 1: =nelisp-socket-listen/-accept/
-#+STATUS: -connect/-send/-recv/-close=, raw SYSCALL, linux-x86_64 only,
-#+STATUS: blocking, IPv4-literal/localhost host resolution only) and against
-#+STATUS: Doc 184's shipped process adapter (=packages/nelisp-process-adapter/
-#+STATUS: src/nelisp-process-adapter.el=, P0-P3 SHIPPED) as the integration
-#+STATUS: point.  =make-network-process='s contract (§1.3) and the FFI
+#+STATUS: SHIPPED (P0-P2, 2026-08-24, branch =feat/network-process-p0=,
+#+STATUS: base =feat/socket-primitives-p1=) — the synchronous client path
+#+STATUS: (=make-network-process=/=open-network-stream=, §3.1), =/etc/hosts=
+#+STATUS: resolution (§3.2 Phase B), and DNS-over-TCP/53 (§3.2 Phase C) are
+#+STATUS: real, tested against a live resolver, and pushed.  P3 (nonblocking
+#+STATUS: primitives), P4 (wiring =:nowait= into the poll loop), P5
+#+STATUS: (=:server t=/auto-accept), and P6 (Windows, documented-not-built)
+#+STATUS: remain exactly as designed below — not started this pass, per
+#+STATUS: this doc's own phased plan (§4) — asking for =:server t= or
+#+STATUS: =:nowait= from the shipped =make-network-process= signals loudly
+#+STATUS: rather than silently degrading.  One substrate defect was found
+#+STATUS: and worked around during P2 implementation, out of this doc's own
+#+STATUS: scope to fix: this runtime's =aref=/=length= (Doc 161) — and
+#+STATUS: independently, =unibyte-string= — treat every string as UTF-8 text
+#+STATUS: with no separate byte-oriented type, silently corrupting a raw
+#+STATUS: wire byte >= 0x80; the DNS wire-format code uses the already-
+#+STATUS: shipped =string-byte=/=string-bytes= byte-level accessors instead
+#+STATUS: (see =nelisp--dns-byte='s own comment, =packages/nelisp-process-
+#+STATUS: adapter/src/nelisp-process-adapter.el=, for the measurement).
+#+STATUS: =make-network-process='s contract (§1.3) and the FFI
 #+STATUS: availability matrix (§1.4) were measured directly, not recalled,
 #+STATUS: against real GNU Emacs 30.1 and =fix/ffi-surface-availability=
 #+STATUS: respectively — see each section for how.
+#+VERIFIED-BY: standalone-reader-network-process-smoke standalone-reader-hosts-file-smoke standalone-reader-dns-smoke standalone-reader-smokes
 
 * §0 TL;DR
 

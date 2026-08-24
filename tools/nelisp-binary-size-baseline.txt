@@ -222,6 +222,28 @@
 # error negatives).  Measured with `stat -c %s target/nelisp' after a
 # clean `make standalone-reader' on this branch's own HEAD (base
 # eb4eb81f3).
+#
+# Raised 2026-08-24 (Doc 194 P0-P2, feat/network-process-p0), 7310720 ->
+# 7331256, +20536 bytes, +0.28%, well inside the 2% slack -- raised
+# anyway per this file's own rule above.  The bulk of Doc 194's P0-P2
+# work (`packages/nelisp-process-adapter/src/nelisp-process-adapter.el':
+# the `network-process' tagged-vector shape, `make-network-process'/
+# `open-network-stream', `process-send-string'/`process-contact', the
+# `/etc/hosts' Phase B lookup, and the full DNS-over-TCP/53 Phase C wire
+# encoder/decoder) does NOT touch this number at all -- that file is
+# loaded via `--load'/`require' at runtime, exactly like Doc 184's own
+# `nelisp-process-adapter.el' additions the 2026-08-23 raise above notes,
+# never linked into `target/nelisp'.  The entire +20536 bytes is
+# `scripts/nelisp-stdlib-prelude.el' gaining one new `cond' arm each in
+# `processp'/`process-get'/`process-put'/`process-status' (a
+# `network-process' branch alongside the existing `process' branch) plus
+# `process-live-p''s vocabulary widening from `run' only to
+# `run'/`open'/`listen'/`connect' -- embedded prelude source text, same
+# accounting as every other prelude-size raise in this file's history.
+# Every added branch is exercised by `standalone-reader-network-process-
+# smoke'/`standalone-reader-hosts-file-smoke'/`standalone-reader-dns-
+# smoke'.  Measured with `stat -c %s target/nelisp' after a clean `make
+# standalone-reader' on this branch's own HEAD.
 # Raised 2026-08-23 (7247592 -> 7251688, +4096 bytes, +0.06%, well
 # inside the 2% slack -- raised anyway per this file's own rule above)
 # by docs/design/189-nl-ns-enforced-namespaces.org Phase 0

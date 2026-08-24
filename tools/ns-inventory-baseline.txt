@@ -461,7 +461,21 @@ ns-collision-divergent 127
 # 'timerp ...)' line itself -- same already-conceded shape its three
 # sibling defalias lines (`run-at-time'/`cancel-timer'/`sit-for') each
 # already contributed one violation for.
-ns-prefix-violation 881
+# 875 -> 890 on 2026-08-24 (Doc 194 P0-P2, feat/network-process-p0):
+# `packages/nelisp-process-adapter/src/nelisp-process-adapter.el' gained
+# `make-network-process'/`open-network-stream'/`process-contact'/
+# `process-send-string' (the standard-name entry points Doc 194 designs,
+# same bare-name shape as this file's own pre-existing `make-process'/
+# `delete-process'/`accept-process-output'/etc. -- already conceded here,
+# Doc 184's own precedent) plus `nelisp-dns-error'/`nelisp-dns-resolver-
+# ip'/`nelisp-dns-resolver-port' (public DNS-configuration globals a
+# caller is meant to `setq'/`let'-bind, so a `nelisp--'-prefixed private
+# name would be the wrong shape for them, not a fix for this count) and
+# the file's own `nelisp--'-prefixed private helpers (host resolution,
+# DNS wire-format encode/decode) -- all measured, none renamed to game
+# this ratchet; raised per this file's own rule, same as every other
+# raise below.
+ns-prefix-violation 890
 # 611 -> 613 on 2026-08-20: `nelisp--check-string'/`--check-symbol' and the
 # other argument-check helpers are referenced from the lisp/ mirrors that
 # carry copies of the functions using them.  This is the kind this file
@@ -742,7 +756,7 @@ pinned-collision ns-collision-divergent	copy-tree	lisp/nelisp-stdlib-plist-str.e
 pinned-collision ns-collision-divergent	define-error	lisp/nelisp-stdlib-error.el scripts/nelisp-stdlib-prelude.el	23dfe8f3d73f
 pinned-collision ns-collision-divergent	defun	lisp/nelisp-jit-substrate.el lisp/nelisp-stdlib-eval-special.el scripts/nelisp-stdlib-prelude.el	91d01aa6ff27
 pinned-collision ns-collision-divergent	delete-dups	lisp/nelisp-stdlib-plist-str.el scripts/nelisp-stdlib-prelude.el	03fd6070a2df
-pinned-collision ns-collision-divergent	delete-process	packages/nelisp-process-adapter/src/nelisp-process-adapter.el scripts/nelisp-stdlib-prelude.el	2e21575a41b7
+pinned-collision ns-collision-divergent	delete-process	packages/nelisp-process-adapter/src/nelisp-process-adapter.el scripts/nelisp-stdlib-prelude.el	a6061f78437b
 pinned-collision ns-collision-divergent	directory-files	lisp/nelisp-stdlib-misc.el scripts/nelisp-stdlib-prelude.el	5772735e4f7a
 pinned-collision ns-collision-divergent	dotimes	lisp/nelisp-stdlib-eval-special.el scripts/nelisp-stdlib-prelude.el	f4ac7387792a
 pinned-collision ns-collision-divergent	downcase	lisp/nelisp-stdlib-plist-str.el scripts/nelisp-stdlib-prelude.el	675d26029d5d
