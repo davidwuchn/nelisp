@@ -17903,6 +17903,92 @@ drift (= a Doc 92 emitter invariant violation)."
   (nelisp-asm-wasm-op-i64-add buf)
   (nelisp-asm-wasm-op-i32-wrap-i64 buf))
 
+(defun nelisp-aot-compiler--wasm-emit-sexp-write-lit (node buf ctx tag-byte)
+  "Emit wasm `sexp-write-symbol-lit'/`sexp-write-str-lit' NODE into BUF.
+CTX is the wasm emit context; TAG-BYTE is 4 (symbol) or 5 (str), matching
+the native `Sexp' tag byte `nl_alloc_symbol'/`nl_alloc_str' write at
+offset 0 (`lisp/nelisp-cc-nlstr-direct-ops.el').
+
+Doc 192 Phase B boundary-slot mechanism: native's SLOT is a caller-
+supplied `*mut Sexp' the helper writes 32 bytes THROUGH (measured via
+disassembly of this exact form on x86_64: the hidden boundary slot's
+frame cell is read, uninitialized, and handed to `nl_alloc_symbol' as
+`result_slot' -- native's own convention for an ordinary top-level user
+defun genuinely depends on an external trampoline pre-populating these
+slots, same as `nelisp-aot-compiler-test--native-trampoline-bytes'
+builds by hand; there is no such trampoline for wasm's simple
+`node tools/wasm-driver.mjs FILE EXPORT ARGS...' caller).  Wasm's `ref'
+(tag 53) is always a plain `local.get' (Doc 192 §6), so there is no
+incoming pointer to write through, and no external caller to supply
+one.  This op therefore SELF-allocates: `alloc-bytes' (tag 0, the
+existing wasm bump allocator) a single `32 + LEN'-byte region -- a
+32-byte header (tag/cap/char-buf-ptr/len, native's own layout) directly
+followed by the literal's own bytes as inline payload -- then
+`local.set's SLOT to that region's address.  From this point SLOT holds
+a real linear-memory address, exactly the value native's SLOT was
+always assumed to already hold; later reads of the same `ref' (e.g. a
+calln dispatcher reading the materialized builtin name back out of
+`name_slot') see that address, unchanged, the same way a native pointer
+argument stays valid across the rest of its caller's frame.  Leaves the
+record address as this node's own value (matching every other
+`--wasm-emit-value' arm and native's own `--emit-sexp-write-lit', which
+also returns the slot pointer)."
+  (let* ((slot-node (nelisp-aot-compiler--ir-get node :slot))
+         (dest-slot (and (eq (nelisp-aot-compiler--ir-kind slot-node) 'ref)
+                         (nelisp-aot-compiler--ir-get slot-node :slot)))
+         (bytes (nelisp-aot-compiler--ir-get node :bytes))
+         (len (length bytes))
+         (dest-ref (nelisp-aot-compiler--make-ir 'ref :slot dest-slot :class 'gp))
+         (alloc-node
+          (nelisp-aot-compiler--make-ir
+           'alloc-bytes
+           :size (nelisp-aot-compiler--make-ir 'imm :value (+ 32 len))
+           :align (nelisp-aot-compiler--make-ir 'imm :value 8))))
+    (unless (integerp dest-slot)
+      (signal 'nelisp-aot-compiler-error
+              (list :wasm-sexp-write-lit-slot-shape node)))
+    ;; Allocate header + inline payload in one bump-allocator call;
+    ;; `local.set' makes SLOT hold the new region's address.
+    (nelisp-aot-compiler--wasm-emit-alloc-bytes alloc-node buf ctx)
+    (nelisp-asm-wasm-op-local-set buf dest-slot)
+    ;; word0 @ +0: tag byte.
+    (nelisp-aot-compiler--wasm-emit-memory-address
+     dest-ref (nelisp-aot-compiler--make-ir 'imm :value 0) buf ctx)
+    (nelisp-asm-wasm-op-i64-const buf tag-byte)
+    (nelisp-asm-wasm-op-i64-store buf)
+    ;; word1 @ +8: cap (native clamps a zero-length alloc's cap to 1;
+    ;; mirrored here so a `nil'-length payload still owns a real byte).
+    (nelisp-aot-compiler--wasm-emit-memory-address
+     dest-ref (nelisp-aot-compiler--make-ir 'imm :value 8) buf ctx)
+    (nelisp-asm-wasm-op-i64-const buf (max len 1))
+    (nelisp-asm-wasm-op-i64-store buf)
+    ;; word2 @ +16: char-buf pointer = SLOT's own address + 32 (the
+    ;; inline payload immediately follows the 32-byte header).
+    (nelisp-aot-compiler--wasm-emit-memory-address
+     dest-ref (nelisp-aot-compiler--make-ir 'imm :value 16) buf ctx)
+    (nelisp-aot-compiler--wasm-emit-value dest-ref buf ctx)
+    (nelisp-asm-wasm-op-i64-const buf 32)
+    (nelisp-asm-wasm-op-i64-add buf)
+    (nelisp-asm-wasm-op-i64-store buf)
+    ;; word3 @ +24: length (the real length; may be 0).
+    (nelisp-aot-compiler--wasm-emit-memory-address
+     dest-ref (nelisp-aot-compiler--make-ir 'imm :value 24) buf ctx)
+    (nelisp-asm-wasm-op-i64-const buf len)
+    (nelisp-asm-wasm-op-i64-store buf)
+    ;; Payload @ +32.. : byte-by-byte immediate stores.  No rodata /
+    ;; data-blob involved (object-mode's own reason for native's
+    ;; stack-buffer technique this mirrors, Doc 129.3B/129.8I) and no
+    ;; extra scratch local needed -- each byte's address is a fresh
+    ;; `dest-ref + imm' computation.
+    (let ((offset 32))
+      (dolist (b bytes)
+        (nelisp-aot-compiler--wasm-emit-memory-address
+         dest-ref (nelisp-aot-compiler--make-ir 'imm :value offset) buf ctx)
+        (nelisp-asm-wasm-op-i64-const buf b)
+        (nelisp-asm-wasm-op-i64-store8 buf)
+        (setq offset (1+ offset))))
+    (nelisp-asm-wasm-op-local-get buf dest-slot)))
+
 (defun nelisp-aot-compiler--wasm-register-ir-imports
     (node imports-box import-map-box type-map-box type-keys-box
           module-defun-names)
@@ -18653,6 +18739,21 @@ drift (= a Doc 92 emitter invariant violation)."
        buf
        (nelisp-aot-compiler--wasm-data-symbol-address
         ctx (nelisp-aot-compiler--ir-get node :name))))
+     ;; Doc 192 Phase B — `sexp-write-symbol-lit' (tag 90, symbol) /
+     ;; `sexp-write-str-lit' (tag 91, string).  Native treats SLOT as a
+     ;; caller-owned `*mut Sexp' the helper writes THROUGH; wasm's `ref'
+     ;; (tag 53) is always a plain `local.get' (measured directly, Doc
+     ;; 192 §6), so there is no incoming pointer to write through here.
+     ;; The wasm-only boundary-slot convention this op establishes: SELF-
+     ;; allocate a linear-memory record (the "boundary-slot area" Doc 192
+     ;; §6/dispatch-brief design note calls for) and `local.set' its
+     ;; address into SLOT, so SLOT becomes a real address from this point
+     ;; on -- exactly the value native's SLOT already was assumed to
+     ;; hold, just materialized here instead of by an external caller.
+     ((= tag 90)
+      (nelisp-aot-compiler--wasm-emit-sexp-write-lit node buf ctx 4))
+     ((= tag 91)
+      (nelisp-aot-compiler--wasm-emit-sexp-write-lit node buf ctx 5))
      (t
       (signal 'nelisp-aot-compiler-error
               (list :wasm-unsupported-ir
@@ -18677,8 +18778,15 @@ drift (= a Doc 92 emitter invariant violation)."
          (need-heap-ptr
           (or data-blobs
               (cl-some (lambda (defun-ir)
-                         (nelisp-aot-compiler--wasm-ir-contains-tag-p
-                          (nelisp-aot-compiler--ir-get defun-ir :body) 0))
+                         (let ((body (nelisp-aot-compiler--ir-get defun-ir :body)))
+                           ;; 0 = alloc-bytes; 90/91 = Doc 192 Phase B's
+                           ;; sexp-write-symbol-lit/str-lit, which also
+                           ;; bump-allocate (self-contained boundary-slot
+                           ;; materialization) without surfacing their own
+                           ;; alloc-bytes IR node.
+                           (or (nelisp-aot-compiler--wasm-ir-contains-tag-p body 0)
+                               (nelisp-aot-compiler--wasm-ir-contains-tag-p body 90)
+                               (nelisp-aot-compiler--wasm-ir-contains-tag-p body 91))))
                        defuns))))
     (dolist (defun-ir defuns)
       (let ((name (nelisp-aot-compiler--ir-get defun-ir :name))

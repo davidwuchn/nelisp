@@ -130,6 +130,17 @@ wasm-smoke:
 	        (extern-call nelisp_aot_wasm_arg_budget_sum8 \
 	                     a b c d e f g h)) \
 	     \"target/wasm-smoke/arg-budget-sum8.wasm\" \
+	     :arch 'wasm32 :format 'wasm) \
+	    (nelisp-aot-compile-to-object \
+	     '(defun symbol-lit-probe (dest) \
+	        (seq \
+	         (sexp-write-symbol-lit dest \"eq\") \
+	         (+ (* 40000000 (ptr-read-u8 dest 0)) \
+	            (+ (* 100000 (- (ptr-read-u64 dest 16) dest)) \
+	               (+ (* 10000 (ptr-read-u64 dest 24)) \
+	                  (+ (* 100 (ptr-read-u8 dest 32)) \
+	                     (ptr-read-u8 dest 33))))))) \
+	     \"target/wasm-smoke/symbol-lit-probe.wasm\" \
 	     :arch 'wasm32 :format 'wasm))"
 	node tools/wasm-driver.mjs target/wasm-smoke/f.wasm f 42
 	node tools/wasm-driver.mjs target/wasm-smoke/f-locals.wasm f 9
@@ -144,7 +155,25 @@ wasm-smoke:
 	node tools/wasm-driver.mjs --env-module tools/wasm-arg-budget-env.mjs \
 	  target/wasm-smoke/arg-budget-sum8.wasm arg-budget-sum8 36 \
 	  1 2 3 4 5 6 7 8
-	@echo "GATE-COUNT checked=3 findings=0"
+	# Doc 192 §3 Phase B: `sexp-write-symbol-lit' materializes a literal
+	# symbol into DEST's frame slot.  Before this phase's wasm boundary-
+	# slot fix, the compile step above signals `(:wasm-unsupported-ir
+	# sexp-write-symbol-lit)' verbatim (red-first-verified by reverting
+	# just the `--wasm-emit-value' tag-90/91 arms and the matching
+	# `nelisp-aot-compiler--wasm-emit-sexp-write-lit' helper in
+	# `lisp/nelisp-aot-compiler.el', then re-running `make wasm-smoke',
+	# which fails at the compile step, `Error 255', before Node ever
+	# runs -- the same discipline the arg-budget-sum8 pair above uses).
+	# After the fix: DEST self-allocates a 32-byte header + inline
+	# "eq" payload in linear memory (no `env' import -- see the tag-90/91
+	# comment at that helper for why none is needed) and the checksum
+	# below packs tag(4)*4e7 + (char-buf-ptr - dest)(32)*1e5 +
+	# len(2)*1e4 + byte0('e'=101)*100 + byte1('q'=113) = 163230213,
+	# verifying the header, the inline-payload offset convention, and
+	# both literal bytes in one return value.
+	node tools/wasm-driver.mjs \
+	  target/wasm-smoke/symbol-lit-probe.wasm symbol-lit-probe 163230213 0
+	@echo "GATE-COUNT checked=4 findings=0"
 
 wasm-runtime-image-smoke:
 	mkdir -p target/wasm-runtime-image
