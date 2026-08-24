@@ -84,19 +84,59 @@ this repeats its quote-unwrap for exactly that one head."
          (and (consp name) (eq (car name) 'quote) (symbolp (car (cdr name)))
               (car (cdr name))))))
 
+(defun nlsp--fboundp-guard-body (form)
+  "If FORM is `(unless (fboundp ...) . BODY)' or `(when (fboundp ...) . BODY)',
+return BODY (a list of forms).  Otherwise nil.
+
+Measured 2026-08-24 (Phase 2B, integration/wave6 audit hardening):
+`nlsp--prelude-function-names' only ever looked at a form's own
+top-level head, so any definition written as `(unless (fboundp \\='X)
+(defun X ...))' -- the standard \"define X only if the substrate does
+not already have it\" idiom this prelude uses ~389 times -- was
+invisible to the presence sweep; only `nl-ffi-call' had been patched
+around by hand, in `nlsp--extra-names'.  The guarded name need not
+match what gets bound inside (see e.g. `(when (fboundp \\='rdf) (fset
+\\='nelisp--syscall-read-file ...))' a few hundred lines down this same
+file): this unwraps the shape structurally and lets
+`nlsp--names-in-form' apply the ordinary definition-head scan to
+whatever is actually inside, rather than assuming any correspondence
+between the tested name and the bound one."
+  (and (consp form)
+       (memq (car form) '(unless when))
+       (let ((test (car-safe (cdr form))))
+         (and (consp test) (eq (car test) 'fboundp)
+              (cdr (cdr form))))))
+
+(defun nlsp--names-in-form (form)
+  "Return the list of function/macro names FORM directly defines.
+Recurses through nested `(unless (fboundp ...) ...)' / `(when (fboundp
+...) ...)' guards (see `nlsp--fboundp-guard-body') so a definition
+written inside one is found the same as a bare top-level one; a form
+that is neither a direct definition nor such a guard contributes
+nothing (this does not descend into arbitrary forms like `progn' --
+scoped to the one guard shape the prelude actually uses)."
+  (let ((direct (or (and (memq (car-safe form) nl-ns-definition-heads)
+                          (eq (nl-ns--definition-host-kind form) 'function)
+                          (nl-ns--defined-symbol form))
+                     (nlsp--fset-name form))))
+    (if direct
+        (list direct)
+      (let ((body (nlsp--fboundp-guard-body form)))
+        (when body
+          (apply #'append (mapcar #'nlsp--names-in-form body)))))))
+
 (defun nlsp--prelude-function-names ()
   "Names of every function/macro `scripts/nelisp-stdlib-prelude.el' defines
-at its top level, as a duplicate-free list in file order."
+at its top level -- including inside an `(unless (fboundp ...) ...)' or
+`(when (fboundp ...) ...)' guard, see `nlsp--names-in-form' -- as a
+duplicate-free list in file order."
   (let ((forms (nl-ns-read-file nlsp--prelude-file))
         (seen (make-hash-table :test 'eq))
         (names nil))
     (when (eq forms 'nl-ns--unreadable)
       (error "nelisp-substrate-presence-gen: could not read %s" nlsp--prelude-file))
     (dolist (form forms)
-      (let ((name (or (and (memq (car-safe form) nl-ns-definition-heads)
-                            (eq (nl-ns--definition-host-kind form) 'function)
-                            (nl-ns--defined-symbol form))
-                       (nlsp--fset-name form))))
+      (dolist (name (nlsp--names-in-form form))
         (when (and name (not (gethash name seen)))
           (puthash name t seen)
           (push name names))))
@@ -126,6 +166,19 @@ runtime prerequisite, only a text read)."
   "Names outside both automatic sources above, added by hand because neither
 source can ever see them -- not a general escape hatch, one entry per name
 with its own reason here.
+
+Phase 2B (integration/wave6 audit hardening, 2026-08-24):
+`nlsp--names-in-form' now unwraps the exact `(unless (fboundp ...) ...)'
+guard shape `nl-ffi-call' is defined inside, so source #1 finds it on
+its own -- this entry is now REDUNDANT with the automatic scan (the
+`nlsp--surface-names' union below dedupes either way, so leaving it
+costs nothing) but is kept rather than deleted: the guard-unwrap only
+covers `unless'/`when' around a `fboundp' test, and a name whose own
+future definition moves to some other conditional shape the scanner
+does not understand would silently vanish from the corpus again
+without a fallback like this one. If this comment is still here and
+`nl-ffi-call' keeps showing up as a plain `unless'-guarded `defun', it
+is safe to prune.
 
 `nl-ffi-call' (Doc 100, Phase 47.D Step C): defined in
 `scripts/nelisp-stdlib-prelude.el' as `(unless (fboundp \\='nl-ffi-call)
