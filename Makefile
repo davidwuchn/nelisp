@@ -15,7 +15,8 @@
         nl-condition-standalone-smoke nl-safe-standalone-smoke nl-resource-standalone-smoke \
         nl-ns-reader-standalone-smoke \
         standalone-reader-buffer-smoke \
-        nl-actor-standalone-smoke nelisp-actor-cps-baseline nelisp-actor-cps-parity
+        nl-actor-standalone-smoke nelisp-actor-cps-baseline nelisp-actor-cps-parity \
+        nl-clj-standalone-smoke
 
 EMACS ?= emacs
 
@@ -518,6 +519,21 @@ nl-actor-standalone-smoke: $(if $(wildcard target/nelisp target/nelisp.exe),,sta
 	  exit 0; \
 	fi; \
 	"$$bin" --load packages/nelisp-actor/test/nelisp-actor-standalone-smoke.el
+
+# Doc 194 (docs/design/194-clojure-compat-library.org) build-first Tier
+# 1: runs the exact ERT bodies of every nl-clj-*-test.el on
+# target/nelisp itself, plus a print/read round-trip check on a tagged
+# persistent vector -- the specific substrate risk this package's own
+# representation choice (nl-clj-core.el's Commentary) exists to avoid
+# (Doc 194 §2.1: cl-defstruct/record print but do not round-trip on
+# this substrate).  Same conditional-build shape as the smokes above.
+nl-clj-standalone-smoke: $(if $(wildcard target/nelisp target/nelisp.exe),,standalone-reader)
+	@bin=./target/nelisp; [ -f "$$bin" ] || bin=./target/nelisp.exe; \
+	if [ ! -f "$$bin" ]; then \
+	  echo "GATE-SKIP no nelisp binary in target/ after build attempt"; \
+	  exit 0; \
+	fi; \
+	"$$bin" --load packages/nl-clj/test/nl-clj-standalone-smoke.el
 
 # Regenerates packages/nelisp-actor/generated/two-actor-exchange-cps.el
 # from examples/nelisp-actor/two-actor-exchange.el's `nelisp-demo-ping-
