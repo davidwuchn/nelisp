@@ -85,6 +85,7 @@
 ;; `nelisp-actor-standalone-smoke.el' uses for its own first `load' --
 ;; a hard failure here should look exactly like a plain load failure,
 ;; not a softened, harder-to-recognize smoke failure.
+(load "packages/nl-prelude/src/nl-prelude-trampoline.el") ; wave8: nl-prelude requires it
 (load "packages/nl-prelude/src/nl-prelude.el")
 (load "packages/nl-safe/src/nl-safe.el")
 (load "packages/nl-clj/src/nl-clj-core.el")

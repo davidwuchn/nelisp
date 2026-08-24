@@ -66,6 +66,7 @@
 ;; Explicit paths are intentional: standalone `require' cannot be trusted to
 ;; locate an absent library, while each source file's own require still checks
 ;; the already-provided dependency feature.
+(load "packages/nl-prelude/src/nl-prelude-trampoline.el") ; wave8: nl-prelude requires it
 (load "packages/nl-prelude/src/nl-prelude.el")
 (load "packages/nl-num/src/nl-num-core.el")
 (load "packages/nl-num/src/nl-num-rational.el")

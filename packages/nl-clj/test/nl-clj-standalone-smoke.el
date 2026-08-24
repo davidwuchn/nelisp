@@ -93,6 +93,7 @@ KEYS supports `:type SYMBOL' for condition matching like ert."
         (t nl-smoke--r))))
   (provide 'ert))
 
+(load "packages/nl-prelude/src/nl-prelude-trampoline.el") ; wave8: nl-prelude requires it
 (load "packages/nl-prelude/src/nl-prelude.el")
 (load "packages/nl-safe/src/nl-safe.el")
 (load "packages/nl-clj/src/nl-clj-core.el")

@@ -60,6 +60,7 @@
                    (gethash 'k probe)))
     (error "nl-ns-in-standalone-smoke: puthash precondition failed")))
 
+(load "packages/nl-prelude/src/nl-prelude-trampoline.el") ; wave8: nl-prelude requires it
 (load "packages/nl-prelude/src/nl-prelude.el")
 (load "packages/nl-ns/src/nl-ns-in.el")
 (load "packages/nl-ns/test/nl-ns-in-test.el")
