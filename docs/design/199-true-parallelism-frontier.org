@@ -14,9 +14,9 @@
 #+STATUS: =#+VERIFIED-BY= — this doc ships no gate, per AI.md's Definition
 #+STATUS: of Done (that requirement applies to =#+STATUS: SHIPPED= docs).
 
-* Implementation status (Doc 199 program: Tier 1 + Tier 2 + Tier 3)
+* Implementation status (Doc 199 program: Tier 1 + Tier 2 + Tier 3a shipped; Tier 3b gated on Doc 152)
 
-#+VERIFIED-BY: compile parens-check nl-clj-future-standalone-smoke
+#+VERIFIED-BY: compile parens-check nl-clj-future-standalone-smoke nelisp-thread-standalone-smoke nelisp-thread-allocating-standalone-smoke
 
 - *Tier 1 (cooperative pmap/future/pcalls): IMPLEMENTED 2026-08-25.*
   packages/nl-clj/src/nl-clj-future.el + nl-clj-future-test.el (15 ERT,
@@ -28,9 +28,33 @@
   (host-Emacs-only on standalone).  nl-clj-deref is made polymorphic over
   atoms and futures; atom behaviour is byte-identical.  API §7 unchanged.
 - *Tier 2 (callable nl-thread-spawn, GC-free workers + publish protocol):
-  IN PROGRESS.*  Runtime work per §4.2 + §6.2; not a pure library.
-- *Tier 3 (concurrency-safe GC): PENDING.*  The §5 epic (per-thread root
-  enumeration + a GC shape); scoped, not started.
+  IMPLEMENTED 2026-08-25, CI-green.*  Five raw-SYSCALL primitives
+  (nelisp-thread-{shared-alloc,atomic-add,atomic-read,spawn,join}) as
+  nelisp_apply_function dispatch arms on linux-x86_64, the socket precedent;
+  a fixed GC-free worker registry; publication happens-after via join.
+  nelisp-thread-standalone-smoke: three clone(2) workers reduce to 42 on
+  target/nelisp (checked=6, mutation-proven); emacs-parity byte-identical.
+- *Tier 3a (region-per-task: bounded ORDINARY allocating Lisp on real
+  threads, no concurrent GC): IMPLEMENTED 2026-08-25.*  This is the
+  Doc-152-independent slice §4.3/§5 did not develop: because a bounded task
+  never needs the collector to run mid-task, inhibiting collection for the
+  whole parallel section (nl_gc_loop_ctx+24=1) lets multiple clone(2)
+  workers evaluate ordinary allocating Lisp (nelisp_eval_call, each with its
+  own private EvalCtx/root-reserve mmap) concurrently into the shared bump
+  arena -- safe because the cursor bump is already lock-free CAS (§6.2-1,
+  verified) and no mark/sweep runs to trip over another thread's in-flight
+  roots.  nelisp-thread-allocating-standalone-smoke: three workers reduce
+  arbitrary allocating forms to 23 (checked=8, 20 consecutive runs); the
+  GC-inhibit mutation hangs rather than answers wrong, proving the inhibit
+  is load-bearing; emacs-parity byte-identical; zero Rust.  Ceiling: bounded
+  tasks, read-only global state, worker mmap held to process exit, arena
+  must not grow mid-section.
+- *Tier 3b (UNRESTRICTED arbitrary Lisp -- mutable globals, unbounded
+  allocation, per-task reclaim, long-lived GC-ing threads): NOT STARTED,
+  gated on Doc 152.*  Needs a thread-local precise-root ABI (Doc 152's own
+  still-open handle-based-roots epic, §5.1), safe arena growth under a
+  chunk-list race, and per-task heap reclaim -- the §5 concurrent-GC work,
+  scoped here, not buildable before Doc 152 lands.
 
 * §0 TL;DR
 

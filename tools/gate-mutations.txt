@@ -229,6 +229,12 @@ nl-num-standalone-smoke|packages/nl-num/src/nl-num-rational.el|s/(+ (nl-num--rea
 # instead of 42.  This isolates a missing/torn result publication from a lost
 # completion increment (which would correctly keep the join waiting).
 nelisp-thread-standalone-smoke|scripts/nelisp-standalone-build.el|s/(ptr-write-u64 result 0 sum)/(ptr-write-u64 result 0 0)/|a GC-free worker signals completion without publishing its partial sum, so join returns but the interpreter observes 0 instead of 42
+# nelisp-thread-allocating-standalone-smoke: Doc 199 Tier 3a's collector
+# exclusion property.  All three workers barrier with freshly allocated lists
+# reachable only through their private env/frame stacks, then explicitly call
+# garbage-collect.  Forcing the unique begin helper to store 0 lets a worker's
+# single-thread root walk collect without enumerating the other worker roots.
+nelisp-thread-allocating-standalone-smoke|scripts/nelisp-standalone-build.el|s/(defun nl_thread_gc_inhibit_begin () (ptr-write-u64 (data-addr nl_gc_loop_ctx) 24 1))/(defun nl_thread_gc_inhibit_begin () (ptr-write-u64 (data-addr nl_gc_loop_ctx) 24 0))/|the bounded section does not inhibit collection, so one worker collects while two other private envs hold live arena lists that its root walk cannot enumerate
 # standalone-reader-frame-stack-pop-desync-smoke: added 2026-08-23 (Doc 180
 # Phase 2 item 1).  The injection reverts `nelisp_eval_call_recorded_done''s
 # pop back to unconditional -- the exact pre-fix defect -- by deleting the

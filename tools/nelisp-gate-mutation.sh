@@ -57,6 +57,12 @@ run_gate() {
         NELISP_GATE_MUTATION_TEST_FILES="$scoped_test" \
         tools/ai/nelisp-ai.sh test >"$log" 2>&1
     fi
+  elif [ "$g" = "nelisp-thread-allocating-standalone-smoke" ]; then
+    # The no-GC mutation can invalidate another worker's private frame before
+    # it reaches the completion increment.  That missed-root manifestation is
+    # an intentionally red hang, so bound the mutation run; the clean smoke
+    # completes in well under one second on the same binary.
+    timeout 30 make "$g" >"$log" 2>&1
   else
     make "$g" >"$log" 2>&1
   fi
@@ -97,7 +103,8 @@ while IFS='|' read -r gate file expr what; do
   # injected and restored binary for the same reason.
   if [ "$gate" = "emacs-parity" ] || \
      [ "$gate" = "standalone-reader-buffer-smoke" ] || \
-     [ "$gate" = "nelisp-thread-standalone-smoke" ]; then
+     [ "$gate" = "nelisp-thread-standalone-smoke" ] || \
+     [ "$gate" = "nelisp-thread-allocating-standalone-smoke" ]; then
     if ! rebuild_checked; then
       echo "  $gate: HARNESS ERROR (rebuild with the injection failed; a stale binary would have read as PASS)"
       bad=$((bad+1))
@@ -136,7 +143,8 @@ while IFS='|' read -r gate file expr what; do
     # dressed as "could not be asked".
     cp "$backup" "$file"
     if [ "$gate" = "emacs-parity" ] || \
-       [ "$gate" = "nelisp-thread-standalone-smoke" ]; then
+       [ "$gate" = "nelisp-thread-standalone-smoke" ] || \
+       [ "$gate" = "nelisp-thread-allocating-standalone-smoke" ]; then
       rebuild_checked || true
     fi
     baseline_log="$(mktemp)"
@@ -160,7 +168,8 @@ while IFS='|' read -r gate file expr what; do
   fi
   cp "$backup" "$file"; rm -f "$backup"
   if [ "$gate" = "emacs-parity" ] || \
-     [ "$gate" = "nelisp-thread-standalone-smoke" ]; then
+     [ "$gate" = "nelisp-thread-standalone-smoke" ] || \
+     [ "$gate" = "nelisp-thread-allocating-standalone-smoke" ]; then
     rebuild_checked || true
   fi
 done <<< "$rows"

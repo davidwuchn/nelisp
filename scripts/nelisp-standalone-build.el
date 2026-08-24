@@ -590,7 +590,12 @@ storage — not an arena reservation."
    ;;   +16..+175 up to 20 form_ptr words, ring order (index 0 = outermost
    ;;       of the captured window), 8 bytes each.  BSS zero-fill = no
    ;;       snapshot, exactly like every other slot in this unit.
-   (list (cons 'bss (+ 57616 1048576 96 176)))
+   ;; Doc 199 Tier 3a spike: +24 after nl_bt_snapshot =
+   ;; nl_thread_parallel_ctx (prior free-list-disable flag @+0, starting
+   ;; current-chunk descriptor @+8, active flag @+16).  The section entry
+   ;; uses this driver-owned state to force every allocating worker onto the
+   ;; CAS bump path and the exit checks that no chunk growth occurred.
+   (list (cons 'bss (+ 57616 1048576 96 176 24)))
    (list (nelisp-link-symbol "nl_arena_base" 0
                              :section 'bss :bind 'global :type 'object)
          (nelisp-link-symbol "nl_rootstack_top" 8
@@ -624,6 +629,9 @@ storage — not an arena reservation."
          (nelisp-link-symbol "nl_alloc_check" (+ 57616 1048576)
                              :section 'bss :bind 'global :type 'object)
          (nelisp-link-symbol "nl_bt_snapshot" (+ 57616 1048576 96)
+                             :section 'bss :bind 'global :type 'object)
+         (nelisp-link-symbol "nl_thread_parallel_ctx"
+                             (+ 57616 1048576 96 176)
                              :section 'bss :bind 'global :type 'object))
    nil))
 
@@ -15004,7 +15012,7 @@ value (matches the binary's M8 read+eval-loop driver)."
     ;; to `nelisp-unsupported-primitive', exactly like the socket family.
     "nelisp-thread-shared-alloc" "nelisp-thread-atomic-add"
     "nelisp-thread-atomic-read" "nelisp-thread-spawn"
-    "nelisp-thread-join")
+    "nelisp-thread-join" "nelisp-thread-gc-inhibit")
   "Builtin names installed into the reader binary's mirror.
 Each is dispatched by the pure-elisp `nelisp_apply_function' (see
 `nelisp-standalone--applyfn-source').  Names > 8 bytes (for example
@@ -18368,11 +18376,13 @@ at all on other targets)."
 ;; This is deliberately a separate surface from the older generic
 ;; `thread-spawn' breadth builtin above.  That builtin evaluates an ordinary
 ;; Lisp form and allocates a fresh evaluator environment in the child; it is
-;; therefore outside Doc 199 section 4.2's GC-free worker boundary.  The five
-;; `nelisp-thread-*' entries below instead dispatch only to this small native
-;; registry.  A registered worker may touch ONLY its argument-addressed raw
-;; mmap memory and its own clone stack: never the Lisp heap, `alloc-bytes',
-;; `nl_alloc_*', the arena cursor, evaluator state, or a Lisp callback.
+;; therefore outside Doc 199 section 4.2's GC-free worker boundary.  The
+;; `nelisp-thread-*' entries below began with that small native registry.
+;; Registry ID 1 remains the Tier-2 GC-free worker.  Doc 199 Tier 3a adds ID 2
+;; as a deliberately bounded spike: it may enter `nelisp_eval_call' and the
+;; shared CAS bump allocator only while `nelisp-thread-gc-inhibit' holds the
+;; whole parallel section GC-free, disables the non-atomic sweep free-list,
+;; and has preflighted 8 MiB of room in the current arena chunk.
 ;;
 ;; Registry ID 1 is a counted-u64 sum worker.  A0 points at COUNT followed by
 ;; COUNT u64 values; A1 is a distinct result slot; A2 is the shared done
@@ -18382,7 +18392,7 @@ at all on other targets)."
 ;; ===================================================================
 
 (defun nelisp-standalone--thread-forms ()
-  "Return Doc 199 Tier-2 native worker units for the current target.
+  "Return Doc 199 Tier-2/Tier-3a native worker units for the current target.
 Only `linux-x86_64' receives raw mmap/clone/exit syscalls.  Every other target
 gets no native definitions and is gated by
 `nelisp-standalone--thread-dispatch-arms', matching the socket precedent."
@@ -18403,10 +18413,87 @@ gets no native definitions and is gated by
            (ptr-write-u64 result 0 sum)
            (atomic-fetch-add done 1)
            0)))
-     '(defun nl_thread_worker_registry_call (worker_id a0 a1 a2)
+     ;; Copy N words without allocating.  Used only by the parent, before the
+     ;; new env is published to clone, and by no GC-free ID-1 worker path.
+     '(defun nl_thread_copy_words (dst src i n)
+        (let* ((k i))
+          (seq
+           (while (< k n)
+             (seq
+              (ptr-write-u64 dst (* k 8) (ptr-read-u64 src (* k 8)))
+              (setq k (+ k 1))))
+           dst)))
+     ;; Build a genuinely private lexical frame stack for one worker.  The
+     ;; globals mirror is intentionally shared read-only, but a shallow copy of
+     ;; env+32 would make `let'/lambda push/pop race the parent's frame depth
+     ;; and backing vector.  All objects constructed here are made by the
+     ;; parent before this particular clone and are reachable only through the
+     ;; worker's mmap-resident env after publication.
+     '(defun nl_thread_private_frames_init
+          (penv env type_slot backing_slot depth_slot _pad)
+        (seq
+         (record-type-tag (+ penv 32) type_slot)
+         (vector-make 8 backing_slot)
+         (record-make type_slot 2 (+ env 32))
+         (record-slot-set (+ env 32) 0 backing_slot)
+         (sexp-int-make depth_slot 0)
+         (record-slot-set (+ env 32) 1 depth_slot)
+         0))
+     ;; One 1 MiB-plus-page mmap per eval worker:
+     ;;   +0..119   private EvalCtx
+     ;;   +120      private root-stack top metadata
+     ;;   +128..159 result Sexp slot
+     ;;   +4096..   private 1 MiB root-stack reserve
+     ;; The current root-stack API is still dormant (there are zero
+     ;; nl_root_reserve callers), so the reserve is not installed in the
+     ;; process-global nl_rootstack_top.  Doing so would create the very race
+     ;; this spike avoids.  With collection inhibited no root scan is needed;
+     ;; the private reserve makes that ABI boundary explicit for a future
+     ;; per-thread-root conversion.
+     '(defun nl_thread_private_env_make (penv)
+        (let* ((region (syscall-direct 9 0 1052672 3 34 (- 0 1) 0)))
+          (if (< region 4096)
+              region
+            (let* ((type_slot (alloc-bytes 32 8))
+                   (backing_slot (alloc-bytes 32 8))
+                   (depth_slot (alloc-bytes 32 8)))
+              (seq
+               (nl_thread_copy_words region penv 0 4)
+               (nl_thread_copy_words (+ region 64) (+ penv 64) 0 4)
+               (nl_thread_private_frames_init
+                penv region type_slot backing_slot depth_slot 0)
+               (ptr-write-u64 region 96 0)
+               (ptr-write-u64 region 104 (ptr-read-u64 (+ penv 104) 0))
+               (ptr-write-u64 region 112 (ptr-read-u64 (+ penv 112) 0))
+               (ptr-write-u64 region 120 (+ region 4096))
+               (ptr-write-u64 region 128 0)
+               (ptr-write-u64 region 136 0)
+               (ptr-write-u64 region 144 0)
+               (ptr-write-u64 region 152 0)
+               region)))))
+     ;; ID 2 evaluates a pre-built form through the ordinary interpreter.  It
+     ;; publishes only an integer payload; -1001 is eval failure and -1002 is
+     ;; a successful non-integer result.  Result store precedes the SeqCst done
+     ;; increment, exactly like ID 1's publication rule.
+     '(defun nl_thread_worker_eval (form result done env)
+        (let* ((out (+ env 128))
+               (rc (nelisp_eval_call form env out)))
+          (seq
+           (ptr-write-u64
+            result 0
+            (if (= rc 0)
+                (if (= (ptr-read-u64 out 0) 2)
+                    (ptr-read-u64 out 8)
+                  (- 0 1002))
+              (- 0 1001)))
+           (atomic-fetch-add done 1)
+           0)))
+     '(defun nl_thread_worker_registry_call (worker_id a0 a1 a2 env)
         (if (= worker_id 1)
             (nl_thread_worker_sum a0 a1 a2)
-          0))
+          (if (= worker_id 2)
+              (nl_thread_worker_eval a0 a1 a2 env)
+            0)))
      ;; `nl_thread_clone_dispatch' has already established a clean native
      ;; frame on the clone stack before calling this entry.  ACK releases the
      ;; parent's short spawn handshake only after no child code can reference
@@ -18418,7 +18505,8 @@ gets no native definitions and is gated by
           (ptr-read-u64 launch 0)
           (ptr-read-u64 launch 8)
           (ptr-read-u64 launch 16)
-          (ptr-read-u64 launch 24))
+          (ptr-read-u64 launch 24)
+          (ptr-read-u64 launch 40))
          (syscall-direct 60 0 0 0 0 0 0)))
      '(defun nl_thread_spawn_wait_ack (launch)
         (while (< (ptr-read-u64 launch 32) 1) 0))
@@ -18460,25 +18548,36 @@ gets no native definitions and is gated by
          (wf_write_int out (ptr-read-u64 (wf_argval args 0) 0))
          0))
      ;; WORKER-ID STACK-TOP A0 A1 A2.  STACK-TOP=0 asks this primitive to
-     ;; mmap its own 64 KiB stack; a nonzero top lets a low-level caller supply
+     ;; mmap its own stack (64 KiB for Tier 2, 64 MiB for Tier 3a); a nonzero top
+     ;; lets a low-level caller supply
      ;; one.  The top 64 bytes are reserved for the raw launch record.  clone
      ;; returns the child tid to the parent; the child never returns through
      ;; this function, because `nl_thread_worker_start' exits task 60.
-     '(defun nl_thread_spawn_impl (args out)
+     '(defun nl_thread_spawn_impl (args env out)
         (let* ((worker_id (wf_argval args 0))
                (requested_top (wf_argval args 1))
-               (a0 (wf_argval args 2))
+               (a0 (if (= worker_id 2)
+                       (wf_arg_ptr args 2)
+                     (wf_argval args 2)))
                (a1 (wf_argval args 3))
                (a2 (wf_argval args 4))
+               (worker_env (if (= worker_id 2)
+                               (nl_thread_private_env_make env)
+                             0))
+               (stack_size (if (= worker_id 2) 67108864 65536))
                (stack_base
                 (if (= requested_top 0)
-                    (syscall-direct 9 0 65536 3 34 (- 0 1) 0)
+                    (syscall-direct 9 0 stack_size 3 34 (- 0 1) 0)
                   0))
                (stack_top
                 (if (= requested_top 0)
-                    (if (< stack_base 0) 0 (+ stack_base 65536))
+                    (if (< stack_base 0) 0 (+ stack_base stack_size))
                   requested_top)))
-          (if (if (= worker_id 1) (> stack_top 64) 0)
+          (if (if (= worker_id 1)
+                  (> stack_top 64)
+                (if (= worker_id 2)
+                    (if (> worker_env 4095) (> stack_top 64) 0)
+                  0))
               (let* ((launch (- stack_top 64)))
                 (seq
                  (ptr-write-u64 launch 0 worker_id)
@@ -18486,12 +18585,17 @@ gets no native definitions and is gated by
                  (ptr-write-u64 launch 16 a1)
                  (ptr-write-u64 launch 24 a2)
                  (ptr-write-u64 launch 32 0)
+                 (ptr-write-u64 launch 40 worker_env)
                  (nl_thread_clone_dispatch
                   (syscall-direct 56 1792 launch 0 0 0 0)
                   launch out)))
             (seq
              (wf_write_int out
-                           (if (< stack_base 0) stack_base (- 0 22)))
+                           (if (= worker_id 2)
+                               (if (< worker_env 4096)
+                                   (if (< worker_env 0) worker_env (- 0 12))
+                                 (if (< stack_base 0) stack_base (- 0 22)))
+                             (if (< stack_base 0) stack_base (- 0 22))))
              0))))
      ;; Spin join: once the SeqCst done counter reaches EXPECTED, result-slot
      ;; reads by the parent are routed after completion (Doc 199 section 6.2).
@@ -18501,10 +18605,57 @@ gets no native definitions and is gated by
           (seq
            (while (< (ptr-read-u64 counter 0) expected) 0)
            (wf_write_int out (ptr-read-u64 counter 0))
-           0))))))
+           0)))
+     ;; Begin/end the bounded no-collector section.  BEGIN (nonzero arg):
+     ;; require 8 MiB free in the current chunk, snapshot that descriptor,
+     ;; disable the sweep free-list so every allocator uses the CAS bump path,
+     ;; then set nl_gc_loop_ctx.in_progress@+24.  END (zero arg): clear the GC
+     ;; gate, restore the prior free-list flag, and return 1 only if the current
+     ;; chunk is still the snapshotted chunk (no racy growth path was reached).
+     '(defun nl_thread_gc_inhibit_begin () (ptr-write-u64 (data-addr nl_gc_loop_ctx) 24 1))
+     '(defun nl_thread_gc_inhibit_impl (args out)
+        (let* ((requested (wf_argval args 0)))
+          (if (= requested 0)
+              (if (= (ptr-read-u64 (data-addr nl_thread_parallel_ctx) 16) 1)
+                  (let* ((same
+                          (if (= (ptr-read-u64
+                                  (data-addr nl_thread_parallel_ctx) 8)
+                                 (ptr-read-u64 268436168 0))
+                              1 0)))
+                    (seq
+                     (ptr-write-u64 (data-addr nl_gc_loop_ctx) 24 0)
+                     (ptr-write-u64
+                      268435624 0
+                      (ptr-read-u64 (data-addr nl_thread_parallel_ctx) 0))
+                     (ptr-write-u64
+                      (data-addr nl_thread_parallel_ctx) 16 0)
+                     (wf_write_int out same)
+                     0))
+                (seq (wf_write_int out 0) 0))
+            (if (= (ptr-read-u64 (data-addr nl_thread_parallel_ctx) 16) 1)
+                (seq (wf_write_int out (- 0 16)) 0)
+              (if (= (ptr-read-u64 (data-addr nl_gc_loop_ctx) 24) 1)
+                  (seq (wf_write_int out (- 0 16)) 0)
+                (let* ((chunk (ptr-read-u64 268436168 0))
+                       (cursor (ptr-read-u64 (nl_chunk_cursor_addr chunk) 0))
+                       (size (ptr-read-u64 (+ chunk 8) 0)))
+                  (if (> (+ cursor 8388608) size)
+                      (seq (wf_write_int out (- 0 12)) 0)
+                    (seq
+                     (ptr-write-u64
+                      (data-addr nl_thread_parallel_ctx) 0
+                      (ptr-read-u64 268435624 0))
+                     (ptr-write-u64
+                      (data-addr nl_thread_parallel_ctx) 8 chunk)
+                     (ptr-write-u64
+                      (data-addr nl_thread_parallel_ctx) 16 1)
+                     (ptr-write-u64 268435624 0 1)
+                     (nl_thread_gc_inhibit_begin)
+                     (wf_write_int out 1)
+                     0)))))))))))
 
 (defun nelisp-standalone--thread-dispatch-arms ()
-  "Return the five Doc 199 `nelisp-thread-*' apply-function dispatch arms.
+  "Return the Doc 199 `nelisp-thread-*' apply-function dispatch arms.
 The raw native units are linked only for `linux-x86_64'.  On every other
 target the same installed names signal catchable
 `nelisp-unsupported-primitive', exactly like the socket family."
@@ -18512,7 +18663,8 @@ target the same installed names signal catchable
                  "nelisp-thread-atomic-add"
                  "nelisp-thread-atomic-read"
                  "nelisp-thread-spawn"
-                 "nelisp-thread-join")))
+                 "nelisp-thread-join"
+                 "nelisp-thread-gc-inhibit")))
     (if (eq nelisp-standalone--target 'linux-x86_64)
         (list
          `((:lit "nelisp-thread-shared-alloc") .
@@ -18522,9 +18674,11 @@ target the same installed names signal catchable
          `((:lit "nelisp-thread-atomic-read") .
            (nl_thread_atomic_read_impl args out))
          `((:lit "nelisp-thread-spawn") .
-           (nl_thread_spawn_impl args out))
+           (nl_thread_spawn_impl args env out))
          `((:lit "nelisp-thread-join") .
-           (nl_thread_join_impl args out)))
+           (nl_thread_join_impl args out))
+         `((:lit "nelisp-thread-gc-inhibit") .
+           (nl_thread_gc_inhibit_impl args out)))
       (let ((sig (nelisp-standalone--applyfn-unsupported-primitive-form)))
         (mapcar (lambda (nm) (cons (list :lit nm) sig)) names)))))
 

@@ -663,6 +663,19 @@ nl-num-standalone-smoke
 # The gate-mutations row suppresses the worker result store, proving this gate
 # detects a worker that completes but publishes the wrong result.
 nelisp-thread-standalone-smoke
+# nelisp-thread-allocating-standalone-smoke: Doc 199 Tier 3a feasibility
+# spike.  Registry worker ID 2 evaluates pre-built ordinary Lisp through
+# nelisp_eval_call with a private mmap EvalCtx, fresh lexical frame stack, and
+# private native clone stack.  The bounded section inhibits collection,
+# disables the non-atomic sweep free-list so allocators use the CAS bump path,
+# preflights 8 MiB in the current chunk, and rejects chunk growth at exit.
+# Checkpoint 1 publishes length 5 from one allocating worker.  Checkpoint 2
+# barriers three workers while their private frames hold live allocated lists,
+# attempts garbage-collect on each, then requires 5+7+11=23 after join.
+# Mutation-proven by changing the unique GC-inhibit begin store to 0; the
+# collector then cannot enumerate the other workers' private roots and this
+# gate goes red.
+nelisp-thread-allocating-standalone-smoke
 #
 # nl-clj-async-standalone-smoke: added 2026-08-24, Doc 195 §4.6
 # (channels/`go' blocks over nelisp-actor).  Same shim/load-by-path

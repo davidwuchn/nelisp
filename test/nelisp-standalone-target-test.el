@@ -815,7 +815,8 @@ Windows uses the target-correct `.obj' unit name; linux/macOS keep `.o'."
                             ("nl_rootstack_region" . 16)
                             ("nl_gc_diag" . 1048592)
                             ("nl_gc_loop_ctx" . 1048656)
-                            ("nl_fa_tbl_base" . 1106064)))
+                            ("nl_fa_tbl_base" . 1106064)
+                            ("nl_thread_parallel_ctx" . 1106464)))
           (let ((sym (cdr (assoc (car expected) by-name))))
             (should sym)
             (should (equal (cdr expected) (plist-get sym :value)))
@@ -823,8 +824,9 @@ Windows uses the target-correct `.obj' unit name; linux/macOS keep `.o'."
         ;; Doc 170 Stage 2: +96 bytes for the `nl_alloc_check' checked-
         ;; allocator control block appended after `nl_fvcache_*'.  Doc 180
         ;; Phase 2 item 3 (2026-08-23): +176 more bytes for `nl_bt_snapshot'
-        ;; (the bounded backtrace capture buffer) appended after that.
-        (should (equal (+ 57616 1048576 96 176)
+        ;; (the bounded backtrace capture buffer) appended after that.  Doc 199
+        ;; Tier 3a appends 24 bytes of bounded parallel-section state.
+        (should (equal (+ 57616 1048576 96 176 24)
                        (cdr (assq 'bss (plist-get u :sections)))))))))
 
 (ert-deftest nelisp-standalone-target-stage8-build-appends-arena-base-slot-unit ()
@@ -1247,11 +1249,12 @@ real) native call\"."
                   "nelisp-thread-atomic-add"
                   "nelisp-thread-atomic-read"
                   "nelisp-thread-spawn"
-                  "nelisp-thread-join"))
+                  "nelisp-thread-join"
+                  "nelisp-thread-gc-inhibit"))
     (should (member name nelisp-standalone--reader-builtins))))
 
 (ert-deftest nelisp-standalone-target-thread-linux-x86-64-shape-b-forms ()
-  "Linux x86_64 emits clone(2) plus a fixed, GC-free worker registry."
+  "Linux x86_64 keeps Tier 2 registry worker ID 1 strictly GC-free."
   (cl-labels ((tree-member-p
                (needle tree)
                (cond
@@ -1271,18 +1274,38 @@ real) native call\"."
                      (forbidden-worker-symbol-p (cdr tree)))))))
     (let* ((nelisp-standalone--target 'linux-x86_64)
            (forms (nelisp-standalone--thread-forms))
-           (worker-names '(nl_thread_worker_sum_range nl_thread_worker_sum
-                           nl_thread_worker_registry_call
-                           nl_thread_worker_start))
+           (worker-names '(nl_thread_worker_sum_range nl_thread_worker_sum))
            (worker-forms
             (cl-remove-if-not
              (lambda (form) (memq (cadr form) worker-names)) forms)))
-      (should (= (length worker-forms) 4))
+      (should (= (length worker-forms) 2))
       (should (tree-member-p
                '(syscall-direct 56 1792 launch 0 0 0 0) forms))
       (should (tree-member-p '(syscall-direct 60 0 0 0 0 0 0) forms))
       (should (tree-member-p '(atomic-fetch-add done 1) worker-forms))
       (should-not (forbidden-worker-symbol-p worker-forms)))))
+
+(ert-deftest nelisp-standalone-target-thread-linux-x86-64-tier3a-forms ()
+  "Tier 3a emits a private env and bounded no-GC allocating worker ID 2."
+  (cl-labels ((tree-member-p
+               (needle tree)
+               (cond
+                ((equal needle tree) t)
+                ((consp tree)
+                 (or (tree-member-p needle (car tree))
+                     (tree-member-p needle (cdr tree)))))))
+    (let* ((nelisp-standalone--target 'linux-x86_64)
+           (forms (nelisp-standalone--thread-forms)))
+      (should (tree-member-p '(nelisp_eval_call form env out) forms))
+      (should (tree-member-p
+               '(syscall-direct 9 0 1052672 3 34 (- 0 1) 0) forms))
+      (should (tree-member-p '(record-make type_slot 2 (+ env 32)) forms))
+      (should (tree-member-p
+               '(defun nl_thread_gc_inhibit_begin ()
+                  (ptr-write-u64 (data-addr nl_gc_loop_ctx) 24 1))
+               forms))
+      (should (tree-member-p '(ptr-write-u64 268435624 0 1) forms))
+      (should (tree-member-p '(atomic-fetch-add done 1) forms)))))
 
 (ert-deftest nelisp-standalone-target-thread-dispatch-linux-x86-64-real ()
   "Linux x86_64 maps all five public names to real native units."
@@ -1292,22 +1315,23 @@ real) native call\"."
      (equal (mapcar (lambda (arm) (cadr (car arm))) arms)
             '("nelisp-thread-shared-alloc" "nelisp-thread-atomic-add"
               "nelisp-thread-atomic-read" "nelisp-thread-spawn"
-              "nelisp-thread-join")))
+              "nelisp-thread-join" "nelisp-thread-gc-inhibit")))
     (should (equal (mapcar (lambda (arm) (car-safe (cdr arm))) arms)
                    '(nl_thread_shared_alloc_impl nl_thread_atomic_add_impl
                      nl_thread_atomic_read_impl nl_thread_spawn_impl
-                     nl_thread_join_impl)))))
+                     nl_thread_join_impl nl_thread_gc_inhibit_impl)))))
 
 (ert-deftest nelisp-standalone-target-thread-non-linux-x86-64-unsupported ()
   "Every non-Linux-x86_64 target installs only unsupported-signal arms."
   (let ((real-impls '(nl_thread_shared_alloc_impl nl_thread_atomic_add_impl
                       nl_thread_atomic_read_impl nl_thread_spawn_impl
-                      nl_thread_join_impl))
+                      nl_thread_join_impl nl_thread_gc_inhibit_impl))
         (expected-names '("nelisp-thread-shared-alloc"
                           "nelisp-thread-atomic-add"
                           "nelisp-thread-atomic-read"
                           "nelisp-thread-spawn"
-                          "nelisp-thread-join")))
+                          "nelisp-thread-join"
+                          "nelisp-thread-gc-inhibit")))
     (dolist (target '(windows-x86_64 windows-aarch64 macos-aarch64
                      linux-aarch64))
       (let* ((nelisp-standalone--target target)

@@ -380,3 +380,5 @@ pinned-site ignore-errors	nelisp-standalone-build.el	defun nelisp-standalone--re
 pinned-site ignore-errors	nelisp-standalone-build.el	defun nelisp-standalone--reader-ipv6-socket-smoke	c143a5fded43 1
 # 2026-08-25 (Doc 199 Tier 2): nl-thread-standalone-smoke.el's `nl-thread-smoke--should-unsupported' asserts a call signals `nelisp-unsupported-primitive'; its condition-case catches the error to inspect its car, an intentional test assertion, not a swallowed fall.
 pinned-site silent-fallback	nelisp-thread-standalone-smoke.el	defmacro nl-thread-smoke--should-unsupported	ba2b5f025f0f 1
+# 2026-08-25 (Doc 199 Tier 3a): nl-thread-allocating-standalone-smoke.el's `nl-thread-alloc-smoke--should-unsupported' asserts a call signals `nelisp-unsupported-primitive'; its condition-case catches the error to inspect its car -- an intentional test assertion, same shape as Tier 2's.
+pinned-site silent-fallback	nelisp-thread-allocating-standalone-smoke.el	defmacro nl-thread-alloc-smoke--should-unsupported	85196b856e10 1
