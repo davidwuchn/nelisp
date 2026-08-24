@@ -298,3 +298,11 @@ standalone-reader-nonblocking-socket-smoke|scripts/nelisp-standalone-build.el|s/
 # measured RED at `mixed=(failed ("failed with code 0\n") nil
 # ("finished\n"))' (the "ok" case's own network status, expected `open').
 standalone-reader-network-process-nowait-smoke|packages/nelisp-process-adapter/src/nelisp-process-adapter.el|s/(if (= err 0)/(if (= err 999)/|a successful nonblocking connect (real SO_ERROR 0) is misclassified as failed, firing "failed with code 0\n" instead of transitioning to open
+# Doc 194 P5 (feat/network-process-p345): manually verified RED-with-
+# injection / GREEN-with-injection-reverted before adding -- an accepted
+# child's `:filter' is dropped (set to nil) instead of copied from the
+# listener, so a client's data never reaches its own filter and the
+# smoke's own `filters-shared'/`both-received' checks both flip false --
+# measured RED at `(listen 5 2 t nil nil t listen closed t)' (positions
+# 4 and 5, expected both `t'), GREEN again with the real copy restored.
+standalone-reader-network-process-server-smoke|packages/nelisp-process-adapter/src/nelisp-process-adapter.el|s/(process-put child :filter (process-get proc :filter))/(process-put child :filter nil)/|an auto-accepted child's filter is dropped instead of inherited from the :server t listener, so per-connection data never reaches the caller's filter

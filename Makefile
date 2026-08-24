@@ -808,6 +808,7 @@ STANDALONE_READER_SMOKES = \
   standalone-reader-mod-float-smoke \
   standalone-reader-nested-backquote-macro-smoke \
   standalone-reader-network-process-nowait-smoke \
+  standalone-reader-network-process-server-smoke \
   standalone-reader-network-process-smoke \
   standalone-reader-nonblocking-socket-smoke \
   standalone-reader-number-token-smoke \
@@ -2291,8 +2292,14 @@ standalone-reader-process-adapter-smoke-red: standalone-reader
 # implementation: the identical status symbol\), never signalling; the
 # async completion / sentinel-firing positive proof lives in its own
 # dedicated `standalone-reader-network-process-nowait-smoke' below,
-# P4's own exit criterion.  `:server t' (Doc 194 P5, not this pass yet)
-# still signals loudly rather than silently degrading.  A fourth
+# P4's own exit criterion.  `:server t' UPDATED the same way by doc 194
+# P5, same commit as this comment: it USED to signal loudly (P0-P2's own
+# guard) -- now it returns a real listening `network-process' with
+# `process-status' reading `listen' \(measured against real Emacs 30.1
+# during P5's own implementation: the identical status symbol\), never
+# signalling; the auto-accept / multi-client positive proof lives in its
+# own dedicated `standalone-reader-network-process-server-smoke' below,
+# P5's own exit criterion.  A fourth
 # case: an ordinary native subprocess and a `network-process' coexisting
 # in the SAME `nelisp-process-adapter--live' poll-set registry (Doc 194
 # S3.1's own design) do not interfere with each other -- the subprocess's
@@ -2312,7 +2319,7 @@ standalone-reader-network-process-smoke: standalone-reader
 	@printf '%s\n' \
 	  '$(NELISP_PROCESS_ADAPTER_LOAD_1)' \
 	  '$(NELISP_PROCESS_ADAPTER_LOAD_2)' \
-	  '(list (condition-case err (progn (open-network-stream "bad" nil "127.0.0.1" 1) (quote uncaught)) (file-error (car err))) (condition-case err (let ((p (make-network-process :name "x" :host "127.0.0.1" :service 80 :nowait t))) (prog1 (process-status p) (delete-process p))) (error (quote signalled))) (condition-case err (progn (make-network-process :name "x" :host "127.0.0.1" :service 80 :server t) (quote uncaught)) (error (quote signalled))))' \
+	  '(list (condition-case err (progn (open-network-stream "bad" nil "127.0.0.1" 1) (quote uncaught)) (file-error (car err))) (condition-case err (let ((p (make-network-process :name "x" :host "127.0.0.1" :service 80 :nowait t))) (prog1 (process-status p) (delete-process p))) (error (quote signalled))) (condition-case err (let ((p (make-network-process :name "x" :host "127.0.0.1" :service 55903 :server t))) (prog1 (process-status p) (delete-process p))) (error (quote signalled))))' \
 	  > target/standalone-reader-network-process-smoke-refused.el
 	@printf '%s\n' \
 	  '$(NELISP_PROCESS_ADAPTER_LOAD_1)' \
@@ -2325,7 +2332,7 @@ standalone-reader-network-process-smoke: standalone-reader
 	mixed_out="$$(./target/nelisp --load target/standalone-reader-network-process-smoke-mixed.el)"; \
 	if [ "$$red_out" = "(quote void-function-red)" ] && \
 	   [ "$$roundtrip_out" = "(open t t closed nil t)" ] && \
-	   [ "$$refused_out" = "(file-error connect signalled)" ] && \
+	   [ "$$refused_out" = "(file-error connect listen)" ] && \
 	   [ "$$mixed_out" = "$$(printf '(\042finished\n\042 open nil)')" ]; then \
 	  echo "[standalone-reader-network-process-smoke] PASS: red(void-fn-on-p1-base)=$$red_out roundtrip(status,srv-got,cli-got,closed,live-p,processp)=$$roundtrip_out refused(file-error,nowait,server)=$$refused_out mixed(sub-sentinel,net-status,sub-live)=$$mixed_out"; \
 	else \
@@ -2565,6 +2572,63 @@ standalone-reader-network-process-nowait-smoke: standalone-reader
 	  echo "[standalone-reader-network-process-nowait-smoke] PASS: ok(status0,status1,sentinel)=$$ok_out refused(status0,status1,sentinel)=$$refused_out mixed(net-status,net-sentinel,sub-live,sub-sentinel)=$$mixed_out"; \
 	else \
 	  echo "[standalone-reader-network-process-nowait-smoke] FAIL: ok=$$ok_out (want $$ok_expect) refused=$$refused_out (want $$refused_expect) mixed=$$mixed_out (want $$mixed_expect)"; \
+	  exit 1; \
+	fi
+
+# Doc 194 P5 exit criterion: `:server t', auto-accept, `:log'.
+# Against-the-bug: RED is the P0-P2 guard `standalone-reader-network-
+# process-smoke''s own "refused" case used to assert for `:server t'
+# (unconditional `error') -- updated alongside this target (same
+# commit) to assert the OPPOSITE, GREEN claim (`process-status' reads
+# `listen', no signal); this target is the dedicated positive proof
+# P5's own exit criterion asks for.
+#
+# A real multi-client scenario: two clients connect to ONE `:server t'
+# listener in the same poll window (both `make-network-process' calls
+# happen before the FIRST `accept-process-output', so both connect
+# attempts are already in flight/queued when the poll loop first looks
+# -- the cooperative-concurrency case this doc's own P5 section flags:
+# this substrate's poll loop is single-thread/cooperative, so the two
+# accepts are serviced ONE PER POLL PASS, not literally simultaneously
+# -- `accept-process-output' is called twice below for exactly this
+# reason, and both children are confirmed live either way).  The live
+# poll-set registry (this runtime's own `process-list' equivalent, Doc
+# 194 S4 P5's own text) shows FIVE processes for two clients -- the
+# listener, each CLIENT-side connection (`c1'/`c2', synchronous
+# `make-network-process' calls, already `nelisp-process-adapter--live'
+# members in their own right, Doc 194 P0), and each SERVER-side
+# auto-accepted child (this phase's own addition) -- matching real Emacs
+# 30.1's measured `process-list' shape exactly (this doc's own
+# measurement while implementing this phase: `srv'/`c1'/`c2' plus one
+# `srv <HOST:PORT>' child per client, five entries for two clients too),
+# modulo the child NAME suffix (`<fd:N>', not `<HOST:PORT>' -- Phase 1's
+# `nelisp-socket-accept' requests no peer address at all, S1.1, a
+# substrate limitation this phase does not fix, recorded in
+# `nelisp-process-adapter--drain-and-fire-network''s
+# own comment).  Each child's `:filter' (inherited from the listener,
+# `eq'-identical to it, matching the SAME real-Emacs measurement) fires
+# independently as each client sends its OWN data -- proving the two
+# connections are not cross-wired.  `:log' is called `(SERVER CHILD
+# MESSAGE)' once per accept.  Deleting the SERVER transitions ONLY its
+# own status to `closed' -- the already-accepted children are
+# unaffected (measured against real Emacs 30.1: "connection procs
+# outlive it", this doc's own P5 exit criterion text, confirmed rather
+# than assumed) -- this smoke checks the children are still `open'
+# immediately after `delete-process' on the server, before cleaning
+# them up itself.
+standalone-reader-network-process-server-smoke: standalone-reader
+	@mkdir -p target
+	@printf '%s\n' \
+	  '$(NELISP_PROCESS_ADAPTER_LOAD_1)' \
+	  '$(NELISP_PROCESS_ADAPTER_LOAD_2)' \
+	  '(defun nps-name (p) (aref p 1))' \
+	  '(let* (received log-calls (srv (make-network-process :name "srv" :server t :service 56020 :filter (lambda (p s) (push (cons (nps-name p) s) received)) :log (lambda (server client msg) (push (list (nps-name server) (nps-name client) msg) log-calls)))) (status0 (process-status srv)) (c1 (make-network-process :name "c1" :host "127.0.0.1" :service 56020)) (c2 (make-network-process :name "c2" :host "127.0.0.1" :service 56020))) (accept-process-output nil 1) (accept-process-output nil 1) (let* ((live (copy-sequence nelisp-process-adapter--live)) (children (seq-filter (lambda (p) (not (memq p (list c1 c2 srv)))) live)) (proc-count (length live))) (process-send-string c1 "hello-from-c1") (process-send-string c2 "hello-from-c2") (accept-process-output nil 1) (accept-process-output nil 1) (let* ((children-open (not (memq nil (mapcar (lambda (p) (eq (aref p 2) (quote open))) children)))) (filters-shared (not (memq nil (mapcar (lambda (p) (eq (process-get p :filter) (process-get srv :filter))) children)))) (recv-both (and (assoc-string "hello-from-c1" (mapcar (lambda (x) (cdr x)) received) t) (assoc-string "hello-from-c2" (mapcar (lambda (x) (cdr x)) received) t))) (server-status-before-delete (process-status srv))) (delete-process srv) (let* ((server-status-after (process-status srv)) (children-still-open (not (memq nil (mapcar (lambda (p) (eq (aref p 2) (quote open))) children))))) (delete-process c1) (delete-process c2) (list status0 proc-count (length children) children-open filters-shared (if recv-both t nil) (= (length log-calls) 2) server-status-before-delete server-status-after children-still-open)))))' \
+	  > target/standalone-reader-network-process-server-smoke.el
+	@out="$$(./target/nelisp --load target/standalone-reader-network-process-server-smoke.el)"; \
+	if [ "$$out" = "(listen 5 2 t t t t listen closed t)" ]; then \
+	  echo "[standalone-reader-network-process-server-smoke] PASS: (server-status0,live-count,child-count,children-open,filters-shared,both-received,log-calls==2,server-status-before-delete,server-status-after-delete,children-still-open-after-server-delete)=$$out"; \
+	else \
+	  echo "[standalone-reader-network-process-server-smoke] FAIL: $$out"; \
 	  exit 1; \
 	fi
 

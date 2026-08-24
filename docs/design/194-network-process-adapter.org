@@ -1,23 +1,28 @@
 #+TITLE: Doc 194 — make-network-process: sockets under the process adapter, nonblocking I/O, and DNS without libc
 #+AUTHOR: Claude (design), zawatton (direction)
 #+DATE: 2026-08-24
-#+STATUS: SHIPPED (P0-P4, 2026-08-24, branch =feat/network-process-p345=,
+#+STATUS: SHIPPED (P0-P5, 2026-08-24, branch =feat/network-process-p345=,
 #+STATUS: base =feat/network-process-p0= / =feat/socket-primitives-p1=) —
 #+STATUS: the synchronous client path
 #+STATUS: (=make-network-process=/=open-network-stream=, §3.1), =/etc/hosts=
 #+STATUS: resolution (§3.2 Phase B), DNS-over-TCP/53 (§3.2 Phase C), the P3
 #+STATUS: nonblocking primitives (=nelisp-socket-connect=/-accept's
 #+STATUS: =NOWAIT= argument, =nelisp-socket-poll=, =nelisp-socket-connect-
-#+STATUS: error=, §3.3), and P4 (real =:nowait= support, driven by the
-#+STATUS: process adapter's ONE poll loop) are real, tested (including
-#+STATUS: against a live resolver for DNS and against real GNU Emacs 30.1
-#+STATUS: for the =:nowait= status/sentinel contract), and pushed.  P5
-#+STATUS: (=:server t=/auto-accept) and P6 (Windows, documented-not-built)
-#+STATUS: remain exactly as designed below — not started this pass, per
-#+STATUS: this doc's own phased plan (§4) — asking for =:server t= from
-#+STATUS: =make-network-process= still signals loudly rather than silently
-#+STATUS: degrading.  Two substrate/design defects
-#+STATUS: were found and fixed/worked around during this pass, both out of
+#+STATUS: error=, §3.3), P4 (real =:nowait= support, driven by the process
+#+STATUS: adapter's ONE poll loop), and P5 (=:server t=/auto-accept/=:log=,
+#+STATUS: same loop, same primitives) are real, tested (including against a
+#+STATUS: live resolver for DNS and against real GNU Emacs 30.1 for the
+#+STATUS: =:nowait=/=:server t= status/sentinel/child-shape contracts), and
+#+STATUS: pushed.  P6 (Windows, documented-not-built) remains exactly as
+#+STATUS: designed below — not started, out of scope per §1.6/§3.4, blocked
+#+STATUS: on a project (Windows PE import-table emission) that does not
+#+STATUS: exist yet.  =make-network-process= now supports every keyword
+#+STATUS: this doc designs (=:host=/=:service=/=:nowait=/=:server=/=:log=)
+#+STATUS: on linux-x86_64; every other target still gets the catchable
+#+STATUS: =nelisp-unsupported-primitive= signal for the underlying socket
+#+STATUS: primitives themselves (§1.1's own per-target gate, unchanged).
+#+STATUS: Three substrate/design defects
+#+STATUS: were found and fixed/worked around during this pass, all out of
 #+STATUS: this doc's own original scope to have anticipated: (1) P2 —
 #+STATUS: this runtime's =aref=/=length= (Doc 161) — and independently,
 #+STATUS: =unibyte-string= — treat every string as UTF-8 text with no
@@ -50,7 +55,29 @@
 #+STATUS: process-adapter/src/nelisp-process-adapter.el=) uses the
 #+STATUS: measured string; ERRNO is exactly what
 #+STATUS: =nelisp-socket-connect-error= already returns, so no separate
-#+STATUS: errno-to-message translation was needed.
+#+STATUS: errno-to-message translation was needed.  (4) P5 — Phase 1's own
+#+STATUS: =nelisp-socket-accept= (§1.1) requests NO peer address at all
+#+STATUS: (=accept4(fd, NULL, NULL, flags)=), so this substrate has no way
+#+STATUS: to learn an accepted connection's remote host/port.  Real Emacs
+#+STATUS: 30.1 (measured fresh while implementing P5, a live probe, not a
+#+STATUS: re-read of §1.3's original one) names each auto-accepted child
+#+STATUS: =SERVERNAME <HOST:PORT>= and fires its sentinel with =open from
+#+STATUS: HOST\n= the instant it is accepted, and calls =:log= with =accept
+#+STATUS: from HOST\n= — all three need that unavailable HOST/PORT.  This
+#+STATUS: implementation names children =SERVERNAME <fd:N>= (N = the
+#+STATUS: connection's own fd, still a unique per-connection identifier)
+#+STATUS: and fires =open\n=/=accept\n= (dropping the missing =" from
+#+STATUS: HOST"= suffix) instead — a deliberate, documented simplification
+#+STATUS: (=nelisp-process-adapter--drain-and-fire-network='s own comment,
+#+STATUS: same file), not a native fix (a real fix needs =accept4= to pass
+#+STATUS: a real =sockaddr= out-param and decode it, additive native work
+#+STATUS: this pass does not attempt).  Every OTHER measured P5 fact holds
+#+STATUS: exactly: =:server t= status is =listen= for the server's whole
+#+STATUS: lifetime; each child's =:filter=/=:sentinel= are the literal SAME
+#+STATUS: function objects as the listener's own (=eq=, not merely
+#+STATUS: =equal=); deleting the server transitions only its own status to
+#+STATUS: =closed=, already-accepted children stay =open= and unaffected
+#+STATUS: ("connection procs outlive it", confirmed rather than assumed).
 #+STATUS: =make-network-process='s contract (§1.3), the FFI
 #+STATUS: availability matrix (§1.4), and the =:nowait=/=:server t= sentinel
 #+STATUS: and child-process-shape contracts (§1.3, reused unchanged by
@@ -60,8 +87,13 @@
 #+STATUS: open question) is confirmed =55=, immediately following
 #+STATUS: =setsockopt='s already-used =54=, against the standard, stable
 #+STATUS: x86_64 kernel syscall table (=arch/x86/entry/syscalls/
-#+STATUS: syscall_64.tbl=).
-#+VERIFIED-BY: standalone-reader-network-process-smoke standalone-reader-hosts-file-smoke standalone-reader-dns-smoke standalone-reader-nonblocking-socket-smoke standalone-reader-network-process-nowait-smoke standalone-reader-smokes
+#+STATUS: syscall_64.tbl=).  P5's own poll loop is COOPERATIVE, single-
+#+STATUS: thread (this doc's own §4 P5 caveat, restated as fact rather
+#+STATUS: than a risk): two concurrent clients are serviced one accept per
+#+STATUS: poll pass, not literally in parallel — expected, not a defect,
+#+STATUS: and =standalone-reader-network-process-server-smoke= calls
+#+STATUS: =accept-process-output= twice for exactly this reason.
+#+VERIFIED-BY: standalone-reader-network-process-smoke standalone-reader-hosts-file-smoke standalone-reader-dns-smoke standalone-reader-nonblocking-socket-smoke standalone-reader-network-process-nowait-smoke standalone-reader-network-process-server-smoke standalone-reader-smokes
 
 * §0 TL;DR
 
@@ -940,7 +972,22 @@ measurement).
   criterion, §4 P2), now proven across the two DIFFERENT process
   kinds this doc's =(aref proc 0)= dispatch makes possible.
 
-** P5 — =:server t=, auto-accept, =:log= (1-2 d)
+** P5 — =:server t=, auto-accept, =:log= (1-2 d) — DONE 2026-08-24
+
+Real =:server t= listener, per-connection auto-accepted child
+`network-process' objects (=:filter=/=:sentinel= copied, `eq'-identical
+to the listener's own), =:log= interception, all driven by the SAME
+poll loop P4 already wired =standalone-reader-network-process-server-
+smoke= (Makefile, two concurrent clients, verified filter/sentinel
+sharing, verified the server-delete-does-not-affect-children contract).
+This doc's top =#+STATUS= block records the one deliberate deviation
+from the exit criterion below: child NAMING/sentinel/`:log' text all
+originally cited a HOST this substrate cannot obtain (Phase 1's
+=nelisp-socket-accept= requests no peer address, §1.1) — =<fd:N>=/
+=open\n=/=accept\n= are used instead of =<HOST:PORT>=/=open from
+HOST\n=/=accept from HOST\n=, every OTHER measured fact (statuses,
+`eq' filter/sentinel sharing, the server-delete/children-outlive
+contract, process-list-equivalent count) holding exactly as measured.
 
 - The listener's =listen=-status poll branch (§3.1/§3.3), per-
   connection child =network-process= creation, =:log= interception.

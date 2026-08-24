@@ -59,15 +59,17 @@
 ;; batch-mode contract (Doc 184 S2).
 ;;
 ;; `make-network-process' was OUT of scope under Doc 184 (S1.7/P4: no
-;; native socket primitive family existed yet).  Doc 194 P0-P2 replaces
+;; native socket primitive family existed yet).  Doc 194 P0-P5 replaces
 ;; that stub: `feat/socket-primitives-p1' shipped the six raw-fd
 ;; primitives this file's `make-network-process'/`open-network-stream'
-;; (synchronous CLIENT path only -- no `:server'/`:nowait', Doc 194 P3+)
-;; now build on directly, plus a pure-elisp DNS resolver (`/etc/hosts'
-;; then DNS-over-TCP/53, Doc 194 S3.2) so a caller can pass a hostname,
-;; not only a literal IPv4/`localhost'.  See docs/design/194-network-
-;; process-adapter.org for the full design; this file is P0-P2's own
-;; "measured, not asserted" implementation of that doc's S3.1/S3.2.
+;; build on directly (P0: the synchronous CLIENT path; P4: `:nowait',
+;; driven by THIS FILE's own poll loop via P3's nonblocking primitives;
+;; P5: `:server t' auto-accept, same loop, same primitives), plus a
+;; pure-elisp DNS resolver (`/etc/hosts' then DNS-over-TCP/53, Doc 194
+;; S3.2) so a caller can pass a hostname, not only a literal IPv4/
+;; `localhost'.  See docs/design/194-network-process-adapter.org for the
+;; full design; this file is P0-P5's own "measured, not asserted"
+;; implementation of that doc's S3.1/S3.2/S3.3.
 ;;
 ;;; Code:
 
@@ -350,10 +352,34 @@ and-fire' (Doc 194 P4/P5).  Dispatches on PROC's STATUS slot (aref 2):
   real string names the errno, and this substrate's own
   `nelisp-socket-connect-error' already returns that exact integer, so
   no separate errno-to-message translation is needed.
-- `listen' (P5, added by a later phase's own edit to this same COND):
-  not yet a case here -- `make-network-process''s `:server' branch still
-  signals until P5 lands, so no `network-process' can reach `listen'
-  status before then.
+- `listen' (P5, `:server t' auto-accept): `nelisp-socket-poll FD nil 0'
+  on the LISTENING fd (POLLIN on a listening socket means \"a connection
+  is pending\", the same generic `poll(2)' semantics the `open' branch's
+  own readable check already relies on); on ready, `nelisp-socket-accept
+  FD t' (nonblocking, P3) -- a real fd wraps a NEW child `network-process'
+  object, status `open', COPYING (not sharing/aliasing anything else)
+  the listener's own `:filter'/`:sentinel' function objects (measured
+  against real Emacs 30.1 during this phase's implementation: `(eq
+  (process-filter child) (process-filter server))' is `t' -- literal
+  reuse of the same function, not a copy of behaviour); calls `:log
+  SERVER CHILD \"accept\\n\"' first if the listener was given one
+  (measured: real Emacs calls `:log' with `\"accept from HOST\\n\"' --
+  simplified here to a bare `\"accept\\n\"', matching this doc's own
+  S3.3 prose exactly, because Phase 1's `nl_socket_accept_impl' requests
+  no peer address at all, S1.1, so this substrate has no HOST string to
+  put there), then fires the CHILD's own sentinel with `\"open\\n\"'
+  (ALSO measured against real Emacs: an accepted child fires its
+  sentinel immediately, with `\"open from HOST\\n\"' -- again simplified
+  to `\"open\\n\"' for the same peer-address-unavailable reason).  The
+  child's NAME is `SERVERNAME <fd:N>' -- real Emacs names it
+  `SERVERNAME <HOST:PORT>' (the peer's own address:port, S1.3), a shape
+  this substrate cannot reproduce for the same reason; `<fd:N>' is
+  still a unique, informative suffix per accepted connection.  A NOWAIT
+  accept racing an empty queue (`-1' sentinel, P3) between the poll
+  check and the accept call -- possible in principle, never observed
+  in this single-process cooperative loop, since nothing else can steal
+  a pending connection between the two calls -- is simply a no-op this
+  pass (nothing to wrap, tried again next pass).
 
 Returns non-nil iff real output BYTES were delivered (`open' status
 only), matching the native branch's own contract."
@@ -389,6 +415,20 @@ only), matching the native branch's own contract."
             (let ((sentinel (process-get proc :sentinel)))
               (when sentinel
                 (funcall sentinel proc (format "failed with code %d\n" err)))))))
+      nil)
+     ((eq status 'listen)
+      (when (eq (nelisp-socket-poll fd nil 0) t)
+        (let ((cfd (nelisp-socket-accept fd t)))
+          (unless (eql cfd -1)
+            (let* ((cname (format "%s <fd:%d>" (aref proc 1) cfd))
+                   (child (nelisp--make-network-process-object cname 'open cfd)))
+              (process-put child :filter (process-get proc :filter))
+              (process-put child :sentinel (process-get proc :sentinel))
+              (setq nelisp-process-adapter--live (cons child nelisp-process-adapter--live))
+              (let ((log (process-get proc :log)))
+                (when log (funcall log proc child "accept\n")))
+              (let ((sentinel (process-get child :sentinel)))
+                (when sentinel (funcall sentinel child "open\n")))))))
       nil)
      (t nil))))
 
@@ -867,10 +907,11 @@ unchanged, it is not re-wrapped as \"unresolvable\" here."
 ;; poll-loop involvement (measured against real Emacs 30.1, Doc 194 S1.3:
 ;; a blocking connect completes synchronously inside `make-network-
 ;; process' itself, `process-status' reads `open' the instant it
-;; returns, before any `accept-process-output' call).  `:server t'/
-;; `:nowait' are Doc 194 P3-P5, not this pass -- asking for either
-;; signals loudly rather than silently degrading to a blocking connect a
-;; caller did not request.
+;; returns, before any `accept-process-output' call).  `:nowait t'
+;; (Doc 194 P4, `nelisp--network-process-connect-nowait' below) and
+;; `:server t' (Doc 194 P5, `nelisp--network-process-listen' below) are
+;; both real now -- P0-P2's own "signals loudly rather than silently
+;; degrading" guard for each is gone, replaced by the real thing.
 
 (defun nelisp--network-process-signal-refused (plist err)
   "Translate a caught error ERR (`nelisp-socket-error' from a refused/
@@ -946,18 +987,49 @@ immediately rather than on a later poll pass."
            (when sentinel (funcall sentinel proc (format "failed with code %d\n" errno))))
          proc)))))
 
+(defun nelisp--network-process-listen (plist)
+  "Doc 194 P5: `make-network-process' with `:server t' -- a LISTENING
+`network-process' (status `listen' for its whole lifetime, S3.1/S3.3).
+`:host' is NOT resolved via `nelisp--resolve-host' the way a client's is
+-- a listener binds a LOCAL interface address, it does not connect to a
+remote one, so DNS/`/etc/hosts' resolution does not apply; only
+`nelisp--net-host-string''s nil/`local' -> \"127.0.0.1\" normalization
+runs, matching Phase 1's own bind-time host grammar (S1.1: literal
+`localhost'/IPv4 dotted-decimal only) directly.  Built on `nelisp-
+socket-listen HOST SERVICE t' (P3's NOWAIT extension -- REQUIRED here,
+not optional: P5 depends on P3's nonblocking accept, S4 P5's own text --
+a blocking `:server t' would freeze the whole poll loop on every accept
+attempt).  `:log' (server-only, real Emacs: `(SERVER CLIENT MESSAGE)' on
+each accept, S1.3) is stored on the listener's own props-alist for
+`nelisp-process-adapter--drain-and-fire-network''s `listen' branch to
+read back.  `:service 0' (kernel-assigned ephemeral port) is explicitly
+NOT supported -- `getsockname(2)' to read the real port back does not
+exist yet (S6's own open question); pass an explicit port."
+  (let* ((name (or (plist-get plist :name) "network"))
+         (host (plist-get plist :host))
+         (service (plist-get plist :service))
+         (fd (condition-case err
+                 (nelisp-socket-listen (nelisp--net-host-string host) service t)
+               (error (nelisp--network-process-signal-refused plist err))))
+         (proc (nelisp--make-network-process-object name 'listen fd)))
+    (nelisp--network-process-populate proc plist)
+    (process-put proc :log (plist-get plist :log))
+    (setq nelisp-process-adapter--live (cons proc nelisp-process-adapter--live))
+    proc))
+
 (defun make-network-process (&rest plist)
-  "Doc 194 P0/P4: standard-name `make-network-process'.  The synchronous
-CLIENT path (no `:server', no `:nowait') is built directly on
-`nelisp-socket-connect' plus `nelisp--resolve-host' (S3.1/S3.2).
+  "Doc 194 P0/P4/P5: standard-name `make-network-process'.  The
+synchronous CLIENT path (no `:server', no `:nowait') is built directly
+on `nelisp-socket-connect' plus `nelisp--resolve-host' (S3.1/S3.2).
 `:nowait t' delegates to `nelisp--network-process-connect-nowait' (P4).
-`:server t' is Doc 194 P5, not yet supported here."
+`:server t' delegates to `nelisp--network-process-listen' (P5)."
   (let* ((service (plist-get plist :service))
          (server (plist-get plist :server))
          (nowait (plist-get plist :nowait)))
     (cond
      (server
-      (signal 'error (list "make-network-process: :server t is not yet supported (Doc 194 P5)")))
+      (unless (integerp service) (signal 'wrong-type-argument (list 'integerp service)))
+      (nelisp--network-process-listen plist))
      (nowait
       (unless (integerp service) (signal 'wrong-type-argument (list 'integerp service)))
       (nelisp--network-process-connect-nowait plist))
