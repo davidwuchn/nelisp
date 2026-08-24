@@ -6911,6 +6911,79 @@ anything (Doc 188 §2.2)."
 (unless (fboundp 'buffer-string)
   (defun buffer-string ()
     (nelisp-buffer-string nelisp--current-buffer)))
+
+;; ---- Doc 188 P2: current-buffer / set-buffer / buffer-substring /
+;; erase-buffer -- the four names §3's P2 bullet lists as still void
+;; after P1 (`with-current-buffer'/`with-temp-buffer' shipped early,
+;; as part of P1's own coherent lifecycle set; see the P1 record's
+;; "Not wired" list).  Same threading discipline as `point'/`goto-
+;; char' above: `nelisp--current-buffer' only, never the ported
+;; file's own ambient `nelisp-buffer--current', so the two "current
+;; buffer" trackers cannot desync for this standard-name path.
+
+(unless (fboundp 'current-buffer)
+  (defun current-buffer ()
+    "Return the current NeLisp buffer object."
+    nelisp--current-buffer))
+
+(unless (fboundp 'set-buffer)
+  (defun set-buffer (buffer-or-name)
+    "Make BUFFER-OR-NAME current and return it.
+
+Error wording probed against Emacs 30.1 (Doc 188 P2): a NAME that
+resolves to no buffer signals `(error \"No buffer named %s\")'; a
+buffer object that has since been killed signals `(error \"Selecting
+deleted buffer\")' even though `get-buffer' happily returns a dead
+buffer object unchanged.  Wrong-type input (`(set-buffer 42)') is
+handled by `get-buffer' itself re-used below -- Emacs's own error
+there, `(wrong-type-argument stringp 42)', already matches what
+`get-buffer' already signals (Doc 188 P1)."
+    (let ((b (get-buffer buffer-or-name)))
+      (cond
+       ((null b)
+        (signal 'error (list (format "No buffer named %s" buffer-or-name))))
+       ((not (buffer-live-p b))
+        (signal 'error (list "Selecting deleted buffer")))
+       (t
+        (setq nelisp--current-buffer b)
+        b)))))
+
+(unless (fboundp 'buffer-substring)
+  (defun buffer-substring (start end)
+    "Return the text between START and END in the current buffer.
+
+Real Emacs accepts START/END in EITHER order and signals
+`args-out-of-range' (data = current buffer, START, END -- in that
+original, unsorted order) outside [`point-min', `point-max'] -- both
+probed against Emacs 30.1 (Doc 188 P2).  The underlying `nelisp-
+buffer-substring' (ported verbatim from src/nelisp-buffer.el, kept
+byte-identical for `ns-gate') assumes START <= END and does no range
+check at all, so both real-Emacs behaviors are handled in this
+wrapper instead of touching that file."
+    (unless (integerp start)
+      (signal 'wrong-type-argument (list 'integer-or-marker-p start)))
+    (unless (integerp end)
+      (signal 'wrong-type-argument (list 'integer-or-marker-p end)))
+    (let* ((b nelisp--current-buffer)
+           (lo (nelisp-point-min b))
+           (hi (nelisp-point-max b))
+           (s (min start end))
+           (e (max start end)))
+      (when (or (< s lo) (> e hi))
+        (signal 'args-out-of-range (list b start end)))
+      (nelisp-buffer-substring s e b))))
+
+(unless (fboundp 'erase-buffer)
+  (defun erase-buffer ()
+    "Delete all text in the current buffer.  Returns nil (Emacs 30.1
+probe, Doc 188 P2).  Real Emacs widens first; the ported `nelisp-
+erase-buffer' does not reset narrowing -- but no standard name in
+this tree can SET narrowing yet (`narrow-to-region'/`widen' are not
+wired to standard names by any phase through P2), so that gap is
+unreachable from the surface this phase builds, not silently papered
+over."
+    (nelisp-erase-buffer nelisp--current-buffer)))
+
 (unless (fboundp 'with-temp-file)
   (defmacro with-temp-file (file &rest body)
     "Real buffer-backed `with-temp-file' (Doc 188 P1): BODY runs with a
