@@ -2207,67 +2207,83 @@ standalone-reader-process-adapter-smoke: standalone-reader
 	  exit 1; \
 	fi
 
-# Against-the-bug RED half of the two smokes above: the SAME binary
-# (target/nelisp is not rebuilt between this and the GREEN targets --
-# Doc 184's fix is an opt-in loadable upgrade layer, not a native/binary
-# change), with NEITHER new file loaded, reproducing exactly Doc 184
-# S1.3's measured defects verbatim: `:filter' silently dropped (no error,
-# no filter call), and `run-at-time' REPEAT ignored (fires once,
-# synchronously, immediately -- not deferred at all).
+# Default-bootstrap regression guard for the two smokes above (retired
+# from its original job as of integration/wave6 phase 2A). Doc 184's fix
+# used to be an opt-in loadable upgrade layer -- this exact target used
+# to prove the PRE-fix defect shape still reproduced when neither new
+# file was `--load'ed, because the default binary never carried the
+# fix. Phase 2A wired `packages/nelisp-eventloop/src/nelisp-async-core.el'
+# and `packages/nelisp-process-adapter/src/nelisp-process-adapter.el''s
+# source directly into `nelisp-standalone--reader-repl-prelude-source'
+# (scripts/nelisp-standalone-build.el), so every standalone build now
+# carries the fix baked in -- the old RED assertion (filter=nil,
+# repeat=1) can no longer reproduce on ANY build, unfixed or not, and a
+# real run against this exact recipe confirmed that (filter=("hi\n")
+# repeat=0). This target now asserts the opposite claim, and is the
+# thing that actually matters going forward: the fix ships WITHOUT an
+# explicit `--load', so a future change to the prelude-source
+# concatenation cannot silently drop it back to opt-in-only without
+# this smoke catching it.
 standalone-reader-process-adapter-smoke-red: standalone-reader
 	@mkdir -p target
 	@printf '%s\n' \
 	  '(let (got) (make-process :name "t" :command (list "/bin/echo" "hi") :filter (lambda (_p chunk) (push chunk got))) (accept-process-output nil 1) got)' \
 	  > target/standalone-reader-process-adapter-smoke-red-filter.el
 	@printf '%s\n' \
-	  '(let ((n 0)) (run-at-time 0 0.01 (lambda () (setq n (1+ n)))) n)' \
+	  '(let ((n 0)) (run-at-time 0 0.02 (lambda () (setq n (1+ n)))) (accept-process-output nil 0.3) (>= n 2))' \
 	  > target/standalone-reader-process-adapter-smoke-red-repeat.el
+	@printf '%s\n' \
+	  '(fboundp (quote process-filter))' \
+	  > target/standalone-reader-process-adapter-smoke-red-fboundp.el
 	@filter_out="$$(./target/nelisp --load target/standalone-reader-process-adapter-smoke-red-filter.el)"; \
 	repeat_out="$$(./target/nelisp --load target/standalone-reader-process-adapter-smoke-red-repeat.el)"; \
-	if [ "$$filter_out" = "nil" ] && [ "$$repeat_out" = "1" ]; then \
-	  echo "[standalone-reader-process-adapter-smoke-red] PASS: measured-defect reproduced verbatim -- filter=$$filter_out (silently dropped) repeat=$$repeat_out (REPEAT ignored, fired once synchronously)"; \
+	fboundp_out="$$(./target/nelisp --load target/standalone-reader-process-adapter-smoke-red-fboundp.el)"; \
+	filter_expect="$$(printf '(\042hi\n\042)')"; \
+	if [ "$$filter_out" = "$$filter_expect" ] && [ "$$repeat_out" = "t" ] && [ "$$fboundp_out" = "t" ]; then \
+	  echo "[standalone-reader-process-adapter-smoke-red] PASS: default binary, NO --load of either new file -- process-filter fboundp=$$fboundp_out, filter fires=$$filter_out, REPEAT-through-shared-loop=$$repeat_out (Doc 184 P1/P2 ships in the default bootstrap, integration/wave6 phase 2A)"; \
 	else \
-	  echo "[standalone-reader-process-adapter-smoke-red] FAIL: expected the UNFIXED defect shape (filter=nil repeat=1), got filter=$$filter_out repeat=$$repeat_out -- the prelude's own baked-in adapter changed out from under this smoke"; \
+	  echo "[standalone-reader-process-adapter-smoke-red] FAIL: expected the default-bootstrap FIXED shape (fboundp=t, filter=(\"hi\\n\"), repeat=t) without loading either new file, got fboundp=$$fboundp_out filter=$$filter_out repeat=$$repeat_out -- the default prelude no longer carries Doc 184 P1/P2"; \
 	  exit 1; \
 	fi
 
-# Doc 184 P3: the `--repl' blank-line idle pump.  RED isolates exactly the
-# wiring question -- `nelisp-async-core.el' ALONE gives real deferred
-# `run-at-time' (so the timer genuinely will not fire until something
-# pumps it, unlike the prelude's synchronous immediate-fire stub) but
-# does NOT define a real `nelisp--repl-idle-pump' (only
-# nelisp-process-adapter.el does), so the baked-in no-op stays in effect
-# and blank-Enter must never print TICK.  GREEN loads
-# nelisp-process-adapter.el too, upgrading the hook to a real bounded
-# pump wired into `nl_repl_loop' (scripts/nelisp-standalone-build.el),
-# and blank-Enter must print TICK.  A `--load' batch run of the identical
-# timer form never reaches `nl_repl_loop' at all, matching Emacs's own
-# batch-mode contract of not pumping outside an explicit wait.
+# Doc 184 P3: the `--repl' blank-line idle pump. Retired from its
+# original RED/GREEN split as of integration/wave6 phase 2A: this smoke
+# used to prove `nelisp-async-core.el' ALONE left the baked-in no-op
+# `nelisp--repl-idle-pump' in effect (no TICK) while ALSO loading
+# nelisp-process-adapter.el upgraded it to a real bounded pump (TICK).
+# Phase 2A wired both files' source into the default prelude
+# (`nelisp-standalone--reader-repl-prelude-source'), so blank-Enter
+# pumps a due timer on every standalone build now, with NOTHING
+# `--load'ed -- the old RED case (no adapter loaded) now also prints
+# TICK, which is the fix working, not a failure (confirmed by a real
+# run: red_out=TICK). This target now asserts the default-bootstrap
+# claim directly: NO explicit load, blank-Enter pumps (TICK); a
+# `--load' batch run of the identical timer form still never reaches
+# `nl_repl_loop' at all, matching Emacs's own batch-mode contract of
+# not pumping outside an explicit wait -- that half is unaffected by
+# the wiring and stays the real regression guard.
 standalone-reader-repl-idle-pump-smoke: standalone-reader
 	@mkdir -p target
 	@printf '%s\n' \
-	  '$(NELISP_PROCESS_ADAPTER_LOAD_1)' \
-	  '$(NELISP_PROCESS_ADAPTER_LOAD_2)' \
 	  '(run-at-time 0.05 nil (lambda () (princ "TICK")))' \
 	  '(quote batch-no-pump)' \
 	  > target/standalone-reader-repl-idle-pump-smoke-batch.el
-	@red_out="$$(printf '(load "packages/nelisp-eventloop/src/nelisp-async-core.el")\n(run-at-time 0.05 nil (lambda () (princ "TICK")))\n\n\n\n\n' | timeout 5 ./target/nelisp --repl --no-prompt --no-print 2>&1)"; \
-	green_out="$$(printf '(load "packages/nelisp-eventloop/src/nelisp-async-core.el")\n(load "packages/nelisp-process-adapter/src/nelisp-process-adapter.el")\n(run-at-time 0.05 nil (lambda () (princ "TICK")))\n\n\n\n\n\n\n\n\n\n' | timeout 5 ./target/nelisp --repl --no-prompt --no-print 2>&1)"; \
+	@noload_out="$$(printf '(run-at-time 0.05 nil (lambda () (princ "TICK")))\n\n\n\n\n' | timeout 5 ./target/nelisp --repl --no-prompt --no-print 2>&1)"; \
 	batch_out="$$(./target/nelisp --load target/standalone-reader-repl-idle-pump-smoke-batch.el 2>&1)"; \
-	case "$$red_out" in \
-	  *TICK*) red_ok=0 ;; \
-	  *) red_ok=1 ;; \
+	case "$$noload_out" in \
+	  *TICK*) noload_ok=1 ;; \
+	  *) noload_ok=0 ;; \
 	esac; \
-	case "$$green_out" in \
-	  *TICK*) green_ok=1 ;; \
-	  *) green_ok=0 ;; \
+	case "$$batch_out" in \
+	  *TICK*) batch_ok=0 ;; \
+	  *) batch_ok=1 ;; \
 	esac; \
-	if [ "$$red_ok" = 1 ] && [ "$$green_ok" = 1 ]; then \
-	  echo "[standalone-reader-repl-idle-pump-smoke] PASS: unloaded REPL blank-Enter never pumps (no TICK), loaded REPL blank-Enter pumps a due timer (TICK), batch --eval of the same timer never reaches the pump at all -> batch=$$batch_out"; \
+	if [ "$$noload_ok" = 1 ] && [ "$$batch_ok" = 1 ]; then \
+	  echo "[standalone-reader-repl-idle-pump-smoke] PASS: default binary, NO --load of either new file -- REPL blank-Enter pumps a due timer (TICK), batch --eval of the same timer never reaches the pump at all -> noload=$$noload_out batch=$$batch_out (Doc 184 P3 ships in the default bootstrap, integration/wave6 phase 2A)"; \
 	else \
-	  echo "[standalone-reader-repl-idle-pump-smoke] FAIL: red(no-adapter)-had-tick=$$([ $$red_ok = 1 ] && echo no || echo YES-BAD) green(adapter-loaded)-had-tick=$$([ $$green_ok = 1 ] && echo YES || echo NO-BAD)"; \
-	  echo "  red_out=$$red_out"; \
-	  echo "  green_out=$$green_out"; \
+	  echo "[standalone-reader-repl-idle-pump-smoke] FAIL: noload-repl-had-tick=$$([ $$noload_ok = 1 ] && echo YES || echo NO-BAD) batch-had-tick=$$([ $$batch_ok = 1 ] && echo no || echo YES-BAD)"; \
+	  echo "  noload_out=$$noload_out"; \
+	  echo "  batch_out=$$batch_out"; \
 	  exit 1; \
 	fi
 

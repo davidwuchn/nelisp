@@ -290,5 +290,34 @@
 # without a raise being required, but the pin is reset to the measured
 # value anyway per this file's own "say what the growth is" rule, not
 # left for slack to silently absorb going forward.
-size 7393896
+#
+# Raised 2026-08-24 (integration/wave6 phase 2A, Doc 184 P1/P2 audit
+# hardening), 7393896 -> 7566672, +172776 bytes, +2.34%, EXCEEDING
+# this file's 2% slack -- the gate correctly failed and this is the
+# required same-commit raise, not slack silently absorbing it.
+# `packages/nelisp-eventloop/src/nelisp-async-core.el' (166 lines) and
+# `packages/nelisp-process-adapter/src/nelisp-process-adapter.el' (376
+# lines) were wired directly into
+# `nelisp-standalone--reader-repl-prelude-source'
+# (scripts/nelisp-standalone-build.el), so both files' source is now
+# embedded into the linked binary as executable prelude text on every
+# standalone build -- the same accounting as every other prelude-size
+# raise in this file's history (hooks/map.el/fixnum, buffer-
+# unification, cl-generic-subset, ...), just landing all at once for
+# ~540 combined source lines instead of a smaller incremental change.
+# Before this, both files were loaded only via an explicit `--load' in
+# the Makefile smoke recipes and never touched a shipped binary at
+# all. Not dead weight: `make-process''s real `:filter', `process-
+# filter'/`set-process-filter'/`process-sentinel'/`set-process-
+# sentinel', `accept-process-output''s real PROCESS/SECONDS/MILLISEC
+# args and real exit status, and the `--repl' idle pump all now work
+# on a default build with NO `--load' -- verified against this exact
+# binary: `(fboundp (quote process-filter))' -> t, a `:filter' fires
+# and captures real chunks, and `standalone-reader-process-adapter-
+# smoke'/`-smoke-red'/`-repl-idle-pump-smoke' (the latter two
+# repurposed from proving the PRE-fix defect shape, which can no
+# longer reproduce on any build, to proving the default-bootstrap FIX
+# shape instead) all pass. Measured with `stat -c %s target/nelisp'
+# after a clean `make standalone-reader' on this exact change.
+size 7566672
 slack-pct 2

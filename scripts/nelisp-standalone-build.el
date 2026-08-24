@@ -14974,6 +14974,45 @@ and the `string-match' family aliases over it."
             "  (let* ((ft (float-time)) (secs (floor ft))\n"
             "         (usec (floor (* (- ft secs) 1000000))))\n"
             "    (list (floor secs 65536) (mod secs 65536) usec 0)))\n")
+    ;; Phase 2A (integration/wave6 audit hardening, Doc 184 P1/P2): wire
+    ;; the process-adapter fix into the DEFAULT bootstrap instead of
+    ;; leaving it an opt-in `--load'.  Before this, `make-process''s
+    ;; `:filter' fix / `accept-process-output' real PROCESS/SECONDS/
+    ;; MILLISEC args / real exit status never reached a shipped binary --
+    ;; only `make NELISP_PROCESS_ADAPTER_LOAD_2=... standalone-reader-
+    ;; process-adapter-smoke' ever loaded this file. Both source files
+    ;; are pure elisp with no native/binary change (Doc 184 S2's own
+    ;; decided direction): `nelisp-async-core.el' has no `require' at
+    ;; all, and `nelisp-process-adapter.el''s one `(require
+    ;; 'nelisp-async-core)' is satisfied by the `(provide ...)' two
+    ;; insertions above register on `features' -- `require' never
+    ;; touches `load-path' once the feature is already provided, so
+    ;; concatenating the two files' source (in dependency order) into
+    ;; this same blob upgrades `run-at-time'/`cancel-timer'/`sit-for'/
+    ;; `make-process'/`accept-process-output'/`process-filter'/
+    ;; `process-sentinel'/`nelisp--repl-idle-pump' in place, exactly the
+    ;; "upgrade-on-load" replacement both files' own headers already
+    ;; describe -- now happening once, at boot, on every standalone
+    ;; build, not only when a script opts in.
+    (insert "\n;; --- Doc 184 P0: generator-free deadline timer queue ---\n")
+    (insert-file-contents
+     (expand-file-name "packages/nelisp-eventloop/src/nelisp-async-core.el"
+                       nelisp-standalone--repo-root))
+    (goto-char (point-max))
+    (insert "\n;; --- Doc 184 P1/P2: standard-name process API + ONE poll loop ---\n")
+    (insert-file-contents
+     (expand-file-name "packages/nelisp-process-adapter/src/nelisp-process-adapter.el"
+                       nelisp-standalone--repo-root))
+    (goto-char (point-max))
+    ;; Both inserted files end in a bare `;;; FILE ends here' footer
+    ;; comment with no form after it -- fine when loaded standalone (the
+    ;; reader just hits EOF), but `generated-source-parse'
+    ;; (tools/nelisp-generated-source-parse.el) reads forms front-to-back
+    ;; via `read-from-string' and treats a trailing comment with nothing
+    ;; parseable after it as "never parsed" leftover, since a lone
+    ;; comment before EOF is not itself a form. A trivial closing form
+    ;; gives it something to consume.
+    (insert "\nt\n")
     (buffer-string)))
 
 (defun nelisp-standalone--reader-repl-prelude-forms (fbuf src cursor result pool
