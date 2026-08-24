@@ -199,3 +199,9 @@ standalone-reader-socket-smoke|scripts/nelisp-standalone-build.el|s/(syscall-dir
 # contract Doc 194 S1.3 measured against real Emacs 30.1 and this gate's
 # own `roundtrip' case checks.
 standalone-reader-network-process-smoke|packages/nelisp-process-adapter/src/nelisp-process-adapter.el|s/(proc (nelisp--make-network-process-object name 'open fd)))/(proc (nelisp--make-network-process-object name 'closed fd)))/|a freshly-connected client process reports status closed instead of open, breaking Doc 194 S1.3's measured "open the instant make-network-process returns" contract
+# Doc 194 P1 (feat/network-process-p0): manually verified RED-with-
+# injection / GREEN-with-injection-reverted before adding --
+# `nelisp--hosts-file-lookup' always answers nil, as if `/etc/hosts' (or
+# the fixture) were never consulted at all -- the P1 positive case (a
+# hostname resolved purely from the fixture, no DNS round trip) fails.
+standalone-reader-hosts-file-smoke|packages/nelisp-process-adapter/src/nelisp-process-adapter.el|s/(cdr (assoc name (nelisp--hosts-file-table file))))/(and nil (cdr (assoc name (nelisp--hosts-file-table file)))))/|/etc/hosts lookup always answers nil, as if the file (or its fixture) were never consulted

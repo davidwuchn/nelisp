@@ -698,6 +698,7 @@ STANDALONE_READER_SMOKES = \
   standalone-reader-ffi-smoke \
   standalone-reader-fmt-smoke \
   standalone-reader-getenv-smoke \
+  standalone-reader-hosts-file-smoke \
   standalone-reader-intern-soft-loop-smoke \
   standalone-reader-intern-soft-smoke \
   standalone-reader-load-smoke \
@@ -2078,6 +2079,59 @@ standalone-reader-network-process-smoke: standalone-reader
 	  echo "[standalone-reader-network-process-smoke] FAIL: red=$$red_out roundtrip=$$roundtrip_out refused=$$refused_out mixed=$$mixed_out"; \
 	  exit 1; \
 	fi
+
+# Doc 194 P1 exit criterion: `/etc/hosts' resolution (`nelisp--hosts-
+# file-lookup', consulted by `nelisp--resolve-host' before DNS).  A
+# fixture `/etc/hosts'-shaped temp file maps a made-up hostname to a
+# loopback-reachable IP; `open-network-stream' against that HOSTNAME (not
+# an IP literal) succeeds through P0's own client path with no network
+# round trip at all -- `nelisp--etc-hosts-file' is let-bound to the
+# fixture so the real system table is never touched.  A hostname absent
+# from the fixture, with the P2 DNS resolver forced to a closed local
+# port (127.0.0.1:1, an immediate ECONNREFUSED -- deterministic and fast,
+# unlike pointing at a genuinely unreachable IP, which can hang for the
+# OS's own multi-second/minute connect timeout), falls through cleanly to
+# a caught `file-error' -- never a hang (wall-clock bounded well under
+# the smoke's own timeout), never a wrong-address connect.
+standalone-reader-hosts-file-smoke: standalone-reader
+	@mkdir -p target
+	@printf '%s\n' \
+	  '127.0.0.1 nelisp-p1-fixture-host.invalid nelisp-p1-fixture-alias.invalid' \
+	  '# a comment line, and a blank line below' \
+	  '' \
+	  '203.0.113.9 nelisp-p1-unreachable.invalid' \
+	  > target/standalone-reader-hosts-file-smoke-fixture.txt
+	@printf '%s\n' \
+	  '$(NELISP_PROCESS_ADAPTER_LOAD_1)' \
+	  '$(NELISP_PROCESS_ADAPTER_LOAD_2)' \
+	  '(setq nelisp--etc-hosts-file "target/standalone-reader-hosts-file-smoke-fixture.txt")' \
+	  '(setq nelisp-dns-resolver-ip "127.0.0.1")' \
+	  '(setq nelisp-dns-resolver-port 1)' \
+	  '(let* ((lfd (nelisp-socket-listen "127.0.0.1" 55904)) (cli (open-network-stream "cli" nil "nelisp-p1-fixture-host.invalid" 55904)) (status (process-status cli)) (sfd (nelisp-socket-accept lfd))) (process-send-string cli "via-hosts-file") (let ((got (nelisp-socket-recv sfd 4096))) (delete-process cli) (nelisp-socket-close sfd) (nelisp-socket-close lfd) (list status (equal got "via-hosts-file") (nelisp--hosts-file-lookup "nelisp-p1-fixture-alias.invalid"))))' \
+	  > target/standalone-reader-hosts-file-smoke-positive.el
+	@printf '%s\n' \
+	  '$(NELISP_PROCESS_ADAPTER_LOAD_1)' \
+	  '$(NELISP_PROCESS_ADAPTER_LOAD_2)' \
+	  '(setq nelisp--etc-hosts-file "target/standalone-reader-hosts-file-smoke-fixture.txt")' \
+	  '(setq nelisp-dns-resolver-ip "127.0.0.1")' \
+	  '(setq nelisp-dns-resolver-port 1)' \
+	  '(condition-case err (progn (open-network-stream "cli" nil "nelisp-p1-no-such-fixture-entry.invalid" 80) (quote uncaught)) (file-error (quote caught-file-error)))' \
+	  > target/standalone-reader-hosts-file-smoke-fallthrough.el
+	@pos_out="$$(./target/nelisp --load target/standalone-reader-hosts-file-smoke-positive.el)"; \
+	start=$$(date +%s%N); \
+	fall_out="$$(timeout 10 ./target/nelisp --load target/standalone-reader-hosts-file-smoke-fallthrough.el)"; \
+	fall_rc=$$?; \
+	end=$$(date +%s%N); \
+	elapsed_ms=$$(( (end - start) / 1000000 )); \
+	if [ "$$pos_out" = "(open t \"127.0.0.1\")" ] && \
+	   [ "$$fall_rc" = "0" ] && [ "$$fall_out" = "caught-file-error" ] && \
+	   [ "$$elapsed_ms" -lt "5000" ]; then \
+	  echo "[standalone-reader-hosts-file-smoke] PASS: positive(status,roundtrip,alias-lookup)=$$pos_out fallthrough(caught,elapsed_ms)=$$fall_out,$${elapsed_ms}ms (never a hang)"; \
+	else \
+	  echo "[standalone-reader-hosts-file-smoke] FAIL: positive=$$pos_out fallthrough_rc=$$fall_rc fallthrough=$$fall_out elapsed_ms=$$elapsed_ms"; \
+	  exit 1; \
+	fi
+
 
 # Doc 184 P3: the `--repl' blank-line idle pump.  RED isolates exactly the
 # wiring question -- `nelisp-async-core.el' ALONE gives real deferred

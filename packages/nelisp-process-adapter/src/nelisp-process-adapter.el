@@ -487,17 +487,59 @@ else must already be a string; the ACTUAL resolution -- literal passthrough,
    ((stringp host) host)
    (t (signal 'wrong-type-argument (list 'stringp host)))))
 
+;; Phase B -- /etc/hosts, pure elisp, zero native change (Doc 194 S3.2).
+
+(defvar nelisp--etc-hosts-file "/etc/hosts"
+  "Path consulted by `nelisp--hosts-file-lookup' (Doc 194 P1).  A test can
+let-bind this to a fixture file without touching the real system table.")
+
+(defun nelisp--hosts-file-parse-line (line)
+  "Return (HOSTNAME . IP) conses for each hostname/alias on LINE, or nil.
+LINE is one physical /etc/hosts line: an address followed by one or more
+whitespace-separated hostnames; `#' starts a trailing comment (POSIX
+hosts(5)).  IPv6 lines parse the same way -- this phase's own IPv4-only
+`nl_socket_build_sockaddr' (Doc 194 S1.1) just never matches their
+address string later, so a mixed A/AAAA pair for one name still lets the
+usable A entry through."
+  (let* ((no-comment (car (split-string line "#")))
+         (fields (split-string no-comment nil t)))
+    (when (>= (length fields) 2)
+      (let ((ip (car fields)))
+        (mapcar (lambda (h) (cons h ip)) (cdr fields))))))
+
+(defun nelisp--hosts-file-table (&optional file)
+  "Parse FILE (default `nelisp--etc-hosts-file') into an alist of
+\(HOSTNAME . \"A.B.C.D\"), first matching line wins per hostname --
+matching POSIX/glibc `files' lookup order."
+  (let ((path (or file nelisp--etc-hosts-file))
+        (table nil))
+    (when (file-exists-p path)
+      (with-temp-buffer
+        (insert-file-contents path)
+        (dolist (line (split-string (buffer-string) "\n"))
+          (dolist (pair (nelisp--hosts-file-parse-line line))
+            (unless (assoc (car pair) table) (push pair table))))))
+    (nreverse table)))
+
+(defun nelisp--hosts-file-lookup (name &optional file)
+  "Return NAME's IPv4 address string from `/etc/hosts' (or FILE), or nil
+if NAME is not listed there (Doc 194 P1)."
+  (cdr (assoc name (nelisp--hosts-file-table file))))
+
 (defun nelisp--resolve-host (host)
   "Return an IPv4 dotted-decimal string or \"localhost\" for HOST, ready
-for `nelisp-socket-connect'/-listen (Doc 194 S3.2).  P0: only Phase A
-(feat/socket-primitives-p1, unchanged) -- an already-literal IPv4/
-`localhost' host passes straight through; anything else signals rather
-than binding/connecting to garbage.  Doc 194 P1/P2 (`/etc/hosts' then
-DNS-over-TCP/53) extend this function's `cond' with one more clause each,
-inserted before this fallback -- see those phases' own commits."
+for `nelisp-socket-connect'/-listen (Doc 194 S3.2).  Fallback chain so
+far: already-literal hosts (Phase A, feat/socket-primitives-p1,
+unchanged) pass straight through; otherwise `/etc/hosts' (Phase B, this
+commit).  Doc 194 P2 (DNS-over-TCP/53, Phase C) extends this function's
+`cond' with one more clause, inserted before this fallback -- see that
+phase's own commit.  Signals a catchable error when no phase resolves it
+-- never a hang, never a wrong-address connect (Doc 194 P1 exit
+criterion)."
   (cond
    ((or (equal host "localhost") (nelisp--ipv4-dotted-p host)) host)
-   (t (signal 'error (list "unresolvable host (Doc 194 P1/P2 not yet loaded)" host)))))
+   ((nelisp--hosts-file-lookup host))
+   (t (signal 'error (list "unresolvable host (Doc 194 P2/DNS not yet loaded)" host)))))
 
 ;;; make-network-process / open-network-stream: the synchronous client
 ;;; path (Doc 194 P0) -------------------------------------------------------
