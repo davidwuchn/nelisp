@@ -17694,12 +17694,18 @@ the prelude's source fixes both without a second change."
 ;; `nelisp-standalone--applyfn-unsupported-primitive-form' records for
 ;; `alloc-bytes'/`ptr-*': raw memory never crosses into user space.
 ;;
-;; Host resolution: IPv4 dotted-decimal ("127.0.0.1") and the literal
-;; "localhost" (hardcoded to 127.0.0.1) ONLY.  DNS is explicitly out of
-;; scope for this pass -- `nl_socket_build_sockaddr' returns -1 for
-;; anything else (a bare hostname, IPv6, a malformed dotted quad), which
-;; every caller below turns into a catchable `nelisp-socket-error' rather
-;; than silently binding/connecting to the wrong address or garbage memory.
+;; Host resolution: IPv4 dotted-decimal ("127.0.0.1"), the literal
+;; "localhost" (hardcoded to 127.0.0.1), and -- Doc 194 IPv6 phase (P7),
+;; below -- any host string containing ':' is parsed as an RFC 4291 sec
+;; 2.2 IPv6 literal (full form, "::" zero-compression, an embedded
+;; dotted-IPv4 tail, and the "[...]" bracket form).  Bare hostnames still
+;; return -1 (a bare NAME is not a literal in either family; DNS
+;; resolution -- including AAAA -- happens one layer up, in
+;; `packages/nelisp-process-adapter/src/nelisp-process-adapter.el', pure
+;; elisp on top of these primitives, unchanged by this native layer),
+;; which every caller below turns into a catchable `nelisp-socket-error'
+;; rather than silently binding/connecting to the wrong address or
+;; garbage memory.
 ;;
 ;; Doc 194 P3 (nonblocking primitives) adds two more units to this same
 ;; per-target gate -- `nelisp-socket-poll'/`nelisp-socket-connect-error' --
@@ -17708,6 +17714,23 @@ the prelude's source fixes both without a second change."
 ;; gate shape.  See each unit's own comment below for the syscalls
 ;; involved (`poll' 230, `getsockopt' 55) and the SOCK_NONBLOCK (2048)/
 ;; EINPROGRESS(115)/EAGAIN(11) handling.
+;;
+;; Doc 194 IPv6 phase (P7) adds AF_INET6 (=10) sockaddr_in6 construction
+;; (`nl_socket_build_sockaddr6' and its own IPv6-literal-parsing helpers,
+;; `nl_ipv6_*'/`nl_hex_nibble'/`nl_bytes_copy', all defined right after
+;; `nl_socket_build_sockaddr' below) plus a one-time, side-effect-free
+;; ':'-byte scan (`nl_ipv6_has_colon_walk') `nl_socket_listen_impl'/
+;; `nl_socket_connect_impl' each run ONCE, before `socket(2)', to decide
+;; AF_INET vs AF_INET6 -- adding NO new dispatchable primitive NAME (no
+;; change to `nelisp-standalone--socket-dispatch-arms'' names list, no
+;; change to the non-linux-x86_64 gate) and NO new syscall NUMBER (the
+;; same socket/connect/accept4/bind/listen/setsockopt/getsockopt/poll
+;; numbers above, called with a computed `domain'/`addrlen' argument
+;; instead of the old hardcoded AF_INET/16).  The IPv4 path is
+;; unaffected: `nl_socket_build_sockaddr' itself is UNCHANGED, and
+;; `family' evaluates to the same literal 2 every non-colon host already
+;; produced, so every syscall's arguments/values stay exactly what they
+;; were.
 (defun nelisp-standalone--socket-forms ()
   "Return the native socket units for the CURRENT `nelisp-standalone--target'.
 Empty list on every target except `linux-x86_64' -- see this file's socket
@@ -17791,6 +17814,195 @@ section banner comment just above for why, and
                    (ptr-write-u8 out_buf 7 1)
                    0)
             (nl_ipv4_parse_dotted host_ptr host_len (+ out_buf 4)))))
+      ;; ---- Doc 194 IPv6 phase (P7) --------------------------------------
+      ;; AF_INET6 = 10 (`bits/socket.h', the same value on every
+      ;; architecture this file targets -- AF_INET is 2, already used
+      ;; above).  `struct sockaddr_in6' is 28 bytes (RFC 3493 sec 3.3 /
+      ;; `netinet/in.h'): sin6_family (u16 @0), sin6_port (u16
+      ;; network-order @2), sin6_flowinfo (u32 @4, always 0 -- flow labels
+      ;; are out of this pass's scope), sin6_addr (16 raw bytes @8),
+      ;; sin6_scope_id (u32 @24, always 0 -- no link-local zone-index
+      ;; support, out of scope).  Built the SAME way `nl_socket_build_
+      ;; sockaddr' above builds sockaddr_in: entirely inside this native
+      ;; unit's own `alloc-bytes' scratch, raw memory never crossing into
+      ;; user space (this file's own socket-section banner comment).
+      ;;
+      ;; Family DETECTION (which of sockaddr_in/-in6 a caller needs) is a
+      ;; single byte-level scan for a ':' (58) anywhere in the host
+      ;; string, `nl_ipv6_has_colon_walk' below -- neither "localhost" nor
+      ;; a dotted-decimal IPv4 literal ever contains one, so this scan can
+      ;; never mis-route Phase 1's own two literal forms into the new
+      ;; path; it only ever routes an unrecognized colon-bearing host
+      ;; here.  `nl_socket_listen_impl'/`nl_socket_connect_impl' each run
+      ;; this scan ONCE, before ever calling `socket(2)', so the AF_INET
+      ;; case still calls `nl_socket_build_sockaddr' (immediately above,
+      ;; UNCHANGED, zero edits) with the exact same arguments/allocation
+      ;; size/addrlen it always has -- the IPv4 path stays byte-for-byte
+      ;; identical, this scan is the only new work on that path and it
+      ;; issues no syscall and touches no shared state.
+      '(defun nl_ipv6_has_colon_walk (ptr i len)
+         (if (= i len)
+             0
+           (if (= (ptr-read-u8 ptr i) 58)
+               1
+             (nl_ipv6_has_colon_walk ptr (+ i 1) len))))
+      ;; nl_hex_nibble: ASCII '0'-'9'/'a'-'f'/'A'-'F' -> 0-15, else -1.
+      '(defun nl_hex_nibble (c)
+         (if (if (>= c 48) (<= c 57) 0)
+             (- c 48)
+           (if (if (>= c 97) (<= c 102) 0)
+               (- (+ c 10) 97)
+             (if (if (>= c 65) (<= c 70) 0)
+                 (- (+ c 10) 65)
+               (- 0 1)))))
+      ;; nl_ipv6_find_dcolon PTR I END -> absolute index of the FIRST "::"
+      ;; run at or after I, or -1 if none.  RFC 4291 sec 2.2
+      ;; zero-compression: a real literal has at most one "::"; this walk
+      ;; finds only the FIRST occurrence deliberately -- a second "::"
+      ;; later in the string makes the group-count arithmetic in
+      ;; `nl_ipv6_parse_literal' below fail closed (too many groups),
+      ;; rejecting the malformed literal rather than accepting an
+      ;; ambiguous one.
+      '(defun nl_ipv6_find_dcolon (ptr i end)
+         (if (> (+ i 2) end)
+             (- 0 1)
+           (if (if (= (ptr-read-u8 ptr i) 58) (= (ptr-read-u8 ptr (+ i 1)) 58) 0)
+               i
+             (nl_ipv6_find_dcolon ptr (+ i 1) end))))
+      ;; nl_bytes_copy SRC SI DST DI N: copy N raw bytes SRC[SI..SI+N) ->
+      ;; DST[DI..DI+N).  Used only to move `nl_ipv6_hex_group_walk''s own
+      ;; RIGHT-of-"::" scratch bytes into their final tail position below
+      ;; (N <= 16 at every call site, bounded by that walker's own <= 8
+      ;; group cap).
+      '(defun nl_bytes_copy (src si dst di n)
+         (if (= n 0)
+             0
+           (seq (ptr-write-u8 dst di (ptr-read-u8 src si))
+                (nl_bytes_copy src (+ si 1) dst (+ di 1) (- n 1)))))
+      ;; nl_ipv6_hex_group_walk PTR I END OUT_BUF OUTIDX VAL NDIGITS ->
+      ;; total 2-byte GROUP COUNT written (an embedded dotted-IPv4 tail,
+      ;; RFC 4291 sec 2.2's "::ffff:1.2.3.4" form, counts as 2 groups/4
+      ;; bytes), or -1 on any malformed input.  Walks [I,END) of the SAME
+      ;; host buffer PTR forward -- absolute indices throughout, the same
+      ;; convention `nl_ipv4_octet_walk' above already uses, so a caller
+      ;; can hand this a SUBRANGE of a larger string (the half before or
+      ;; after a "::") with no pointer arithmetic, only different I/END.
+      ;; 1-4 hex digits per colon-separated group; a '.' encountered
+      ;; mid-group means the digits collected so far were actually the
+      ;; START of a dotted-quad tail (its own end is this walk's own END,
+      ;; never a ':') -- re-parsed via the EXISTING, UNCHANGED
+      ;; `nl_ipv4_octet_walk' over exactly that sub-range, into a small
+      ;; local scratch buffer, then copied byte-for-byte into OUT_BUF.
+      ;; Bounds OUTIDX against 8 groups (16 bytes) / 7 groups (leaving
+      ;; room for a 4-byte IPv4 tail) before every write, so a malformed
+      ;; literal with too many groups fails closed rather than
+      ;; overrunning OUT_BUF (always allocated 16 bytes by every caller
+      ;; below).
+      '(defun nl_ipv6_hex_group_walk (ptr i end out_buf outidx val ndigits)
+         (if (= i end)
+             (if (= ndigits 0)
+                 (- 0 1)
+               (if (>= outidx 8)
+                   (- 0 1)
+                 (seq (ptr-write-u8 out_buf (* outidx 2) (logand (/ val 256) 255))
+                      (ptr-write-u8 out_buf (+ (* outidx 2) 1) (logand val 255))
+                      (+ outidx 1))))
+           (let* ((c (ptr-read-u8 ptr i)))
+             (if (= c 58)
+                 (if (= ndigits 0)
+                     (- 0 1)
+                   (if (>= outidx 8)
+                       (- 0 1)
+                     (seq (ptr-write-u8 out_buf (* outidx 2) (logand (/ val 256) 255))
+                          (ptr-write-u8 out_buf (+ (* outidx 2) 1) (logand val 255))
+                          (nl_ipv6_hex_group_walk ptr (+ i 1) end out_buf
+                                                   (+ outidx 1) 0 0))))
+               (if (= c 46)
+                   (if (if (= ndigits 0) 1 (if (>= outidx 7) 1 0))
+                       (- 0 1)
+                     (let* ((gstart (- i ndigits))
+                            (v4buf (alloc-bytes 4 1))
+                            (rc (nl_ipv4_octet_walk ptr gstart end 0 0 0 v4buf)))
+                       (if (< rc 0)
+                           (- 0 1)
+                         (seq (ptr-write-u8 out_buf (* outidx 2) (ptr-read-u8 v4buf 0))
+                              (ptr-write-u8 out_buf (+ (* outidx 2) 1) (ptr-read-u8 v4buf 1))
+                              (ptr-write-u8 out_buf (+ (* outidx 2) 2) (ptr-read-u8 v4buf 2))
+                              (ptr-write-u8 out_buf (+ (* outidx 2) 3) (ptr-read-u8 v4buf 3))
+                              (+ outidx 2)))))
+                 (let* ((nib (nl_hex_nibble c)))
+                   (if (< nib 0)
+                       (- 0 1)
+                     (if (>= ndigits 4)
+                         (- 0 1)
+                       (nl_ipv6_hex_group_walk ptr (+ i 1) end out_buf outidx
+                                                (+ (* val 16) nib) (+ ndigits 1))))))))))
+      ;; nl_ipv6_parse_literal PTR I END OUT_BUF -> 0/-1.  Parses the
+      ;; RFC 4291 sec 2.2 textual form (full 8-group form, "::"
+      ;; zero-compression at any position including a bare "::", and an
+      ;; embedded dotted-IPv4 tail in the last group, with or without
+      ;; compression) found at [I,END) of PTR into the 16 raw bytes at
+      ;; OUT_BUF.  The CALLER (`nl_socket_build_sockaddr6' below) always
+      ;; zeroes OUT_BUF's whole 16 bytes before calling this -- the "::"
+      ;; gap between LEFT and RIGHT groups is left exactly as that initial
+      ;; zero, never rewritten here, so this function does not need its
+      ;; own zero pass.  LEFT groups (before "::", or the whole literal
+      ;; when there is no "::") are written directly into OUT_BUF at their
+      ;; final offset; RIGHT groups (after "::") are parsed into a small
+      ;; local scratch buffer first (their final offset -- flush against
+      ;; the 16-byte end -- is only known once their own byte count is),
+      ;; then copied into place via `nl_bytes_copy'.
+      '(defun nl_ipv6_parse_literal (ptr i end out_buf)
+         (let* ((dc (nl_ipv6_find_dcolon ptr i end)))
+           (if (< dc 0)
+               (let* ((n (nl_ipv6_hex_group_walk ptr i end out_buf 0 0 0)))
+                 (if (= n 8) 0 (- 0 1)))
+             (let* ((left_n (if (= dc i) 0 (nl_ipv6_hex_group_walk ptr i dc out_buf 0 0 0))))
+               (if (< left_n 0)
+                   (- 0 1)
+                 (let* ((rstart (+ dc 2)))
+                   (if (= rstart end)
+                       0
+                     (let* ((tmp (alloc-bytes 16 1))
+                            (right_n (nl_ipv6_hex_group_walk ptr rstart end tmp 0 0 0)))
+                       (if (< right_n 0)
+                           (- 0 1)
+                         (if (> (+ left_n right_n) 8)
+                             (- 0 1)
+                           (seq (nl_bytes_copy tmp 0 out_buf (- 16 (* right_n 2)) (* right_n 2))
+                                0)))))))))))
+      ;; nl_socket_build_sockaddr6 HOST_PTR HOST_LEN PORT OUT_BUF -> 0/-1.
+      ;; Zeroes the full 28-byte `struct sockaddr_in6', fills sin6_family
+      ;; (AF_INET6=10, one byte -- the second byte of the native-endian
+      ;; u16 is already 0 from the zero pass, same one-byte-write idiom
+      ;; `nl_socket_build_sockaddr' above uses for AF_INET=2) and sin6_port
+      ;; (network/big-endian u16, same htons-by-hand two-write idiom used
+      ;; above), leaves sin6_flowinfo/sin6_scope_id at their zeroed
+      ;; default, then fills sin6_addr (@8, 16 bytes) by parsing HOST_PTR
+      ;; as an IPv6 literal.  Strips a bracket pair (the `open-network-
+      ;; stream'/URL display form, "[::1]") before parsing if present --
+      ;; the RAW `nelisp-socket-listen'/-connect primitives accept EITHER
+      ;; form directly, matching real getaddrinfo(3)'s own bracket
+      ;; tolerance for a numeric IPv6 literal.  Returns 0 on success, -1
+      ;; when the address bytes could not be parsed (mirrors
+      ;; `nl_socket_build_sockaddr''s own -1-for-unparseable-host
+      ;; contract).
+      '(defun nl_socket_build_sockaddr6 (host_ptr host_len port out_buf)
+         (seq
+          (ptr-write-u64 out_buf 0 0)
+          (ptr-write-u64 out_buf 8 0)
+          (ptr-write-u64 out_buf 16 0)
+          (ptr-write-u32 out_buf 24 0)
+          (ptr-write-u8 out_buf 0 10)
+          (ptr-write-u8 out_buf 2 (logand (/ port 256) 255))
+          (ptr-write-u8 out_buf 3 (logand port 255))
+          (if (if (>= host_len 2)
+                  (if (= (ptr-read-u8 host_ptr 0) 91)
+                      (= (ptr-read-u8 host_ptr (- host_len 1)) 93)
+                    0)
+                0)
+              (nl_ipv6_parse_literal host_ptr 1 (- host_len 1) (+ out_buf 8))
+            (nl_ipv6_parse_literal host_ptr 0 host_len (+ out_buf 8)))))
       ;; Catchable `nelisp-socket-error' signal, same flag@268435472 /
       ;; TAG@268435480 / VAL@268435512 stash `bf_signal' et al. use (see
       ;; `nelisp-standalone--applyfn-unsupported-primitive-form''s
@@ -17861,26 +18073,42 @@ section banner comment just above for why, and
       ;; at socket-creation time" technique the doc already prescribes for
       ;; connect, applied to the one additional call site that actually
       ;; needs it for a correct nonblocking accept.
+      ;;
+      ;; Doc 194 IPv6 phase (P7): FAMILY is decided ONCE, before `socket(2)'
+      ;; is ever called, by `nl_ipv6_has_colon_walk' on the raw host bytes
+      ;; -- a pure, side-effect-free scan, so this addition changes no
+      ;; syscall's ARGUMENTS on the IPv4 path (FAMILY evaluates to the
+      ;; literal 2 there, exactly what `socket(2)' always received; ADDR's
+      ;; allocation stays the original 16 bytes; ABUILD calls the
+      ;; UNCHANGED `nl_socket_build_sockaddr'; ALEN stays 16) -- only a
+      ;; harmless extra memory read ahead of an otherwise byte-identical
+      ;; sequence.  When FAMILY is 10 (host contains ':'), `socket(2)' is
+      ;; called with AF_INET6 and `nl_socket_build_sockaddr6' builds the
+      ;; 28-byte struct instead.
       '(defun nl_socket_listen_impl (args out)
          (let* ((host_sx (wf_arg_ptr args 0))
+                (host_ptr (nl_bi_strptr host_sx))
+                (host_len (nl_bi_strlen host_sx))
                 (port (wf_argval args 1))
                 (nowait (nl_socket_bool_arg args 2))
+                (family (if (= (nl_ipv6_has_colon_walk host_ptr 0 host_len) 1) 10 2))
                 (socktype (if (= nowait 1) 2049 1))
-                (fd (syscall-direct 41 2 socktype 0 0 0 0)))
+                (fd (syscall-direct 41 family socktype 0 0 0 0)))
            (if (< fd 0)
                (nl_socket_signal_error fd)
              (let* ((optval (alloc-bytes 4 4))
-                    (addr (alloc-bytes 16 1)))
+                    (addr (if (= family 10) (alloc-bytes 28 1) (alloc-bytes 16 1))))
                (seq
                 (ptr-write-u32 optval 0 1)
                 (syscall-direct 54 fd 1 2 optval 4 0)
-                (let* ((abuild (nl_socket_build_sockaddr
-                                 (nl_bi_strptr host_sx) (nl_bi_strlen host_sx)
-                                 port addr)))
+                (let* ((abuild (if (= family 10)
+                                    (nl_socket_build_sockaddr6 host_ptr host_len port addr)
+                                  (nl_socket_build_sockaddr host_ptr host_len port addr)))
+                       (alen (if (= family 10) 28 16)))
                   (if (< abuild 0)
                       (seq (nl_os_close_handle fd)
                            (nl_socket_signal_error (- 0 9999)))
-                    (let* ((brc (syscall-direct 49 fd addr 16 0 0 0)))
+                    (let* ((brc (syscall-direct 49 fd addr alen 0 0 0)))
                       (if (< brc 0)
                           (seq (nl_os_close_handle fd)
                                (nl_socket_signal_error brc))
@@ -17934,22 +18162,34 @@ section banner comment just above for why, and
       ;; error' once ready, S3.3 items 2 and 3).  Every OTHER negative
       ;; connect(2) return (including EINPROGRESS when NOWAIT was NOT
       ;; requested) still raises exactly as Phase 1 already does.
+      ;;
+      ;; Doc 194 IPv6 phase (P7): same FAMILY-first restructuring as
+      ;; `nl_socket_listen_impl' above -- see that function's own comment
+      ;; for why the IPv4 path (FAMILY literal-2, ADDR 16 bytes, ABUILD
+      ;; calling the unchanged `nl_socket_build_sockaddr', ALEN 16) is
+      ;; unaffected.  EINPROGRESS (errno -115) handling is family-agnostic
+      ;; (a nonblocking `connect(2)' on an AF_INET6 socket returns the
+      ;; identical errno), so that check is untouched.
       '(defun nl_socket_connect_impl (args out)
          (let* ((host_sx (wf_arg_ptr args 0))
+                (host_ptr (nl_bi_strptr host_sx))
+                (host_len (nl_bi_strlen host_sx))
                 (port (wf_argval args 1))
                 (nowait (nl_socket_bool_arg args 2))
+                (family (if (= (nl_ipv6_has_colon_walk host_ptr 0 host_len) 1) 10 2))
                 (socktype (if (= nowait 1) 2049 1))
-                (fd (syscall-direct 41 2 socktype 0 0 0 0)))
+                (fd (syscall-direct 41 family socktype 0 0 0 0)))
            (if (< fd 0)
                (nl_socket_signal_error fd)
-             (let* ((addr (alloc-bytes 16 1))
-                    (abuild (nl_socket_build_sockaddr
-                             (nl_bi_strptr host_sx) (nl_bi_strlen host_sx)
-                             port addr)))
+             (let* ((addr (if (= family 10) (alloc-bytes 28 1) (alloc-bytes 16 1)))
+                    (abuild (if (= family 10)
+                                (nl_socket_build_sockaddr6 host_ptr host_len port addr)
+                              (nl_socket_build_sockaddr host_ptr host_len port addr)))
+                    (alen (if (= family 10) 28 16)))
                (if (< abuild 0)
                    (seq (nl_os_close_handle fd)
                         (nl_socket_signal_error (- 0 9999)))
-                 (let* ((crc (syscall-direct 42 fd addr 16 0 0 0)))
+                 (let* ((crc (syscall-direct 42 fd addr alen 0 0 0)))
                    (if (< crc 0)
                        (if (if (= nowait 1) (= crc (- 0 115)) 0)
                            (seq (wf_write_int out fd) 0)
@@ -21492,7 +21732,8 @@ loader when it is absent."
                                  nelisp-standalone--reader-form-location-smoke
                                  nelisp-standalone--reader-frame-stack-pop-desync-smoke
                                  nelisp-standalone--reader-bounded-backtrace-smoke
-                                 nelisp-standalone--reader-socket-smoke))
+                                 nelisp-standalone--reader-socket-smoke
+                                 nelisp-standalone--reader-ipv6-socket-smoke))
                   (funcall smoke)
                   (setq checked (1+ checked)))
                 (message "GATE-COUNT checked=%d findings=0" checked)
@@ -23274,6 +23515,264 @@ nelisp-unsupported-primitive, stdout=%S" out))
         (kill-emacs 0))
     (error
      (message "[standalone-reader] FAIL: socket smoke: %s"
+              (error-message-string err))
+     (kill-emacs 1))))
+
+(defun nelisp-standalone--reader-ipv6-socket-smoke ()
+  "Against-the-bug proof for the Doc 194 IPv6 phase (P7), exercised in ONE
+process via `--load' on `target/nelisp' itself, mirroring `nelisp-
+standalone--reader-socket-smoke''s own shape and Makefile-generated-fixture
+convention (`nelisp-standalone--reader-dns-smoke''s own captured-response
+pattern, this file's sibling).
+
+1. IPv6 loopback round trip at the RAW primitive level: listen on ::1 ->
+   connect -> accept -> send/recv BOTH directions (UTF-8 Japanese payload,
+   byte-exact) -> close, the exact same proof P1's own IPv4 smoke already
+   established, on `::1' instead of `127.0.0.1'.
+2. The SAME round trip on `127.0.0.1', in the SAME process, right after --
+   against-the-bug evidence that adding the IPv6 path did not disturb the
+   IPv4 one (this is IN ADDITION TO, not a replacement for, the separate,
+   UNCHANGED `standalone-reader-socket-smoke' this doc's own DoD also
+   requires green).
+3. Bracketed (\"[::1]\") and full-form (\"0:0:0:0:0:0:0:1\") loopback
+   literals at the raw primitive level, and a malformed literal
+   (\"gggg::1\") signalling the catchable `nelisp-socket-error' rather
+   than a wrong syscall or an uncaught error.
+4. The pure-elisp `nelisp--ipv6-parse'/`-unparse' reference table (Doc
+   194 IPv6 phase SCOPE item 3: \"::\", \"::1\", a full form, an embedded
+   \"::ffff:v4\" tail, and the bracketed form), round-tripped, plus a
+   malformed literal signalling the catchable `nelisp-dns-error'.
+5. A captured/hand-built DNS-over-TCP response with one AAAA/IN answer
+   parses to the canonical IPv6 string via QTYPE 28, and the SAME
+   fixture parsed with QTYPE 1 (A) finds no match (nil, not a wrong
+   value) -- proving QTYPE actually gates extraction, DoD item (d)'s own
+   \"else unit-test the AAAA parser against a captured response\" clause.
+6. `/etc/hosts' AAAA resolution (DoD item (d)'s own \"localhost/::1 via
+   /etc/hosts\"): a fixture file mapping one hostname to `::1' resolves
+   via `nelisp--hosts-file-lookup-typed' QTYPE `aaaa', and does NOT
+   resolve via QTYPE `a' (no A-shaped entry for that name in the
+   fixture) -- proving the typed lookup actually discriminates by
+   address family, not just returning whatever it finds.
+7. `open-network-stream'/`make-network-process' end-to-end through the
+   ADAPTER layer (not the raw primitives) on `::1', including the
+   `:family \\='ipv6' + `:host nil' loopback-default-becomes-::1' case
+   (SCOPE item 5)."
+  (let* ((script (make-temp-file "nelisp-ipv6-socket-smoke-" nil ".el"))
+         (jp-out "日本語")
+         (jp-in "こんにちは")
+         (src (concat
+               ;; Part 1: IPv6 loopback round trip, raw primitives.
+               "(condition-case err\n"
+               "    (let* ((lfd (nelisp-socket-listen \"::1\" 55951))\n"
+               "           (cfd (nelisp-socket-connect \"::1\" 55951))\n"
+               "           (sfd (nelisp-socket-accept lfd))\n"
+               "           (msg (concat \"hello6 \" \"" jp-out "\"))\n"
+               "           (sent (nelisp-socket-send cfd msg))\n"
+               "           (got (nelisp-socket-recv sfd 4096))\n"
+               "           (reply (concat \"pong6 \" \"" jp-in "\"))\n"
+               "           (sent2 (nelisp-socket-send sfd reply))\n"
+               "           (got2 (nelisp-socket-recv cfd 4096)))\n"
+               "      (nelisp-socket-close cfd)\n"
+               "      (nelisp-socket-close sfd)\n"
+               "      (nelisp-socket-close lfd)\n"
+               "      (nl-write-file \"/dev/stdout\"\n"
+               "        (format \"IPV6-ROUNDTRIP=%S\\n\"\n"
+               "                (if (if (integerp sent) (if (integerp sent2)\n"
+               "                        (if (equal got msg) (equal got2 reply) nil) nil) nil)\n"
+               "                    \"OK\" (list sent got sent2 got2)))))\n"
+               "  (error (nl-write-file \"/dev/stdout\" (format \"IPV6-ROUNDTRIP=ERR:%S\\n\" err))))\n"
+               ;; Part 2: IPv4 round trip, SAME process, right after --
+               ;; against-the-bug proof the IPv4 path is undisturbed.
+               "(condition-case err\n"
+               "    (let* ((lfd (nelisp-socket-listen \"127.0.0.1\" 55952))\n"
+               "           (cfd (nelisp-socket-connect \"127.0.0.1\" 55952))\n"
+               "           (sfd (nelisp-socket-accept lfd))\n"
+               "           (msg \"hello4\")\n"
+               "           (sent (nelisp-socket-send cfd msg))\n"
+               "           (got (nelisp-socket-recv sfd 4096)))\n"
+               "      (nelisp-socket-close cfd)\n"
+               "      (nelisp-socket-close sfd)\n"
+               "      (nelisp-socket-close lfd)\n"
+               "      (nl-write-file \"/dev/stdout\"\n"
+               "        (format \"IPV4-STILL-WORKS=%S\\n\"\n"
+               "                (if (if (integerp sent) (equal got msg) nil) \"OK\" (list sent got)))))\n"
+               "  (error (nl-write-file \"/dev/stdout\" (format \"IPV4-STILL-WORKS=ERR:%S\\n\" err))))\n"
+               ;; Part 3: bracketed + full-form loopback literals, raw
+               ;; primitives; a malformed literal is caught, not raised
+               ;; uncaught and not silently misparsed.
+               "(condition-case err\n"
+               "    (let* ((lfd (nelisp-socket-listen \"[::1]\" 55953))\n"
+               "           (cfd (nelisp-socket-connect \"0:0:0:0:0:0:0:1\" 55953)))\n"
+               "      (nelisp-socket-close cfd)\n"
+               "      (nelisp-socket-close lfd)\n"
+               "      (nl-write-file \"/dev/stdout\" \"IPV6-BRACKET-FULLFORM=OK\\n\"))\n"
+               "  (error (nl-write-file \"/dev/stdout\"\n"
+               "           (format \"IPV6-BRACKET-FULLFORM=ERR:%S\\n\" err))))\n"
+               "(condition-case err\n"
+               "    (progn (nelisp-socket-connect \"gggg::1\" 1)\n"
+               "           (nl-write-file \"/dev/stdout\" \"IPV6-MALFORMED=UNCAUGHT\\n\"))\n"
+               "  (error (nl-write-file \"/dev/stdout\"\n"
+               "           (format \"IPV6-MALFORMED=%S\\n\"\n"
+               "                   (if (eq (car err) 'nelisp-socket-error) \"CAUGHT\" err)))))\n"
+               ;; Part 4: pure-elisp literal parser reference table +
+               ;; round trip + malformed rejection.  Loads the process
+               ;; adapter package (elisp, not baked into these raw
+               ;; primitives) the same way the network-process family of
+               ;; smokes already does.
+               "(load \"packages/nelisp-eventloop/src/nelisp-async-core.el\")\n"
+               "(load \"packages/nelisp-process-adapter/src/nelisp-process-adapter.el\")\n"
+               "(condition-case err\n"
+               "    (let ((cases (list (cons \"::\" (list 0 0 0 0 0 0 0 0))\n"
+               "                       (cons \"::1\" (list 0 0 0 0 0 0 0 1))\n"
+               "                       (cons \"2001:db8:0:0:0:0:0:1\" (list 8193 3512 0 0 0 0 0 1))\n"
+               "                       (cons \"::ffff:1.2.3.4\" (list 0 0 0 0 0 65535 258 772))\n"
+               "                       (cons \"[::1]\" (list 0 0 0 0 0 0 0 1))))\n"
+               "          (all-ok t))\n"
+               "      (dolist (c cases)\n"
+               "        (let ((got (nelisp--ipv6-parse (car c))))\n"
+               "          (unless (equal got (cdr c)) (setq all-ok (list 'mismatch c got)))\n"
+               "          (unless (equal (nelisp--ipv6-parse (nelisp--ipv6-unparse got)) got)\n"
+               "            (setq all-ok (list 'round-trip-mismatch c)))))\n"
+               "      (nl-write-file \"/dev/stdout\"\n"
+               "        (format \"IPV6-LITERAL-TABLE=%S\\n\" (if (eq all-ok t) \"OK\" all-ok))))\n"
+               "  (error (nl-write-file \"/dev/stdout\" (format \"IPV6-LITERAL-TABLE=ERR:%S\\n\" err))))\n"
+               "(condition-case err\n"
+               "    (progn (nelisp--ipv6-parse \"gggg::1\")\n"
+               "           (nl-write-file \"/dev/stdout\" \"IPV6-LITERAL-MALFORMED=UNCAUGHT\\n\"))\n"
+               "  (error (nl-write-file \"/dev/stdout\"\n"
+               "           (format \"IPV6-LITERAL-MALFORMED=%S\\n\"\n"
+               "                   (if (eq (car err) 'nelisp-dns-error) \"CAUGHT\" err)))))\n"
+               ;; Part 5: DNS AAAA fixture (captured/hand-built response,
+               ;; DoD item (d)'s own no-egress fallback), QTYPE gating.
+               "(condition-case err\n"
+               "    (let* ((header (concat (string 0 1) (string 1 0) (string 0 1)\n"
+               "                            (string 0 1) (string 0 0) (string 0 0)))\n"
+               "           (qname (concat (string 7) \"example\" (string 3) \"com\" (string 0)))\n"
+               "           (question (concat qname (string 0 28) (string 0 1)))\n"
+               "           (rdata (nelisp--ipv6-groups-to-bytes-string\n"
+               "                   (nelisp--ipv6-parse \"2001:db8::1\")))\n"
+               "           (answer (concat (unibyte-string 192 12) (string 0 28) (string 0 1)\n"
+               "                           (string 0 0 0 60) (string 0 16) rdata))\n"
+               "           (msg (concat header question answer))\n"
+               "           (aaaa-got (nelisp--dns-parse-response msg 28))\n"
+               "           (a-got (nelisp--dns-parse-response msg 1)))\n"
+               "      (nl-write-file \"/dev/stdout\"\n"
+               "        (format \"IPV6-AAAA-FIXTURE=%S\\n\"\n"
+               "                (if (if (equal aaaa-got \"2001:db8::1\") (null a-got) nil)\n"
+               "                    \"OK\" (list aaaa-got a-got)))))\n"
+               "  (error (nl-write-file \"/dev/stdout\" (format \"IPV6-AAAA-FIXTURE=ERR:%S\\n\" err))))\n"
+               ;; Part 6: /etc/hosts AAAA resolution, DoD item (d).
+               "(condition-case err\n"
+               "    (let ((fixture (make-temp-file \"nelisp-ipv6-hosts-\" nil \".txt\")))\n"
+               "      (with-temp-file fixture\n"
+               "        (insert \"::1 localhost ipv6custom\\n127.0.0.1 v4onlyname\\n\"))\n"
+               "      (let* ((nelisp--etc-hosts-file fixture)\n"
+               "             (aaaa-got (nelisp--hosts-file-lookup-typed \"ipv6custom\" 'aaaa))\n"
+               "             (a-absent (nelisp--hosts-file-lookup-typed \"ipv6custom\" 'a))\n"
+               "             (v4-a-got (nelisp--hosts-file-lookup-typed \"v4onlyname\" 'a))\n"
+               "             (v4-aaaa-absent (nelisp--hosts-file-lookup-typed \"v4onlyname\" 'aaaa)))\n"
+               "        (delete-file fixture)\n"
+               "        (nl-write-file \"/dev/stdout\"\n"
+               "          (format \"IPV6-HOSTSFILE=%S\\n\"\n"
+               "                  (if (if (equal aaaa-got \"::1\")\n"
+               "                          (if (null a-absent)\n"
+               "                              (if (equal v4-a-got \"127.0.0.1\") (null v4-aaaa-absent) nil)\n"
+               "                            nil)\n"
+               "                        nil)\n"
+               "                      \"OK\" (list aaaa-got a-absent v4-a-got v4-aaaa-absent))))))\n"
+               "  (error (nl-write-file \"/dev/stdout\" (format \"IPV6-HOSTSFILE=ERR:%S\\n\" err))))\n"
+               ;; Part 7: adapter layer, `open-network-stream'/`make-
+               ;; network-process' end to end on ::1, and `:family
+               ;; 'ipv6'+:host nil' -> \"::1\" loopback default.
+               "(condition-case err\n"
+               "    (let* ((lfd (nelisp-socket-listen \"::1\" 55954))\n"
+               "           (cli (open-network-stream \"cli6\" nil \"::1\" 55954))\n"
+               "           (status-immediate (process-status cli))\n"
+               "           (sfd (nelisp-socket-accept lfd)))\n"
+               "      (process-send-string cli \"ping6\")\n"
+               "      (let ((srv-got (nelisp-socket-recv sfd 4096)))\n"
+               "        (nelisp-socket-send sfd \"pong6\")\n"
+               "        (let ((cli-got (nelisp-socket-recv (aref cli 3) 4096)))\n"
+               "          (delete-process cli)\n"
+               "          (nelisp-socket-close sfd)\n"
+               "          (nelisp-socket-close lfd)\n"
+               "          (nl-write-file \"/dev/stdout\"\n"
+               "            (format \"IPV6-OPEN-NETWORK-STREAM=%S\\n\"\n"
+               "                    (if (if (eq status-immediate 'open)\n"
+               "                            (if (equal srv-got \"ping6\") (equal cli-got \"pong6\") nil)\n"
+               "                          nil)\n"
+               "                        \"OK\" (list status-immediate srv-got cli-got)))))))\n"
+               "  (error (nl-write-file \"/dev/stdout\"\n"
+               "           (format \"IPV6-OPEN-NETWORK-STREAM=ERR:%S\\n\" err))))\n"
+               "(condition-case err\n"
+               "    (let* ((lfd (nelisp-socket-listen \"::1\" 55955))\n"
+               "           (cli (make-network-process :name \"cli6b\" :host nil\n"
+               "                                       :service 55955 :family 'ipv6)))\n"
+               "      (let ((status (process-status cli)))\n"
+               "        (delete-process cli)\n"
+               "        (nelisp-socket-close lfd)\n"
+               "        (nl-write-file \"/dev/stdout\"\n"
+               "          (format \"IPV6-FAMILY-AUTO-LOCAL=%S\\n\" (if (eq status 'open) \"OK\" status)))))\n"
+               "  (error (nl-write-file \"/dev/stdout\"\n"
+               "           (format \"IPV6-FAMILY-AUTO-LOCAL=ERR:%S\\n\" err))))\n"
+               "(nl-write-file \"/dev/stdout\" \"IPV6-SOCKET-SMOKE-DONE\\n\")\n"))
+         (out nil) (rc nil))
+    (unwind-protect
+        (progn
+          (let ((coding-system-for-write 'utf-8-unix))
+            (with-temp-file script (insert src)))
+          (with-temp-buffer
+            (setq rc (call-process nelisp-standalone--reader-out nil t nil
+                                   "--load" script))
+            (setq out (buffer-string)))
+          (unless (= rc 0)
+            (error "ipv6 socket smoke: exit=%S stdout=%S" rc out))
+          (unless (string-match-p "^IPV6-ROUNDTRIP=\"OK\"$" out)
+            (error "ipv6 socket smoke: ::1 round-trip failed, stdout=%S" out))
+          (unless (string-match-p "^IPV4-STILL-WORKS=\"OK\"$" out)
+            (error "ipv6 socket smoke: 127.0.0.1 round-trip broke alongside \
+the IPv6 addition, stdout=%S" out))
+          (unless (string-match-p "^IPV6-BRACKET-FULLFORM=OK$" out)
+            (error "ipv6 socket smoke: bracketed/full-form loopback literal \
+failed, stdout=%S" out))
+          (unless (string-match-p "^IPV6-MALFORMED=\"CAUGHT\"$" out)
+            (error "ipv6 socket smoke: malformed literal was not a catchable \
+nelisp-socket-error, stdout=%S" out))
+          (unless (string-match-p "^IPV6-LITERAL-TABLE=\"OK\"$" out)
+            (error "ipv6 socket smoke: pure-elisp literal reference table \
+failed, stdout=%S" out))
+          (unless (string-match-p "^IPV6-LITERAL-MALFORMED=\"CAUGHT\"$" out)
+            (error "ipv6 socket smoke: pure-elisp parser did not catch a \
+malformed literal, stdout=%S" out))
+          (unless (string-match-p "^IPV6-AAAA-FIXTURE=\"OK\"$" out)
+            (error "ipv6 socket smoke: DNS AAAA fixture parse failed, \
+stdout=%S" out))
+          (unless (string-match-p "^IPV6-HOSTSFILE=\"OK\"$" out)
+            (error "ipv6 socket smoke: /etc/hosts AAAA resolution failed, \
+stdout=%S" out))
+          (unless (string-match-p "^IPV6-OPEN-NETWORK-STREAM=\"OK\"$" out)
+            (error "ipv6 socket smoke: open-network-stream over ::1 failed, \
+stdout=%S" out))
+          (unless (string-match-p "^IPV6-FAMILY-AUTO-LOCAL=\"OK\"$" out)
+            (error "ipv6 socket smoke: :family 'ipv6 + :host nil did not \
+default to ::1, stdout=%S" out))
+          (unless (string-match-p "^IPV6-SOCKET-SMOKE-DONE$" out)
+            (error "ipv6 socket smoke: did not reach its own end marker, \
+stdout=%S" out))
+          (message "[standalone-reader] ipv6 socket smoke PASS"))
+      (ignore-errors (delete-file script)))))
+
+;;;###autoload
+(defun nelisp-standalone-reader-ipv6-socket-test ()
+  "Build the reader binary and run only the Doc 194 IPv6 phase (P7)
+smoke.  Exits 0/1."
+  (nelisp-standalone-build-reader)
+  (condition-case err
+      (progn
+        (nelisp-standalone--reader-ipv6-socket-smoke)
+        (kill-emacs 0))
+    (error
+     (message "[standalone-reader] FAIL: ipv6 socket smoke: %s"
               (error-message-string err))
      (kill-emacs 1))))
 
