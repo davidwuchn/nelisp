@@ -1173,6 +1173,74 @@ scratch chunks have their cursor reset."
   (should (< nelisp-standalone--macos-native-stack-size
              nelisp-standalone--native-stack-size)))
 
+;; Doc 194 S5.3/P3 exit criterion: the eight `nelisp-socket-*' names (six
+;; Phase 1 primitives + `nelisp-socket-poll'/`nelisp-socket-connect-error',
+;; added this phase) must raise the catchable `nelisp-unsupported-
+;; primitive' form -- not compile a real (wrong) syscall, not silently fail
+;; to link -- on every target other than `linux-x86_64'.  This is "the
+;; existing target-swap harness Phase 1's own gate uses" the design doc
+;; refers to: `nelisp-standalone--target' let-bound per case and the
+;; GENERATED dispatch-arm forms inspected directly at the source level, no
+;; cross-arch binary build/execution needed (a Windows PE or aarch64 ELF
+;; built on this x86_64 Linux host could not run here anyway).  Phase 1
+;; itself never had this ERT-level proof for its own six names (a
+;; pre-existing gap, not this phase's own regression) -- verified before
+;; this test existed: `linux-x86_64' returns the six real `nl_socket_*_impl'
+;; call forms and `windows-x86_64'/`macos-aarch64'/`linux-aarch64' each
+;; returned the empty native-forms list (`nelisp-standalone--socket-forms')
+;; while STILL wiring six dispatch arms (`nelisp-standalone--socket-
+;; dispatch-arms' does not consult `-forms' at all for its non-linux-x86_64
+;; branch) -- so this test covers all eight names on every target in one
+;; pass, closing that gap for the family as a whole, not only its own two
+;; new members.
+(ert-deftest nelisp-standalone-target-socket-dispatch-linux-x86-64-real ()
+  "linux-x86_64 gets real native call forms for all eight socket primitives."
+  (let* ((nelisp-standalone--target 'linux-x86_64)
+         (arms (nelisp-standalone--socket-dispatch-arms))
+         (names (mapcar (lambda (a) (cadr (car a))) arms)))
+    (should (equal names '("nelisp-socket-listen" "nelisp-socket-accept"
+                            "nelisp-socket-connect" "nelisp-socket-send"
+                            "nelisp-socket-recv" "nelisp-socket-close"
+                            "nelisp-socket-poll" "nelisp-socket-connect-error")))
+    (should (equal (cdr (nth 6 arms)) '(nl_socket_poll_impl args out)))
+    (should (equal (cdr (nth 7 arms)) '(nl_socket_connect_error_impl args out)))))
+
+(ert-deftest nelisp-standalone-target-socket-dispatch-non-linux-x86-64-unsupported ()
+  "Every socket primitive -- including the two P3 additions -- raises the
+catchable `nelisp-unsupported-primitive' signal form on every non-
+linux-x86_64 target, never a real (wrong-syscall) call form.
+
+`nelisp-standalone--applyfn-unsupported-primitive-form' is NOT a pure
+function returning an `equal'-stable constant across separate calls (it
+builds fresh gensym-named `let*' bindings each time, confirmed by a first
+version of this test that computed the comparison value via its OWN
+independent call and got a structurally-different-but-semantically-
+identical form back) -- so this test instead asserts, per target, that
+ALL EIGHT dispatch arms share the exact same (`eq'-identical, since
+`nelisp-standalone--socket-dispatch-arms' computes `sig' exactly ONCE per
+call and closes over it for every arm) signal form, and that this shared
+form never mentions any of the eight real `nl_socket_*_impl' native call
+targets -- the two properties that together mean \"every name maps to the
+one shared unsupported-primitive signal, not to a real (or partially
+real) native call\"."
+  (let ((real-impls '(nl_socket_listen_impl nl_socket_accept_impl
+                       nl_socket_connect_impl nl_socket_send_impl
+                       nl_socket_recv_impl nl_socket_close_impl
+                       nl_socket_poll_impl nl_socket_connect_error_impl))
+        (expected-names '("nelisp-socket-listen" "nelisp-socket-accept"
+                           "nelisp-socket-connect" "nelisp-socket-send"
+                           "nelisp-socket-recv" "nelisp-socket-close"
+                           "nelisp-socket-poll" "nelisp-socket-connect-error")))
+    (dolist (target '(windows-x86_64 windows-aarch64 macos-aarch64 linux-aarch64))
+      (let* ((nelisp-standalone--target target)
+             (arms (nelisp-standalone--socket-dispatch-arms))
+             (names (mapcar (lambda (a) (cadr (car a))) arms))
+             (shared (cdr (car arms))))
+        (should (equal names expected-names))
+        (dolist (arm arms)
+          (should (eq (cdr arm) shared))
+          (should-not (memq (car-safe (cdr arm)) real-impls)))))))
+
 (provide 'nelisp-standalone-target-test)
 
 ;;; nelisp-standalone-target-test.el ends here

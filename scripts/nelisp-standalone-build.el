@@ -14991,7 +14991,10 @@ value (matches the binary's M8 read+eval-loop driver)."
     "nelisp--target-os-code" "nelisp--target-arch-code"
     ;; Socket primitives (Doc 184 follow-on), Linux x86_64 first.
     "nelisp-socket-listen" "nelisp-socket-accept" "nelisp-socket-connect"
-    "nelisp-socket-send" "nelisp-socket-recv" "nelisp-socket-close")
+    "nelisp-socket-send" "nelisp-socket-recv" "nelisp-socket-close"
+    ;; Doc 194 P3: nonblocking primitives (NOWAIT is an arity extension of
+    ;; the three names above, not a new name -- only these two are new).
+    "nelisp-socket-poll" "nelisp-socket-connect-error")
   "Builtin names installed into the reader binary's mirror.
 Each is dispatched by the pure-elisp `nelisp_apply_function' (see
 `nelisp-standalone--applyfn-source').  Names > 8 bytes (for example
@@ -17697,6 +17700,14 @@ the prelude's source fixes both without a second change."
 ;; anything else (a bare hostname, IPv6, a malformed dotted quad), which
 ;; every caller below turns into a catchable `nelisp-socket-error' rather
 ;; than silently binding/connecting to the wrong address or garbage memory.
+;;
+;; Doc 194 P3 (nonblocking primitives) adds two more units to this same
+;; per-target gate -- `nelisp-socket-poll'/`nelisp-socket-connect-error' --
+;; and extends `nelisp-socket-listen'/-connect/-accept with a backward-
+;; compatible optional NOWAIT argument, all still linux-x86_64-only, same
+;; gate shape.  See each unit's own comment below for the syscalls
+;; involved (`poll' 230, `getsockopt' 55) and the SOCK_NONBLOCK (2048)/
+;; EINPROGRESS(115)/EAGAIN(11) handling.
 (defun nelisp-standalone--socket-forms ()
   "Return the native socket units for the CURRENT `nelisp-standalone--target'.
 Empty list on every target except `linux-x86_64' -- see this file's socket
@@ -17801,15 +17812,61 @@ section banner comment just above for why, and
             (ptr-write-u64 268435472 0 1)
             (atomic-fetch-add 268435544 1)
             1)))
-      ;; nelisp-socket-listen HOST PORT -> listen-fd.  socket(2) ->
-      ;; setsockopt(2) SO_REUSEADDR (best-effort: a failure here is not
-      ;; fatal, matching common practice) -> bind(2) -> listen(2), backlog
-      ;; 16.  Any of socket/bind/listen failing (or an unparseable HOST)
-      ;; closes the fd it opened (if any) and signals.
+      ;; nl_socket_bool_arg: read optional arg N of ARGS as a strict 0/1
+      ;; boolean -- 0 when the arg is absent (arity backward-compat, Doc 194
+      ;; P3) OR present-but-nil, 1 when present and non-nil.  Same idiom
+      ;; `bf_require_noerror_p' (this file's `require' arity handling)
+      ;; already uses for its own optional NOERROR argument, applied here
+      ;; to every NOWAIT/WANT-WRITE argument P3 adds below.  `bf_require_
+      ;; arg_present_p' is defined in `nelisp-standalone--applyfn-bf-
+      ;; helpers', a DIFFERENT helper group than this one -- already a
+      ;; proven cross-group reference in this exact file (Phase 1's own
+      ;; `nl_socket_send_impl'/`nl_socket_connect_impl' already call
+      ;; `nl_bi_strptr'/`nl_bi_strlen', defined in the file-I/O helper
+      ;; group, not this one) -- every unit shares one flat native
+      ;; namespace once linked (this section's own banner comment above).
+      '(defun nl_socket_bool_arg (args n)
+         (if (= (bf_require_arg_present_p args n) 1)
+             (if (= (ptr-read-u64 (wf_arg_ptr args n) 0) 0) 0 1)
+           0))
+      ;; nelisp-socket-listen HOST PORT &optional NOWAIT -> listen-fd.
+      ;; socket(2) -> setsockopt(2) SO_REUSEADDR (best-effort: a failure
+      ;; here is not fatal, matching common practice) -> bind(2) ->
+      ;; listen(2), backlog 16.  Any of socket/bind/listen failing (or an
+      ;; unparseable HOST) closes the fd it opened (if any) and signals.
+      ;;
+      ;; P3 (doc 194 S3.3): NOWAIT, non-nil, ORs SOCK_NONBLOCK (2048,
+      ;; Linux's `type'-argument extension to socket(2)) into the
+      ;; socket(2) call's type argument -- the exact technique
+      ;; `nl_socket_connect_impl' below already uses for its own NOWAIT.
+      ;; Doc 194's own enumeration of P3's native additions (S3.3 item 1)
+      ;; named only `nelisp-socket-connect'/`nelisp-socket-accept', not
+      ;; `nelisp-socket-listen' -- but `accept4(2)''s SOCK_NONBLOCK flags
+      ;; argument (wired into `nl_socket_accept_impl' below) sets
+      ;; O_NONBLOCK on the RETURNED connection fd only (Linux accept4(2):
+      ;; "Setting the SOCK_NONBLOCK flag also enables nonblocking behavior
+      ;; for the newly created descriptor"), never on the LISTENING fd
+      ;; accept4 is called against -- accept4(2) still BLOCKS on an empty
+      ;; queue unless the LISTENING socket itself already has O_NONBLOCK, a
+      ;; distinction the doc's S3.3 prose elides.  Measured directly
+      ;; against this phase's own exit criterion (a NOWAIT accept against
+      ;; an EMPTY queue must return immediately, not hang): without this
+      ;; listen-side extension, that case hangs even with
+      ;; `nl_socket_accept_impl''s own accept4-flags change alone (RED,
+      ;; reproduced while implementing this phase) -- so this backward-
+      ;; compatible 3rd argument on `nelisp-socket-listen' is required, not
+      ;; optional polish, and deliberately does NOT reuse `nl_os_process_
+      ;; set_nonblock' (the separate, already-known-buggy subprocess fcntl
+      ;; path, S1.5) -- the same "no separate fcntl call, set SOCK_NONBLOCK
+      ;; at socket-creation time" technique the doc already prescribes for
+      ;; connect, applied to the one additional call site that actually
+      ;; needs it for a correct nonblocking accept.
       '(defun nl_socket_listen_impl (args out)
          (let* ((host_sx (wf_arg_ptr args 0))
                 (port (wf_argval args 1))
-                (fd (syscall-direct 41 2 1 0 0 0 0)))
+                (nowait (nl_socket_bool_arg args 2))
+                (socktype (if (= nowait 1) 2049 1))
+                (fd (syscall-direct 41 2 socktype 0 0 0 0)))
            (if (< fd 0)
                (nl_socket_signal_error fd)
              (let* ((optval (alloc-bytes 4 4))
@@ -17832,19 +17889,57 @@ section banner comment just above for why, and
                               (seq (nl_os_close_handle fd)
                                    (nl_socket_signal_error lrc))
                             (seq (wf_write_int out fd) 0))))))))))))
-      ;; nelisp-socket-accept LISTEN-FD -> conn-fd.  accept4(2), no peer
-      ;; address requested (NULL/NULL), flags 0 (blocking -- nonblocking
-      ;; accept is out of scope, see this change's report).
+      ;; nelisp-socket-accept LISTEN-FD &optional NOWAIT -> conn-fd.
+      ;; accept4(2), no peer address requested (NULL/NULL).
+      ;;
+      ;; P3 (doc 194 S3.3 item 1): NOWAIT non-nil ORs SOCK_NONBLOCK (2048)
+      ;; into accept4's flags argument (0 -> 2048), setting O_NONBLOCK on
+      ;; the RETURNED connection fd (accept4(2)'s own documented behavior
+      ;; for that flag -- see `nl_socket_listen_impl''s comment above for
+      ;; why this alone does not make the ACCEPT CALL ITSELF nonblocking on
+      ;; an empty queue; that needs the LISTENING fd's own O_NONBLOCK, set
+      ;; at `nelisp-socket-listen' time).  When NOWAIT and the listening fd
+      ;; is itself nonblocking, an empty queue makes accept4 return -EAGAIN
+      ;; (errno 11; EWOULDBLOCK is the identical value on Linux)
+      ;; immediately -- doc 194 S3.3 item 1's own explicitly-named
+      ;; exception to Phase 1's "every syscall failure signals" rule: this
+      ;; ONE case is a *soft* outcome (no pending connection is not an
+      ;; error for a poll-driven accept loop), so it returns the sentinel
+      ;; -1 (an ordinary int, distinguishable from any real fd, always >=
+      ;; 0) instead of raising `nelisp-socket-error'.  Every OTHER negative
+      ;; return still raises exactly as Phase 1 already does.
       '(defun nl_socket_accept_impl (args out)
-         (let* ((cfd (syscall-direct 288 (wf_argval args 0) 0 0 0 0 0)))
+         (let* ((nowait (nl_socket_bool_arg args 1))
+                (flags (if (= nowait 1) 2048 0))
+                (cfd (syscall-direct 288 (wf_argval args 0) 0 0 flags 0 0)))
            (if (< cfd 0)
-               (nl_socket_signal_error cfd)
+               (if (if (= nowait 1) (= cfd (- 0 11)) 0)
+                   (seq (wf_write_int out (- 0 1)) 0)
+                 (nl_socket_signal_error cfd))
              (seq (wf_write_int out cfd) 0))))
-      ;; nelisp-socket-connect HOST PORT -> fd.  socket(2) -> connect(2).
+      ;; nelisp-socket-connect HOST PORT &optional NOWAIT -> fd.
+      ;; socket(2) -> connect(2).
+      ;;
+      ;; P3 (doc 194 S3.3 item 1): NOWAIT non-nil ORs SOCK_NONBLOCK (2048)
+      ;; into socket(2)'s type argument (1 -> 2049) -- at socket-creation
+      ;; time, not a separate fcntl(2) call, sidestepping S1.5's O_NONBLOCK
+      ;; value mismeasurement in the unrelated subprocess path entirely.  A
+      ;; nonblocking connect(2) against a socket that cannot complete the
+      ;; three-way handshake synchronously returns -EINPROGRESS (errno
+      ;; 115) immediately -- the standard POSIX "connect in flight"
+      ;; outcome, not a failure -- so when NOWAIT was requested this ONE
+      ;; negative value returns the fd exactly as a successful connect
+      ;; would (the caller polls for writability via `nelisp-socket-poll'
+      ;; and disambiguates success from failure via `nelisp-socket-connect-
+      ;; error' once ready, S3.3 items 2 and 3).  Every OTHER negative
+      ;; connect(2) return (including EINPROGRESS when NOWAIT was NOT
+      ;; requested) still raises exactly as Phase 1 already does.
       '(defun nl_socket_connect_impl (args out)
          (let* ((host_sx (wf_arg_ptr args 0))
                 (port (wf_argval args 1))
-                (fd (syscall-direct 41 2 1 0 0 0 0)))
+                (nowait (nl_socket_bool_arg args 2))
+                (socktype (if (= nowait 1) 2049 1))
+                (fd (syscall-direct 41 2 socktype 0 0 0 0)))
            (if (< fd 0)
                (nl_socket_signal_error fd)
              (let* ((addr (alloc-bytes 16 1))
@@ -17856,8 +17951,10 @@ section banner comment just above for why, and
                         (nl_socket_signal_error (- 0 9999)))
                  (let* ((crc (syscall-direct 42 fd addr 16 0 0 0)))
                    (if (< crc 0)
-                       (seq (nl_os_close_handle fd)
-                            (nl_socket_signal_error crc))
+                       (if (if (= nowait 1) (= crc (- 0 115)) 0)
+                           (seq (wf_write_int out fd) 0)
+                         (seq (nl_os_close_handle fd)
+                              (nl_socket_signal_error crc)))
                      (seq (wf_write_int out fd) 0))))))))
       ;; nelisp-socket-send FD STRING -> bytes-sent (integer).  Reuses
       ;; `nl_os_write_file_handle' (write(2), syscall 1 on Linux x86_64) --
@@ -17899,22 +17996,109 @@ section banner comment just above for why, and
             (syscall-direct 48 fd 2 0 0 0 0)
             (nl_os_close_handle fd)
             (wf_write_nil out)
-            0))))
+            0)))
+      ;; nelisp-socket-poll FD WANT-WRITE TIMEOUT -> t/nil.  P3 (doc 194
+      ;; S3.3 item 2): the SAME poll(2) shape `nl_os_process_poll_readable'
+      ;; (this file's per-target OS-helper section) already uses,
+      ;; parameterized into a genuine dispatch-table entry callable on an
+      ;; arbitrary fd -- that helper is a private per-target defun, always
+      ;; POLLIN, always a zero timeout.  events = POLLOUT(4) when
+      ;; WANT-WRITE is non-nil, POLLIN(1) otherwise; TIMEOUT is poll(2)'s
+      ;; own millisecond argument verbatim (0 = the zero-timeout probe the
+      ;; process adapter's poll loop uses every pass; a positive value lets
+      ;; a direct caller -- e.g. this phase's own smoke -- block up to a
+      ;; bound without busy-looping; negative blocks indefinitely, matching
+      ;; poll(2) itself).  Ready is POLLIN|POLLERR|POLLHUP (25) for read,
+      ;; POLLOUT|POLLERR|POLLHUP (28) for write -- folding in POLLERR/
+      ;; POLLHUP on both sides so a caller sees "ready" and gets the real
+      ;; error from the subsequent recv/getsockopt call, exactly
+      ;; `nl_os_process_poll_readable''s own precedent for the read side.
+      ;;
+      ;; Syscall number: 7, NOT 230.  Measured with `strace' while
+      ;; implementing this phase, against this doc's own "confirm against
+      ;; an authoritative source" norm: `nl_os_process_poll_readable' (the
+      ;; pattern this unit parameterizes, per this doc's own S3.3 item 2
+      ;; text) uses `syscall-direct 230 ...' on its linux-x86_64 branch --
+      ;; copying that literally here reached NO `poll' syscall at all under
+      ;; `strace -f'; it reached `clock_nanosleep' instead (`230' is
+      ;; `clock_nanosleep' on the Linux x86_64 ABI -- `arch/x86/entry/
+      ;; syscalls/syscall_64.tbl'; `poll' is `7', the same table, and the
+      ;; SAME number this file's own `_' (BSD/other) fallback branch below
+      ;; already uses correctly for its own `nl_os_syscall_nr_poll').  Not
+      ;; this phase's scope to fix `nl_os_process_poll_readable' itself
+      ;; (the subprocess pipe-poll path this doc does not touch -- P4/P5's
+      ;; own poll loop wiring calls ONLY this new unit, never that one), but
+      ;; recorded here since a design doc citing that function as an
+      ;; already-correct pattern to parameterize was, measured, wrong about
+      ;; the one number that matters most.  Returns a real Lisp t/nil,
+      ;; deliberately NOT 0/1: an Elisp integer 0 is TRUTHY (only `nil' is
+      ;; false), so a bare `wf_write_int' return here would make every
+      ;; `(if (nelisp-socket-poll ...) ...)' call site true even when not
+      ;; ready -- caught before this ever reached the poll loop (P4), not
+      ;; asserted.
+      '(defun nl_socket_poll_impl (args out)
+         (let* ((fd (wf_argval args 0))
+                (want_write (nl_socket_bool_arg args 1))
+                (timeout (wf_argval args 2))
+                (events (if (= want_write 1) 4 1))
+                (mask (if (= want_write 1) 28 25))
+                (pfd (alloc-bytes 8 4)))
+           (seq
+            (ptr-write-u32 pfd 0 fd)
+            (ptr-write-u32 pfd 4 events)
+            (let* ((rc (syscall-direct 7 pfd 1 timeout 0 0 0))
+                   (revents (/ (ptr-read-u32 pfd 4) 65536)))
+              (if (if (> rc 0) (if (= (logand revents mask) 0) 0 1) 0)
+                  (wf_write_t out)
+                (wf_write_nil out))))))
+      ;; nelisp-socket-connect-error FD -> integer (0 = connected, else the
+      ;; real errno).  P3 (doc 194 S3.3 item 3): getsockopt(2), Linux
+      ;; x86_64 syscall number 55 -- confirmed against the standard,
+      ;; stable x86_64 kernel syscall table
+      ;; (arch/x86/entry/syscalls/syscall_64.tbl: 54 setsockopt, 55
+      ;; getsockopt, 56 clone), immediately following `setsockopt''s 54
+      ;; this file already calls above -- doc 194 S6's own open question,
+      ;; resolved here: this is the well-known, unchanging value, not a
+      ;; target-dependent one the way the socket(2) family/`accept4' etc.
+      ;; differ per architecture.  SOL_SOCKET(1)/SO_ERROR(4), the standard
+      ;; POSIX technique to disambiguate a nonblocking connect's success
+      ;; from its failure once `nelisp-socket-poll FD t TIMEOUT' reports
+      ;; the fd writable -- connect(2)'s OWN return value is useless for
+      ;; this once the call was nonblocking and returned EINPROGRESS
+      ;; immediately.  OPTLEN is an IN/OUT pointer for getsockopt (unlike
+      ;; setsockopt's plain-value OPTLEN above), so it is allocated and
+      ;; pre-seeded with the buffer's capacity (4) before the call.  A
+      ;; getsockopt(2) failure itself (bad fd, etc.) still signals
+      ;; `nelisp-socket-error', matching every other syscall in this
+      ;; family.
+      '(defun nl_socket_connect_error_impl (args out)
+         (let* ((fd (wf_argval args 0))
+                (optval (alloc-bytes 4 4))
+                (optlen (alloc-bytes 4 4)))
+           (seq
+            (ptr-write-u32 optlen 0 4)
+            (let* ((rc (syscall-direct 55 fd 1 4 optval optlen 0)))
+              (if (< rc 0)
+                  (nl_socket_signal_error rc)
+                (seq (wf_write_int out (ptr-read-u32 optval 0)) 0)))))))
      nil)))
 
 (defun nelisp-standalone--socket-dispatch-arms ()
-  "Return the six `nelisp-socket-*' `nelisp_apply_function' dispatch arms.
-Real raw-SYSCALL implementations (`nelisp-standalone--socket-forms') on
-`linux-x86_64'; on every other target, the SAME catchable
-`nelisp-unsupported-primitive' signal Task A's fix installs as the
-unknown-builtin default -- the primitive names exist and are `fboundp',
-calling one just refuses loudly instead of either issuing a wrong syscall
-number for a target this DSL has not been taught, or silently failing to
-link (`nl_socket_listen_impl' et al. are only DEFINED on `linux-x86_64', so
-these dispatch arms must not reference them at all on other targets)."
+  "Return the eight `nelisp-socket-*' `nelisp_apply_function' dispatch
+arms (six Phase 1 primitives + two doc 194 P3 additions, `nelisp-socket-
+poll'/`nelisp-socket-connect-error').  Real raw-SYSCALL implementations
+(`nelisp-standalone--socket-forms') on `linux-x86_64'; on every other
+target, the SAME catchable `nelisp-unsupported-primitive' signal Task A's
+fix installs as the unknown-builtin default -- the primitive names exist
+and are `fboundp', calling one just refuses loudly instead of either
+issuing a wrong syscall number for a target this DSL has not been taught,
+or silently failing to link (`nl_socket_listen_impl' et al. are only
+DEFINED on `linux-x86_64', so these dispatch arms must not reference them
+at all on other targets)."
   (let ((names '("nelisp-socket-listen" "nelisp-socket-accept"
                  "nelisp-socket-connect" "nelisp-socket-send"
-                 "nelisp-socket-recv" "nelisp-socket-close")))
+                 "nelisp-socket-recv" "nelisp-socket-close"
+                 "nelisp-socket-poll" "nelisp-socket-connect-error")))
     (if (eq nelisp-standalone--target 'linux-x86_64)
         (list
          `((:lit "nelisp-socket-listen") . (nl_socket_listen_impl args out))
@@ -17922,7 +18106,9 @@ these dispatch arms must not reference them at all on other targets)."
          `((:lit "nelisp-socket-connect") . (nl_socket_connect_impl args out))
          `((:lit "nelisp-socket-send") . (nl_socket_send_impl args out))
          `((:lit "nelisp-socket-recv") . (nl_socket_recv_impl args out))
-         `((:lit "nelisp-socket-close") . (nl_socket_close_impl args out)))
+         `((:lit "nelisp-socket-close") . (nl_socket_close_impl args out))
+         `((:lit "nelisp-socket-poll") . (nl_socket_poll_impl args out))
+         `((:lit "nelisp-socket-connect-error") . (nl_socket_connect_error_impl args out)))
       (let ((sig (nelisp-standalone--applyfn-unsupported-primitive-form)))
         (mapcar (lambda (nm) (cons (list :lit nm) sig)) names)))))
 
