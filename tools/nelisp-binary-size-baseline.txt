@@ -181,7 +181,12 @@
 # it dead weight (every path is exercised by `scripts/standalone-bignum-
 # smoke.el').  Measured with `stat -c %s target/nelisp' after a clean
 # `make standalone-reader' on this branch's own HEAD.
-size 7314288
+# (Doc 190 Phase B note: the `size' directive itself moved below, past
+# the 189-nl-ns-enforced-namespaces entry immediately following -- a
+# file must have exactly one machine-read `size' line, since the gate's
+# `awk' picks it up unconditionally; two would concatenate into an
+# invalid arithmetic expression.  This paragraph's own number, 7240384,
+# is preserved as the value Phase B's own raise below transitions FROM.)
 # Raised 2026-08-24 (7240384 -> 7314288, +73904 bytes, +1.02%, well
 # inside the 2% slack -- raised anyway per this file's own rule above,
 # not left for slack to silently absorb) by Doc 188 Phase 2 (buffer
@@ -210,4 +215,36 @@ size 7314288
 # above it, which is loaded at runtime and does not link in at all.
 # Measured with `stat -c %s target/nelisp' after a clean `make
 # standalone-reader' on this change alone, base 670ddd885.
+#
+# Raised 2026-08-23 (Doc 190 Phase B, feat/bignum-p2-arith), 7240384 ->
+# 7310768, +70384 bytes, +0.97%, inside the existing 2% slack -- raised
+# anyway per this file's own rule above.  The bignum arithmetic core
+# (contagion) is exactly the shape of change this ratchet exists to make
+# visible: new native code in `scripts/nelisp-standalone-build.el'
+# (`nelisp-standalone--applyfn-core-helpers' gains the schoolbook limb
+# add/sub/mul primitives -- `nl_bignum_add_raw'/`nl_bignum_sub_raw'/
+# `nl_bignum_mul_raw' and their carry/borrow/row loops -- plus the
+# rewritten `wf_sum'/`wf_prod'/`wf_subtail'/`wf_diff' and the three new
+# `wf_*_big' fold continuations, all AOT-compiled into the linked
+# binary), plus a small addition to the interpreted stdlib prelude
+# (`scripts/nelisp-stdlib-prelude.el''s `expt' gained one `bignump'
+# guard, embedded as prelude source text like every other prelude-size
+# raise in this file's history).  None of it dead weight: every new
+# native function is exercised by `scripts/standalone-bignum-smoke.el'
+# (grown from 37 to 54 cases this same commit).  Measured with `stat -c
+# %s target/nelisp' after a clean `make standalone-reader' on this
+# branch's own HEAD (eb4eb81f3 base).
+#
+# integration/wave6 (this branch, merge 2/9): buffer-unification-p2
+# (merge 1/9) raised this same `size' line to 7314288 on its OWN tree
+# (base eb4eb81f3, before bignum-p2-arith's growth existed) via the
+# Doc 188 Phase 2 raise paragraph preserved above; bignum-p2-arith's own
+# raise above lands at 7310768, also measured on its own tree (same
+# eb4eb81f3 base, before buffer-unification-p2's growth existed).  The
+# two interim pins do not compose additively (non-overlapping trees,
+# same caveat as every prior interim reconciliation in this file's
+# history) -- left at the higher of the two, 7314288, until the full
+# 9-branch integration/wave6 tree is built and this ratchet is RESET
+# ONCE to the actual measured size per the integration playbook.
+size 7314288
 slack-pct 2

@@ -1422,7 +1422,7 @@ standalone-reader-number-token-smoke: standalone-reader
 standalone-reader-bignum-smoke: standalone-reader
 	@out="$$(ulimit -v 4194304; timeout 30 ./target/nelisp --load scripts/standalone-bignum-smoke.el)"; \
 	echo "$$out"; \
-	if echo "$$out" | grep -q 'BIGNUM-SMOKE cases=37 mismatches=0'; then \
+	if echo "$$out" | grep -q 'BIGNUM-SMOKE cases=54 mismatches=0'; then \
 	  echo "[standalone-reader-bignum-smoke] PASS"; \
 	else \
 	  echo "[standalone-reader-bignum-smoke] FAIL"; \

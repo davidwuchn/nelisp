@@ -277,6 +277,29 @@
     (44 shared (if (equal 2305843009213693952
                           (car (read-from-string (prin1-to-string 2305843009213693952))))
                    1 0))
+
+    ;; -- Doc 190 Phase B (bignums, arithmetic core, 2026-08-23): `+'/`-'/
+    ;; `*' promotion and demotion are now host-comparable too -- real GNU
+    ;; Emacs (27+) promotes a fixnum-boundary `+'/`-'/`*' overflow to a
+    ;; bignum and demotes back to a fixnum once the magnitude re-fits, the
+    ;; same contract Doc 190 Phase B gives NeLisp.  Values host-verified
+    ;; (GNU Emacs 30.1, 2026-08-23).
+    ;;
+    ;; 45: exact promoted sum, `(+ most-positive-fixnum 1)'.
+    (45 shared (if (= (+ most-positive-fixnum 1) 2305843009213693952) 1 0))
+    ;; 46: exact bignum*bignum (genuine multi-limb on the NeLisp side --
+    ;; most-positive-fixnum squared needs 3 32-bit limbs).
+    (46 shared (if (= (* most-positive-fixnum most-positive-fixnum)
+                      5316911983139663487003542222693990401)
+                   1 0))
+    ;; 47: demotion -- a bignum-producing op followed by one that brings
+    ;; the magnitude back under 2^61 must equal (and, on the NeLisp side,
+    ;; retag as) a plain fixnum again.  `fixnump' is host-only (not in
+    ;; this runtime's predicate table, Doc 190 Phase A's own §6.1 scope),
+    ;; so this entry checks the VALUE identity every substrate can
+    ;; express; the NeLisp-only tag check (`bignump') lives in
+    ;; `scripts/standalone-bignum-smoke.el' instead.
+    (47 shared (if (= (- (+ most-positive-fixnum 1) 1) most-positive-fixnum) 1 0))
     ))
 
 (provide 'nelisp-substrate-parity-corpus)

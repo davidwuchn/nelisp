@@ -2052,7 +2052,29 @@ loop for the exponent (= no `expt' / `float' primitive needed)."
            (let ((r 1) (i 0))
              (while (< i e)
                (let ((next (* r b)))
-                 (when (and (/= b 0) (/= (/ next b) r))
+                 ;; Doc 190 Phase B regression, found by the fencepost check
+                 ;; ("expt overflow-check unaffected") this same phase's own
+                 ;; smoke inherited from Phase A: `*' now PROMOTES a fixnum-
+                 ;; boundary crossing to an exact Bignum instead of
+                 ;; signalling, so `next' can genuinely be a Bignum here now
+                 ;; -- something the div-round-trip check below was never
+                 ;; written to expect (it assumes NEXT is always a plain
+                 ;; fixnum).  `/' does not support a Bignum operand (Phase
+                 ;; A's own recorded, still-unchanged gap), so falling
+                 ;; through to `(/ next b)' on a promoted `next' signalled
+                 ;; the WRONG condition, `wrong-type-argument', instead of
+                 ;; `overflow-error'.  `expt' itself is OUT OF SCOPE for
+                 ;; Phase B's promotion (this doc's own task brief: `+'/`-'/
+                 ;; `*' only) -- it still signals `overflow-error' exactly
+                 ;; as it did before, just via an explicit `bignump' guard
+                 ;; now instead of (coincidentally, pre-Phase-B) always
+                 ;; being pre-empted by the native `*''s OWN overflow signal
+                 ;; before `next' could ever be bound to anything else.  The
+                 ;; div-round-trip half stays as defense in depth for a true
+                 ;; 64-bit-register wrap, even though `*' promoting rather
+                 ;; than wrapping means it should no longer be reachable in
+                 ;; practice.
+                 (when (or (bignump next) (and (/= b 0) (/= (/ next b) r)))
                    (signal 'overflow-error nil))
                  (setq r next))
                (setq i (1+ i)))

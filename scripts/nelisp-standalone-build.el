@@ -3591,11 +3591,20 @@ argument (reachability + in-arena bounds checks).")
   ;; Doc 190 Phase A: `+'/`-'/`*' gate on `wf_any_float_arith'/
   ;; `wf_first_non_number_or_bignum' (NOT the plain `wf_any_float'/
   ;; `wf_first_non_number' every other arithmetic entry below still
-  ;; uses) so a Bignum operand reaches `wf_sum'/`wf_diff'/`wf_prod',
-  ;; which signal `overflow-error' for it -- no arithmetic promotion in
-  ;; this phase, matching Doc 187's landed contract exactly (Doc 190 §2:
-  ;; "this doc does not change that baseline on its own" until the
-  ;; Phase B arithmetic core exists).
+  ;; uses) so a Bignum operand reaches `wf_sum'/`wf_diff'/`wf_prod'.
+  ;;
+  ;; Doc 190 Phase B (2026-08-23, SUPERSEDING Phase A's own note above and
+  ;; Doc 187's landed contract for these three ops only): a Bignum operand,
+  ;; or a fixnum-fixnum overflow, no longer signals `overflow-error' here
+  ;; -- `wf_sum'/`wf_diff'/`wf_prod' PROMOTE to an exact Bignum result
+  ;; instead (Doc 190 §2's contagion rule, matching real GNU Emacs since
+  ;; 27), demoting back to a plain Sexp::Int whenever the result re-fits
+  ;; the fixnum bound.  Doc 187's own overflow DETECTION (the literal-
+  ;; bound / div-round-trip checks inside the fold) is UNCHANGED; only
+  ;; what happens once overflow is detected changed.  `/'/`mod'/`%' below
+  ;; are UNCHANGED and still report `wrong-type-argument' for a Bignum
+  ;; operand -- deliberately out of this phase's scope, see Doc 190
+  ;; §Open questions.
   '(((:u8 "+") . (let* ((f (wf_any_float_arith args)))
                     (if (= f 2)
                         (bf_wrong_type_number_or_marker (wf_first_non_number_or_bignum args))
@@ -3607,24 +3616,21 @@ argument (reachability + in-arena bounds checks).")
                         ;; CALL.  Inside the helpers bits-to-f64 only wraps refs.)
                         (let* ((sc (alloc-bytes 32 8)))
                           (seq (wf_fsum args 0 sc) (wf_copy32 out sc)))
-                      (seq (ptr-write-u64 268435472 0 0)
-                           (wf_write_int_checked out (wf_sum args 0)))))))
+                      (wf_sum args 0 out)))))
     ((:u8 "-") . (let* ((f (wf_any_float_arith args)))
                     (if (= f 2)
                         (bf_wrong_type_number_or_marker (wf_first_non_number_or_bignum args))
                       (if (= f 1)
                         (let* ((sc (alloc-bytes 32 8)))
                           (seq (wf_fdiff args sc) (wf_copy32 out sc)))
-                      (seq (ptr-write-u64 268435472 0 0)
-                           (wf_write_int_checked out (wf_diff args)))))))
+                      (wf_diff args out)))))
     ((:u8 "*") . (let* ((f (wf_any_float_arith args)))
                     (if (= f 2)
                         (bf_wrong_type_number_or_marker (wf_first_non_number_or_bignum args))
                       (if (= f 1)
                         (let* ((sc (alloc-bytes 32 8)))
                           (seq (wf_fprod args (wf_int_fbits 1 sc) sc) (wf_copy32 out sc)))
-                      (seq (ptr-write-u64 268435472 0 0)
-                           (wf_write_int_checked out (wf_prod args 1)))))))
+                      (wf_prod args 1 out)))))
     ;; One argument is the RECIPROCAL, not the number itself: (/ 7) is 0 and
     ;; (/ 2.0) is 0.5.  Reading a second argument that was not there walked
     ;; off the end of the argument list and segfaulted -- an abort no
@@ -4076,17 +4082,18 @@ unresolved at link time."
                 (wf_first_non_number (nl_cons_cdr_ptr args))
               a))
         0))
-    ;; Doc 190 Phase A: a BIGNUM-AWARE variant of `wf_first_non_number',
+    ;; Doc 190 Phase A/B: a BIGNUM-AWARE variant of `wf_first_non_number',
     ;; used ONLY by `+'/`-'/`*''s own dispatch entries below (NOT by `/',
     ;; `mod', `%', `1+', `1-', which are unchanged and still treat a
     ;; Bignum operand as "not a number" -- deliberately out of this
     ;; phase's scope, see doc 190 §Open questions).  Accepting tag 13
     ;; here is what lets a Bignum operand reach `wf_sum'/`wf_prod'/
-    ;; `wf_diff' at all, where THEY immediately signal `overflow-error'
-    ;; (their own new tag-13 guard, added alongside this) rather than
-    ;; this gate reporting `wrong-type-argument number-or-marker-p' --
-    ;; the task's own contract is that `(+ big 1)' keeps signalling
-    ;; `overflow-error', not a type error.
+    ;; `wf_diff' at all, where (Phase B) THEY now COMPUTE with it --
+    ;; promoting/combining into an exact Bignum result -- rather than
+    ;; this gate reporting `wrong-type-argument number-or-marker-p'.
+    ;; (Phase A had this fold immediately signal `overflow-error' for a
+    ;; Bignum operand instead; Phase B supersedes that, see `wf_sum''s
+    ;; own comment.)
     (defun wf_first_non_number_or_bignum (args)
       (if (= (sexp-tag args) 7)
           (let* ((a (nl_cons_car_ptr args)) (tg (ptr-read-u64 a 0)))
@@ -4960,10 +4967,208 @@ unresolved at link time."
       ;; SeqCst atomic increment so concurrent threads (parallel build) never
       ;; lose a mutation-epoch bump (the old read;+1;write was a racy RMW).
       (atomic-fetch-add 268435544 1))
-    ;; Doc 187 §3.1: overflow check inline in the fold, so the native
-    ;; `+'/`*' dispatch (the entries that call these) signals
-    ;; `overflow-error' instead of silently wrapping past
-    ;; most-positive-fixnum/most-negative-fixnum.
+    ;; --- Doc 190 Phase B: bignum arithmetic core (contagion) -----------
+    ;; `+'/`-'/`*' promote a fixnum-boundary overflow (or an operand that
+    ;; is already a Bignum) to an exact Bignum result instead of signalling
+    ;; `overflow-error' (Doc 187's contract, superseded HERE ONLY for these
+    ;; three ops -- `/'/`mod'/`%' are UNCHANGED, still `wrong-type-argument'
+    ;; on a Bignum operand, matching Doc 190's own phase scope).  Limbs are
+    ;; 32-bit (Doc 190 Phase A §6.1's own choice), schoolbook add/sub/mul
+    ;; (Doc 190 §3 Phase B: "schoolbook multiplication is the honest
+    ;; default ... Karatsuba is a later optimization, not a Phase B
+    ;; requirement").  Every result re-canonicalizes through
+    ;; `nl_bignum_finish', which DEMOTES back to a plain Sexp::Int whenever
+    ;; the magnitude fits the fixnum bound again (Doc 190 §2: "a bignum,
+    ;; once created, contracts back to a fixnum whenever an operation's
+    ;; result re-fits the 61-bit magnitude") -- verified end-to-end against
+    ;; host Emacs, e.g. `(- (+ most-positive-fixnum 1) 1)' is a plain
+    ;; fixnum on this build, matching host exactly (`scripts/standalone-
+    ;; bignum-smoke.el').
+    ;;
+    ;; These live in CORE (not the reader-only `nelisp-standalone--applyfn-
+    ;; bignum-helpers' group) because `wf_sum'/`wf_prod'/`wf_subtail'/
+    ;; `wf_diff' below are core (the baked-form eval build's own `+'/`-'/
+    ;; `*' dispatch entries are the first 19 table entries, `nelisp-
+    ;; standalone--applyfn-dispatch-table-baked', and link ONLY core) --
+    ;; a promotion path reachable from a core fold must itself be core, or
+    ;; the baked build fails to link.  All pure pointer/integer code, no
+    ;; string-primitive dependency, same criterion the EXISTING core
+    ;; comparison helpers (`nl_bignum_top_limb' et al., above) already use.
+    ;; `nl_bignum_write'/`nl_bignum_write_int' (originally Phase A, reader-
+    ;; only) moved here for the same reason -- `nl_bignum_finish' below is
+    ;; the one place both a promoted result and a demoted-back-to-fixnum
+    ;; result get boxed/written, and it must be reachable from core.
+
+    ;; Highest-index-plus-one canonical limb count for an N-limb array
+    ;; already written (no leading zero limb, except a single zero limb
+    ;; for value 0).  Thin wrapper over the existing `nl_bignum_top_limb'.
+    (defun nl_bignum_canon_count (limb_ptr n)
+      (let* ((top (nl_bignum_top_limb limb_ptr n))) (if (< top 0) 1 (+ top 1))))
+    ;; Upper-bound limb count for an add/sub between an A_COUNT-limb and a
+    ;; B_COUNT-limb magnitude: the larger operand's count, plus one head-
+    ;; room limb for a possible same-sign carry-out (unused, and trimmed
+    ;; away by `nl_bignum_canon_count', when the differing-sign subtract
+    ;; path runs instead).
+    (defun nl_bignum_addsub_bound (a_count b_count)
+      (+ (if (> a_count b_count) a_count b_count) 1))
+    ;; Write the 2-limb magnitude of a fixnum-range raw value V (already
+    ;; proven, by the caller, to be a real tagged Int payload -- magnitude
+    ;; <= 2^61, far short of the 2^63 two's-complement limit, the SAME
+    ;; safety argument `nl_bignum_write_int''s own comment already makes)
+    ;; into LIMB_PTR (caller-provided, >= 2 limbs).  Returns V's sign
+    ;; (0/1).  2 limbs always cover a 61-bit magnitude (32*2=64 >= 61).
+    (defun nl_bignum_int_limbs (v limb_ptr)
+      (let* ((sign (if (< v 0) 1 0)) (mag (if (< v 0) (- 0 v) v)))
+        (seq (ptr-write-u32 limb_ptr 0 (logand mag 4294967295))
+             (ptr-write-u32 limb_ptr 4 (shr mag 32))
+             sign)))
+    ;; Write a canonical Sexp::Bignum (tag 13) into RESULT_SLOT: sign@+8,
+    ;; limb-ptr@+16, limb-count@+24 -- mirrors `nl_alloc_str_write''s field
+    ;; layout exactly (cap/ptr/len -> sign/ptr/limb-count).  (Doc 190 Phase
+    ;; A originally, moved from the reader-only bignum-helpers group to
+    ;; core for Phase B -- see this block's own header comment above.)
+    (defun nl_bignum_write (sign limb_ptr limb_count result_slot)
+      (seq (ptr-write-u8  result_slot 0  13)
+           (ptr-write-u64 result_slot 8  sign)
+           (ptr-write-u64 result_slot 16 limb_ptr)
+           (ptr-write-u64 result_slot 24 limb_count)
+           result_slot))
+    ;; Reconstruct a plain Sexp::Int (tag 2) from a <=2-limb magnitude and
+    ;; SIGN.  Only called once `nl_bignum_mag_le_bound' has already proven
+    ;; the magnitude fits the fixnum bound for that sign, so the negation
+    ;; below (SIGN=1) never risks hardware i64 wraparound even though it
+    ;; is not routed through Doc 187's checked `-' (the magnitude is
+    ;; already proven <= 2^61, far short of the 2^63 two's-complement
+    ;; limit).  (Doc 190 Phase A originally, moved to core for Phase B.)
+    (defun nl_bignum_write_int (limb_ptr limb_count sign result_slot)
+      (let* ((lo (if (> limb_count 0) (ptr-read-u32 limb_ptr 0) 0))
+             (hi (if (> limb_count 1) (ptr-read-u32 limb_ptr 4) 0))
+             (mag (logior lo (shl hi 32))))
+        (wf_write_int result_slot (if (= sign 1) (- 0 mag) mag))))
+    ;; Canonical Bignum-or-Int write, DEMOTING to a plain Sexp::Int
+    ;; whenever the magnitude fits the fixnum bound for SIGN (Doc 190 §2's
+    ;; contraction rule) -- the single choke point every arithmetic result
+    ;; below funnels through.  Reuses Phase A's own `nl_bignum_mag_le_bound'
+    ;; (the exact bound check `nl_read_int_or_bignum' already trusts) and
+    ;; `nl_bignum_write_int'/`nl_bignum_write'.  ALWAYS returns 0 (matching
+    ;; every other arithmetic dispatch arm's success convention in this
+    ;; file -- `nl_bignum_write' alone would return a nonzero pointer).
+    (defun nl_bignum_finish (sign limb_ptr limb_count result_slot)
+      (let* ((bound_hi (if (= sign 1) 536870912 536870911))
+             (bound_lo (if (= sign 1) 0 4294967295)))
+        (seq
+         (if (= (nl_bignum_mag_le_bound limb_ptr limb_count bound_hi bound_lo) 1)
+             (nl_bignum_write_int limb_ptr limb_count sign result_slot)
+           (nl_bignum_write sign limb_ptr limb_count result_slot))
+         0)))
+    ;; Ripple-carry magnitude add, LSB-first, N limbs (caller passes
+    ;; N = `nl_bignum_addsub_bound' or the exact same-sign extent needed).
+    ;; A_PTR/B_PTR may be shorter than N (the missing high limbs read as 0)
+    ;; -- this is what lets a 2-limb fixnum-derived operand add against an
+    ;; arbitrarily-long Bignum without first re-padding it.
+    (defun nl_bignum_add_loop (a_ptr a_count b_ptr b_count out_ptr i n carry)
+      (if (>= i n) carry
+        (let* ((av (if (< i a_count) (ptr-read-u32 a_ptr (* i 4)) 0))
+               (bv (if (< i b_count) (ptr-read-u32 b_ptr (* i 4)) 0))
+               (sum (+ (+ av bv) carry)))
+          (seq (ptr-write-u32 out_ptr (* i 4) (logand sum 4294967295))
+               (nl_bignum_add_loop a_ptr a_count b_ptr b_count out_ptr (+ i 1) n (shr sum 32))))))
+    ;; Ripple-borrow magnitude subtract, LSB-first, N limbs -- caller MUST
+    ;; ensure the true magnitude of (A limbs) >= (B limbs) over [0,N), or
+    ;; the result is the two's-complement-in-limbs wraparound, not a
+    ;; negative magnitude (this file has no signed-limb representation --
+    ;; the CALLER picks the larger-magnitude operand as A first, via
+    ;; `nl_bignum_mag_cmp').
+    (defun nl_bignum_sub_loop (a_ptr a_count b_ptr b_count out_ptr i n borrow)
+      (if (>= i n) borrow
+        (let* ((av (if (< i a_count) (ptr-read-u32 a_ptr (* i 4)) 0))
+               (bv (if (< i b_count) (ptr-read-u32 b_ptr (* i 4)) 0))
+               (diff (- (- av bv) borrow)))
+          (if (< diff 0)
+              (seq (ptr-write-u32 out_ptr (* i 4) (logand (+ diff 4294967296) 4294967295))
+                   (nl_bignum_sub_loop a_ptr a_count b_ptr b_count out_ptr (+ i 1) n 1))
+            (seq (ptr-write-u32 out_ptr (* i 4) (logand diff 4294967295))
+                 (nl_bignum_sub_loop a_ptr a_count b_ptr b_count out_ptr (+ i 1) n 0))))))
+    ;; Signed magnitude add: A+B when same sign, else the sign-correct
+    ;; magnitude subtract of the larger from the smaller (`nl_bignum_mag_
+    ;; cmp', Phase A's own comparison primitive, picks which).  Writes the
+    ;; RAW result limbs into OUT_PTR (caller-sized, >=
+    ;; `nl_bignum_addsub_bound a_count b_count') and the result's sign into
+    ;; SIGN_SLOT (an 8-byte scratch, u64) -- this DSL has no multi-value
+    ;; return, so a small out-parameter carries the second answer, the
+    ;; same "answer via ptr-write, flow-control via return" idiom `nl_
+    ;; bignum_mulsmall_add_loop' (Phase A) already uses for its carry.
+    ;; Returns the canonical limb count.  Equal-magnitude opposite-sign
+    ;; operands fall out of the ordinary subtract path as an all-zero
+    ;; result (no separate zero special-case needed): `nl_bignum_finish'
+    ;; demotes any zero-magnitude result to plain Int 0 regardless of the
+    ;; sign this function reports for it.
+    (defun nl_bignum_add_raw (a_sign a_ptr a_count b_sign b_ptr b_count out_ptr sign_slot)
+      (if (= a_sign b_sign)
+          (let* ((n (nl_bignum_addsub_bound a_count b_count)))
+            (seq (nl_bignum_add_loop a_ptr a_count b_ptr b_count out_ptr 0 n 0)
+                 (ptr-write-u64 sign_slot 0 a_sign)
+                 (nl_bignum_canon_count out_ptr n)))
+        (if (>= (nl_bignum_mag_cmp a_ptr a_count b_ptr b_count) 0)
+            (seq (nl_bignum_sub_loop a_ptr a_count b_ptr b_count out_ptr 0 a_count 0)
+                 (ptr-write-u64 sign_slot 0 a_sign)
+                 (nl_bignum_canon_count out_ptr a_count))
+          (seq (nl_bignum_sub_loop b_ptr b_count a_ptr a_count out_ptr 0 b_count 0)
+               (ptr-write-u64 sign_slot 0 b_sign)
+               (nl_bignum_canon_count out_ptr b_count)))))
+    ;; A - B = A + (-B): flip B's sign and reuse `nl_bignum_add_raw'.
+    (defun nl_bignum_sub_raw (a_sign a_ptr a_count b_sign b_ptr b_count out_ptr sign_slot)
+      (nl_bignum_add_raw a_sign a_ptr a_count (- 1 b_sign) b_ptr b_count out_ptr sign_slot))
+    ;; Schoolbook magnitude multiply into OUT_PTR (caller-sized,
+    ;; `(a_count+b_count)' limbs -- the standard bignum-multiply upper
+    ;; bound; `nl_bignum_mul_raw' below zero-fills it first).  `nl_bignum_
+    ;; mul_carry_prop' ripples a row's leftover carry through however many
+    ;; already-nonzero limbs above it are needed -- column OUT[i+j] can
+    ;; already hold a previous row's carry-out, so a single limb of
+    ;; propagation is not always enough.  Every add here (AV*BV up to
+    ;; (2^32-1)^2, plus two more <2^32 terms) stays under 2^64 -- verified:
+    ;; (2^32-1)^2 + 2*(2^32-1) = 2^64-1, the maximum representable u64,
+    ;; never wrapping -- and only `shr'/`logand' (bit-pattern ops, sign-
+    ;; agnostic) ever touch that raw sum; this file's `<'/`>' comparisons
+    ;; (`nelisp-aot-compiler--emit-cmp': "signed") only ever run on the
+    ;; tiny loop counters and the <2^32 carry, never on the near-2^64
+    ;; intermediate itself -- same reasoning `nl_bignum_divmod10_loop''s
+    ;; own comment already applies to its CUR value.
+    (defun nl_bignum_mul_carry_prop (out_ptr idx carry)
+      (if (= carry 0) 0
+        (let* ((cur (ptr-read-u32 out_ptr (* idx 4))) (sum (+ cur carry)))
+          (seq (ptr-write-u32 out_ptr (* idx 4) (logand sum 4294967295))
+               (nl_bignum_mul_carry_prop out_ptr (+ idx 1) (shr sum 32))))))
+    (defun nl_bignum_mul_row (a_ptr i av b_ptr b_count out_ptr j carry)
+      (if (>= j b_count)
+          (nl_bignum_mul_carry_prop out_ptr (+ i b_count) carry)
+        (let* ((bv (ptr-read-u32 b_ptr (* j 4)))
+               (idx (+ i j))
+               (cur (ptr-read-u32 out_ptr (* idx 4)))
+               (sum (+ (+ cur (* av bv)) carry)))
+          (seq (ptr-write-u32 out_ptr (* idx 4) (logand sum 4294967295))
+               (nl_bignum_mul_row a_ptr i av b_ptr b_count out_ptr (+ j 1) (shr sum 32))))))
+    (defun nl_bignum_mag_mul (a_ptr a_count b_ptr b_count out_ptr i)
+      (if (>= i a_count) 0
+        (seq (nl_bignum_mul_row a_ptr i (ptr-read-u32 a_ptr (* i 4)) b_ptr b_count out_ptr 0 0)
+             (nl_bignum_mag_mul a_ptr a_count b_ptr b_count out_ptr (+ i 1)))))
+    ;; Signed multiply: magnitude via `nl_bignum_mag_mul' (schoolbook,
+    ;; Doc 190 §3 Phase B's own stated default -- "most real-world bignum
+    ;; operands ... are a handful of limbs past the fixnum boundary, not
+    ;; cryptographic-scale, so schoolbook's O(n^2) is the right complexity/
+    ;; cost trade for a first ship"), sign = XOR of the operand signs.
+    (defun nl_bignum_mul_raw (a_sign a_ptr a_count b_sign b_ptr b_count out_ptr sign_slot)
+      (let* ((n (+ a_count b_count)))
+        (seq (nl_alloc_zero_fill out_ptr 0 (* n 4))
+             (nl_bignum_mag_mul a_ptr a_count b_ptr b_count out_ptr 0)
+             (ptr-write-u64 sign_slot 0 (if (= a_sign b_sign) 0 1))
+             (nl_bignum_canon_count out_ptr n))))
+    ;; Doc 187 §3.1: overflow check inline in the fold -- detection is
+    ;; UNCHANGED from Doc 187 (see the MEASURED note below); Doc 190 Phase
+    ;; B (2026-08-23) changed what happens once overflow is detected: the
+    ;; fold now PROMOTES to an exact Bignum instead of signalling
+    ;; `overflow-error', instead of wrapping past most-positive-fixnum/
+    ;; most-negative-fixnum the way it did before Doc 187 either.
     ;;
     ;; MEASURED (this session), not the sign-flip trick `expt' uses: a raw,
     ;; not-yet-packed `--emit-arith' sum/product is a genuine, un-narrowed
@@ -4983,27 +5188,64 @@ unresolved at link time."
     ;; most-positive-fixnum back gives 2305843009213693951, not something
     ;; wrapped), so a bound comparison on them is trustworthy without
     ;; needing the sum/product itself to have been packed first.
-    ;; Doc 190 Phase A: a Bignum (tag 13) operand signals `overflow-error'
-    ;; immediately, the SAME contract as any other fixnum-boundary overflow
-    ;; -- Phase A adds no arithmetic core, so `(+ big 1)' is not "wrong
-    ;; type", it is exactly the shape of operation this fold already
-    ;; signals for (a result that cannot be represented as a fixnum);
-    ;; promoting the fold to actually COMPUTE with a bignum operand is
-    ;; Phase B's job (Doc 190 §3, Phase B).  Checked BEFORE reading
-    ;; offset+8 as a value: a Bignum's offset+8 is its SIGN word, not a
-    ;; usable magnitude, so folding it in unchecked would silently
-    ;; miscompute rather than overflow.
-    (defun wf_sum (list_ptr acc)
+    ;;
+    ;; Doc 190 Phase B: a Bignum (tag 13) operand, or a detected fixnum-
+    ;; fixnum overflow, promotes ACC (and, for the fixnum-fixnum case, V
+    ;; too) into a 2-limb Bignum via `nl_bignum_int_limbs' and hands off to
+    ;; `wf_sum_big', which carries the accumulator as (sign, limb-ptr,
+    ;; limb-count) for the REST of the fold instead of a single fixnum.
+    ;; OUT is threaded through unchanged so both the fast (fixnum-only) and
+    ;; promoted paths write their final answer through the SAME choke
+    ;; point (`wf_write_int' / `nl_bignum_finish', which itself demotes
+    ;; back to a fixnum when the magnitude re-fits -- Doc 190 §2).
+    (defun wf_sum (list_ptr acc out)
       (if (= (ptr-read-u64 list_ptr 0) 7)
           (let* ((car_ptr (nl_cons_car_ptr list_ptr)))
             (if (= (ptr-read-u64 car_ptr 0) 13)
-                (bf_signal_overflow_error)
+                (let* ((abuf (alloc-bytes 8 4)) (asign (nl_bignum_int_limbs acc abuf))
+                       (acount (nl_bignum_canon_count abuf 2))
+                       (e_sign (ptr-read-u64 car_ptr 8)) (e_ptr (ptr-read-u64 car_ptr 16))
+                       (e_count (ptr-read-u64 car_ptr 24))
+                       (rbuf (alloc-bytes (* (nl_bignum_addsub_bound acount e_count) 4) 4))
+                       (sign_slot (alloc-bytes 8 8))
+                       (rcount (nl_bignum_add_raw asign abuf acount e_sign e_ptr e_count rbuf sign_slot)))
+                  (wf_sum_big (nl_cons_cdr_ptr list_ptr) (ptr-read-u64 sign_slot 0) rbuf rcount out))
               (let* ((v (ptr-read-u64 car_ptr 8)))
                 (if (or (and (> v 0) (> acc (- 2305843009213693951 v)))
                         (and (< v 0) (< acc (- -2305843009213693952 v))))
-                    (bf_signal_overflow_error)
-                  (wf_sum (nl_cons_cdr_ptr list_ptr) (+ acc v))))))
-        acc))
+                    (let* ((abuf (alloc-bytes 8 4)) (asign (nl_bignum_int_limbs acc abuf))
+                           (acount (nl_bignum_canon_count abuf 2))
+                           (ebuf (alloc-bytes 8 4)) (esign (nl_bignum_int_limbs v ebuf))
+                           (ecount (nl_bignum_canon_count ebuf 2))
+                           (rbuf (alloc-bytes (* (nl_bignum_addsub_bound acount ecount) 4) 4))
+                           (sign_slot (alloc-bytes 8 8))
+                           (rcount (nl_bignum_add_raw asign abuf acount esign ebuf ecount rbuf sign_slot)))
+                      (wf_sum_big (nl_cons_cdr_ptr list_ptr) (ptr-read-u64 sign_slot 0) rbuf rcount out))
+                  (wf_sum (nl_cons_cdr_ptr list_ptr) (+ acc v) out)))))
+        (wf_write_int out acc)))
+    ;; Doc 190 Phase B: BIGNUM-MODE continuation of `wf_sum''s fold, entered
+    ;; once ACC has been promoted.  ACC is carried as (ACC_SIGN, ACC_PTR,
+    ;; ACC_COUNT) from here on; the base case (list exhausted) demotes back
+    ;; to a plain Int when the final magnitude re-fits, via `nl_bignum_
+    ;; finish' -- the same choke point `wf_sum''s own fast-path base case
+    ;; uses conceptually, just for the boxed representation.
+    (defun wf_sum_big (list_ptr acc_sign acc_ptr acc_count out)
+      (if (= (ptr-read-u64 list_ptr 0) 7)
+          (let* ((car_ptr (nl_cons_car_ptr list_ptr)))
+            (if (= (ptr-read-u64 car_ptr 0) 13)
+                (let* ((e_sign (ptr-read-u64 car_ptr 8)) (e_ptr (ptr-read-u64 car_ptr 16))
+                       (e_count (ptr-read-u64 car_ptr 24))
+                       (rbuf (alloc-bytes (* (nl_bignum_addsub_bound acc_count e_count) 4) 4))
+                       (sign_slot (alloc-bytes 8 8))
+                       (rcount (nl_bignum_add_raw acc_sign acc_ptr acc_count e_sign e_ptr e_count rbuf sign_slot)))
+                  (wf_sum_big (nl_cons_cdr_ptr list_ptr) (ptr-read-u64 sign_slot 0) rbuf rcount out))
+              (let* ((ebuf (alloc-bytes 8 4)) (e_sign (nl_bignum_int_limbs (ptr-read-u64 car_ptr 8) ebuf))
+                     (e_count (nl_bignum_canon_count ebuf 2))
+                     (rbuf (alloc-bytes (* (nl_bignum_addsub_bound acc_count e_count) 4) 4))
+                     (sign_slot (alloc-bytes 8 8))
+                     (rcount (nl_bignum_add_raw acc_sign acc_ptr acc_count e_sign ebuf e_count rbuf sign_slot)))
+                (wf_sum_big (nl_cons_cdr_ptr list_ptr) (ptr-read-u64 sign_slot 0) rbuf rcount out))))
+        (seq (nl_bignum_finish acc_sign acc_ptr acc_count out) 0)))
     ;; `*': the div-round-trip alone (matching `expt''s shape) only catches
     ;; a product that overflows the TRUE 64-bit register (verified: it
     ;; correctly flags `(* 100000000000 100000000000)', whose true product
@@ -5012,20 +5254,57 @@ unresolved at link time."
     ;; true value 2^62-2, round-trips cleanly (prod/acc = 2 = v exactly) --
     ;; needs the same literal-bound check `wf_sum' uses, applied to the
     ;; (verified-true, since the round trip above already passed) `prod'.
-    ;; Doc 190 Phase A: same Bignum-operand guard as `wf_sum' above.
-    (defun wf_prod (list_ptr acc)
+    ;;
+    ;; Doc 190 Phase B: on EITHER overflow shape, or a Bignum operand, the
+    ;; TRUE product is recomputed from scratch via `nl_bignum_mul_raw'
+    ;; (schoolbook, full-width limbs) -- `prod' itself is discarded in the
+    ;; promoted branch, since a TRUE-64-bit overflow already means `prod'
+    ;; is a wrapped, meaningless i64 (that is exactly what the div-round-
+    ;; trip check above catches it BY), not a value safe to reuse.
+    (defun wf_prod (list_ptr acc out)
       (if (= (ptr-read-u64 list_ptr 0) 7)
           (let* ((car_ptr (nl_cons_car_ptr list_ptr)))
             (if (= (ptr-read-u64 car_ptr 0) 13)
-                (bf_signal_overflow_error)
+                (let* ((abuf (alloc-bytes 8 4)) (asign (nl_bignum_int_limbs acc abuf))
+                       (acount (nl_bignum_canon_count abuf 2))
+                       (e_sign (ptr-read-u64 car_ptr 8)) (e_ptr (ptr-read-u64 car_ptr 16))
+                       (e_count (ptr-read-u64 car_ptr 24))
+                       (rbuf (alloc-bytes (* (+ acount e_count) 4) 4))
+                       (sign_slot (alloc-bytes 8 8))
+                       (rcount (nl_bignum_mul_raw asign abuf acount e_sign e_ptr e_count rbuf sign_slot)))
+                  (wf_prod_big (nl_cons_cdr_ptr list_ptr) (ptr-read-u64 sign_slot 0) rbuf rcount out))
               (let* ((v (ptr-read-u64 car_ptr 8))
                      (prod (* acc v)))
                 (if (or (and (/= acc 0) (/= (/ prod acc) v))
                         (> prod 2305843009213693951)
                         (< prod -2305843009213693952))
-                    (bf_signal_overflow_error)
-                  (wf_prod (nl_cons_cdr_ptr list_ptr) prod)))))
-        acc))
+                    (let* ((abuf (alloc-bytes 8 4)) (asign (nl_bignum_int_limbs acc abuf))
+                           (acount (nl_bignum_canon_count abuf 2))
+                           (ebuf (alloc-bytes 8 4)) (esign (nl_bignum_int_limbs v ebuf))
+                           (ecount (nl_bignum_canon_count ebuf 2))
+                           (rbuf (alloc-bytes (* (+ acount ecount) 4) 4))
+                           (sign_slot (alloc-bytes 8 8))
+                           (rcount (nl_bignum_mul_raw asign abuf acount esign ebuf ecount rbuf sign_slot)))
+                      (wf_prod_big (nl_cons_cdr_ptr list_ptr) (ptr-read-u64 sign_slot 0) rbuf rcount out))
+                  (wf_prod (nl_cons_cdr_ptr list_ptr) prod out)))))
+        (wf_write_int out acc)))
+    (defun wf_prod_big (list_ptr acc_sign acc_ptr acc_count out)
+      (if (= (ptr-read-u64 list_ptr 0) 7)
+          (let* ((car_ptr (nl_cons_car_ptr list_ptr)))
+            (if (= (ptr-read-u64 car_ptr 0) 13)
+                (let* ((e_sign (ptr-read-u64 car_ptr 8)) (e_ptr (ptr-read-u64 car_ptr 16))
+                       (e_count (ptr-read-u64 car_ptr 24))
+                       (rbuf (alloc-bytes (* (+ acc_count e_count) 4) 4))
+                       (sign_slot (alloc-bytes 8 8))
+                       (rcount (nl_bignum_mul_raw acc_sign acc_ptr acc_count e_sign e_ptr e_count rbuf sign_slot)))
+                  (wf_prod_big (nl_cons_cdr_ptr list_ptr) (ptr-read-u64 sign_slot 0) rbuf rcount out))
+              (let* ((ebuf (alloc-bytes 8 4)) (e_sign (nl_bignum_int_limbs (ptr-read-u64 car_ptr 8) ebuf))
+                     (e_count (nl_bignum_canon_count ebuf 2))
+                     (rbuf (alloc-bytes (* (+ acc_count e_count) 4) 4))
+                     (sign_slot (alloc-bytes 8 8))
+                     (rcount (nl_bignum_mul_raw acc_sign acc_ptr acc_count e_sign ebuf e_count rbuf sign_slot)))
+                (wf_prod_big (nl_cons_cdr_ptr list_ptr) (ptr-read-u64 sign_slot 0) rbuf rcount out))))
+        (seq (nl_bignum_finish acc_sign acc_ptr acc_count out) 0)))
     ;; `/' folds over EVERY divisor: (/ 100 5 2) is 10, and reading only the
     ;; first two arguments answered 20 -- a wrong number, silently.  Integer
     ;; division by zero traps in hardware, so the divisors are scanned for a
@@ -5062,39 +5341,93 @@ unresolved at link time."
     ;; most-negative-fixnum' -- negating it is the only negation that
     ;; overflows, since the positive range is one narrower than the
     ;; negative range.
-    ;; Doc 190 Phase A: same Bignum-operand guard as `wf_sum' above.
-    (defun wf_subtail (list_ptr acc)
+    ;;
+    ;; Doc 190 Phase B: same promotion shape as `wf_sum'/`wf_prod' -- a
+    ;; Bignum operand, or a detected overflow, promotes and hands off to
+    ;; `wf_subtail_big' (via `nl_bignum_sub_raw' = `nl_bignum_add_raw' with
+    ;; the subtrahend's sign flipped, so `a - b' reuses the exact same
+    ;; magnitude-combine/demote machinery `wf_sum' does).
+    (defun wf_subtail (list_ptr acc out)
       (if (= (ptr-read-u64 list_ptr 0) 7)
           (let* ((car_ptr (nl_cons_car_ptr list_ptr)))
             (if (= (ptr-read-u64 car_ptr 0) 13)
-                (bf_signal_overflow_error)
+                (let* ((abuf (alloc-bytes 8 4)) (asign (nl_bignum_int_limbs acc abuf))
+                       (acount (nl_bignum_canon_count abuf 2))
+                       (e_sign (ptr-read-u64 car_ptr 8)) (e_ptr (ptr-read-u64 car_ptr 16))
+                       (e_count (ptr-read-u64 car_ptr 24))
+                       (rbuf (alloc-bytes (* (nl_bignum_addsub_bound acount e_count) 4) 4))
+                       (sign_slot (alloc-bytes 8 8))
+                       (rcount (nl_bignum_sub_raw asign abuf acount e_sign e_ptr e_count rbuf sign_slot)))
+                  (wf_subtail_big (nl_cons_cdr_ptr list_ptr) (ptr-read-u64 sign_slot 0) rbuf rcount out))
               (let* ((v (ptr-read-u64 car_ptr 8)))
                 (if (or (and (< v 0) (> acc (+ 2305843009213693951 v)))
                         (and (> v 0) (< acc (+ -2305843009213693952 v))))
-                    (bf_signal_overflow_error)
-                  (wf_subtail (nl_cons_cdr_ptr list_ptr) (- acc v))))))
-        acc))
+                    (let* ((abuf (alloc-bytes 8 4)) (asign (nl_bignum_int_limbs acc abuf))
+                           (acount (nl_bignum_canon_count abuf 2))
+                           (ebuf (alloc-bytes 8 4)) (esign (nl_bignum_int_limbs v ebuf))
+                           (ecount (nl_bignum_canon_count ebuf 2))
+                           (rbuf (alloc-bytes (* (nl_bignum_addsub_bound acount ecount) 4) 4))
+                           (sign_slot (alloc-bytes 8 8))
+                           (rcount (nl_bignum_sub_raw asign abuf acount esign ebuf ecount rbuf sign_slot)))
+                      (wf_subtail_big (nl_cons_cdr_ptr list_ptr) (ptr-read-u64 sign_slot 0) rbuf rcount out))
+                  (wf_subtail (nl_cons_cdr_ptr list_ptr) (- acc v) out)))))
+        (wf_write_int out acc)))
+    (defun wf_subtail_big (list_ptr acc_sign acc_ptr acc_count out)
+      (if (= (ptr-read-u64 list_ptr 0) 7)
+          (let* ((car_ptr (nl_cons_car_ptr list_ptr)))
+            (if (= (ptr-read-u64 car_ptr 0) 13)
+                (let* ((e_sign (ptr-read-u64 car_ptr 8)) (e_ptr (ptr-read-u64 car_ptr 16))
+                       (e_count (ptr-read-u64 car_ptr 24))
+                       (rbuf (alloc-bytes (* (nl_bignum_addsub_bound acc_count e_count) 4) 4))
+                       (sign_slot (alloc-bytes 8 8))
+                       (rcount (nl_bignum_sub_raw acc_sign acc_ptr acc_count e_sign e_ptr e_count rbuf sign_slot)))
+                  (wf_subtail_big (nl_cons_cdr_ptr list_ptr) (ptr-read-u64 sign_slot 0) rbuf rcount out))
+              (let* ((ebuf (alloc-bytes 8 4)) (e_sign (nl_bignum_int_limbs (ptr-read-u64 car_ptr 8) ebuf))
+                     (e_count (nl_bignum_canon_count ebuf 2))
+                     (rbuf (alloc-bytes (* (nl_bignum_addsub_bound acc_count e_count) 4) 4))
+                     (sign_slot (alloc-bytes 8 8))
+                     (rcount (nl_bignum_sub_raw acc_sign acc_ptr acc_count e_sign ebuf e_count rbuf sign_slot)))
+                (wf_subtail_big (nl_cons_cdr_ptr list_ptr) (ptr-read-u64 sign_slot 0) rbuf rcount out))))
+        (seq (nl_bignum_finish acc_sign acc_ptr acc_count out) 0)))
     ;; Doc 190 Phase A: same Bignum-operand guard, checked on the FIRST
     ;; operand before `first' is ever read as a value -- covers both the
     ;; n-ary delegation to `wf_subtail' (which re-checks each later operand
     ;; itself) and the one-argument negation path.
-    (defun wf_diff (list_ptr)
+    ;;
+    ;; Doc 190 Phase B: a Bignum FIRST operand delegates straight to
+    ;; `wf_subtail_big' (n-ary) or flips its own sign via `nl_bignum_finish'
+    ;; (unary negation -- a canonical Bignum's magnitude already exceeds
+    ;; the fixnum bound, by construction, so negating it can never itself
+    ;; need to demote; `nl_bignum_finish' is still used, not a bare
+    ;; `nl_bignum_write', for the same defensive canonicality check every
+    ;; other result in this file gets).  The fixnum-FIRST overflow branch
+    ;; (only `most-negative-fixnum''s own negation) writes the FIXED
+    ;; magnitude 2^61 directly rather than round-tripping through the
+    ;; general combine machinery -- host-verified
+    ;; (`scripts/standalone-bignum-smoke.el'): `(- most-negative-fixnum)'
+    ;; = 2305843009213693952 = 2^61 = limb0:0 limb1:536870912 (2^29).
+    (defun wf_diff (list_ptr out)
       (if (= (ptr-read-u64 list_ptr 0) 7)
-          (let* ((car_ptr (nl_cons_car_ptr list_ptr)))
+          (let* ((car_ptr (nl_cons_car_ptr list_ptr)) (rest (nl_cons_cdr_ptr list_ptr)))
             (if (= (ptr-read-u64 car_ptr 0) 13)
-                (bf_signal_overflow_error)
-              (let* ((first (ptr-read-u64 car_ptr 8))
-                     (rest (nl_cons_cdr_ptr list_ptr)))
+                (let* ((f_sign (ptr-read-u64 car_ptr 8)) (f_ptr (ptr-read-u64 car_ptr 16))
+                       (f_count (ptr-read-u64 car_ptr 24)))
+                  (if (= (ptr-read-u64 rest 0) 7)
+                      (wf_subtail_big rest f_sign f_ptr f_count out)
+                    (seq (nl_bignum_finish (- 1 f_sign) f_ptr f_count out) 0)))
+              (let* ((first (ptr-read-u64 car_ptr 8)))
                 ;; elisp `-': 1-arg `(- x)' = NEGATION (-x), not x; n-arg subtracts
                 ;; the tail from the first.  The old `first' fallthrough made `(- 5)'
                 ;; return 5, breaking every `(ash v (- (* i 8)))' byte-extraction.
                 (if (= (ptr-read-u64 rest 0) 7)
-                    (wf_subtail rest first)
+                    (wf_subtail rest first out)
                   (if (or (and (< first 0) (> 0 (+ 2305843009213693951 first)))
                           (and (> first 0) (< 0 (+ -2305843009213693952 first))))
-                      (bf_signal_overflow_error)
-                    (- 0 first))))))
-        0))
+                      (let* ((rbuf (alloc-bytes 8 4)))
+                        (seq (ptr-write-u32 rbuf 0 0) (ptr-write-u32 rbuf 4 536870912)
+                             (nl_bignum_write 0 rbuf 2 out) 0))
+                    (seq (wf_write_int out (- 0 first)) 0))))))
+        (seq (wf_write_int out 0) 0)))
     ;; --- FLOAT-AWARE arithmetic.  The integer wf_sum/wf_prod/wf_subtail/wf_diff
     ;; above read slot+8 as a raw i64 with NO tag check, so a Float operand
     ;; (tag 3, IEEE-754 bits inline at +8) is folded as garbage and written via
@@ -5126,12 +5459,12 @@ unresolved at link time."
       (if (= (wf_first_non_number list_ptr) 0)
           (wf_has_float list_ptr)
         2))
-    ;; Doc 190 Phase A: bignum-aware sibling of `wf_any_float', used ONLY
+    ;; Doc 190 Phase A/B: bignum-aware sibling of `wf_any_float', used ONLY
     ;; by `+'/`-'/`*''s dispatch entries (see `wf_first_non_number_or_
     ;; bignum').  `wf_has_float' itself needs no change: it only answers 1
     ;; for tag 3, so a Bignum (tag 13) correctly stays on the INTEGER fold
-    ;; path (`wf_sum'/`wf_prod'/`wf_diff'), where their own tag-13 guard
-    ;; signals `overflow-error'.
+    ;; path (`wf_sum'/`wf_prod'/`wf_diff'), where (Phase B) it is now
+    ;; folded into an exact Bignum result rather than signalled.
     (defun wf_any_float_arith (list_ptr)
       (if (= (wf_first_non_number_or_bignum list_ptr) 0)
           (wf_has_float list_ptr)
@@ -6751,14 +7084,17 @@ eval applyfn.")
 ;; safe: the reader build links core-helpers first, see
 ;; `nelisp-standalone--applyfn-source').
 ;;
-;; No general bignum arithmetic (+/-/* etc.) here -- Doc 190's phased plan
-;; scopes THIS phase to construction/printing/comparison only.  The one
-;; arithmetic-shaped primitive below, "multiply the whole limb array by a
-;; small constant (the token's radix) and add a small digit value", is a
-;; CONSTRUCTION primitive (decimal-token accumulation), not general
-;; bignum arithmetic -- it never combines two bignums, and Doc 187's
-;; `+'/`-'/`*' overflow-error contract for ordinary Lisp arithmetic is
-;; untouched (see the `wf_sum'/`wf_prod'/`wf_diff' tag-13 guards above).
+;; Doc 190 Phase B (2026-08-23) added general bignum arithmetic (+/-/*,
+;; contagion) in `nelisp-standalone--applyfn-core-helpers' instead of
+;; here: `wf_sum'/`wf_prod'/`wf_diff' are core (shared by the baked
+;; build), so anything they call must be core too -- including the box
+;; writers `nl_bignum_write'/`nl_bignum_write_int', MOVED there from this
+;; group (Phase A originally defined them here).  The one arithmetic-
+;; shaped primitive still below, "multiply the whole limb array by a
+;; small constant (the token's radix) and add a small digit value",
+;; remains a CONSTRUCTION primitive (decimal-token accumulation) --
+;; unrelated to the Phase B add/sub/mul core, and still reader-only since
+;; it is only ever called from the reader's own decimal-token path.
 (defconst nelisp-standalone--applyfn-bignum-helpers
   '(;; Multiply the (pre-sized, zero-initialised) LIMB_COUNT-limb array at
     ;; LIMB_PTR by small MUL (here always the token's radix, <= 16) and add
@@ -6784,28 +7120,11 @@ eval applyfn.")
     (defun nl_bignum_scratch_limbs (n)
       (let* ((k (+ (/ n 9) 2)))
         (if (= (logand k 1) 1) (+ k 1) k)))
-    ;; Write a canonical Sexp::Bignum (tag 13) into RESULT_SLOT: sign@+8,
-    ;; limb-ptr@+16, limb-count@+24 -- mirrors `nl_alloc_str_write''s field
-    ;; layout exactly (cap/ptr/len -> sign/ptr/limb-count).
-    (defun nl_bignum_write (sign limb_ptr limb_count result_slot)
-      (seq (ptr-write-u8  result_slot 0  13)
-           (ptr-write-u64 result_slot 8  sign)
-           (ptr-write-u64 result_slot 16 limb_ptr)
-           (ptr-write-u64 result_slot 24 limb_count)
-           result_slot))
-    ;; Reconstruct a plain Sexp::Int (tag 2) from a <=2-limb magnitude and
-    ;; SIGN.  Only called once `nl_bignum_mag_le_bound' (in
-    ;; `nelisp-standalone--applyfn-core-helpers') has already proven the
-    ;; magnitude fits the fixnum bound for that sign, so the negation
-    ;; below (SIGN=1) never risks hardware i64 wraparound even though it
-    ;; is not routed through Doc 187's checked `-' (the magnitude is
-    ;; already proven <= 2^61, far short of the 2^63 two's-complement
-    ;; limit).
-    (defun nl_bignum_write_int (limb_ptr limb_count sign result_slot)
-      (let* ((lo (if (> limb_count 0) (ptr-read-u32 limb_ptr 0) 0))
-             (hi (if (> limb_count 1) (ptr-read-u32 limb_ptr 4) 0))
-             (mag (logior lo (shl hi 32))))
-        (wf_write_int result_slot (if (= sign 1) (- 0 mag) mag))))
+    ;; `nl_bignum_write'/`nl_bignum_write_int' moved to `nelisp-standalone--
+    ;; applyfn-core-helpers' (Doc 190 Phase B, see that group's own header
+    ;; comment): `wf_sum'/`wf_prod'/`wf_diff' (core, shared by the baked
+    ;; build too) now call them via `nl_bignum_finish' to demote-or-box a
+    ;; promoted arithmetic result, so they can no longer live only here.
     ;; Entry point.  SP: *const Sexp, a Str/MutStr (tag 5/6) holding a
     ;; plain decimal-integer token: optional leading '-'/'+' then one or
     ;; more ASCII digits -- exactly what the reader's own numeric regexp
@@ -20617,18 +20936,23 @@ comment in lisp/nelisp-stdlib-misc.el); `map-keys' over a plist.
 Fixnum: `most-positive-fixnum' / `most-negative-fixnum' hold the
 measured values (2305843009213693951 / -2305843009213693952, Emacs's
 own on a 64-bit host).  Doc 187: the native `+'/`-'/`*' dispatch
-(`wf_sum'/`wf_subtail'/`wf_diff'/`wf_prod' in this file) now signals
-`overflow-error' on a fixnum-boundary crossing instead of the old
-silent wrap to `most-negative-fixnum' -- checks 11/13-16 are the
-against-the-bug cases (wrapped in `condition-case', not a bare
-`should-error', per the memory note on this runtime's past
-`condition-case'/`throw' interaction bugs); checks 17-18 are the
-fencepost controls a naive off-by-one in that check could pass right
-next to (no false-positive signal one below/at the boundary).  `expt'
-still signals `overflow-error' the way it did before this change,
-unaffected by any of the above (this runtime has no bignums to
-promote into on overflow, unlike host Emacs since 27 -- a documented
-divergence `expt''s own contract already established, not a new one)."
+(`wf_sum'/`wf_subtail'/`wf_diff'/`wf_prod' in this file) DETECTS a
+fixnum-boundary crossing the same way it always has (unchanged from
+Doc 187); Doc 190 Phase B (2026-08-23) changed the RESPONSE -- checks
+11/13-16 used to assert `overflow-error' (wrapped in `condition-case',
+not a bare `should-error', per the memory note on this runtime's past
+`condition-case'/`throw' interaction bugs) and now assert the EXACT
+promoted Bignum result instead, host-verified against GNU Emacs 30.1
+(`bignump'/value equality both checked -- Doc 190 §4's own `verified
+by tag inspection, not just value equality' discipline); checks 17-18
+remain the fencepost controls a naive off-by-one in the detection
+check could pass right next to (no false-positive promotion one
+below/at the boundary, AND the result must be a plain fixnum again,
+not a Bignum that merely prints/compares like one).  `expt' still
+signals `overflow-error' the way it did before this change, unaffected
+by any of the above (Doc 190 Phase B's own scope is `+'/`-'/`*' only,
+per that doc's task brief; `expt' promoting is left to a later phase,
+same documented divergence `expt''s own contract already established)."
   (let ((tmp (make-temp-file "nelisp-reader-stdlib-completion-" nil ".el"))
         (out nil))
     (unwind-protect
@@ -20655,37 +20979,48 @@ divergence `expt''s own contract already established, not a new one)."
              "(defvar nelisp-src-check8 (equal (sort (map-keys nelisp-src-pl) (lambda (a b) (string< (symbol-name a) (symbol-name b)))) '(:a :b)))\n"
              "(defvar nelisp-src-check9 (= most-positive-fixnum 2305843009213693951))\n"
              "(defvar nelisp-src-check10 (= most-negative-fixnum -2305843009213693952))\n"
-             ;; Doc 187 P1 against-the-bug: `(+ most-positive-fixnum 1)' used
-             ;; to wrap silently to `most-negative-fixnum' (the old check11);
-             ;; it must now signal `overflow-error', condition-case-wrapped.
-             "(defvar nelisp-src-add-of (condition-case nil (progn (+ most-positive-fixnum 1) 'no-signal) (overflow-error 'signalled)))\n"
-             "(defvar nelisp-src-check11 (eq nelisp-src-add-of 'signalled))\n"
+             ;; Doc 190 Phase B against-the-bug: `(+ most-positive-fixnum 1)'
+             ;; used to signal `overflow-error' (Doc 187, the old check11);
+             ;; it now PROMOTES to the exact bignum 2305843009213693952,
+             ;; host-verified (GNU Emacs 30.1, 2026-08-23) -- checked by
+             ;; both value AND tag (`bignump'), per Doc 190 §4.
+             "(defvar nelisp-src-add-of (+ most-positive-fixnum 1))\n"
+             "(defvar nelisp-src-check11 (and (= nelisp-src-add-of 2305843009213693952) (bignump nelisp-src-add-of)))\n"
              "(defvar nelisp-src-expt-overflow (condition-case nil (progn (expt 2 100) 'no-signal) (overflow-error 'signalled)))\n"
              "(defvar nelisp-src-check12 (eq nelisp-src-expt-overflow 'signalled))\n"
-             ;; Doc 187 P1/P2 remaining against-the-bug cases: `*' overflow
-             ;; (the sibling commit's own second reference case, plus a
-             ;; product that stays within the true 64-bit register but
-             ;; crosses only the narrower fixnum boundary), negation of
-             ;; `most-negative-fixnum', and n-ary `-' underflow.
-             "(defvar nelisp-src-mul-of (condition-case nil (progn (* 100000000000 100000000000) 'no-signal) (overflow-error 'signalled)))\n"
-             "(defvar nelisp-src-check13 (eq nelisp-src-mul-of 'signalled))\n"
-             "(defvar nelisp-src-mul-boundary-of (condition-case nil (progn (* most-positive-fixnum 2) 'no-signal) (overflow-error 'signalled)))\n"
-             "(defvar nelisp-src-check14 (eq nelisp-src-mul-boundary-of 'signalled))\n"
-             "(defvar nelisp-src-neg-of (condition-case nil (progn (- most-negative-fixnum) 'no-signal) (overflow-error 'signalled)))\n"
-             "(defvar nelisp-src-check15 (eq nelisp-src-neg-of 'signalled))\n"
-             "(defvar nelisp-src-sub-of (condition-case nil (progn (- most-negative-fixnum 1) 'no-signal) (overflow-error 'signalled)))\n"
-             "(defvar nelisp-src-check16 (eq nelisp-src-sub-of 'signalled))\n"
+             ;; Doc 190 Phase B: `*' promotion (a true 64-bit-register
+             ;; overflow, plus a product that stays within 64 bits but
+             ;; crosses only the narrower fixnum boundary), and negation/
+             ;; n-ary `-' promotion of `most-negative-fixnum' -- all four
+             ;; were the Doc 187 against-the-bug cases (13-16), now
+             ;; asserting the exact promoted value instead of the signal.
+             "(defvar nelisp-src-mul-of (* 100000000000 100000000000))\n"
+             "(defvar nelisp-src-check13 (and (= nelisp-src-mul-of 10000000000000000000000) (bignump nelisp-src-mul-of)))\n"
+             "(defvar nelisp-src-mul-boundary-of (* most-positive-fixnum 2))\n"
+             "(defvar nelisp-src-check14 (and (= nelisp-src-mul-boundary-of 4611686018427387902) (bignump nelisp-src-mul-boundary-of)))\n"
+             "(defvar nelisp-src-neg-of (- most-negative-fixnum))\n"
+             "(defvar nelisp-src-check15 (and (= nelisp-src-neg-of 2305843009213693952) (bignump nelisp-src-neg-of)))\n"
+             "(defvar nelisp-src-sub-of (- most-negative-fixnum 1))\n"
+             "(defvar nelisp-src-check16 (and (= nelisp-src-sub-of -2305843009213693953) (bignump nelisp-src-sub-of)))\n"
              ;; Doc 187 §5.2 fencepost controls: the boundary value itself,
-             ;; and one below it, must NOT false-positive.
+             ;; and one below it, must NOT false-positive (promote when it
+             ;; should not).  Doc 190 Phase B extends check17 with a
+             ;; DEMOTION fencepost: `(- (+ most-positive-fixnum 1) 1)'
+             ;; promotes then immediately demotes back, and the result
+             ;; must be a plain fixnum, not a Bignum that merely compares
+             ;; equal -- Doc 190 §4's own "verified by tag inspection, not
+             ;; just value equality" requirement.
              "(defvar nelisp-src-check17 (= (+ (1- most-positive-fixnum) 1) most-positive-fixnum))\n"
-             "(defvar nelisp-src-check18 (and (= (* most-positive-fixnum 1) most-positive-fixnum) (= (- most-negative-fixnum -1) (1+ most-negative-fixnum))))\n"))
+             "(defvar nelisp-src-check18 (and (= (* most-positive-fixnum 1) most-positive-fixnum) (= (- most-negative-fixnum -1) (1+ most-negative-fixnum))))\n"
+             "(defvar nelisp-src-demote (- (+ most-positive-fixnum 1) 1))\n"
+             "(defvar nelisp-src-check19 (and (= nelisp-src-demote most-positive-fixnum) (not (bignump nelisp-src-demote)) (integerp nelisp-src-demote)))\n"))
           (with-temp-buffer
             (call-process nelisp-standalone--reader-out nil t nil
                           "eval-elisp-source" tmp
-                          "(list nelisp-src-check1 nelisp-src-check2 nelisp-src-check3 nelisp-src-check4 nelisp-src-check5 nelisp-src-check6 nelisp-src-check7 nelisp-src-check8 nelisp-src-check9 nelisp-src-check10 nelisp-src-check11 nelisp-src-check12 nelisp-src-check13 nelisp-src-check14 nelisp-src-check15 nelisp-src-check16 nelisp-src-check17 nelisp-src-check18)")
+                          "(list nelisp-src-check1 nelisp-src-check2 nelisp-src-check3 nelisp-src-check4 nelisp-src-check5 nelisp-src-check6 nelisp-src-check7 nelisp-src-check8 nelisp-src-check9 nelisp-src-check10 nelisp-src-check11 nelisp-src-check12 nelisp-src-check13 nelisp-src-check14 nelisp-src-check15 nelisp-src-check16 nelisp-src-check17 nelisp-src-check18 nelisp-src-check19)")
             (setq out (string-trim (buffer-string))))
-          (unless (string= out "(t t t t t t t t t t t t t t t t t t)")
-            (error "stdlib-completion smoke -> %S (expected (t t t t t t t t t t t t t t t t t t))" out)))
+          (unless (string= out "(t t t t t t t t t t t t t t t t t t t)")
+            (error "stdlib-completion smoke -> %S (expected (t t t t t t t t t t t t t t t t t t t))" out)))
       (ignore-errors (delete-file tmp)))))
 
 (defun nelisp-standalone--reader-char-table-smoke ()
