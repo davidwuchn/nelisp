@@ -273,18 +273,22 @@
 # target/nelisp' after a clean `make standalone-reader'
 # (NELISP_READER_DYNAMIC unset) on this branch's own HEAD.
 #
-# integration/wave6 (this branch, merges 2/9 through 7/9): four
-# independent branches each raised this same `size' line off the
-# shared eb4eb81f3 base, each measured on its own non-overlapping
-# tree: buffer-unification-p2 (merge 1/9) -> 7314288, bignum-p2-arith
-# (merge 2/9) -> 7310768, socket-primitives-p1 (merge 6/9) -> 7310720,
-# fix/ffi-surface-availability (merge 7/9) -> 7265024. None compose
-# additively as separate directive lines; a file may have only one
-# machine-read `size'.  Interim pin left at the highest of the four
-# (7314288, buffer-unification-p2's own raise) so the ratchet does
-# not spuriously fail mid-merge against a binary that already carries
-# all four branches' growth.  RESET ONCE to the actual measured size
-# on the fully-merged, fully-built 9-branch integration/wave6 tree at
-# the end of phase 1, per the integration playbook.
-size 7314288
+# integration/wave6 battery reconciliation (post merge 11/11, full
+# tree, all 9 code + 2 doc branches landed): reset ONCE per this
+# file's own rule and the integration playbook, to the real measured
+# size on the merged binary -- `stat -c %s target/nelisp' after a
+# clean `make standalone-reader' on the fully-merged tree: 7393896
+# bytes, +79608 over the 7314288 interim pin (+1.09%). This
+# supersedes every interim number above; the four branches that each
+# independently raised the old `size' line off eb4eb81f3 (buffer-
+# unification-p2, bignum-p2-arith, socket-primitives-p1, fix/ffi-
+# surface-availability) all compose additively once actually built
+# together, plus feat/wasm-boundary-slots and feat/nl-clj-foundation's
+# own smaller native/prelude growth that never touched this file's
+# narrative directly. `binary-size-ratchet' passed against the old
+# interim pin (7393896 < 7460573 ceiling, well inside the 2% slack)
+# without a raise being required, but the pin is reset to the measured
+# value anyway per this file's own "say what the growth is" rule, not
+# left for slack to silently absorb going forward.
+size 7393896
 slack-pct 2

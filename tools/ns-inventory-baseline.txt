@@ -431,7 +431,21 @@ ns-collision-divergent 126
 # file order is read.  Interim pin: 874 + 2 + 1 + 11 = 888 (sum of
 # the three disjoint new-name sets), pending the RE-RUN of this gate
 # on the fully merged tree per the integration playbook.
-ns-prefix-violation 888
+#
+# integration/wave6 battery reconciliation (post merge 11/11, full
+# tree): measured via `make ns-inventory' on the fully-merged, built
+# tree: 879, 9 BELOW the 888 interim sum -- the interim arithmetic
+# (874 + 2 + 1 + 11) summed each branch's own isolated delta, but
+# `ns-prefix-violation' infers a file's expected prefix from its own
+# basename, and at least one of the interim deltas double-counted
+# names that read as violations on their OWN branch's smaller tree
+# but resolve against an already-conceded sibling pattern once every
+# branch's files coexist (the same non-additive-composition caveat
+# this file's history already carries for the pre-wave6 waves,
+# just landing on the safe/lower side this time instead of needing a
+# raise).  Reset ONCE to the measured value per the integration
+# playbook; `ns-inventory' PASSes with this exact baseline.
+ns-prefix-violation 879
 # 611 -> 613 on 2026-08-20: `nelisp--check-string'/`--check-symbol' and the
 # other argument-check helpers are referenced from the lisp/ mirrors that
 # carry copies of the functions using them.  This is the kind this file
