@@ -4,9 +4,9 @@
 
 ;;; Commentary:
 
-;; Doc 194 §4.7 (minimal slice; laziness itself deferred to a later
+;; Doc 195 §4.7 (minimal slice; laziness itself deferred to a later
 ;; phase per this package's own build-first brief) plus the
-;; polymorphic operations Doc 194 §4.1/§4.2 each describe for their
+;; polymorphic operations Doc 195 §4.1/§4.2 each describe for their
 ;; own collection: this file is the single place every nl-clj public
 ;; function that works across MORE than one collection type lives --
 ;; `nl-clj-seq'/`first'/`rest'/`next'/`cons'/`into'/`map'/`filter'/
@@ -21,14 +21,14 @@
 ;; type.
 ;;
 ;; Eager, not lazy (this package's own build-first brief, following
-;; Doc 194 §6's own ranking): `nl-clj-seq' materializes a plain Elisp
+;; Doc 195 §6's own ranking): `nl-clj-seq' materializes a plain Elisp
 ;; list up front rather than returning a lazy view.  `nl-clj-map'/
 ;; `nl-clj-filter'/`nl-clj-reduce' walk that list with a plain `while'
 ;; loop -- inherently stack-safe with zero recursion, so unlike Doc
 ;; 194 §4.7's (deferred) lazy-seq walk, `nl-loop'/`nl-recur' are not
 ;; needed here to avoid blowing the interpreter's own call stack.
 ;;
-;; A named, documented divergence from Clojure (Doc 194 §4.7's own
+;; A named, documented divergence from Clojure (Doc 195 §4.7's own
 ;; discipline: name it, do not hide it): Clojure's `rest' and `next'
 ;; are observably different only because Clojure distinguishes an
 ;; empty-but-not-nil `()' from `nil'.  This package's seq
@@ -42,11 +42,11 @@
 ;; `sxhash-equal' walk a tagged vector *structurally* (ROOT/TAIL/SHIFT
 ;; element by element), which is a different question from Clojure's
 ;; own logical collection equality (comparing the *sequence of
-;; elements*, regardless of internal tree shape) -- Doc 194 §3.2's
+;; elements*, regardless of internal tree shape) -- Doc 195 §3.2's
 ;; named correctness trap.  Passing an nl-clj collection as a key into
 ;; a *plain* `(make-hash-table :test 'equal)' still silently uses the
 ;; wrong notion (tree-shape, not content) -- `define-hash-table-test'
-;; is void-function on this substrate (Doc 194 §2.3), so there is no
+;; is void-function on this substrate (Doc 195 §2.3), so there is no
 ;; way to register the right one as a real hash-table `:test' at all;
 ;; this is a named, accepted footgun, not solved here.
 
@@ -193,7 +193,7 @@ extends by one).  Map: K is any key."
 (defun nl-clj-dissoc (m k &rest ks)
   "Remove K, and each further key in KS, from map M.
 Removing an absent key is a no-op returning M itself, `eq'-identical
-(Doc 194 §4.2)."
+(Doc 195 §4.2)."
   (unless (nl-clj-map-p m) (signal 'nl-clj-type-error (list 'nl-clj-dissoc m)))
   (let ((result (nl-clj-hash--map-dissoc m k)))
     (dolist (kk ks) (setq result (nl-clj-hash--map-dissoc result kk)))
@@ -249,7 +249,7 @@ first.  Signals `nl-clj-index-error' on an empty vector or nil list
 (defun nl-clj-subvec (v start &optional end)
   "Return a NEW persistent vector holding V's elements in [START, END).
 END defaults to V's count.  A deliberate divergence from Clojure's own
-O(1) offset/end-aware view type -- Doc 194 §4.1 explicitly defers that
+O(1) offset/end-aware view type -- Doc 195 §4.1 explicitly defers that
 optimization; this is an eager O(k) rebuild, correctness-first."
   (unless (nl-clj-vector-p v) (signal 'nl-clj-type-error (list 'nl-clj-subvec v)))
   (let* ((count (aref v 1)) (e (or end count)))
@@ -265,7 +265,7 @@ optimization; this is an eager O(k) rebuild, correctness-first."
 
 (defun nl-clj-map (f coll)
   "Eagerly apply F to every element of COLL's seq; return a plain Elisp
-list of the results.  Eager for this phase -- Doc 194 §4.7 defers a
+list of the results.  Eager for this phase -- Doc 195 §4.7 defers a
 lazy version to a later phase."
   (mapcar f (nl-clj-seq coll)))
 
@@ -279,7 +279,7 @@ lazy version to a later phase."
   "Left fold: (f (f (f INIT x1) x2) x3) ... over COLL's seq.
 A plain `while' walk, not recursion -- stack-safe over an arbitrarily
 long seq for free, with no need for `nl-loop'/`nl-recur' (those are
-load-bearing only for Doc 194 §4.7's deferred *lazy* walk, whose
+load-bearing only for Doc 195 §4.7's deferred *lazy* walk, whose
 producer closures cannot be flattened into an ordinary loop the way an
 already-eager seq can)."
   (let ((acc init) (s (nl-clj-seq coll)))
@@ -288,7 +288,7 @@ already-eager seq can)."
       (setq s (cdr s)))
     acc))
 
-;;;; Content equality / hash (Doc 194 §3.2) ---------------------------------
+;;;; Content equality / hash (Doc 195 §3.2) ---------------------------------
 
 (defun nl-clj-collection-p (x)
   "Return non-nil iff X is an nl-clj vector, map, or set."
@@ -329,7 +329,7 @@ for everything else.  See this file's Commentary for why this is NOT
 
 (defconst nl-clj--hash-space (1- (ash 1 32))
   "Every combined hash value below is kept within this 32-bit space.
-Doc 194 §2.2 measured, against a built `target/nelisp', that `+'/`-'/
+Doc 195 §2.2 measured, against a built `target/nelisp', that `+'/`-'/
 `*' do NOT auto-promote past fixnum range on this substrate today
 (bignum arithmetic is Doc 190 Phase B, not shipped -- a value that
 overflows signals `overflow-error', full stop).  A raw `sxhash-equal'
@@ -369,7 +369,7 @@ overflow-safety reason as `nl-clj--hash-mix'."
 (defun nl-clj-hash (x)
   "Content hash of X, consistent with `nl-clj-equal'.  NOT `sxhash-equal'
 on X's raw representation for an nl-clj collection -- two logically
-equal collections need not share internal tree shape (Doc 194 §3.2)."
+equal collections need not share internal tree shape (Doc 195 §3.2)."
   (cond
    ((nl-clj-vector-p x) (nl-clj--hash-seq (nl-clj-seq x) -415))
    ((nl-clj-map-p x) (nl-clj--hash-unordered (nl-clj-hash--map-entries x) 7))

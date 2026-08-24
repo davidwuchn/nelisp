@@ -4,7 +4,7 @@
 
 ;;; Commentary:
 
-;; Doc 194 §4.5's own DoD-shaped verification: no host-Emacs control
+;; Doc 195 §4.5's own DoD-shaped verification: no host-Emacs control
 ;; exists (Emacs has no `atom' constructor), so every assertion below
 ;; is checked against Clojure's own documented reference contract by
 ;; hand, not by differential comparison.
@@ -38,7 +38,7 @@
     (should (= (nl-clj-deref a) 20))))
 
 (ert-deftest nl-clj-atom-test-swap-calls-f-exactly-once ()
-  ;; NeLisp's single-thread execution model (Doc 194 §2.7/§4.5) means
+  ;; NeLisp's single-thread execution model (Doc 195 §2.7/§4.5) means
   ;; `swap!' never retries -- F runs exactly once, a strictly STRONGER
   ;; guarantee than Clojure's own "F may run more than once" contract.
   ;; A future caller relying on this must not be silently broken by a

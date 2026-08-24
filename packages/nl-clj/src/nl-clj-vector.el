@@ -4,17 +4,17 @@
 
 ;;; Commentary:
 
-;; Doc 194 §4.1: a persistent vector, the standard Bagwell/Clojure
+;; Doc 195 §4.1: a persistent vector, the standard Bagwell/Clojure
 ;; array-mapped trie -- 5 bits per level, 32-wide branch nodes, a TAIL
 ;; array holding the last <=32 elements uncommitted to the trie so
 ;; `nl-clj-conj'/`nl-clj-peek' are O(1) amortized rather than always
 ;; O(log32 N).  Built entirely from plain `vector'/`aref'/`aset'/
-;; `make-vector' -- Doc 194 §2.1 measured this the one data type in
+;; `make-vector' -- Doc 195 §2.1 measured this the one data type in
 ;; this codebase's own type-reporting story that is fully trustworthy
 ;; (`type-of' answers `vector', not `cons', unlike `record'/
 ;; `cl-defstruct').
 ;;
-;; Representation (Doc 194 §3.2, `nl-clj-core.el'):
+;; Representation (Doc 195 §3.2, `nl-clj-core.el'):
 ;;
 ;;   [nl-clj--pvec COUNT SHIFT ROOT TAIL]
 ;;
@@ -37,10 +37,10 @@
 ;; `packages/nl-clj/test/nl-clj-vector-test.el' by `eq'-checking the
 ;; untouched subtree, not merely checking the new vector's values).
 ;;
-;; Deliberate divergence from real Clojure, named per Doc 194 §4.1:
+;; Deliberate divergence from real Clojure, named per Doc 195 §4.1:
 ;; `nl-clj-subvec' here is an eager O(k) rebuild (walks and re-conjes
 ;; the requested range into a fresh vector), not Clojure's O(1)
-;; offset/end-aware view-node type -- Doc 194 §4.1 explicitly defers
+;; offset/end-aware view-node type -- Doc 195 §4.1 explicitly defers
 ;; that optimization as "real, separable new work," and this package's
 ;; task brief asks for `subvec' in the public API, so it ships
 ;; correctness-first rather than not at all.
@@ -210,7 +210,7 @@ own `pop' contract (an error, not a silent no-op)."
 
 (defun nl-clj-vector--root (v)
   "Return V's root trie node -- exposed so callers can `eq'-check
-structural sharing between two vectors after an operation (Doc 194
+structural sharing between two vectors after an operation (Doc 195
 §4.1's own against-the-bug shape)."
   (aref v 3))
 

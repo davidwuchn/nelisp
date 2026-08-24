@@ -4,9 +4,9 @@
 
 ;;; Commentary:
 
-;; Doc 194 §4.2: a persistent hash-array-mapped trie (HAMT) map, and a
+;; Doc 195 §4.2: a persistent hash-array-mapped trie (HAMT) map, and a
 ;; set built on the identical engine (a map whose values are ignored).
-;; Leaf key hashing uses `sxhash-equal' -- Doc 194 §2.3 measured it
+;; Leaf key hashing uses `sxhash-equal' -- Doc 195 §2.3 measured it
 ;; `fboundp' and stable across two structurally-equal-but-`eq'-distinct
 ;; compound values on `target/nelisp', exactly the property a HAMT
 ;; bucket function needs (`secure-hash' is absent there, but that is
@@ -14,7 +14,7 @@
 ;; cryptographic digest -- the same choice Clojure itself makes).
 ;;
 ;; This file deliberately does NOT use the standard-library `logcount'
-;; function for the bitmap popcount-prefix trick Doc 194 §4.2 itself
+;; function for the bitmap popcount-prefix trick Doc 195 §4.2 itself
 ;; describes -- a repo-wide grep (`grep -rl logcount --include=*.el .')
 ;; found zero hits anywhere in this tree, meaning nothing has ever
 ;; exercised it on `target/nelisp', and this package's own DoD-shaped
@@ -24,7 +24,7 @@
 ;; `scripts/nelisp-standalone-build.el''s dispatch table -- "measured,
 ;; not assumed" applied to a primitive choice, not just a fact claim.
 ;;
-;; Representation (Doc 194 §3.2, §4.2, refined per `nl-clj-core.el's
+;; Representation (Doc 195 §3.2, §4.2, refined per `nl-clj-core.el's
 ;; Commentary for the map/set tag split):
 ;;
 ;;   map: [nl-clj--pmap COUNT ROOT]   set: [nl-clj--pset COUNT ROOT]
@@ -33,7 +33,7 @@
 ;; (BITMAP . PACKED-ARRAY): BITMAP is a 32-bit-ish integer, bit N set
 ;; iff hash-slice N is populated at this level; PACKED-ARRAY holds
 ;; only the populated slots, indexed by the standard popcount-prefix
-;; trick (Doc 194 §4.2: `(logcount (logand bitmap (1- (ash 1 idx))))',
+;; trick (Doc 195 §4.2: `(logcount (logand bitmap (1- (ash 1 idx))))',
 ;; here `nl-clj-hash--popcount' in place of `logcount').  Memory cost
 ;; stays proportional to actual size, unlike a dense 32-wide array.
 ;;
@@ -41,18 +41,18 @@
 ;;   - a leaf:      [nl-clj--leaf KEY VAL]           (a lone key/value)
 ;;   - a collision: [nl-clj--collision HASH ALIST]   (two+ keys whose
 ;;                  hash agrees in every 5-bit slice all the way to
-;;                  `nl-clj-hash--max-shift' -- Doc 194 §4.2's named
+;;                  `nl-clj-hash--max-shift' -- Doc 195 §4.2's named
 ;;                  "collision handling" requirement)
 ;;   - a branch node (BITMAP . PACKED-ARRAY), recursing one level down
 ;; A branch node's own cons cell is never confused with a leaf/
 ;; collision vector -- `consp' vs `vectorp' dispatches unambiguously.
 ;;
-;; Fidelity (Doc 194 §4.2): real structural sharing on assoc/dissoc,
+;; Fidelity (Doc 195 §4.2): real structural sharing on assoc/dissoc,
 ;; matching Clojure's HAMT complexity shape.  Divergence, named: no
 ;; small-map array-map special case (Clojure's own PersistentHashMap
 ;; flattens <=8-entry maps for cache-friendliness before promoting to
 ;; a true HAMT) -- always-HAMT here, correct but not tuned for small
-;; maps; Doc 194 §8 leaves this an open question pending real usage
+;; maps; Doc 195 §8 leaves this an open question pending real usage
 ;; data, not designed further here.
 
 ;;; Code:
@@ -80,7 +80,7 @@ point so `packages/nl-clj/test/nl-clj-hash-test.el' can `let'-bind it
 to a function that forces two specific keys to collide, driving the
 collision-bucket path deterministically end to end (both the initial
 insert AND every later re-derivation of an already-stored key's hash
-during a merge/split) -- Doc 194 §4.2's own recommended technique
+during a merge/split) -- Doc 195 §4.2's own recommended technique
 (\"buildable deterministically by hash-value construction, not left
 to chance\"), since real `sxhash-equal' offers no practical way to
 manufacture two colliding fixnums by hand.  Production code never
@@ -88,7 +88,7 @@ rebinds this; it is always plain `sxhash-equal'.")
 
 (defun nl-clj-hash--hash-key (key)
   "Return the leaf hash of KEY.  Deliberately plain `sxhash-equal' (via
-`nl-clj-hash--hash-fn'), not `nl-clj-hash' (nl-clj-seq.el) -- Doc 194
+`nl-clj-hash--hash-fn'), not `nl-clj-hash' (nl-clj-seq.el) -- Doc 195
 §3.2's named trap: a HAMT's own *leaf* keys/values are ordinary Elisp
 values, where structural `sxhash-equal' already is the right notion;
 it must never be used to hash two nl-clj *collections* against each
@@ -166,7 +166,7 @@ collision bucket at `nl-clj-hash--max-shift') rooted at SHIFT."
 ;;
 ;; These take an explicit HASH parameter rather than recomputing it
 ;; from KEY, exactly so tests can drive the collision path
-;; deterministically (Doc 194 §4.2's own against-the-bug shape:
+;; deterministically (Doc 195 §4.2's own against-the-bug shape:
 ;; "construct two keys whose hash values agree... buildable
 ;; deterministically by hash-value construction, not left to chance").
 
@@ -232,7 +232,7 @@ collision bucket at `nl-clj-hash--max-shift') rooted at SHIFT."
 (defun nl-clj-hash--node-dissoc (node shift hash key)
   "Return (NEW-NODE . REMOVED).  NEW-NODE is nil when NODE becomes empty.
 When KEY is absent, returns (NODE . nil) -- NODE itself, `eq'-identical,
-unchanged (Doc 194 §4.2's named `dissoc'-of-absent-key no-op guarantee)."
+unchanged (Doc 195 §4.2's named `dissoc'-of-absent-key no-op guarantee)."
   (cond
    ((null node) (cons nil nil))
    ((nl-clj-hash--leaf-p node)
@@ -272,7 +272,7 @@ unchanged (Doc 194 §4.2's named `dissoc'-of-absent-key no-op guarantee)."
 
 (defun nl-clj-hash--node-entries (node)
   "Return every (KEY . VAL) pair under NODE, as a plain Elisp list.
-Eager for this phase (Doc 194 §4.7 defers a lazy walk)."
+Eager for this phase (Doc 195 §4.7 defers a lazy walk)."
   (cond
    ((null node) nil)
    ((nl-clj-hash--leaf-p node)
@@ -302,7 +302,7 @@ Eager for this phase (Doc 194 §4.7 defers a lazy walk)."
   (let* ((hash (nl-clj-hash--hash-key key))
          (result (nl-clj-hash--node-dissoc (aref m 2) 0 hash key)))
     (if (not (cdr result))
-        m ;; no-op: return the SAME object, `eq'-identical (Doc 194 §4.2)
+        m ;; no-op: return the SAME object, `eq'-identical (Doc 195 §4.2)
       (vector nl-clj--pmap-tag (1- (aref m 1)) (car result)))))
 
 (defun nl-clj-hash--map-entries (m)
@@ -329,7 +329,7 @@ Eager for this phase (Doc 194 §4.7 defers a lazy walk)."
   (unless (nl-clj-map-p m) (signal 'nl-clj-type-error (list 'nl-clj-vals m)))
   (mapcar #'cdr (nl-clj-hash--map-entries m)))
 
-;;;; Set public surface (Doc 194 §4.2: a map whose values are ignored) ----
+;;;; Set public surface (Doc 195 §4.2: a map whose values are ignored) ----
 
 (defun nl-clj-set-p (object)
   "Return non-nil when OBJECT is an nl-clj persistent set."

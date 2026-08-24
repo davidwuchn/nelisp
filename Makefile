@@ -520,12 +520,12 @@ nl-actor-standalone-smoke: $(if $(wildcard target/nelisp target/nelisp.exe),,sta
 	fi; \
 	"$$bin" --load packages/nelisp-actor/test/nelisp-actor-standalone-smoke.el
 
-# Doc 194 (docs/design/194-clojure-compat-library.org) build-first Tier
+# Doc 195 (docs/design/195-clojure-compat-library.org) build-first Tier
 # 1: runs the exact ERT bodies of every nl-clj-*-test.el on
 # target/nelisp itself, plus a print/read round-trip check on a tagged
 # persistent vector -- the specific substrate risk this package's own
 # representation choice (nl-clj-core.el's Commentary) exists to avoid
-# (Doc 194 §2.1: cl-defstruct/record print but do not round-trip on
+# (Doc 195 §2.1: cl-defstruct/record print but do not round-trip on
 # this substrate).  Same conditional-build shape as the smokes above.
 nl-clj-standalone-smoke: $(if $(wildcard target/nelisp target/nelisp.exe),,standalone-reader)
 	@bin=./target/nelisp; [ -f "$$bin" ] || bin=./target/nelisp.exe; \

@@ -2,11 +2,11 @@
 
 * Motivation
 
-Doc 194 (=docs/design/194-clojure-compat-library.org=), build-first
+Doc 195 (=docs/design/195-clojure-compat-library.org=), build-first
 Tier 1: a persistent vector, a persistent hash-map/hash-set, an
 =atom=, and a minimal eager seq API, so NeLisp programs can write in a
 Clojure idiom without giving up plain Elisp semantics anywhere that
-does not opt in.  Doc 194 is a measured survey ("every asset claim
+does not opt in.  Doc 195 is a measured survey ("every asset claim
 below was either read from a file at a cited line or measured directly
 against a built =target/nelisp="), not a guess; this package follows
 its decisions on naming, representation, and HAMT design exactly (one
@@ -18,7 +18,7 @@ convention every =nl-= package here follows): loading it changes
 nothing about plain Elisp semantics.  It depends only on =nl-prelude=
 (the =nl-error= condition every =nl-clj-error= derives from).
 
-* Representation (Doc 194 §3.2)
+* Representation (Doc 195 §3.2)
 
 Every collection is a plain Elisp vector whose slot 0 is a
 distinguishing tag symbol, =nl-cell='s own idiom
@@ -33,7 +33,7 @@ persistent list:   ordinary cons cells, nil-terminated (already
 atom:              [nl-clj--atom VALUE WATCHES]
 #+end_example
 
-Why not =record=: Doc 194 §2.1 measured, against a built
+Why not =record=: Doc 195 §2.1 measured, against a built
 =target/nelisp=, that records print with real Emacs =#s(...)= syntax
 but do NOT round-trip through =read-from-string= on this substrate --
 a genuine print/read asymmetry, not merely "records are unreliable."
@@ -42,7 +42,7 @@ Plain tagged vectors round-trip correctly (measured, same section).
 own representation specifically, on the real standalone binary, not
 just claims it by analogy.
 
-One small, documented divergence from Doc 194's own literal sketch:
+One small, documented divergence from Doc 195's own literal sketch:
 sets use a distinct =nl-clj--pset= tag rather than sharing =pmap='s
 (the doc's own text: "a map whose values are all the sentinel
 =nl-clj--set-member="). A shared tag would make =nl-clj-map-p=/
@@ -57,7 +57,7 @@ directly.
 
 * API
 
-** Atom (=nl-clj-atom.el=, Doc 194 §4.5)
+** Atom (=nl-clj-atom.el=, Doc 195 §4.5)
 
 #+begin_src elisp
 (require 'nl-clj)
@@ -70,14 +70,14 @@ directly.
 
 =nl-clj-swap!=/=reset!=/=compare-and-set!= are single-assignment, not
 a compare-and-set retry loop -- NeLisp's current execution model has
-exactly one thread of Lisp-level control (Doc 194 §2.7), so the retry
+exactly one thread of Lisp-level control (Doc 195 §2.7), so the retry
 loop's entire reason to exist is absent; see =src/nl-clj-atom.el='s
 Commentary for the full argument and the one honest divergence this
 creates (F runs exactly once, always -- stronger than Clojure's own
 "may retry" contract).  =add-watch=/=set-validator!= are named by Doc
 194 §4.5 as real but peripheral -- deliberately not in this phase.
 
-** Persistent vector (=nl-clj-vector.el=, Doc 194 §4.1)
+** Persistent vector (=nl-clj-vector.el=, Doc 195 §4.1)
 
 32-way bit-partitioned trie with a <=32-element tail, matching
 Clojure's own complexity/sharing contract: O(log32 N) =assoc=/=get=,
@@ -94,11 +94,11 @@ O(1) amortized =conj=/=peek=/=pop=.
 #+end_src
 
 =nl-clj-subvec= is a deliberate divergence: an eager O(k) rebuild, not
-Clojure's O(1) offset/end-aware view type (Doc 194 §4.1 explicitly
+Clojure's O(1) offset/end-aware view type (Doc 195 §4.1 explicitly
 defers that optimization as separable future work; this package's own
 brief asks for =subvec= in the API, so it ships correctness-first).
 
-** Persistent hash-map / hash-set (=nl-clj-hash.el=, Doc 194 §4.2)
+** Persistent hash-map / hash-set (=nl-clj-hash.el=, Doc 195 §4.2)
 
 A real HAMT: bitmap-indexed branch nodes (the standard popcount-prefix
 trick), collision buckets for keys whose hash agrees all the way to
@@ -119,18 +119,18 @@ ignored.
 Deliberate divergence: no small-map array-map special case (Clojure's
 own =PersistentHashMap= flattens <=8-entry maps for cache-friendliness
 before promoting to a true HAMT) -- always-HAMT here, correct but not
-tuned for small maps; Doc 194 §8 leaves this an open question pending
+tuned for small maps; Doc 195 §8 leaves this an open question pending
 real usage data.
 
 This file deliberately does NOT use the standard-library =logcount=
-for the popcount step Doc 194 §4.2 itself describes -- a repo-wide
+for the popcount step Doc 195 §4.2 itself describes -- a repo-wide
 grep found zero references to it anywhere in this tree, meaning
 nothing has exercised it standalone.  =nl-clj-hash--popcount= is a
 manual bit loop over =logand=/=ash=, both confirmed present in
 =scripts/nelisp-standalone-build.el='s dispatch table.  "Measured, not
 assumed," applied to a primitive choice, not only a fact claim.
 
-** Seq API (=nl-clj-seq.el=, Doc 194 §4.7's minimal, eager slice)
+** Seq API (=nl-clj-seq.el=, Doc 195 §4.7's minimal, eager slice)
 
 Generic across vector, map, set, and plain Elisp lists (a plain Elisp
 vector too, as a bonus that costs nothing given the dispatch):
@@ -146,7 +146,7 @@ vector too, as a bonus that costs nothing given the dispatch):
 Eager, not lazy: =nl-clj-map=/=filter= return a plain Elisp list;
 =nl-clj-reduce= walks with a plain =while= loop, not recursion --
 stack-safe over an arbitrarily long seq for free, with no need for
-=nl-loop=/=nl-recur= (those are load-bearing for Doc 194 §4.7's
+=nl-loop=/=nl-recur= (those are load-bearing for Doc 195 §4.7's
 *deferred* lazy-seq walk, not for an already-eager one).
 
 A named, documented divergence from Clojure: =nl-clj-rest= and
@@ -161,18 +161,18 @@ are still defined, under their own names, for full API-surface parity.
 =sxhash-equal= walk a tagged vector *structurally* (comparing
 ROOT/TAIL/SHIFT element by element), which is a different question
 from Clojure's own logical collection equality (comparing the
-*sequence of elements*, regardless of internal tree shape -- Doc 194
+*sequence of elements*, regardless of internal tree shape -- Doc 195
 §3.2's own named correctness trap).  A named, accepted footgun this
 does NOT solve: passing an nl-clj collection as a key into a *plain*
 =(make-hash-table :test 'equal)= silently uses the wrong notion
 (tree-shape, not content) -- =define-hash-table-test= is void-function
-on this substrate (Doc 194 §2.3), so there is no way to register the
+on this substrate (Doc 195 §2.3), so there is no way to register the
 right one as a real hash-table =:test= at all.
 
-* Naming (Doc 194 §3.1)
+* Naming (Doc 195 §3.1)
 
 Every public symbol is =nl-clj-= prefixed.  Elisp already has
-=assoc=/=get=/=pop=/=atom=/=concat= with different meanings (Doc 194
+=assoc=/=get=/=pop=/=atom=/=concat= with different meanings (Doc 195
 §2.6's measured collisions); this package never shadows them.
 
 =nl-ns-in= sugar (=packages/nl-ns=) is optional, demonstration-only,
@@ -188,7 +188,7 @@ and never required to call any function here directly:
 #+end_src
 
 =assoc=, =get=, =pop=, =atom=, =concat= are deliberately never listed
-in a =:members= block -- =nl-ns-in='s whole-body rewrite (Doc 194
+in a =:members= block -- =nl-ns-in='s whole-body rewrite (Doc 195
 §2.6) would otherwise silently redirect a plain Elisp =(atom x)= call
 site inside the same block to =nl-clj-atom=.  This package still
 exports =nl-clj-assoc=/=nl-clj-get=/=nl-clj-atom=/etc. as ordinary
@@ -201,7 +201,7 @@ specific names is withheld.
 =nl-clj-index-error= (out-of-bounds =nth=/=assoc=/=pop=/=subvec=),
 =nl-clj-type-error= (wrong collection type for the operation).
 
-* Next phases (Doc 194 §5/§6, out of scope this phase)
+* Next phases (Doc 195 §5/§6, out of scope this phase)
 
 - *Transients* (§4.4): reuses =nl-safe='s =nl-cell= borrow-cell fence
   as the mutability boundary and the "freeze forever" =persistent!=
@@ -215,7 +215,7 @@ specific names is withheld.
   =nl-cell=, reusing the identical borrow-fence trick a second time
   for a different purpose (reentrant-force protection).
 - *Refs/STM* (§5.1) and *true multicore* (§5.2): explicitly NOT
-  recommended for this library's own roadmap (Doc 194's own verdict)
+  recommended for this library's own roadmap (Doc 195's own verdict)
   until a real second thread of Lisp-level execution and a concurrent-
   safe GC story exist -- building either now would be a facade, not
   infrastructure.
@@ -245,14 +245,14 @@ The standalone smoke additionally proves the specific claim this
 package's representation choice depends on: it =prin1=/=read-from-
 string='s a persistent vector on the live binary and asserts the
 result is =equal= to the original AND still behaves as a working
-vector afterward -- the exact property Doc 194 §2.1 found =record=
+vector afterward -- the exact property Doc 195 §2.1 found =record=
 lacks on this substrate.
 
 * Follow-ups
 
-- Small-map array-map optimization (Doc 194 §8, open question).
+- Small-map array-map optimization (Doc 195 §8, open question).
 - Faster =nl-clj-vector--to-list= (currently repeated =nth=; a direct
   trie walk would be O(n) instead of O(n log32 n)).
-- =add-watch=/=set-validator!= for atoms (Doc 194 §4.5, peripheral).
-- The four "Next phases" items above, in the build-first order Doc 194
+- =add-watch=/=set-validator!= for atoms (Doc 195 §4.5, peripheral).
+- The four "Next phases" items above, in the build-first order Doc 195
   §6 ranks them.

@@ -4,7 +4,7 @@
 
 ;;; Commentary:
 
-;; The generic dispatch layer over vector/map/set/list.  Doc 194's own
+;; The generic dispatch layer over vector/map/set/list.  Doc 195's own
 ;; DoD-shaped verification: no host-Emacs control (plain Emacs has
 ;; none of these types), checked against Clojure's own documented seq/
 ;; collection contract by hand.
@@ -276,7 +276,7 @@
   ;; against-the-bug: this MUST use a plain loop, not recursion -- try
   ;; the naive recursive version first and it stack-overflows well
   ;; under this size (this repo's own "red on the defect, then green"
-  ;; discipline, Doc 194 §4.7).
+  ;; discipline, Doc 195 §4.7).
   (let ((v (nl-clj-vector)))
     (dotimes (i 5000) (setq v (nl-clj-vector--conj v i)))
     (should (= (nl-clj-reduce #'+ 0 v) (/ (* 4999 5000) 2)))))

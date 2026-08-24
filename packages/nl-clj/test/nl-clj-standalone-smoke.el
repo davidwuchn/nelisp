@@ -12,7 +12,7 @@
 ;; test body is executed -- same pattern as
 ;; `packages/nl-safe/test/nl-safe-standalone-smoke.el'.
 ;;
-;; This is the real risk this package's own brief names: Doc 194 §2.1
+;; This is the real risk this package's own brief names: Doc 195 §2.1
 ;; measured that `cl-defstruct'/`record' print with real Emacs
 ;; `#s(...)' syntax but do not round-trip through `read-from-string'
 ;; on this exact substrate -- a genuine print/read asymmetry.  This
@@ -30,7 +30,7 @@
 ;;
 ;; Dependencies are loaded explicitly by path: on the standalone,
 ;; (require 'nl-prelude) would silently "succeed" even with the file
-;; absent (Doc 194 §2's own measured `require' gap on this substrate,
+;; absent (Doc 195 §2's own measured `require' gap on this substrate,
 ;; matching this session's own memory of the same trap elsewhere), so
 ;; `load' is the only trustworthy path (same pattern as
 ;; nl-safe/nl-prelude's own smoke runners).
@@ -95,7 +95,7 @@ KEYS supports `:type SYMBOL' for condition matching like ert."
 
 ;; The exact risk this package's own brief names: prove the tagged-
 ;; vector representation round-trips through `prin1'/`read-from-string'
-;; on THIS substrate, where Doc 194 §2.1 measured `record' does not.
+;; on THIS substrate, where Doc 195 §2.1 measured `record' does not.
 (let* ((v (nl-clj-vector 1 2 3))
        (printed (prin1-to-string v))
        (reread (car (read-from-string printed))))

@@ -4,11 +4,11 @@
 
 ;;; Commentary:
 
-;; Doc 194 §4.5: `atom'/`deref'/`swap!'/`reset!'/`compare-and-set!'.
+;; Doc 195 §4.5: `atom'/`deref'/`swap!'/`reset!'/`compare-and-set!'.
 ;;
 ;; Real Clojure's `swap!' is a compare-and-set RETRY loop *because* the
 ;; JVM is genuinely concurrent -- another thread's `swap!' could
-;; interleave between this call's read and its write.  Doc 194 §2.7
+;; interleave between this call's read and its write.  Doc 195 §2.7
 ;; measured, from three independent facts (Doc 39 §6.5/§9.4's explicit
 ;; single-thread event-loop decision, Doc 146 §2.1's single-heap
 ;; tracing GC with no concurrent-mutation synchronization, and
@@ -30,12 +30,12 @@
 ;; precisely because real Clojure cannot promise it).  The day NeLisp
 ;; gains real concurrent Lisp-level execution, this file's strategy
 ;; (not its observable contract) needs to change back to a genuine
-;; CAS retry loop -- gated on the same frontier work Doc 194 §5.2
+;; CAS retry loop -- gated on the same frontier work Doc 195 §5.2
 ;; names, not a defect in this file.
 ;;
-;; Representation (Doc 194 §3.2): [nl-clj--atom VALUE WATCHES].
+;; Representation (Doc 195 §3.2): [nl-clj--atom VALUE WATCHES].
 ;; WATCHES is reserved (always nil in Tier 1) -- `add-watch'/
-;; `set-validator!' are named by Doc 194 §4.5 as real but peripheral,
+;; `set-validator!' are named by Doc 195 §4.5 as real but peripheral,
 ;; deliberately out of this phase's scope.
 
 ;;; Code:

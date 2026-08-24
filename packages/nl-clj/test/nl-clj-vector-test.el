@@ -4,12 +4,12 @@
 
 ;;; Commentary:
 
-;; Doc 194 §4.1's own DoD-shaped verification: no host-Emacs control
+;; Doc 195 §4.1's own DoD-shaped verification: no host-Emacs control
 ;; exists (plain Emacs has no persistent vector at all), so every
 ;; assertion below is checked against Clojure's own documented
 ;; complexity/sharing contract by hand, not by differential testing.
 ;; Three against-the-bug shapes this file specifically covers, named
-;; in Doc 194 §4.1: (1) structural sharing -- an `eq' check on the
+;; in Doc 195 §4.1: (1) structural sharing -- an `eq' check on the
 ;; UNTOUCHED subtree, plus reading the ORIGINAL vector back after the
 ;; fact (not just checking the new vector's values -- a mutation bug
 ;; here is exactly "silent wrong result"); (2) the 32/33 and
@@ -115,7 +115,7 @@
       ;; original fully unchanged
       (should (= (nl-clj-vector--nth v 0) 0)))))
 
-;;;; Structural sharing (against-the-bug, Doc 194 §4.1 property 1) --------
+;;;; Structural sharing (against-the-bug, Doc 195 §4.1 property 1) --------
 
 (ert-deftest nl-clj-vector-test-conj-shares-root-when-tail-has-room ()
   (let* ((v (nl-clj-vector 1 2 3))

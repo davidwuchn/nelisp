@@ -4,10 +4,10 @@
 
 ;;; Commentary:
 
-;; Doc 194 §4.2's own DoD-shaped verification: no host-Emacs control
+;; Doc 195 §4.2's own DoD-shaped verification: no host-Emacs control
 ;; (plain Emacs has no HAMT), so every assertion below is checked
 ;; against Clojure's own documented `assoc'/`dissoc'/`get' contract by
-;; hand.  Three against-the-bug shapes Doc 194 §4.2 names specifically:
+;; hand.  Three against-the-bug shapes Doc 195 §4.2 names specifically:
 ;; (1) the collision-handling path -- two keys forced, deterministically
 ;; (not left to chance), to agree in every 5-bit hash slice down to
 ;; `nl-clj-hash--max-shift', each independently retrievable and
@@ -96,7 +96,7 @@
 (ert-deftest nl-clj-hash-test-keys-signals-on-non-map ()
   (should-error (nl-clj-keys [1 2]) :type 'nl-clj-type-error))
 
-;;;; Forced collision path (Doc 194 §4.2's own recommended technique) -----
+;;;; Forced collision path (Doc 195 §4.2's own recommended technique) -----
 
 (ert-deftest nl-clj-hash-test-forced-collision-two-keys ()
   (let* ((nl-clj-hash--hash-fn

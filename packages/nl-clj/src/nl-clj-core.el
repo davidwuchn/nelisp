@@ -4,11 +4,11 @@
 
 ;;; Commentary:
 
-;; Doc 194 (docs/design/194-clojure-compat-library.org) §3.2: every
+;; Doc 195 (docs/design/195-clojure-compat-library.org) §3.2: every
 ;; nl-clj collection is a plain Elisp vector whose slot 0 is a
 ;; distinguishing tag symbol -- the same idiom `nl-cell' already ships
 ;; (`packages/nl-safe/src/nl-safe.el': `(vector 'nl--cell value 0)') --
-;; NOT a `cl-defstruct'/`record'.  Doc 194 §2.1 measured, against a
+;; NOT a `cl-defstruct'/`record'.  Doc 195 §2.1 measured, against a
 ;; built `target/nelisp', that records print with real Emacs
 ;; `#s(...)' syntax but do not round-trip through `read-from-string'
 ;; on this substrate (the standalone reader's `#s(...)' handler
@@ -18,7 +18,7 @@
 ;; one shared tag-check helper every other nl-clj module uses, so the
 ;; representation convention lives in exactly one place.
 ;;
-;; Representation (Doc 194 §3.2):
+;; Representation (Doc 195 §3.2):
 ;;
 ;;   persistent vector: [nl-clj--pvec COUNT SHIFT ROOT TAIL]
 ;;   persistent map:    [nl-clj--pmap COUNT ROOT]
@@ -27,7 +27,7 @@
 ;;                      Clojure's own representation, no wrapper needed
 ;;   atom:              [nl-clj--atom VALUE WATCHES]
 ;;
-;; Doc 194 §3.2 itself describes the set representation as literally
+;; Doc 195 §3.2 itself describes the set representation as literally
 ;; sharing the map's `nl-clj--pmap' tag ("a map whose values are all
 ;; the sentinel `nl-clj--set-member'").  This package uses a distinct
 ;; `nl-clj--pset' tag instead -- a deliberate, small divergence from
@@ -38,7 +38,7 @@
 ;; would misreport as a set).  A second tag costs nothing -- both
 ;; still route through the identical HAMT engine in `nl-clj-hash.el',
 ;; sharing every node-assoc/node-get/node-dissoc function; only the
-;; envelope tag differs.  Doc 194 is itself a DRAFT survey ("Nothing
+;; envelope tag differs.  Doc 195 is itself a DRAFT survey ("Nothing
 ;; in this doc is implemented" -- its own Status line); its measured
 ;; facts and decisions (tagged vectors, HAMT design, naming) are
 ;; followed exactly, this one representation micro-detail is refined.
@@ -46,11 +46,11 @@
 ;; Trie *internal* nodes (branch arrays inside a vector or a HAMT) are
 ;; deliberately untagged plain Elisp vectors/conses -- never handed to
 ;; a caller directly, so there is nothing to discriminate by type at
-;; that layer (Doc 194 §3.2).
+;; that layer (Doc 195 §3.2).
 ;;
-;; Naming (Doc 194 §3.1): every public name is `nl-clj-' prefixed.
+;; Naming (Doc 195 §3.1): every public name is `nl-clj-' prefixed.
 ;; Elisp already has `assoc'/`get'/`pop'/`atom'/`concat' with
-;; different meanings (measured collisions, Doc 194 §2.6); nl-clj
+;; different meanings (measured collisions, Doc 195 §2.6); nl-clj
 ;; never shadows them.  `nl-ns-in' sugar (packages/nl-ns) is optional
 ;; opt-in ergonomics, not required by anything in this package.
 ;;

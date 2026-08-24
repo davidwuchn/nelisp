@@ -1,4 +1,4 @@
-#+TITLE: Doc 194 — A Clojure library for NeLisp: persistent data structures and coroutine-shaped concurrency, priced against what already ships
+#+TITLE: Doc 195 — A Clojure library for NeLisp: persistent data structures and coroutine-shaped concurrency, priced against what already ships
 #+AUTHOR: Claude (design), zawatton (direction)
 #+DATE: 2026-08-24
 #+STATUS: PARTIAL — build-first Tier 1 implemented 2026-08-24 as
@@ -46,7 +46,7 @@
 
 | item     | value                                                             |
 |----------+--------------------------------------------------------------------|
-| Doc #    | 194                                                                |
+| Doc #    | 195                                                                |
 | State    | PARTIAL — build-first Tier 1 (§4.1/§4.2/§4.5, minimal §4.7) SHIPPED 2026-08-24 as packages/nl-clj/; §4.4/§4.6/§4.7-lazy/§5 not started (see #+STATUS above) |
 | Parent   | Doc 168 (extension libraries, non-goals and layer discipline)     |
 | Sibling  | Doc 169 (nl-prelude/nl-condition), Doc 170 (nl-safe/nl-contract), Doc 189 (nl-ns), Doc 190 (bignums), Doc 193 (extension libraries publication), Doc 10 (nelisp-actor / Phase 4 actor runtime) |

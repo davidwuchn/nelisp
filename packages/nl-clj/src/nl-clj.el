@@ -16,13 +16,13 @@
 ;;   nl-clj-seq.el      generic seq/conj/assoc/get/... across all three,
 ;;                       plus ordinary Elisp lists
 ;;
-;; Deliberately out of scope this phase (Doc 194 §5/§6's own phasing;
+;; Deliberately out of scope this phase (Doc 195 §5/§6's own phasing;
 ;; this package's own build-first brief): transients (§4.4), channels
 ;; and `go' blocks over `nelisp-actor' (§4.6), lazy-seq (§4.7), refs/
 ;; STM (§5.1), and true multicore (§5.2).  See this package's
 ;; README.org "Next phases" section.
 ;;
-;; Naming (Doc 194 §3.1): every public symbol is `nl-clj-' prefixed.
+;; Naming (Doc 195 §3.1): every public symbol is `nl-clj-' prefixed.
 ;; `nl-ns-in' sugar (packages/nl-ns) is optional, demonstrated in
 ;; README.org, and never required to call any function here directly.
 

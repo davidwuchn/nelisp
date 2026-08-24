@@ -400,7 +400,7 @@ ns-collision-divergent 126
 # Makefile the same way each of those backs its own fast-focused-loop
 # target.  One more instance of an already-accepted public-entry-point
 # shape, not a new kind of violation.
-# 874 -> 885 on 2026-08-24 (Doc 194, packages/nl-clj/): 11 new instances of
+# 874 -> 885 on 2026-08-24 (Doc 195, packages/nl-clj/): 11 new instances of
 # this file's own already-conceded "public API surface" pattern -- a
 # multi-file PACKAGE using a package-level prefix (`nl-clj-') rather than a
 # per-FILE one (this tool infers each file's own expected prefix from its
@@ -412,7 +412,7 @@ ns-collision-divergent 126
 # `nl-clj-vector'/`nl-clj-vector-p' (nl-clj-vector.el), `nl-clj-hash-map'/
 # `nl-clj-hash-set'/`nl-clj-keys'/`nl-clj-map-p'/`nl-clj-set-p'/`nl-clj-vals'
 # (nl-clj-hash.el).  Renaming any of these to a file-local prefix would
-# directly contradict Doc 194 §3.1's own naming decision (a single
+# directly contradict Doc 195 §3.1's own naming decision (a single
 # qualified `nl-clj-' prefix is "the ground truth" specifically so the
 # public symbol is never ambiguous regardless of which file happens to
 # define it) -- the same shape this baseline's own 2026-08-23 note already
@@ -475,7 +475,7 @@ ns-prefix-violation 888
 # 611 + (619-611) + (612-611) = 620.  To be reconciled to the measured
 # count in the battery.
 #
-# 620 -> 642 on 2026-08-24 (Doc 194, packages/nl-clj/): the same "shared
+# 620 -> 642 on 2026-08-24 (Doc 195, packages/nl-clj/): the same "shared
 # core, conceded cross-file `--' call" shape this file's own async-core
 # note above already established, applied to a 5-file package instead of
 # a 2-file split.  Measured, not estimated -- 22 total: 9 are every module
@@ -487,7 +487,7 @@ ns-prefix-violation 888
 # one definition (nl-clj-core.el's own Commentary: "so the representation
 # convention lives in exactly one place") would be strictly worse, the
 # same tradeoff the async-core note already made.  The other 13 are
-# nl-clj-seq.el (Doc 194's own "generic dispatch layer," by design calling
+# nl-clj-seq.el (Doc 195's own "generic dispatch layer," by design calling
 # INTO nl-clj-vector.el's and nl-clj-hash.el's internal engines rather than
 # duplicating trie/HAMT logic a third time) referencing
 # `nl-clj-vector--assoc-n'/`--conj'/`--empty'/`--nth'/`--pop'/`--to-list'

@@ -616,12 +616,12 @@ nl-actor-standalone-smoke
 # a real defect surfaces here first.
 nl-ns-reader-standalone-smoke?
 #
-# nl-clj-standalone-smoke: added 2026-08-24, Doc 194
-# (docs/design/194-clojure-compat-library.org) build-first Tier 1 (atom,
+# nl-clj-standalone-smoke: added 2026-08-24, Doc 195
+# (docs/design/195-clojure-compat-library.org) build-first Tier 1 (atom,
 # persistent vector, persistent hash-map/hash-set, minimal eager seq
 # API).  Same shim/load-by-path pattern as nl-condition-standalone-smoke
 # above, plus a print/read round-trip check on a tagged persistent
-# vector -- proving Doc 194 §2.1's own measured print/read asymmetry
+# vector -- proving Doc 195 §2.1's own measured print/read asymmetry
 # for `cl-defstruct'/`record' on this substrate does NOT apply to this
 # package's chosen representation (a tagged plain vector, the same
 # idiom `nl-cell' already ships).  Listed optional (not promoted to
