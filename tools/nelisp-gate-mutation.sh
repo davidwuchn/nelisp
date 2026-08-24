@@ -92,7 +92,12 @@ while IFS='|' read -r gate file expr what; do
   # Confirmed by hand while adding this row: with a leftover target/nelisp
   # already present, `make standalone-reader-buffer-smoke' on freshly
   # mutated source ran the OLD binary and reported PASS.
-  if [ "$gate" = "emacs-parity" ] || [ "$gate" = "standalone-reader-buffer-smoke" ]; then
+  # Doc 199's `nelisp-thread-standalone-smoke' has the same conditional
+  # prerequisite and mutates native-unit source, so it must rebuild both the
+  # injected and restored binary for the same reason.
+  if [ "$gate" = "emacs-parity" ] || \
+     [ "$gate" = "standalone-reader-buffer-smoke" ] || \
+     [ "$gate" = "nelisp-thread-standalone-smoke" ]; then
     if ! rebuild_checked; then
       echo "  $gate: HARNESS ERROR (rebuild with the injection failed; a stale binary would have read as PASS)"
       bad=$((bad+1))
@@ -130,7 +135,10 @@ while IFS='|' read -r gate file expr what; do
     # a skip that appears only once the defect lands is the defect itself,
     # dressed as "could not be asked".
     cp "$backup" "$file"
-    if [ "$gate" = "emacs-parity" ]; then rebuild_checked || true; fi
+    if [ "$gate" = "emacs-parity" ] || \
+       [ "$gate" = "nelisp-thread-standalone-smoke" ]; then
+      rebuild_checked || true
+    fi
     baseline_log="$(mktemp)"
     run_gate "$gate" "$file" "$baseline_log"
     skip_before=$(grep -E '^GATE-SKIP ' "$baseline_log" | tail -1 | sed 's/^GATE-SKIP //' || true)
@@ -151,7 +159,10 @@ while IFS='|' read -r gate file expr what; do
     echo "  $gate: went red as it should ($what)"
   fi
   cp "$backup" "$file"; rm -f "$backup"
-  if [ "$gate" = "emacs-parity" ]; then rebuild_checked || true; fi
+  if [ "$gate" = "emacs-parity" ] || \
+     [ "$gate" = "nelisp-thread-standalone-smoke" ]; then
+    rebuild_checked || true
+  fi
 done <<< "$rows"
 echo "GATE-COUNT checked=$total findings=$bad"
 if [ "$bad" -gt 0 ]; then

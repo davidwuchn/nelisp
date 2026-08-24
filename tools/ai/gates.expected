@@ -656,6 +656,13 @@ nl-clj-future-standalone-smoke?
 # the Phase 2 mutation in tools/gate-mutations.txt reproduces the native
 # sign-word wrong-value path and proves this gate turns red on it.
 nl-num-standalone-smoke
+# nelisp-thread-standalone-smoke: Doc 199 Tier 2 Shape B.  The smoke is
+# loaded by target/nelisp itself (not self-host compiled), spawns three fixed
+# registry worker-ID 1 clone(2) tasks, publishes three distinct result slots
+# through a shared SeqCst done counter + join, and requires 14+14+14=42.
+# The gate-mutations row suppresses the worker result store, proving this gate
+# detects a worker that completes but publishes the wrong result.
+nelisp-thread-standalone-smoke
 #
 # nl-clj-async-standalone-smoke: added 2026-08-24, Doc 195 §4.6
 # (channels/`go' blocks over nelisp-actor).  Same shim/load-by-path

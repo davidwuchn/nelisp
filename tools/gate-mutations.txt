@@ -223,6 +223,12 @@ standalone-reader-bignum-smoke|scripts/nelisp-standalone-build.el|s/(if (= (nl_b
 ert-full|packages/nl-num/src/nl-num-core.el|s/(while (<= multiple numerator)/(while (< multiple numerator)/|nl-num doubling division omits an exact top multiple, leaving a remainder equal to the denominator instead of canonical Euclidean divmod
 ert-full|packages/nl-num/src/nl-num-rational.el|s/(divisor (nl-num--gcd numerator denominator))/(divisor 1)/|nl-rational stops reducing numerator and denominator by their gcd, violating the canonical lowest-terms invariant
 nl-num-standalone-smoke|packages/nl-num/src/nl-num-rational.el|s/(+ (nl-num--real-to-float a) (nl-num--real-to-float b))/(+ a b)/|nl-num mixed addition hands a Bignum and Float to the native standalone fold, which reads the bignum sign word as its magnitude
+# nelisp-thread-standalone-smoke: Doc 199 Tier 2's result-publication property.
+# The worker still bumps the done counter, so join completes normally, but the
+# distinct result slots remain zero and the interpreter-driven reduction is 0
+# instead of 42.  This isolates a missing/torn result publication from a lost
+# completion increment (which would correctly keep the join waiting).
+nelisp-thread-standalone-smoke|scripts/nelisp-standalone-build.el|s/(ptr-write-u64 result 0 sum)/(ptr-write-u64 result 0 0)/|a GC-free worker signals completion without publishing its partial sum, so join returns but the interpreter observes 0 instead of 42
 # standalone-reader-frame-stack-pop-desync-smoke: added 2026-08-23 (Doc 180
 # Phase 2 item 1).  The injection reverts `nelisp_eval_call_recorded_done''s
 # pop back to unconditional -- the exact pre-fix defect -- by deleting the

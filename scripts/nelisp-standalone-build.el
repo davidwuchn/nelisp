@@ -11182,6 +11182,10 @@ signalling arm -- never simply absent, so `fboundp' cannot go void again."
    ;; catchable `nelisp-unsupported-primitive' signal everywhere else -- see
    ;; `nelisp-standalone--socket-dispatch-arms''s docstring.
    (nelisp-standalone--socket-dispatch-arms)
+   ;; Doc 199 Tier 2 Shape B: fixed-registry, GC-free native workers.  Real
+   ;; clone(2) implementations on linux-x86_64, the same catchable unsupported
+   ;; signal as the socket family everywhere else.
+   (nelisp-standalone--thread-dispatch-arms)
    ;; Step C: the PLT-backed real `nl-ffi-call' arm where it can link,
    ;; otherwise the `nelisp-unsupported-primitive'-signalling arm -- always
    ;; one or the other, never neither.  Uses `reader-ffi-live-p', NOT the
@@ -14994,7 +14998,13 @@ value (matches the binary's M8 read+eval-loop driver)."
     "nelisp-socket-send" "nelisp-socket-recv" "nelisp-socket-close"
     ;; Doc 194 P3: nonblocking primitives (NOWAIT is an arity extension of
     ;; the three names above, not a new name -- only these two are new).
-    "nelisp-socket-poll" "nelisp-socket-connect-error")
+    "nelisp-socket-poll" "nelisp-socket-connect-error"
+    ;; Doc 199 Tier 2: interpreter-callable Shape-B thread substrate.  The
+    ;; names are installed on every target; non-linux-x86_64 dispatches them
+    ;; to `nelisp-unsupported-primitive', exactly like the socket family.
+    "nelisp-thread-shared-alloc" "nelisp-thread-atomic-add"
+    "nelisp-thread-atomic-read" "nelisp-thread-spawn"
+    "nelisp-thread-join")
   "Builtin names installed into the reader binary's mirror.
 Each is dispatched by the pure-elisp `nelisp_apply_function' (see
 `nelisp-standalone--applyfn-source').  Names > 8 bytes (for example
@@ -18352,13 +18362,180 @@ at all on other targets)."
       (let ((sig (nelisp-standalone--applyfn-unsupported-primitive-form)))
         (mapcar (lambda (nm) (cons (list :lit nm) sig)) names)))))
 
+;; ===================================================================
+;; Doc 199 Tier 2 -- interpreter-callable Shape-B clone(2) workers.
+;;
+;; This is deliberately a separate surface from the older generic
+;; `thread-spawn' breadth builtin above.  That builtin evaluates an ordinary
+;; Lisp form and allocates a fresh evaluator environment in the child; it is
+;; therefore outside Doc 199 section 4.2's GC-free worker boundary.  The five
+;; `nelisp-thread-*' entries below instead dispatch only to this small native
+;; registry.  A registered worker may touch ONLY its argument-addressed raw
+;; mmap memory and its own clone stack: never the Lisp heap, `alloc-bytes',
+;; `nl_alloc_*', the arena cursor, evaluator state, or a Lisp callback.
+;;
+;; Registry ID 1 is a counted-u64 sum worker.  A0 points at COUNT followed by
+;; COUNT u64 values; A1 is a distinct result slot; A2 is the shared done
+;; counter.  It writes the result before the SeqCst atomic increment.  The
+;; parent must read A1 only after `nelisp-thread-join' observes the requested
+;; done count, which is Doc 199 section 6.2's publish-through-join protocol.
+;; ===================================================================
+
+(defun nelisp-standalone--thread-forms ()
+  "Return Doc 199 Tier-2 native worker units for the current target.
+Only `linux-x86_64' receives raw mmap/clone/exit syscalls.  Every other target
+gets no native definitions and is gated by
+`nelisp-standalone--thread-dispatch-arms', matching the socket precedent."
+  (if (not (eq nelisp-standalone--target 'linux-x86_64))
+      nil
+    (list
+     ;; GC-free registry worker ID 1.  Recursion consumes only the private
+     ;; clone stack; it never allocates or reads a tagged Lisp value.
+     '(defun nl_thread_worker_sum_range (buffer i count)
+        (if (= i count)
+            0
+          (+ (ptr-read-u64 buffer (* (+ i 1) 8))
+             (nl_thread_worker_sum_range buffer (+ i 1) count))))
+     '(defun nl_thread_worker_sum (buffer result done)
+        (let* ((sum (nl_thread_worker_sum_range
+                     buffer 0 (ptr-read-u64 buffer 0))))
+          (seq
+           (ptr-write-u64 result 0 sum)
+           (atomic-fetch-add done 1)
+           0)))
+     '(defun nl_thread_worker_registry_call (worker_id a0 a1 a2)
+        (if (= worker_id 1)
+            (nl_thread_worker_sum a0 a1 a2)
+          0))
+     ;; `nl_thread_clone_dispatch' has already established a clean native
+     ;; frame on the clone stack before calling this entry.  ACK releases the
+     ;; parent's short spawn handshake only after no child code can reference
+     ;; the parent's native frame.  All remaining loads are from LAUNCH/A0-A2.
+     '(defun nl_thread_worker_start (launch)
+        (seq
+         (ptr-write-u64 launch 32 1)
+         (nl_thread_worker_registry_call
+          (ptr-read-u64 launch 0)
+          (ptr-read-u64 launch 8)
+          (ptr-read-u64 launch 16)
+          (ptr-read-u64 launch 24))
+         (syscall-direct 60 0 0 0 0 0 0)))
+     '(defun nl_thread_spawn_wait_ack (launch)
+        (while (< (ptr-read-u64 launch 32) 1) 0))
+     ;; The clone result must not be bound by `let*': the compiler stores a
+     ;; runtime let in the caller's rbp-relative frame, which clone shares,
+     ;; and the child's 0 would race the parent's tid in that one slot.  Used
+     ;; as the first call argument instead, the result is pushed only AFTER
+     ;; clone returns, onto each task's now-distinct current stack, before this
+     ;; helper establishes a clean frame.  The parent ACK wait keeps the old
+     ;; spawn frame alive until the child has captured LAUNCH.
+     '(defun nl_thread_clone_dispatch (tid launch out)
+        (if (= tid 0)
+            (nl_thread_worker_start launch)
+          (if (< tid 0)
+              (seq (wf_write_int out tid) 0)
+            (seq
+             (nl_thread_spawn_wait_ack launch)
+             (wf_write_int out tid)
+             0))))
+     ;; nelisp-thread-shared-alloc SIZE -> raw mmap address.  MAP_PRIVATE is
+     ;; process-private, while CLONE_VM makes the mapping visible to every
+     ;; worker task in this process, exactly as selfhost-mt-test.sh proves.
+     '(defun nl_thread_shared_alloc_impl (args out)
+        (seq
+         (wf_write_int
+          out
+          (syscall-direct 9 0 (wf_argval args 0) 3 34 (- 0 1) 0))
+         0))
+     ;; SeqCst fetch-add; return the pre-add value.
+     '(defun nl_thread_atomic_add_impl (args out)
+        (seq
+         (wf_write_int out
+                       (atomic-fetch-add (wf_argval args 0)
+                                         (wf_argval args 1)))
+         0))
+     ;; Join polling is intentionally a plain aligned u64 load on x86_64.
+     '(defun nl_thread_atomic_read_impl (args out)
+        (seq
+         (wf_write_int out (ptr-read-u64 (wf_argval args 0) 0))
+         0))
+     ;; WORKER-ID STACK-TOP A0 A1 A2.  STACK-TOP=0 asks this primitive to
+     ;; mmap its own 64 KiB stack; a nonzero top lets a low-level caller supply
+     ;; one.  The top 64 bytes are reserved for the raw launch record.  clone
+     ;; returns the child tid to the parent; the child never returns through
+     ;; this function, because `nl_thread_worker_start' exits task 60.
+     '(defun nl_thread_spawn_impl (args out)
+        (let* ((worker_id (wf_argval args 0))
+               (requested_top (wf_argval args 1))
+               (a0 (wf_argval args 2))
+               (a1 (wf_argval args 3))
+               (a2 (wf_argval args 4))
+               (stack_base
+                (if (= requested_top 0)
+                    (syscall-direct 9 0 65536 3 34 (- 0 1) 0)
+                  0))
+               (stack_top
+                (if (= requested_top 0)
+                    (if (< stack_base 0) 0 (+ stack_base 65536))
+                  requested_top)))
+          (if (if (= worker_id 1) (> stack_top 64) 0)
+              (let* ((launch (- stack_top 64)))
+                (seq
+                 (ptr-write-u64 launch 0 worker_id)
+                 (ptr-write-u64 launch 8 a0)
+                 (ptr-write-u64 launch 16 a1)
+                 (ptr-write-u64 launch 24 a2)
+                 (ptr-write-u64 launch 32 0)
+                 (nl_thread_clone_dispatch
+                  (syscall-direct 56 1792 launch 0 0 0 0)
+                  launch out)))
+            (seq
+             (wf_write_int out
+                           (if (< stack_base 0) stack_base (- 0 22)))
+             0))))
+     ;; Spin join: once the SeqCst done counter reaches EXPECTED, result-slot
+     ;; reads by the parent are routed after completion (Doc 199 section 6.2).
+     '(defun nl_thread_join_impl (args out)
+        (let* ((counter (wf_argval args 0))
+               (expected (wf_argval args 1)))
+          (seq
+           (while (< (ptr-read-u64 counter 0) expected) 0)
+           (wf_write_int out (ptr-read-u64 counter 0))
+           0))))))
+
+(defun nelisp-standalone--thread-dispatch-arms ()
+  "Return the five Doc 199 `nelisp-thread-*' apply-function dispatch arms.
+The raw native units are linked only for `linux-x86_64'.  On every other
+target the same installed names signal catchable
+`nelisp-unsupported-primitive', exactly like the socket family."
+  (let ((names '("nelisp-thread-shared-alloc"
+                 "nelisp-thread-atomic-add"
+                 "nelisp-thread-atomic-read"
+                 "nelisp-thread-spawn"
+                 "nelisp-thread-join")))
+    (if (eq nelisp-standalone--target 'linux-x86_64)
+        (list
+         `((:lit "nelisp-thread-shared-alloc") .
+           (nl_thread_shared_alloc_impl args out))
+         `((:lit "nelisp-thread-atomic-add") .
+           (nl_thread_atomic_add_impl args out))
+         `((:lit "nelisp-thread-atomic-read") .
+           (nl_thread_atomic_read_impl args out))
+         `((:lit "nelisp-thread-spawn") .
+           (nl_thread_spawn_impl args out))
+         `((:lit "nelisp-thread-join") .
+           (nl_thread_join_impl args out)))
+      (let ((sig (nelisp-standalone--applyfn-unsupported-primitive-form)))
+        (mapcar (lambda (nm) (cons (list :lit nm) sig)) names)))))
+
 (defun nelisp-standalone--reader-os-source-forms ()
   "Return target-specific OS helper defuns used by the reader driver/file I/O."
   (append
    (nelisp-standalone--os-syscall-xlat-forms)
    (nelisp-standalone--reader-os-base-forms)
    (nelisp-standalone--target-os-code-forms)
-   (nelisp-standalone--socket-forms)))
+   (nelisp-standalone--socket-forms)
+   (nelisp-standalone--thread-forms)))
 
 (defun nelisp-standalone--reader-os-base-forms ()
   "Return the per-target base OS helper defuns (argv/file/process)."

@@ -1241,6 +1241,85 @@ real) native call\"."
           (should (eq (cdr arm) shared))
           (should-not (memq (car-safe (cdr arm)) real-impls)))))))
 
+(ert-deftest nelisp-standalone-target-thread-builtins-installed ()
+  "All Doc 199 Tier-2 names are installed for uniform `fboundp' behavior."
+  (dolist (name '("nelisp-thread-shared-alloc"
+                  "nelisp-thread-atomic-add"
+                  "nelisp-thread-atomic-read"
+                  "nelisp-thread-spawn"
+                  "nelisp-thread-join"))
+    (should (member name nelisp-standalone--reader-builtins))))
+
+(ert-deftest nelisp-standalone-target-thread-linux-x86-64-shape-b-forms ()
+  "Linux x86_64 emits clone(2) plus a fixed, GC-free worker registry."
+  (cl-labels ((tree-member-p
+               (needle tree)
+               (cond
+                ((equal needle tree) t)
+                ((consp tree)
+                 (or (tree-member-p needle (car tree))
+                     (tree-member-p needle (cdr tree))))))
+              (forbidden-worker-symbol-p
+               (tree)
+               (cond
+                ((symbolp tree)
+                 (or (eq tree 'alloc-bytes)
+                     (string-prefix-p "nl_alloc_" (symbol-name tree))
+                     (eq tree 'nelisp_eval_call)))
+                ((consp tree)
+                 (or (forbidden-worker-symbol-p (car tree))
+                     (forbidden-worker-symbol-p (cdr tree)))))))
+    (let* ((nelisp-standalone--target 'linux-x86_64)
+           (forms (nelisp-standalone--thread-forms))
+           (worker-names '(nl_thread_worker_sum_range nl_thread_worker_sum
+                           nl_thread_worker_registry_call
+                           nl_thread_worker_start))
+           (worker-forms
+            (cl-remove-if-not
+             (lambda (form) (memq (cadr form) worker-names)) forms)))
+      (should (= (length worker-forms) 4))
+      (should (tree-member-p
+               '(syscall-direct 56 1792 launch 0 0 0 0) forms))
+      (should (tree-member-p '(syscall-direct 60 0 0 0 0 0 0) forms))
+      (should (tree-member-p '(atomic-fetch-add done 1) worker-forms))
+      (should-not (forbidden-worker-symbol-p worker-forms)))))
+
+(ert-deftest nelisp-standalone-target-thread-dispatch-linux-x86-64-real ()
+  "Linux x86_64 maps all five public names to real native units."
+  (let* ((nelisp-standalone--target 'linux-x86_64)
+         (arms (nelisp-standalone--thread-dispatch-arms)))
+    (should
+     (equal (mapcar (lambda (arm) (cadr (car arm))) arms)
+            '("nelisp-thread-shared-alloc" "nelisp-thread-atomic-add"
+              "nelisp-thread-atomic-read" "nelisp-thread-spawn"
+              "nelisp-thread-join")))
+    (should (equal (mapcar (lambda (arm) (car-safe (cdr arm))) arms)
+                   '(nl_thread_shared_alloc_impl nl_thread_atomic_add_impl
+                     nl_thread_atomic_read_impl nl_thread_spawn_impl
+                     nl_thread_join_impl)))))
+
+(ert-deftest nelisp-standalone-target-thread-non-linux-x86-64-unsupported ()
+  "Every non-Linux-x86_64 target installs only unsupported-signal arms."
+  (let ((real-impls '(nl_thread_shared_alloc_impl nl_thread_atomic_add_impl
+                      nl_thread_atomic_read_impl nl_thread_spawn_impl
+                      nl_thread_join_impl))
+        (expected-names '("nelisp-thread-shared-alloc"
+                          "nelisp-thread-atomic-add"
+                          "nelisp-thread-atomic-read"
+                          "nelisp-thread-spawn"
+                          "nelisp-thread-join")))
+    (dolist (target '(windows-x86_64 windows-aarch64 macos-aarch64
+                     linux-aarch64))
+      (let* ((nelisp-standalone--target target)
+             (arms (nelisp-standalone--thread-dispatch-arms))
+             (shared (cdr (car arms))))
+        (should-not (nelisp-standalone--thread-forms))
+        (should (equal (mapcar (lambda (arm) (cadr (car arm))) arms)
+                       expected-names))
+        (dolist (arm arms)
+          (should (eq (cdr arm) shared))
+          (should-not (memq (car-safe (cdr arm)) real-impls)))))))
+
 (provide 'nelisp-standalone-target-test)
 
 ;;; nelisp-standalone-target-test.el ends here
