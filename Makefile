@@ -16,7 +16,7 @@
         nl-ns-reader-standalone-smoke \
         standalone-reader-buffer-smoke \
         nl-actor-standalone-smoke nelisp-actor-cps-baseline nelisp-actor-cps-parity \
-        nl-clj-standalone-smoke
+        nl-clj-standalone-smoke nl-clj-async-standalone-smoke nl-clj-async-cps-baseline
 
 EMACS ?= emacs
 
@@ -534,6 +534,42 @@ nl-clj-standalone-smoke: $(if $(wildcard target/nelisp target/nelisp.exe),,stand
 	  exit 0; \
 	fi; \
 	"$$bin" --load packages/nl-clj/test/nl-clj-standalone-smoke.el
+
+# Doc 195 §4.6 (channels/go over nelisp-actor).  Same shim/load-by-path
+# pattern as the smokes above, but loads packages/nl-clj/generated/
+# go-ping-pong-cps.el -- the build-time CPS transform of a `nl-clj-go'
+# ping/pong exchange (regenerate with `make nl-clj-async-cps-baseline')
+# -- rather than replaying nl-clj-async-test.el's own ERT bodies, most
+# of which spawn actors via `nl-clj-go' directly and stay host-Emacs-
+# only by design (same reasoning as nl-actor-standalone-smoke above).
+# Makes exactly ONE call into the baked demo, not one per assertion --
+# see the smoke file's own Commentary for the real, measured, not-yet-
+# root-caused reason a second call in the same process hangs.
+nl-clj-async-standalone-smoke: $(if $(wildcard target/nelisp target/nelisp.exe),,standalone-reader)
+	@bin=./target/nelisp; [ -f "$$bin" ] || bin=./target/nelisp.exe; \
+	if [ ! -f "$$bin" ]; then \
+	  echo "GATE-SKIP no nelisp binary in target/ after build attempt"; \
+	  exit 0; \
+	fi; \
+	"$$bin" --load packages/nl-clj/test/nl-clj-async-standalone-smoke.el
+
+# Regenerates packages/nl-clj/generated/go-ping-pong-cps.el from
+# nl-clj-async.el's own `nl-clj-async--make-chan-1'/`-blocking-take-1'/
+# `-blocking-put-1' plus examples/nl-clj-async/go-ping-pong.el's
+# `nl-clj-async-demo-ping-pong', under THIS host's real Emacs +
+# generator.el (AI.md rule 7).  Run this after editing any of those,
+# then re-run `nl-clj-async-standalone-smoke' to confirm the
+# regenerated file still runs correctly standalone before committing
+# it -- host-vs-generated parity is NOT checked by this target itself
+# (unlike `nelisp-actor-cps-parity' for the sibling package); compare
+# `nl-clj-async-demo-ping-pong'/`-standalone' by hand (see
+# packages/nl-clj/scripts/nl-clj-async-cps-dump.el's own Commentary).
+nl-clj-async-cps-baseline:
+	$(EMACS) --batch -Q -L src -L packages/nelisp-actor/src -L packages/nelisp-actor/scripts \
+	  -L packages/nl-prelude/src -L packages/nl-safe/src -L packages/nl-clj/src \
+	  -l packages/nelisp-actor/scripts/nelisp-actor-cps-dump.el \
+	  -l packages/nl-clj/scripts/nl-clj-async-cps-dump.el \
+	  --eval "(nl-clj-async-cps-dump-write)"
 
 # Regenerates packages/nelisp-actor/generated/two-actor-exchange-cps.el
 # from examples/nelisp-actor/two-actor-exchange.el's `nelisp-demo-ping-

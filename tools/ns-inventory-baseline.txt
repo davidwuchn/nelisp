@@ -495,7 +495,21 @@ ns-collision-divergent 127
 # `--sentinel-message'/`--signal-name'/`--sleep-gap'/`--wait'/`--poll-
 # quantum' -- every one of them already counted here), not a new
 # violation class; measured, none renamed to game this ratchet.
-ns-prefix-violation 898
+# 898 -> 907 on integration/wave7 (feat/nl-clj-async merge): 9 new
+# instances of the SAME package-level-prefix shape the 874 -> 885 Doc 195
+# entry above already concedes -- `nl-clj-async.el''s public API
+# (`nl-clj-chan'/`nl-clj-close!'/`nl-clj-go'/`nl-clj-<!'/`nl-clj-<!!'/
+# `nl-clj->!'/`nl-clj->!!'/`nl-clj-alts!'/`nl-clj-async-error') uses the
+# package-wide `nl-clj-' prefix, not a file-local `nl-clj-async-' one, by
+# the same design choice §4.6 and this package's README make explicit
+# (short, Clojure-idiomatic public names).  `nl-clj-lazy.el' (merged the
+# same session) added ZERO new violations here -- its own public API
+# (`nl-clj-lazy-seq'/`nl-clj-lazy-range'/...) already matches its
+# file-local expected prefix.  Measured via `make ns-inventory' on the
+# merged tree (`tools/nl-ns-inventory.el' plist dump, filtered to
+# `packages/nl-clj/src/nl-clj-async.el': exactly 9 findings, all listed
+# above).
+ns-prefix-violation 907
 # 611 -> 613 on 2026-08-20: `nelisp--check-string'/`--check-symbol' and the
 # other argument-check helpers are referenced from the lisp/ mirrors that
 # carry copies of the functions using them.  This is the kind this file
