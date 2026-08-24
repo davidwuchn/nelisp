@@ -485,7 +485,17 @@ ns-collision-divergent 127
 # carries.  Measured via `make ns-inventory' on the fully-merged, built
 # tree: 896.  Reset ONCE to the measured value per the integration
 # playbook; `ns-inventory' PASSes with this exact baseline.
-ns-prefix-violation 896
+# 896 -> 898 on 2026-08-24 (Doc 194 P4/P5, feat/network-process-p345):
+# `packages/nelisp-process-adapter/src/nelisp-process-adapter.el' gained
+# `nelisp-process-adapter--drain-and-fire-network'/`nelisp-process-
+# adapter--network-process-close' -- two more private helpers using this
+# file's own already-conceded `nelisp-process-adapter--' single-dash
+# prefix (the SAME shape as its 8 already-baselined siblings --
+# `nelisp-process-adapter--drain-and-fire'/`--live'/`--pump-once'/
+# `--sentinel-message'/`--signal-name'/`--sleep-gap'/`--wait'/`--poll-
+# quantum' -- every one of them already counted here), not a new
+# violation class; measured, none renamed to game this ratchet.
+ns-prefix-violation 898
 # 611 -> 613 on 2026-08-20: `nelisp--check-string'/`--check-symbol' and the
 # other argument-check helpers are referenced from the lisp/ mirrors that
 # carry copies of the functions using them.  This is the kind this file

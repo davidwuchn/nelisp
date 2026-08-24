@@ -250,7 +250,16 @@ standalone-reader-bounded-backtrace-smoke|scripts/nelisp-standalone-build.el|s/(
 # a less specific signal than "this exact syscall number is what
 # matters, and this gate reads it, not just \"a socket call failed
 # somewhere\"".
-standalone-reader-socket-smoke|scripts/nelisp-standalone-build.el|s/(syscall-direct 288 (wf_argval args 0) 0 0 0 0 0)/(syscall-direct 289 (wf_argval args 0) 0 0 0 0 0)/|accept4 issues the wrong raw syscall number, so nelisp-socket-accept fails on every connection instead of returning the queued one
+# Row text UPDATED 2026-08-24 (Doc 194 P3, feat/network-process-p345):
+# `nl_socket_accept_impl' gained a NOWAIT/`flags' argument (P3's own
+# arity extension, S3.3 item 1), changing the 5th `syscall-direct'
+# argument from a literal `0' to the `flags' variable -- the OLD row's
+# exact-text pattern went stale (matched nothing, caught by this exact
+# phase's own gate-mutation run) without this update.  Same defect,
+# same target, new surrounding text; re-verified RED-with-injection
+# (accept4 fails every connection with EINVAL) / GREEN-with-injection-
+# reverted before updating.
+standalone-reader-socket-smoke|scripts/nelisp-standalone-build.el|s/(cfd (syscall-direct 288 (wf_argval args 0) 0 0 flags 0 0)))/(cfd (syscall-direct 289 (wf_argval args 0) 0 0 flags 0 0)))/|accept4 issues the wrong raw syscall number, so nelisp-socket-accept fails on every connection instead of returning the queued one
 # Doc 194 P0 (feat/network-process-p0): manually verified RED-with-
 # injection / GREEN-with-injection-reverted before adding -- the
 # synchronous client's initial status flips from `open' to `closed' at
