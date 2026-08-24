@@ -6969,6 +6969,10 @@ write instead of ever touching a real buffer."
 (unless (fboundp 'processp)
   (defun processp (process)
     (or (and (vectorp process) (> (length process) 0) (eq (aref process 0) 'process))
+        ;; Doc 194 P0: a `network-process' is a THIRD, sibling tagged-vector
+        ;; shape -- see the `process-get'/`process-put'/`process-status'/
+        ;; `process-live-p' arms just below, each extended the same way.
+        (and (vectorp process) (> (length process) 0) (eq (aref process 0) 'network-process))
         (and (fboundp 'nelisp-process-object-p)
              (nelisp-process-object-p process)))))
 (unless (fboundp 'process-get)
@@ -6976,6 +6980,11 @@ write instead of ever touching a real buffer."
     (unless (processp process) (signal 'wrong-type-argument (list 'processp process)))
     (cond
      ((and (vectorp process) (> (length process) 0) (eq (aref process 0) 'process))
+      (cdr (assq key (aref process 4))))
+     ;; [0]='network-process [1]=NAME [2]=STATUS [3]=FD [4]=PROPS-ALIST
+     ;; (Doc 194 S3.1) -- same slot-4 props-alist convention as the
+     ;; `process' fallback shape just above, read/written identically.
+     ((and (vectorp process) (> (length process) 0) (eq (aref process 0) 'network-process))
       (cdr (assq key (aref process 4))))
      ((and (fboundp 'nelisp-process-object-p)
            (nelisp-process-object-p process))
@@ -6987,6 +6996,11 @@ write instead of ever touching a real buffer."
       (signal 'wrong-type-argument (list 'processp process)))
     (cond
      ((and (vectorp process) (> (length process) 0) (eq (aref process 0) 'process))
+      (let ((cell (assq key (aref process 4))))
+        (if cell
+            (setcdr cell value)
+          (aset process 4 (cons (cons key value) (aref process 4))))))
+     ((and (vectorp process) (> (length process) 0) (eq (aref process 0) 'network-process))
       (let ((cell (assq key (aref process 4))))
         (if cell
             (setcdr cell value)
@@ -7039,6 +7053,14 @@ write instead of ever touching a real buffer."
      ((and (vectorp process) (> (length process) 0)
            (eq (aref process 0) 'process))
       (aref process 2))
+     ;; Doc 194 P0: `network-process' status is a symbol already matching
+     ;; Emacs's own contract (measured against real Emacs 30.1, Doc 194
+     ;; S1.3) -- `open'/`closed'/`failed'/`listen'/`connect', never
+     ;; `run'/`exit' (the SUBPROCESS vocabulary) -- so this is a plain
+     ;; slot read, no symbol translation needed.
+     ((and (vectorp process) (> (length process) 0)
+           (eq (aref process 0) 'network-process))
+      (aref process 2))
      ;; Emacs answers NIL for anything else -- it accepts a buffer or a
      ;; process NAME too, so "not a process object" is not an error here.
      ;; Signalling made a caller probing whether a process was live get an
@@ -7058,10 +7080,19 @@ write instead of ever touching a real buffer."
     ;; Answers nil for a non-process, unlike `process-status' beside it --
     ;; so it cannot simply delegate, which is what made it inherit the
     ;; signal.
+    ;;
+    ;; Doc 194 P0: real Emacs's own `process-live-p' documentation says
+    ;; non-nil for STATUS run/open/listen/connect/stop -- not only `run'
+    ;; (the subprocess-only vocabulary this used to hardcode).  A
+    ;; `network-process' never reaches `run' at all (S1.3), so widening
+    ;; this to the full set is required for it to ever report live, and is
+    ;; a safe generalization for the existing `process'/native shapes
+    ;; too: neither ever produces `open'/`listen'/`connect' today, so
+    ;; this is not a behaviour change for them.
     (and (or (processp process)
              (and (vectorp process) (> (length process) 0)
                   (eq (aref process 0) 'process)))
-         (eq (process-status process) 'run))))
+         (and (memq (process-status process) '(run open listen connect)) t))))
 (unless (fboundp 'delete-process)
   (defun delete-process (process)
     (when (and (fboundp 'nelisp-process-object-p)
