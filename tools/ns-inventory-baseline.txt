@@ -256,7 +256,14 @@ ns-collision 250
 # vs. process-adapter make-process/etc.), so the interim ceiling below is
 # the arithmetic union against the shared 124 base: 124 + (121-124) +
 # (129-124) = 126.  To be reconciled to the measured count in the battery.
-ns-collision-divergent 126
+#
+# integration/wave6 battery run (2026-08-24, the emacs-parity fix):
+# 126 -> 127, +1: `timerp' joins `run-at-time'/`cancel-timer'/`sit-for'
+# as a fourth name packages/nelisp-eventloop/src/nelisp-async-core.el
+# defaliases over scripts/nelisp-stdlib-prelude.el's own unconditional
+# stub (see tools/ns-inventory-baseline.txt's own `pinned-collision'
+# line for `timerp' immediately below its three siblings).
+ns-collision-divergent 127
 # 850 -> 851 on 2026-08-19: `nl-check-file-quoted-unsafe', the entry point
 # that reports the unsafe calls inside quoted forms.  Same situation as the
 # nl-ns pair above -- it is public because tools/nl-check-inventory.el calls
@@ -445,7 +452,16 @@ ns-collision-divergent 126
 # just landing on the safe/lower side this time instead of needing a
 # raise).  Reset ONCE to the measured value per the integration
 # playbook; `ns-inventory' PASSes with this exact baseline.
-ns-prefix-violation 879
+#
+# integration/wave6 battery run (2026-08-24, the emacs-parity fix):
+# 879 -> 881, +2, in packages/nelisp-eventloop/src/nelisp-async-core.el:
+# the new public `nelisp-async-core-timerp' function (this file's own
+# `nelisp-async-core-' single-dash prefix, same already-conceded shape
+# every sibling function in this file has), plus the `(defalias
+# 'timerp ...)' line itself -- same already-conceded shape its three
+# sibling defalias lines (`run-at-time'/`cancel-timer'/`sit-for') each
+# already contributed one violation for.
+ns-prefix-violation 881
 # 611 -> 613 on 2026-08-20: `nelisp--check-string'/`--check-symbol' and the
 # other argument-check helpers are referenced from the lisp/ mirrors that
 # carry copies of the functions using them.  This is the kind this file
@@ -823,6 +839,16 @@ pinned-collision ns-collision-divergent	sxhash-eq	lisp/nelisp-stdlib-misc.el scr
 pinned-collision ns-collision-divergent	sxhash-eql	lisp/nelisp-stdlib-misc.el scripts/nelisp-stdlib-prelude.el	ef0e301feba4
 pinned-collision ns-collision-divergent	sxhash-equal	lisp/nelisp-stdlib-misc.el scripts/nelisp-stdlib-prelude.el	e9e6292cefd6
 pinned-collision ns-collision-divergent	terpri	lisp/nelisp-stdlib-prn.el scripts/nelisp-stdlib-prelude.el	c1e5577e4c95
+# timerp: added 2026-08-24 (integration/wave6 battery run, the emacs-parity
+# fix). packages/nelisp-eventloop/src/nelisp-async-core.el now defaliases
+# `timerp' to `nelisp-async-core-timerp' (joining its sibling `run-at-time'/
+# `cancel-timer'/`sit-for' aliases above, same "upgrade-on-load" pattern,
+# same divergent-collision shape against scripts/nelisp-stdlib-prelude.el's
+# own unconditional `nil'-returning stub) -- needed so a real timer object
+# `run-at-time' now returns is recognized as one, and so `cancel-timer' can
+# validate its argument via `timerp' the same way real Emacs's own
+# `cancel-timer' does.
+pinned-collision ns-collision-divergent	timerp	packages/nelisp-eventloop/src/nelisp-async-core.el scripts/nelisp-stdlib-prelude.el	58c4e5383474
 pinned-collision ns-collision-divergent	unless	lisp/nelisp-jit-substrate.el lisp/nelisp-stdlib-eval-special.el scripts/nelisp-stdlib-prelude.el	d1b23dd61639
 pinned-collision ns-collision-divergent	upcase	lisp/nelisp-stdlib-plist-str.el scripts/nelisp-stdlib-prelude.el	b0951456fb17
 pinned-collision ns-collision-divergent	vconcat	lisp/nelisp-stdlib-plist-str.el scripts/nelisp-stdlib-prelude.el	1737d584ddfe

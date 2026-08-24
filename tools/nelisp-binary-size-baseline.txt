@@ -331,5 +331,16 @@
 # itself is unchanged, already a native dispatch arm since Doc 190.
 # Measured with `stat -c %s target/nelisp' after a clean `make
 # standalone-reader' on this exact change.
-size 7570768
+#
+# Raised 2026-08-24 (integration/wave6 battery run: the emacs-parity
+# fix for run-at-time/cancel-timer/timerp), 7570768 -> 7587264,
+# +16496 bytes, +0.22%, well inside the 2% slack -- raised anyway per
+# this file's own rule above, not left for slack to silently absorb.
+# packages/nelisp-eventloop/src/nelisp-async-core.el is loaded via
+# `nelisp-standalone--reader-repl-prelude-source' (Phase 2A) as
+# embedded prelude source, same accounting as every other prelude-
+# size raise in this file's history: the new `nelisp-async-core-
+# timerp' function, `nelisp-async-core-run-at-time''s restored TIME
+# validation, and their docstrings/comments.
+size 7587264
 slack-pct 2

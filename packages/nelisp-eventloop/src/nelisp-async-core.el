@@ -80,17 +80,54 @@ or a number of seconds.  Returns the timer object for `cancel-timer'.
 Deferred: FN fires when a driver's fire-due/pump step next runs (this
 module's own poll consumers: `nelisp-async-core-sit-for', or a caller
 of `nelisp-async-core--fire-due' directly, such as
-`nelisp-async-run'/`nelisp-process-adapter''s poll loop)."
+`nelisp-async-run'/`nelisp-process-adapter''s poll loop).
+
+TIME is validated before FN is touched (fixed 2026-08-24, integration/
+wave6 battery run -- restores the check the prelude's own pre-upgrade
+`run-at-time' stub already did, which this defalias silently dropped,
+a real emacs-parity regression: `nelisp-async-core--secs' quietly
+mapped any non-number/non-nil TIME to 0.0 instead of signalling, so
+e.g. `(run-at-time \"ABC\" nil (function ignore))' returned a timer
+object where real Emacs signals `(error \"Invalid time specification\")'):
+a bad TIME is a time error, not `invalid-function' about FN, since
+real Emacs never reaches FN either."
+  (unless (or (null time) (numberp time)
+              (and (stringp time) (string-match-p "[0-9]" time))
+              ;; A time VALUE is (HIGH LOW ...) -- at least two integers.
+              ;; A one-element cons is not one, and Emacs says so before
+              ;; it looks at FN.
+              (and (consp time) (integerp (car time))
+                   (consp (cdr time)) (integerp (car (cdr time)))))
+    (signal 'error (list "Invalid time specification")))
   (let ((tm (vector (+ (nelisp-async-core--now) (nelisp-async-core--secs time))
                     (and (numberp repeat) repeat)
                     fn args t)))
     (setq nelisp-async-core--timers (cons tm nelisp-async-core--timers))
     tm))
 
+(defun nelisp-async-core-timerp (x)
+  "Return non-nil when X is a timer vector this module created.
+Shape check only (length 5, numeric deadline slot) -- a cancelled
+timer is still a timer (real Emacs's own `timerp' agrees: cancelling
+changes a timer's enabled state, not its type), so this deliberately
+does not look at the LIVE slot."
+  (and (vectorp x) (= (length x) 5)
+       (numberp (aref x nelisp-async-core--t-deadline))))
+
 (defun nelisp-async-core-cancel-timer (tm)
-  "Cancel timer TM so it never fires again."
-  (when (vectorp tm)
-    (aset tm nelisp-async-core--t-live nil))
+  "Cancel timer TM so it never fires again.
+Signals `wrong-type-argument' for a non-timer TM, matching real
+Emacs's own `cancel-timer' (measured: `(cancel-timer \"x\")' ->
+`(wrong-type-argument timerp \"x\")' on host Emacs 30.1) and the
+prelude's own pre-upgrade stub this defalias replaces -- fixed
+2026-08-24 (integration/wave6 battery run): the version this
+replaced silently accepted anything `vectorp' rejected and returned
+nil instead, a real emacs-parity regression Phase 2A's process-
+adapter wiring exposed by making this the default `cancel-timer' on
+every standalone build instead of an opt-in `--load'."
+  (unless (nelisp-async-core-timerp tm)
+    (signal 'wrong-type-argument (list 'timerp tm)))
+  (aset tm nelisp-async-core--t-live nil)
   nil)
 
 (defun nelisp-async-core--next-deadline ()
@@ -152,15 +189,23 @@ override this to return nil when a key arrives)."
 
 ;;; Upgrade the prelude stubs to the real deferred implementations -----
 ;; Same upgrade-on-load pattern `nelisp-async.el' already used: loading
-;; this file redefines the three standard names unconditionally (no
+;; this file redefines the four standard names unconditionally (no
 ;; `unless (fboundp ...)' guard -- that guard is what makes the prelude's
 ;; own synchronous stubs step aside for a real implementation once one is
 ;; loaded, matching how the prelude's own `run-at-time' stub documents
-;; itself: "REPEAT ignored" only until something upgrades it).
+;; itself: "REPEAT ignored" only until something upgrades it).  `timerp'
+;; joins the other three as of 2026-08-24 (integration/wave6 battery
+;; run): the prelude's own `timerp' is an unconditional "there are no
+;; timers in this runtime" `nil' stub (correct for ITS OWN synchronous
+;; `run-at-time', which returns a `(nelisp--sync-timer FUNCTION)' list,
+;; not a real timer object at all), but once `run-at-time' is upgraded
+;; to return a real, cancellable timer vector, `timerp' must upgrade
+;; alongside it or a genuine timer object stops being recognized as one.
 
 (defalias 'run-at-time #'nelisp-async-core-run-at-time)
 (defalias 'cancel-timer #'nelisp-async-core-cancel-timer)
 (defalias 'sit-for #'nelisp-async-core-sit-for)
+(defalias 'timerp #'nelisp-async-core-timerp)
 
 (provide 'nelisp-async-core)
 ;;; nelisp-async-core.el ends here
