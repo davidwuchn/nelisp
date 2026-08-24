@@ -509,7 +509,16 @@ ns-collision-divergent 127
 # merged tree (`tools/nl-ns-inventory.el' plist dump, filtered to
 # `packages/nl-clj/src/nl-clj-async.el': exactly 9 findings, all listed
 # above).
-ns-prefix-violation 907
+# 907 -> 929 on 2026-08-24 (Doc 196 build-first Phases 0-4,
+# packages/nl-num): 22 public names deliberately follow the design's
+# measured shared-obarray rule rather than their module basenames.  The
+# arithmetic/constructors use bare `nl-' (`nl-+'/`nl-rational'/...), while
+# comparisons use `nl-num-' because `nl->' is already nl-contract's public
+# constructor.  This is the same package-level public-API shape the Doc 195
+# nl-clj notes above concede; renaming them to satisfy file-local prefixes
+# would violate Doc 196's opt-in API decision rather than fix a collision.
+# Measured via `make ns-inventory': exactly 22 new prefix findings.
+ns-prefix-violation 929
 # 611 -> 613 on 2026-08-20: `nelisp--check-string'/`--check-symbol' and the
 # other argument-check helpers are referenced from the lisp/ mirrors that
 # carry copies of the functions using them.  This is the kind this file
@@ -599,7 +608,16 @@ ns-prefix-violation 907
 # API), and the three forward-reference vars are the require-cycle break
 # nl-clj-core.el's own Commentary documents -- making THOSE public would
 # not remove the cross-file reference this gate counts, only rename it.
-ns-private-escape 652
+# 652 -> 691 on 2026-08-24 (Doc 196 build-first Phases 0-4,
+# packages/nl-num): 39 cross-file calls among nl-num-core.el's tag/divmod/
+# conversion foundation, nl-num-rational.el's real arithmetic, nl-num-
+# complex.el's component formulas, and nl-num.el's public dispatch.  These
+# remain double-dash because they are one package's internal module seams,
+# not public API.  The dependency order is explicit in each `require' and
+# manifest.el still has only nl-prelude as its cross-package dependency.
+# This is the same shared-core/private-engine shape conceded for nl-clj
+# immediately above.  Measured via `make ns-inventory': exactly 39.
+ns-private-escape 691
 ns-unreadable 0
 
 # `pinned-collision KEY' pins every ns-collision and ns-collision-divergent

@@ -1,23 +1,16 @@
 #+TITLE: Doc 196 — nl-num: a rational + complex numeric tower as an opt-in library over bignum
 #+AUTHOR: Claude (design), zawatton (direction)
 #+DATE: 2026-08-24
-#+STATUS: DRAFT — survey only, nothing implemented.  Every asset claim in
-#+STATUS: §2 was read from a file at a cited line on this session's own
-#+STATUS: clone (=origin/feat/native-observability= @ =3bab0fe88=, a
-#+STATUS: throwaway scratch clone under =/var/tmp/design-numtower=, never
-#+STATUS: writing into any other worktree — this task's own brief
-#+STATUS: prohibits building or editing source, so nothing here was
-#+STATUS: re-executed against a live =target/nelisp= this session; §2.4 in
-#+STATUS: particular is a static-reading finding, flagged unverified-by-
-#+STATUS: execution, and named as the first thing Phase 0 must confirm on
-#+STATUS: a real binary before anything depends on it.
+#+STATUS: PARTIAL — build-first Phases 0-4 implemented 2026-08-24 in
+#+STATUS: =packages/nl-num/=; Phase 5 reader work remains explicitly deferred.
+#+VERIFIED-BY: compile parens-check ert-focus nl-num-standalone-smoke gate-mutation ns-gate
 
 * Status
 
 | item     | value                                                              |
 |----------+----------------------------------------------------------------------|
 | Doc #    | 196                                                                |
-| State    | DRAFT — survey, no code                                          |
+| State    | PARTIAL — build-first Phases 0-4 implemented; Phase 5 deferred   |
 | Parent   | Doc 190 (bignum, the substrate this tower builds on), Doc 195 §2.2/§3 (nl-clj's own numeric-tower note and naming/representation precedent), Doc 168-170 (the =nl-*= opt-in extension-library family this doc's package joins) |
 | Base     | =origin/feat/native-observability= @ =3bab0fe88= (this doc's own clone point) |
 | Reads    | =docs/design/190-bignums.org= (bignum contract), =packages/nl-safe/src/nl-safe.el=, =packages/nl-clj/src/nl-clj-core.el= (representation precedent), =packages/nl-contract/src/nl-contract.el= (the one real naming collision found), =packages/nl-ns/src/nl-ns-reader.el= (reader-hook boundary), =scripts/nelisp-standalone-build.el= (native arithmetic/comparison dispatch), =lisp/nelisp-cc-reader-parser.el= (numeric tokenizer), =packages/README.org=, =packages/nl-prelude/src/nl-prelude.el= |
@@ -140,7 +133,7 @@ printed into a log or a saved buffer, obviously must). =nl-num='s
 representation decision in §3.2 is not a new idea; it is the third
 package to independently land on the same one.
 
-** 2.4 The float+bignum arithmetic-fold gap (found this session, unverified by execution)
+** 2.4 The float+bignum arithmetic-fold gap (confirmed by execution)
 
 Doc 190 §7's own contagion work is careful and, per §2.5 below, got the
 comparison operators right.  Reading the *arithmetic* fold this design
@@ -183,18 +176,13 @@ exactly on the path this design's own §4.1 promotion table needs
 (float contagion touching a rational whose numerator or denominator is
 a bignum).
 
-This finding was made by reading the dispatch code, not by running it
-— this task's brief explicitly prohibits building — so it is stated
-here as a *design constraint to build around*, not as a confirmed
-defect report: §7 Phase 0 names re-confirming it against a live binary
-as the first thing to do before anything in this design depends on the
-conclusion. The design conclusion itself does not need the
-confirmation to be actionable either way: §4.1 already commits =nl-num=
-to never handing a Bignum and a Float to the same native n-ary =+=/
-=-=/=*= call, converting the Bignum side through its own safe path
-first (§6.3) regardless of whether this specific fold turns out to
-misbehave or merely to be untested — the safe path is strictly no
-slower and removes the question either way.
+Phase 0 confirmed this against the freshly built =target/nelisp=:
+=(+ 1.0 1267650600228229401496703205376)= printed =1.0=, while host
+Emacs and =nl-+= produce =1.2676506002282294e+30=.  This is therefore
+a reproduced silent-wrong-value defect, not only a static finding.
+The implementation never hands a Bignum and Float to the same native
+arithmetic call; §4.1 records the measured correction to the originally
+proposed conversion path.
 
 ** 2.5 Comparison already got this right — the contrast is instructive
 
@@ -448,13 +436,15 @@ complex is ORTHOGONAL: wraps any one of the three levels above as its
 *"native-safe" for integer+float: safe exactly when the integer operand
 is a plain Int (tag 2). When it is a Bignum, §2.4's finding means
 =nl-num= must NOT hand the pair to a native =+=/=-=/=*= n-ary call
-directly — it converts the Bignum operand through =number-to-string=/
-=string-to-number= (§2.1 confirms Bignum printing/parsing is Phase-A
-shipped and exact) to get a Float first, THEN calls native float
-arithmetic on two Floats, which §2.4 did not find any gap in. This one
-substitution is the concrete, load-bearing consequence of §2.4 on this
-design — every int+float and rational+float cell in the table routes
-through it whenever the integer/rational side has a Bignum component.
+directly.  The survey's proposed =number-to-string=/=string-to-number=
+bridge was corrected by Phase 0 measurement: standalone
+=string-to-number= reconstructs an exact integer/Bignum, not a Float,
+and standalone =(float BIGNUM)= itself traverses the bad mixed fold and
+returned =0.0= for =2^100=.  The shipped bridge instead uses §6.3's
+divmod to retain a correctly rounded 53-bit fixnum mantissa, then
+restores its exponent with float-only multiplication.  Every int+float
+and rational+float cell routes through that bridge, so the eventual
+native calls receive Float+Float only.
 
 Rational-vs-rational and rational-vs-integer arithmetic (the cells that
 matter for §7 Phase 1/2) reduce to plain bignum-safe integer add/
@@ -727,11 +717,10 @@ parser.el=, not a later phase of this one.
   rationals are exact-integer-only by definition); this doc does not
   resolve it, only names that Phase 3 will hit it the first time a
   complex wraps a float component that happens to be NaN.
-- §2.4's finding is unverified by execution this session (task
-  constraint); Phase 0 names re-confirming it as its first concrete
-  action, but this doc's own design decision (§4.1's routing) does not
-  wait on that confirmation, since the safe path costs nothing extra
-  either way.
+- §2.4 is now confirmed by execution.  The separate conversion-path
+  assumption was corrected by the same measurement: standalone
+  =string-to-number= does not create a Float, so Phase 0's divmod-backed
+  53-bit rounding bridge replaces the survey's proposed string bridge.
 - Whether =nl-num-sqrt= should shadow-avoid or actually alias the
   host's own =sqrt= name for real, non-negative inputs (so
   =(nl-num-sqrt 4)= and =(sqrt 4)= agree exactly) is left to Phase 3's
@@ -745,3 +734,24 @@ parser.el=, not a later phase of this one.
   materializes, which, per Doc 190 §5's own "no concrete reported case"
   precedent for bignums themselves, this doc does not currently have
   evidence for either way.
+
+* 9. Implementation report — 2026-08-24 build-first landing
+
+Phases 0-4 now live under =packages/nl-num/=.  Phase 0 supplies signed
+Euclidean doubling divmod, gcd, tagged-vector helpers, and the measured
+bignum-to-float bridge.  Phase 1 supplies normalized rationals and
+cosmetic =N/D= printing.  Phase 2 supplies n-ary arithmetic across
+integer/rational/float contagion with exact integer division.  Phase 3
+supplies CLHS-canonical complex construction, component arithmetic,
+magnitude, and negative-real =nl-num-sqrt=.  Phase 4 supplies value
+equality and real ordering across the tower; complex equality is by
+components and complex ordering signals =nl-num-error=.
+
+The host reference corpus contains 51 ERT tests, including Phase 4's
+complete 5x5 type-pairing matrix.  The standalone smoke replays all 51
+bodies and additionally round-trips both a bignum-backed
+rational and a rational-component complex through =prin1-to-string=/
+=read-from-string=.  Three mutation rows prove the Phase 0 doubling
+bound, Phase 1 gcd normalization, and Phase 2 Bignum+Float route each
+turn their real gate red.  Phase 5 remains deferred exactly as §7 says;
+no core reader or native tag work is included.

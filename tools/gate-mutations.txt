@@ -212,6 +212,17 @@ standalone-reader-bignum-smoke|scripts/nelisp-standalone-build.el|s/(seq (ptr-wr
 # mutation; not caught by any value-only check, since the mutated value
 # still prints/compares as the right number.
 standalone-reader-bignum-smoke|scripts/nelisp-standalone-build.el|s/(if (= (nl_bignum_mag_le_bound limb_ptr limb_count bound_hi bound_lo) 1)/(if 0/|an arithmetic result that should demote back to a fixnum stays boxed as a Bignum forever (right value, wrong tag) -- Doc 190 §2's contraction rule silently stops holding
+# nl-num build-first phases (Doc 196, 2026-08-24).  Phase 0's row changes
+# the doubling bound from inclusive to exclusive, so an exact divisor
+# multiple is omitted and divmod leaves remainder == denominator.  Phase 1's
+# row disables gcd reduction at the constructor choke point.  Both use the
+# ert-full mechanism scoped above to nl-num-test.el.  Phase 2 must run on the
+# standalone: host Emacs handles Bignum+Float natively, while target/nelisp's
+# float fold misreads tag 13's sign word; bypassing nl-num's safe promotion
+# therefore reproduces the measured silent wrong-value defect only there.
+ert-full|packages/nl-num/src/nl-num-core.el|s/(while (<= multiple numerator)/(while (< multiple numerator)/|nl-num doubling division omits an exact top multiple, leaving a remainder equal to the denominator instead of canonical Euclidean divmod
+ert-full|packages/nl-num/src/nl-num-rational.el|s/(divisor (nl-num--gcd numerator denominator))/(divisor 1)/|nl-rational stops reducing numerator and denominator by their gcd, violating the canonical lowest-terms invariant
+nl-num-standalone-smoke|packages/nl-num/src/nl-num-rational.el|s/(+ (nl-num--real-to-float a) (nl-num--real-to-float b))/(+ a b)/|nl-num mixed addition hands a Bignum and Float to the native standalone fold, which reads the bignum sign word as its magnitude
 # standalone-reader-frame-stack-pop-desync-smoke: added 2026-08-23 (Doc 180
 # Phase 2 item 1).  The injection reverts `nelisp_eval_call_recorded_done''s
 # pop back to unconditional -- the exact pre-fix defect -- by deleting the

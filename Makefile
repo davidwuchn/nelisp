@@ -16,7 +16,8 @@
         nl-ns-reader-standalone-smoke \
         standalone-reader-buffer-smoke \
         nl-actor-standalone-smoke nelisp-actor-cps-baseline nelisp-actor-cps-parity \
-        nl-clj-standalone-smoke nl-clj-async-standalone-smoke nl-clj-async-cps-baseline
+        nl-clj-standalone-smoke nl-clj-async-standalone-smoke nl-clj-async-cps-baseline \
+        nl-num-standalone-smoke
 
 EMACS ?= emacs
 
@@ -534,6 +535,26 @@ nl-clj-standalone-smoke: $(if $(wildcard target/nelisp target/nelisp.exe),,stand
 	  exit 0; \
 	fi; \
 	"$$bin" --load packages/nl-clj/test/nl-clj-standalone-smoke.el
+
+# Doc 196 Phases 0-4: exact rational/complex reference-contract tests on the
+# standalone, plus tagged-vector print/read round trips for a bignum-backed
+# rational and a rational-component complex value.  Same explicit-load shim
+# pattern as nl-clj-standalone-smoke above.
+nl-num-standalone-smoke: $(if $(wildcard target/nelisp target/nelisp.exe),,standalone-reader)
+	@NELISP_STANDALONE_TARGET=$(STANDALONE_GATE_TARGET) $(EMACS) --batch -Q -L lisp -L src -L scripts -l nelisp-standalone-build \
+	  --eval '(kill-emacs (if (nelisp-standalone--target-runnable-on-host-p) 0 3))' \
+	  >/dev/null 2>&1; \
+	host_rc=$$?; \
+	if [ "$$host_rc" = 3 ]; then \
+	  echo "GATE-SKIP target $(STANDALONE_GATE_TARGET) cannot run on this host"; \
+	  exit 0; \
+	fi; \
+	bin=./target/nelisp; [ -f "$$bin" ] || bin=./target/nelisp.exe; \
+	if [ ! -f "$$bin" ]; then \
+	  echo "GATE-SKIP no nelisp binary in target/ after build attempt"; \
+	  exit 0; \
+	fi; \
+	"$$bin" --load packages/nl-num/test/nl-num-standalone-smoke.el
 
 # Doc 195 §4.6 (channels/go over nelisp-actor).  Same shim/load-by-path
 # pattern as the smokes above, but loads packages/nl-clj/generated/
