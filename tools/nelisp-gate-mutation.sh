@@ -51,6 +51,7 @@ run_gate() {
       local scoped_test=test/nelisp-eval-test.el
       case "$f" in
         lisp/nelisp-cl-macros.el) scoped_test=test/nelisp-cl-generic-test.el ;;
+        packages/nl-num/src/*.el) scoped_test=packages/nl-num/test/nl-num-test.el ;;
       esac
       NELISP_GATE_DIR="$mutation_gate_dir" \
         NELISP_GATE_MUTATION_TEST_FILES="$scoped_test" \

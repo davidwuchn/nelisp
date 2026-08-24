@@ -647,6 +647,14 @@ nl-ns-reader-standalone-smoke?
 # required gate -- this is the same pre-existing optional gate,
 # extended).
 nl-clj-standalone-smoke?
+# nl-num-standalone-smoke: added 2026-08-24 for Doc 196 Phases 0-4.
+# It replays all 51 CL/Scheme/Clojure reference-contract ERT bodies on the
+# standalone and separately round-trips bignum-backed rational and complex
+# tagged vectors through prin1/read.  Promoted immediately because Doc 196's
+# representation and bignum-float routing decisions are substrate-specific;
+# the Phase 2 mutation in tools/gate-mutations.txt reproduces the native
+# sign-word wrong-value path and proves this gate turns red on it.
+nl-num-standalone-smoke
 #
 # nl-clj-async-standalone-smoke: added 2026-08-24, Doc 195 §4.6
 # (channels/`go' blocks over nelisp-actor).  Same shim/load-by-path
