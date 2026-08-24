@@ -1993,3 +1993,61 @@ nelisp-standalone-build.el の gc-source + lisp/nelisp-cc-sf-while.el、Rust 無
 - *残（4c/4d）*: 残 RSS high-water（sweep は chunk を munmap しない + freelist exact-fit reuse の取りこぼし）→
   compaction / trigger 調整。4c = nested call / multi-form body へ safepoint 拡張（同 validation）。
 - *次 = 4c*: multi-form body / nested call boundary へ safepoint を拡張、poison + ctx-depth>1 で同 soundness 検証。
+
+* §11.42 Stage 3 SHIPPED（root stack に初の利用者、rooting 下で sound な mid-form collect、2026-08-25）
+Stage 2 の root stack は 2 ヶ月 dormant（region と mark 側だけ在り、=nl_root_reserve= の caller ゼロ、
+write 側の defun 自体が不在）だった。Stage 3 でその write 側を実装し、§11.39 の 5 hot GAP slot を全て
+root 化した。commit は本節と同一。
+
+** 実装
+- =lisp/nelisp-cc-rootstack.el=: =nl_root_mark= / =nl_root_reserve=（lazy-init + 32B slot bump）/
+  =nl_root_release=（LIFO pop）/ =nl_gc_mark_rootstack(_walk)=（[region,top) を 32B step で
+  =nl_gc_mark_slot=）。
+- rooting（reserve … release で bracket、slot index は helper ARGS で thread。§11.39 の
+  「cc-unit は runtime 値を let 不可」制約を遵守、生成 helper に runtime let は 1 個も無い）:
+  - 3b =nl_eval_arg_list_walk= eval_slot（最 hot、per-arg）
+  - 3c =nl_eval_inner_cons= func_slot
+  - 3d =nl_apply_do_apply= func_slot
+  - =nl_apply_sym_eq_bytes= は rooting でなく**確保レス化**（immediate-word 比較 =nl_apply_sym_eq_w=）で
+    tmp/result の GAP 2 個を構造的に消去 → 5 GAP のうち 3 個 rooted + 2 個消去 = 全消化。
+- *unwind-safety*（§11.39 が最大リスクとした点）: 正常 return / error / throw / unwind-protect cleanup /
+  失敗 apply の 5 経路で root depth が 3→3 に戻ることを実測。root せず見送った slot はゼロ。
+
+** root region 拡大（1 MiB → 4 MiB）— rec_max を下げない
+rooting は非末尾再帰 1 段あたり root-depth =3N+6= を消費するため、32768 slot 固定では N=15000 で
+region が溢れる。初版は rec_max を 100000→16000 に下げて回避したが、**実測すると非末尾再帰の実効上限が
+N≈20000 → N≈5000-7000 へ約 1/4 低下**する実質的な機能後退だった。bss は zero-fill で「触るまで RSS
+コスト無し」（§11.37 Stage 2 の設計根拠そのもの）なので、*region を 4 MiB（131072 slot）へ拡大し
+rec_max=100000 を維持*する方を採った。=arena-base.o= の bss size と region 以降の全 symbol offset は
+=1048576= 基準の式で書かれているので、その 16 箇所のみを =4194304= へ同期更新（無関係な同値定数には
+触れない）。実測で N=20000 の成功を回復し、=recursion-guard-smoke= も PASS。
+
+** 検証（すべて実測）
+- =make compile= exit 0（warnings=errors）、=make parens-check= checked=463 findings=0。
+- =make emacs-parity= checked=19967 findings=0（19967 bytes identical to stock Emacs）。
+- =make standalone-reader-test= checked=27 findings=0（IPv6 socket smoke 含む全 smoke PASS）。
+- =test/nelisp-standalone-target-test.el= ERT 55/55（bss layout の期待 offset は 4 MiB 基準の式へ更新）。
+- =recursion-guard-smoke= PASS（shallow=1000 / deep=excessive-lisp-nesting）。
+- *armed mid-form collect（=(nelisp--debug-switch 5)=）下で 500k loop*: result=500000、**trip=0**、
+  fired=7、poison hit 無し。poison ON で **20,458,482 object が実際に free**。
+  = rooting 下で mid-form collect が sound に大量回収する、の実証。
+
+** DoD #4「loop RSS が bounded」は未達 — ただし真因は Stage 3 ではない（切り分け実測）
+| 指標 | rooting 前 | rooting 後 |
+| poison count（実 free 数） | 21,063,727 | 20,458,482 |
+| trip（root 漏れ） | 0 | 0 |
+| armed peak RSS（500k） | 339.9 MB | 340.2 MB |
+| armed RSS slope | ~262 B/iter | ~262 B/iter |
+collect は rooting の前から既に 2000 万 object 規模を正しく回収しており、rooting はそれを *sound に*
+する（trip=0 を保証する）役割を果たした。にもかかわらず RSS が線形に増えるのは、**sweep が chunk を
+OS へ返さず、freelist の exact-fit reuse も取りこぼす**ためで、これは §11.41 が残件として自ら予告した
+*Stage 4c/4d（compaction / trigger 調整 / safepoint 拡張）*の領域である。DoD #4 を Stage 3 に置いたのは
+本書の見立て違いで、Stage 3 の達成条件は「rooting 下で collect が sound（trip=0 / poison hit 無し）」
+であり、それは満たされた。armed は dormant 比で 807 MB → 340 MB（-58%）。
+
+** 残（Stage 4c/4d、次の一手）
+1. sweep が空 chunk を munmap して RSS を返す（現状は返さない = 線形増の主因）。
+2. freelist exact-fit reuse の取りこぼし解消（同サイズ block の再利用率を上げる）。
+3. safepoint を nested call / multi-form body へ拡張（§11.41 の 4c）。
+4. 2-form / 4-form battery に残る freelist guard trip 1/2（rooting 前の binary でも同数 = *既存バグ*で
+   Stage 3 起因ではない。切り分け済み、Stage 4/5 で回収）。

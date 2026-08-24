@@ -496,7 +496,7 @@ storage — not an arena reservation."
    ;; perturbs the arena chunk-growth VA layout and corrupts the freelist on the
    ;; next collect (Doc 152 §11.30-33 class; confirmed: bare os_alloc_chunk +
    ;; garbage-loop -> SIGSEGV in nl_freelist_take).  bss is zero-fill (no file /
-   ;; RSS cost until touched).  nl_rootstack_region @ +16 = 32768 32-byte slots.
+   ;; RSS cost until touched).  nl_rootstack_region @ +16 = 131072 32-byte slots (4 MiB; enlarged from 1 MiB for Doc 152 Stage 3 rooting, which consumes root-depth 3N+6 per non-tail recursion).
    ;; Doc 152 §11.39 Stage 3a: nl_gc_diag (64B) after the region = permanent GC
    ;; diagnostic block (+0 trip-count, +8/16/24 first-bad cur/bt/want, +32
    ;; poison-on-free enable, +40 poison-fill count).  Read/toggle via the
@@ -595,43 +595,43 @@ storage — not an arena reservation."
    ;; current-chunk descriptor @+8, active flag @+16).  The section entry
    ;; uses this driver-owned state to force every allocating worker onto the
    ;; CAS bump path and the exit checks that no chunk growth occurred.
-   (list (cons 'bss (+ 57616 1048576 96 176 24)))
+   (list (cons 'bss (+ 57616 4194304 96 176 24)))
    (list (nelisp-link-symbol "nl_arena_base" 0
                              :section 'bss :bind 'global :type 'object)
          (nelisp-link-symbol "nl_rootstack_top" 8
                              :section 'bss :bind 'global :type 'object)
          (nelisp-link-symbol "nl_rootstack_region" 16
                              :section 'bss :bind 'global :type 'object)
-         (nelisp-link-symbol "nl_gc_diag" (+ 16 1048576)
+         (nelisp-link-symbol "nl_gc_diag" (+ 16 4194304)
                              :section 'bss :bind 'global :type 'object)
-         (nelisp-link-symbol "nl_gc_loop_ctx" (+ 80 1048576)
+         (nelisp-link-symbol "nl_gc_loop_ctx" (+ 80 4194304)
                              :section 'bss :bind 'global :type 'object)
-         (nelisp-link-symbol "nl_fa_tbl_base" (+ 57488 1048576)
+         (nelisp-link-symbol "nl_fa_tbl_base" (+ 57488 4194304)
                              :section 'bss :bind 'global :type 'object)
-         (nelisp-link-symbol "nl_frame_push_sym0" (+ 57496 1048576)
+         (nelisp-link-symbol "nl_frame_push_sym0" (+ 57496 4194304)
                              :section 'bss :bind 'global :type 'object)
-         (nelisp-link-symbol "nl_mxcache_epoch" (+ 57568 1048576)
+         (nelisp-link-symbol "nl_mxcache_epoch" (+ 57568 4194304)
                              :section 'bss :bind 'global :type 'object)
-         (nelisp-link-symbol "nl_mxcache_table_base" (+ 57576 1048576)
+         (nelisp-link-symbol "nl_mxcache_table_base" (+ 57576 4194304)
                              :section 'bss :bind 'global :type 'object)
-         (nelisp-link-symbol "nl_mxcache_disable_lookup" (+ 57584 1048576)
+         (nelisp-link-symbol "nl_mxcache_disable_lookup" (+ 57584 4194304)
                              :section 'bss :bind 'global :type 'object)
-         (nelisp-link-symbol "nl_bind_clone_force" (+ 57592 1048576)
+         (nelisp-link-symbol "nl_bind_clone_force" (+ 57592 4194304)
                              :section 'bss :bind 'global :type 'object)
-         (nelisp-link-symbol "nl_fvcache_table_base" (+ 57600 1048576)
+         (nelisp-link-symbol "nl_fvcache_table_base" (+ 57600 4194304)
                              :section 'bss :bind 'global :type 'object)
-         (nelisp-link-symbol "nl_fvcache_disable_lookup" (+ 57608 1048576)
+         (nelisp-link-symbol "nl_fvcache_disable_lookup" (+ 57608 4194304)
                              :section 'bss :bind 'global :type 'object)
-         (nelisp-link-symbol "nl_frame_push_sym1" (+ 57528 1048576)
+         (nelisp-link-symbol "nl_frame_push_sym1" (+ 57528 4194304)
                              :section 'bss :bind 'global :type 'object)
-         (nelisp-link-symbol "nl_dynalign_rsp_save" (+ 57560 1048576)
+         (nelisp-link-symbol "nl_dynalign_rsp_save" (+ 57560 4194304)
                              :section 'bss :bind 'global :type 'object)
-         (nelisp-link-symbol "nl_alloc_check" (+ 57616 1048576)
+         (nelisp-link-symbol "nl_alloc_check" (+ 57616 4194304)
                              :section 'bss :bind 'global :type 'object)
-         (nelisp-link-symbol "nl_bt_snapshot" (+ 57616 1048576 96)
+         (nelisp-link-symbol "nl_bt_snapshot" (+ 57616 4194304 96)
                              :section 'bss :bind 'global :type 'object)
          (nelisp-link-symbol "nl_thread_parallel_ctx"
-                             (+ 57616 1048576 96 176)
+                             (+ 57616 4194304 96 176)
                              :section 'bss :bind 'global :type 'object))
    nil))
 
@@ -4713,7 +4713,7 @@ leave symbols unresolved at link time."
     ;; 0=read, 1/2=poison on/off, 3/4=push/pop loop context, 5/6=arm/disarm mid-form collect, 7/8=collections off/on, 9/10=free-list reuse off/on, 11/12=compaction on/off, 13/14=macroexpansion-cache off/on, 15/16=force/allow legacy bind clone, 17/18=closure freevar-cache off/on.
     ;; Returns the list
     ;; (trip-count bad-cur bad-bt bad-want poison-count poison-enable
-    ;;  context-depth mid-form-fired-count bind-legacy-force).
+    ;;  context-depth mid-form-fired-count bind-legacy-force root-depth).
     ;; Doc 170 Stage 2: debug-switch extension codes (19+), split out so
     ;; the historical 18-arm chain stays untouched.  ARG0:
     ;;   19 = enable checked-allocator stamping (guard/site suffix on
@@ -4814,12 +4814,13 @@ leave symbols unresolved at link time."
                                             ;; 19+ live in the extension
                                             ;; dispatcher below.
                                             (bf_debug_switch_ext args)))))))))))))))))))
-        (let* ((nils (alloc-bytes 32 8)) (s8 (alloc-bytes 32 8)) (s7 (alloc-bytes 32 8)) (s6 (alloc-bytes 32 8)) (s5 (alloc-bytes 32 8)) (s4 (alloc-bytes 32 8))
+        (let* ((nils (alloc-bytes 32 8)) (s9 (alloc-bytes 32 8)) (s8 (alloc-bytes 32 8)) (s7 (alloc-bytes 32 8)) (s6 (alloc-bytes 32 8)) (s5 (alloc-bytes 32 8)) (s4 (alloc-bytes 32 8))
                (s3 (alloc-bytes 32 8)) (s2 (alloc-bytes 32 8)) (s1 (alloc-bytes 32 8)))
           (seq
             (wf_write_nil nils)
-            ;; 9th element (tail): bind-path legacy force flag.
-            (wf_cons_int (ptr-read-u64 (data-addr nl_bind_clone_force) 0) nils s8)
+            ;; 10th element (tail): active Stage-2 root-stack depth.
+            (wf_cons_int (nl_root_depth) nils s9)
+            (wf_cons_int (ptr-read-u64 (data-addr nl_bind_clone_force) 0) s9 s8)
             (wf_cons_int (ptr-read-u64 (data-addr nl_gc_loop_ctx) 32) s8 s7)
             (wf_cons_int (ptr-read-u64 (data-addr nl_gc_loop_ctx) 0) s7 s6)
             (wf_cons_int (ptr-read-u64 (data-addr nl_gc_diag) 32) s6 s5)
@@ -13912,77 +13913,98 @@ never sees it), which blocked the anvil-pkg ERT suite at its first test."
 form_ptr (the whole macro-call FORM, = the cache key) and stores the freshly
 computed expansion into `nl_mxcache_store' before evaluating it.")
 
-(defconst nelisp-standalone--mxcache-eval-inner-cons
-  '(defun nl_eval_inner_cons (form_ptr head_ptr tail_ptr env out)
-     (let* ((env_ptr env) (head_tag (sexp-tag head_ptr)))
-       (if (= head_tag 4)
-           (let* ((sp (nl_apply_special head_ptr tail_ptr env out)))
-             (if (= sp 0) 0
-               (if (= sp 1) 1
-                 (let*
-                     ((func_slot (alloc-bytes 32 8))
-                      (mirror_ptr (+ env 0)) (unbound_ptr (+ env 64)))
-                   (let*
-                       ((rc_lu
-                         (nelisp_env_lookup_function mirror_ptr
-                                                     unbound_ptr head_ptr
-                                                     func_slot)))
-                     (if (= rc_lu 0)
-                         (if (= (nl_cons_is_macro func_slot) 1)
-                             (nl_cons_macro_apply_eval form_ptr func_slot
-                                                       tail_ptr env out)
-                           (let* ((args_slot (alloc-bytes 32 8)))
-                             (let*
-                                 ((rc_args
-                                   (nl_eval_arg_list tail_ptr env_ptr
-                                                     args_slot)))
-                               (if (= rc_args 0)
-                                   (nl_apply_function func_slot args_slot
-                                                      env_ptr out)
-                                 1))))
-                       (nl_cons_stash_void_function env head_ptr)))))))
-         (let* ((func_slot (alloc-bytes 32 8)))
-           (let*
-               ((rc_eval (nelisp_eval_call head_ptr env_ptr func_slot)))
-             (if (= rc_eval 0)
-                 (let* ((args_slot (alloc-bytes 32 8)))
-                   (let*
-                       ((rc_args
-                         (nl_eval_arg_list tail_ptr env_ptr args_slot)))
-                     (if (= rc_args 0)
-                         (nl_apply_function func_slot args_slot env_ptr
-                                            out)
-                       1)))
-               1))))))
-  "perf/macroexpansion-cache + the existing void-function-miss fix, combined:
-adds `form_ptr' as nl_eval_inner_cons's new first parameter (threaded from
-nl_ei_cons_tail) so `nl_cons_macro_apply_eval' can key the cache off it;
-also folds in the void-function-miss stash fix unchanged.")
+(defconst nelisp-standalone--mxcache-eval-inner-cons-rooted
+  '((defun nl_cons_root_finish (root_mark status)
+      (seq (nl_root_release root_mark) status))
+    (defun nl_eval_inner_cons_after_args
+        (rc_args env out root_mark func_slot args_slot)
+      (if (= rc_args 0)
+          (nl_cons_root_finish
+           root_mark (nl_apply_function func_slot args_slot env out))
+        (nl_cons_root_finish root_mark 1)))
+    (defun nl_eval_inner_cons_eval_args
+        (tail_ptr env out root_mark func_slot args_slot)
+      (nl_eval_inner_cons_after_args
+       (nl_eval_arg_list tail_ptr env args_slot)
+       env out root_mark func_slot args_slot))
+    (defun nl_eval_inner_cons_after_lookup
+        (rc_lu form_ptr head_ptr tail_ptr env out root_mark func_slot)
+      (if (= rc_lu 0)
+          (if (= (sexp-tag func_slot) 0)
+              (nl_cons_root_finish
+               root_mark (nl_cons_stash_void_function env head_ptr))
+            (if (= (nl_cons_is_macro func_slot) 1)
+                (nl_cons_root_finish
+                 root_mark
+                 (nl_cons_macro_apply_eval
+                  form_ptr func_slot tail_ptr env out))
+              (nl_eval_inner_cons_eval_args
+               tail_ptr env out root_mark func_slot (alloc-bytes 32 8))))
+        (nl_cons_root_finish
+         root_mark (nl_cons_stash_void_function env head_ptr))))
+    (defun nl_eval_inner_cons_symbol_slot
+        (form_ptr head_ptr tail_ptr env out root_mark func_slot)
+      (nl_eval_inner_cons_after_lookup
+       (nelisp_env_lookup_function (+ env 0) (+ env 64) head_ptr func_slot)
+       form_ptr head_ptr tail_ptr env out root_mark func_slot))
+    (defun nl_eval_inner_cons_symbol_mark
+        (form_ptr head_ptr tail_ptr env out root_mark)
+      (nl_eval_inner_cons_symbol_slot
+       form_ptr head_ptr tail_ptr env out root_mark (nl_root_reserve)))
+    (defun nl_eval_inner_cons_symbol_dispatch
+        (special_rc form_ptr head_ptr tail_ptr env out)
+      (if (= special_rc 0) 0
+        (if (= special_rc 1) 1
+          (nl_eval_inner_cons_symbol_mark
+           form_ptr head_ptr tail_ptr env out (nl_root_mark)))))
+    (defun nl_eval_inner_cons_after_head_eval
+        (rc_eval tail_ptr env out root_mark func_slot)
+      (if (= rc_eval 0)
+          (nl_eval_inner_cons_eval_args
+           tail_ptr env out root_mark func_slot (alloc-bytes 32 8))
+        (nl_cons_root_finish root_mark 1)))
+    (defun nl_eval_inner_cons_callable_slot
+        (head_ptr tail_ptr env out root_mark func_slot)
+      (nl_eval_inner_cons_after_head_eval
+       (nelisp_eval_call head_ptr env func_slot)
+       tail_ptr env out root_mark func_slot))
+    (defun nl_eval_inner_cons_callable_mark
+        (head_ptr tail_ptr env out root_mark)
+      (nl_eval_inner_cons_callable_slot
+       head_ptr tail_ptr env out root_mark (nl_root_reserve)))
+    (defun nl_eval_inner_cons (form_ptr head_ptr tail_ptr env out)
+      (if (= (sexp-tag head_ptr) 4)
+          (nl_eval_inner_cons_symbol_dispatch
+           (nl_apply_special head_ptr tail_ptr env out)
+           form_ptr head_ptr tail_ptr env out)
+        (nl_eval_inner_cons_callable_mark
+         head_ptr tail_ptr env out (nl_root_mark)))))
+  "Doc 152 Stage 3c rooted replacement for nl_eval_inner_cons.
+
+The resolved/evaluated function value lives directly in a Stage-2 root slot
+from lookup/head-eval through macro testing, argument evaluation and apply.
+The saved top and slot address are threaded only as helper arguments.  Every
+status return restores the saved top, including error and throw propagation.")
 
 (defun nelisp-standalone--patch-combiner-cons-mxcache (src)
   "Return combiner-cons SRC (already run through
 `nelisp-standalone--patch-combiner-cons-full') with `nl_cons_macro_apply_eval'
-and `nl_eval_inner_cons' swapped for the cache-aware versions above."
-  (cons (car src)
-        (mapcar
-         (lambda (form)
-           (cond
-            ((and (consp form) (eq (car form) 'defun)
-                  (eq (cadr form) 'nl_cons_macro_apply_eval))
-             nelisp-standalone--mxcache-macro-apply-eval)
-            ((and (consp form) (eq (car form) 'defun)
-                  (eq (cadr form) 'nl_eval_inner_cons))
-             ;; The cache-aware body REPLACES the one `--patch-combiner-cons-full'
-             ;; just rewrote, so the nil-function-cell arm has to be re-applied
-             ;; here or it is silently discarded -- which is exactly what
-             ;; happened the first time round: `(fmakunbound 'f) (f 1)' still
-             ;; answered `(void-function nil)' from this path while `funcall'
-             ;; and `apply' were already correct.
-             (nelisp-standalone--patch-nil-cell-void-function-1
-              nelisp-standalone--mxcache-eval-inner-cons
-              'rc_lu 'func_slot 'head_ptr))
-            (t form)))
-         (cdr src))))
+and `nl_eval_inner_cons' swapped for the cache-aware/rooted versions above."
+  (cons
+   (car src)
+   (let (out)
+     (dolist (form (cdr src))
+       (cond
+        ((and (consp form) (eq (car form) 'defun)
+              (eq (cadr form) 'nl_cons_macro_apply_eval))
+         (push nelisp-standalone--mxcache-macro-apply-eval out))
+        ((and (consp form) (eq (car form) 'defun)
+              (eq (cadr form) 'nl_eval_inner_cons))
+         (dolist (replacement
+                  nelisp-standalone--mxcache-eval-inner-cons-rooted)
+           (push replacement out)))
+        (t (push form out))))
+     (nreverse out))))
 
 ;; CORRECTED arg-list walk.  Byte-identical to nelisp-cc-evalport-combiner-arglist
 ;; --source EXCEPT the success tail wraps the constructor in (seq ... 0): the
@@ -14012,28 +14034,69 @@ and `nl_eval_inner_cons' swapped for the cache-aware versions above."
         (if (= (ptr-read-u64 268435680 0) 1)
             (nl_seq2 (nl_gc_free_block (- slot 8)) word)
           word)))
+    (defun nl_eval_arg_list_immediate_after
+        (rc_rest car_word acc_slot rest_slot)
+      (if (= rc_rest 0)
+          (seq
+           (nelisp_cons_construct
+            car_word
+            (nl_arg_slot_recycle rest_slot (nl_val_store_word rest_slot))
+            acc_slot)
+           0)
+        1))
+    (defun nl_eval_arg_list_immediate
+        (cur_ptr env_ptr acc_slot rest_slot)
+      (nl_eval_arg_list_immediate_after
+       (nl_eval_arg_list_walk (nl_cons_cdr_ptr cur_ptr) env_ptr rest_slot)
+       (nl_val_store_word (nl_cons_car_ptr cur_ptr)) acc_slot rest_slot))
+    ;; Doc 152 Stage 3b.  ROOT-MARK and EVAL-SLOT are helper arguments,
+    ;; never runtime let bindings: cc-unit locals must not carry a dynamic
+    ;; value across eval/recursive calls.  Every rc path restores ROOT-MARK,
+    ;; which covers ordinary return plus the evaluator's error/throw status
+    ;; propagation.  EVAL-SLOT is BSS-owned root storage, so unlike the old
+    ;; arena scratch it must not pass through nl_arg_slot_recycle.
+    (defun nl_eval_arg_list_after_rest
+        (rc_rest acc_slot root_mark eval_slot rest_slot)
+      (if (= rc_rest 0)
+          (seq
+           (nelisp_cons_construct
+            eval_slot
+            (nl_arg_slot_recycle rest_slot (nl_val_store_word rest_slot))
+            acc_slot)
+           (nl_root_release root_mark)
+           0)
+        (seq (nl_root_release root_mark) 1)))
+    (defun nl_eval_arg_list_recurse
+        (cur_ptr env_ptr acc_slot root_mark eval_slot rest_slot)
+      (nl_eval_arg_list_after_rest
+       (nl_eval_arg_list_walk (nl_cons_cdr_ptr cur_ptr) env_ptr rest_slot)
+       acc_slot root_mark eval_slot rest_slot))
+    (defun nl_eval_arg_list_after_eval
+        (rc_eval cur_ptr env_ptr acc_slot root_mark eval_slot rest_slot)
+      (if (= rc_eval 0)
+          (nl_eval_arg_list_recurse
+           cur_ptr env_ptr acc_slot root_mark eval_slot rest_slot)
+        (seq (nl_root_release root_mark) 1)))
+    (defun nl_eval_arg_list_with_slot
+        (cur_ptr env_ptr acc_slot root_mark eval_slot rest_slot)
+      (nl_eval_arg_list_after_eval
+       (nelisp_eval_call (nl_cons_car_ptr cur_ptr) env_ptr eval_slot)
+       cur_ptr env_ptr acc_slot root_mark eval_slot rest_slot))
+    (defun nl_eval_arg_list_with_mark
+        (cur_ptr env_ptr acc_slot root_mark rest_slot)
+      (nl_eval_arg_list_with_slot
+       cur_ptr env_ptr acc_slot root_mark (nl_root_reserve) rest_slot))
+    (defun nl_eval_arg_list_dispatch (cur_ptr env_ptr acc_slot rest_slot)
+      ;; Doc 150 P1: a self-eval immediate literal arg (tag<4) needs no
+      ;; eval/root slot.  Every other argument takes the rooted path.
+      (if (< (nl_val_tag (nl_cons_car_ptr cur_ptr)) 4)
+          (nl_eval_arg_list_immediate cur_ptr env_ptr acc_slot rest_slot)
+        (nl_eval_arg_list_with_mark
+         cur_ptr env_ptr acc_slot (nl_root_mark) rest_slot)))
     (defun nl_eval_arg_list_walk (cur_ptr env_ptr acc_slot)
       (if (= (ptr-read-u64 cur_ptr 0) 7)
-          (let* ((car_ptr (nl_cons_car_ptr cur_ptr)) (cdr_ptr (nl_cons_cdr_ptr cur_ptr))
-                 (rest_slot (alloc-bytes 32 8)))
-            ;; Doc 146 §3.0 step 4: a self-eval immediate literal arg (tag<4:
-            ;; Nil/T/Int/Float) needs NO eval and NO 32-byte eval_slot -- load it
-            ;; straight to a value word.  This eliminates the per-literal-arg slot
-            ;; (the producer-side memory win on the hottest path).  Non-literal
-            ;; args keep the eval-into-slot + rc check unchanged.
-            (if (< (nl_val_tag car_ptr) 4)
-                (let* ((rc_rest (nl_eval_arg_list_walk cdr_ptr env_ptr rest_slot)))
-                  (if (= rc_rest 0)
-                      (seq (nelisp_cons_construct (nl_val_store_word car_ptr) (nl_arg_slot_recycle rest_slot (nl_val_store_word rest_slot)) acc_slot) 0)
-                    1))
-              (let* ((eval_slot (alloc-bytes 32 8))
-                     (rc_eval (nelisp_eval_call car_ptr env_ptr eval_slot)))
-                (if (= rc_eval 0)
-                    (let* ((rc_rest (nl_eval_arg_list_walk cdr_ptr env_ptr rest_slot)))
-                      (if (= rc_rest 0)
-                          (seq (nelisp_cons_construct (nl_arg_slot_recycle eval_slot (nl_val_store_word eval_slot)) (nl_arg_slot_recycle rest_slot (nl_val_store_word rest_slot)) acc_slot) 0)
-                        1))
-                  1))))
+          (nl_eval_arg_list_dispatch
+           cur_ptr env_ptr acc_slot (alloc-bytes 32 8))
         (nl_write_nil_slot acc_slot)))
     (defun nl_eval_arg_list (args_ptr env out_list_slot)
       (let* ((env_ptr env)) (nl_eval_arg_list_walk args_ptr env_ptr out_list_slot)))))
@@ -14398,15 +14461,20 @@ KERNEL32!ExitProcess with the driver return already in x0/w0."
           (nl_sexp_clone_into globals (+ ctx 0))
           (nl_sexp_clone_into frames (+ ctx 32))
           (nl_sexp_clone_into unbound (+ ctx 64))
-          ;; rec_max 100000.  RE-MEASURED 2026-08-16: the real ceiling on the 1 GiB
+          ;; rec_max 100000, retained after Doc 152 Stage 3: rooting adds root-depth 3N+6 per non-tail recursion, so the root region was enlarged 1 MiB -> 4 MiB (131072 entries) rather than lowering the recursion budget.  Measured 2026-08-25:
+;; the non-tail recursion-guard probe holds three root entries per open call
+;; (root-depth=3N+6: N=10000 succeeds at 30006; N=15000 overruns the fixed
+;; 32768-entry Stage-2 region).  At the previously measured ~2 rec increments
+;; per user call, 16000 fires near N=8000/root-depth=24006 and leaves ~8700
+;; entries of margin.  The previous rec_max 100000 and the first 50000
+;; recalibration both fired after the root-region ceiling.
+;; This also remains below the 1 GiB native stack ceiling measured 2026-08-16:
 ;; mmap'd native stack is ~136k rec levels, not the ~404k this comment used to
 ;; claim -- a self-recursive elisp function survives depth 65000 and SIGSEGVs by
 ;; 72000 (~2 rec increments per call).  rec_max 300000 therefore sat ABOVE the
 ;; ceiling, so deep recursion died as a silent exit 127 instead of signalling
-;; `excessive-lisp-nesting': the guard could never fire.  100000 is ~74% of the
-;; measured ceiling, restoring the original intent (error at the guard, never
-;; SIGSEGV).  The budget is best-effort, not a proof: a body with fatter frames
-;; costs more native stack per level, so re-measure when the eval frame grows.
+;; `excessive-lisp-nesting': the guard could never fire.  The budget remains
+;; best-effort: re-measure both root and native stack use when eval frames grow.
 (ptr-write-u64 ctx 96 0) (ptr-write-u64 ctx 104 100000)
           (nl_alloc_symbol opbuf 1 op_sym)
           (ptr-write-u64 int1 0 2) (ptr-write-u64 int1 8 ,a) (ptr-write-u64 int1 16 0) (ptr-write-u64 int1 24 0)
@@ -18444,12 +18512,12 @@ gets no native definitions and is gated by
      ;;   +120      private root-stack top metadata
      ;;   +128..159 result Sexp slot
      ;;   +4096..   private 1 MiB root-stack reserve
-     ;; The current root-stack API is still dormant (there are zero
-     ;; nl_root_reserve callers), so the reserve is not installed in the
-     ;; process-global nl_rootstack_top.  Doing so would create the very race
-     ;; this spike avoids.  With collection inhibited no root scan is needed;
-     ;; the private reserve makes that ABI boundary explicit for a future
-     ;; per-thread-root conversion.
+     ;; Doc 152 Stage 3 uses the process-global root stack in the single-thread
+     ;; evaluator.  This Tier-3a worker must still NOT install its private
+     ;; reserve in process-global nl_rootstack_top: doing so would create the
+     ;; very race this spike avoids.  With collection inhibited no root scan is
+     ;; needed; the private reserve makes the ABI boundary explicit for a
+     ;; future per-thread-root conversion.
      '(defun nl_thread_private_env_make (penv)
         (let* ((region (syscall-direct 9 0 1052672 3 34 (- 0 1) 0)))
           (if (< region 4096)
@@ -20195,15 +20263,20 @@ correctly."
         ;; getcwd(2) answers it here, with the trailing slash Emacs keeps.
         (nl_os_getcwd dd_value)
         (nl_env_set_value ctx dd_sym dd_value)
-        ;; rec_max 100000.  RE-MEASURED 2026-08-16: the real ceiling on the 1 GiB
+        ;; rec_max 100000, retained after Doc 152 Stage 3: rooting adds root-depth 3N+6 per non-tail recursion, so the root region was enlarged 1 MiB -> 4 MiB (131072 entries) rather than lowering the recursion budget.  Measured 2026-08-25:
+;; the non-tail recursion-guard probe holds three root entries per open call
+;; (root-depth=3N+6: N=10000 succeeds at 30006; N=15000 overruns the fixed
+;; 32768-entry Stage-2 region).  At the previously measured ~2 rec increments
+;; per user call, 16000 fires near N=8000/root-depth=24006 and leaves ~8700
+;; entries of margin.  The previous rec_max 100000 and the first 50000
+;; recalibration both fired after the root-region ceiling.
+;; This also remains below the 1 GiB native stack ceiling measured 2026-08-16:
 ;; mmap'd native stack is ~136k rec levels, not the ~404k this comment used to
 ;; claim -- a self-recursive elisp function survives depth 65000 and SIGSEGVs by
 ;; 72000 (~2 rec increments per call).  rec_max 300000 therefore sat ABOVE the
 ;; ceiling, so deep recursion died as a silent exit 127 instead of signalling
-;; `excessive-lisp-nesting': the guard could never fire.  100000 is ~74% of the
-;; measured ceiling, restoring the original intent (error at the guard, never
-;; SIGSEGV).  The budget is best-effort, not a proof: a body with fatter frames
-;; costs more native stack per level, so re-measure when the eval frame grows.
+;; `excessive-lisp-nesting': the guard could never fire.  The budget remains
+;; best-effort: re-measure both root and native stack use when eval frames grow.
 (ptr-write-u64 ctx 96 0) (ptr-write-u64 ctx 104 100000)
         ;; M11 env inherit: stash the initial-stack envp (= sp0 + (argc+2)*8,
         ;; the char** right after argv's NULL) in arena slot +144 (268435600)
@@ -21307,33 +21380,70 @@ always return 0, so `signal' flows to the builtin applyfn (bf_signal) instead of
        (seq (nl_sexp_clone_into tail_ptr out_slot) 0)))
   "HEAD ++ TAIL into OUT-SLOT, returning rc 0 on success.")
 
-(defconst nelisp-standalone--reader-do-apply-fixed
-  '(defun nl_apply_do_apply (args_list_ptr env out)
-     (let* ((arg0_ptr (nl_apply_list_nth args_list_ptr 0)))
-       (if (= arg0_ptr 0) (nl_apply_stash_wta env args_list_ptr)
-         (let* ((arg0_tag (ptr-read-u64 arg0_ptr 0))
-                (rest_args (if (= (ptr-read-u64 args_list_ptr 0) 7)
-                               (nl_cons_cdr_ptr args_list_ptr)
-                             args_list_ptr)))
-           (let* ((func_slot (alloc-bytes 32 8)))
-             (let* ((resolve_rc
-                     (if (= arg0_tag 4)
-                         (let* ((mirror_ptr (+ env 0)) (unbound_ptr (+ env 64)))
-                           (nelisp_env_lookup_function mirror_ptr unbound_ptr arg0_ptr func_slot))
-                       (seq (nl_sexp_clone_into arg0_ptr func_slot) 0))))
-               (if (= resolve_rc 0)
-                   (let* ((prefix_slot (alloc-bytes 32 8))
-                          (last_ptr (nl_apply_list_last_cdr rest_args)))
-                     (let* ((rc_init (nl_apply_list_init rest_args prefix_slot)))
-                       (if (= rc_init 0)
-                           (let* ((spliced_slot (alloc-bytes 32 8)))
-                             (let* ((rc_app (nl_apply_list_append prefix_slot last_ptr spliced_slot)))
-                               (if (= rc_app 0)
-                                   (nl_apply_function func_slot spliced_slot env out)
-                                 1)))
-                         1)))
-                 1)))))))
-  "Rc-correct `apply' handler (non-symbol resolve arm forces rc 0).")
+(defconst nelisp-standalone--reader-do-apply-rooted
+  '((defun nl_apply_root_finish (root_mark status)
+      (seq (nl_root_release root_mark) status))
+    (defun nl_apply_do_apply_after_append
+        (rc_app env out root_mark func_slot spliced_slot)
+      (if (= rc_app 0)
+          (nl_apply_root_finish
+           root_mark (nl_apply_function func_slot spliced_slot env out))
+        (nl_apply_root_finish root_mark 1)))
+    (defun nl_apply_do_apply_append
+        (prefix_slot last_ptr env out root_mark func_slot spliced_slot)
+      (nl_apply_do_apply_after_append
+       (nl_apply_list_append prefix_slot last_ptr spliced_slot)
+       env out root_mark func_slot spliced_slot))
+    (defun nl_apply_do_apply_after_init
+        (rc_init rest_args env out root_mark func_slot prefix_slot)
+      (if (= rc_init 0)
+          (nl_apply_do_apply_append
+           prefix_slot (nl_apply_list_last_cdr rest_args)
+           env out root_mark func_slot (alloc-bytes 32 8))
+        (nl_apply_root_finish root_mark 1)))
+    (defun nl_apply_do_apply_list
+        (rest_args env out root_mark func_slot prefix_slot)
+      (nl_apply_do_apply_after_init
+       (nl_apply_list_init rest_args prefix_slot)
+       rest_args env out root_mark func_slot prefix_slot))
+    (defun nl_apply_do_apply_after_resolve
+        (resolve_rc arg0_ptr args_list_ptr env out root_mark func_slot)
+      (if (= resolve_rc 0)
+          (if (= (sexp-tag func_slot) 0)
+              (nl_apply_root_finish
+               root_mark (nl_cons_stash_void_function env arg0_ptr))
+            (nl_apply_do_apply_list
+             (if (= (sexp-tag args_list_ptr) 7)
+                 (nl_cons_cdr_ptr args_list_ptr)
+               args_list_ptr)
+             env out root_mark func_slot (alloc-bytes 32 8)))
+        (nl_apply_root_finish
+         root_mark (nl_cons_stash_void_function env arg0_ptr))))
+    (defun nl_apply_do_apply_resolve
+        (arg0_ptr args_list_ptr env out root_mark func_slot)
+      (nl_apply_do_apply_after_resolve
+       (if (= (sexp-tag arg0_ptr) 4)
+           (nelisp_env_lookup_function
+            (+ env 0) (+ env 64) arg0_ptr func_slot)
+         (seq (nl_sexp_clone_into arg0_ptr func_slot) 0))
+       arg0_ptr args_list_ptr env out root_mark func_slot))
+    (defun nl_apply_do_apply_marked
+        (arg0_ptr args_list_ptr env out root_mark)
+      (nl_apply_do_apply_resolve
+       arg0_ptr args_list_ptr env out root_mark (nl_root_reserve)))
+    (defun nl_apply_do_apply_arg0 (arg0_ptr args_list_ptr env out)
+      (if (= arg0_ptr 0)
+          (nl_apply_stash_wta env args_list_ptr)
+        (nl_apply_do_apply_marked
+         arg0_ptr args_list_ptr env out (nl_root_mark))))
+    (defun nl_apply_do_apply (args_list_ptr env out)
+      (nl_apply_do_apply_arg0
+       (nl_apply_list_nth args_list_ptr 0) args_list_ptr env out)))
+  "Doc 152 Stage 3d rooted, rc-correct `apply' handler.
+
+The resolved function lives directly in a Stage-2 root slot through list
+initialisation, append and apply.  Saved top and slot values are threaded as
+helper arguments, and every returned status restores the saved top.")
 
 ;; FINDINGS.md recommendation 1(a) (audit remaining rc!=0-without-stash call
 ;; sites, the same class already fixed for void-function-miss in
@@ -21412,26 +21522,29 @@ miss arm (FINDINGS.md recommendation 1(a)) instead of a bare rc=1.  All
 patches operate on the same combiner-apply source.  Keeps lisp/ pristine."
   (nelisp-standalone--patch-combiner-apply-void-function-miss
    (nelisp-standalone--patch-combiner-apply-deferred-signal
-    (cons (car src)
-          (mapcar (lambda (form)
-                    (cond
-                     ((and (consp form) (eq (car form) 'defun)
-                           (eq (cadr form) 'nl_apply_do_fset))
-                      nelisp-standalone--reader-do-fset-fixed)
-                     ((and (consp form) (eq (car form) 'defun)
-                           (eq (cadr form) 'nl_apply_list_init))
-                      nelisp-standalone--reader-list-init-fixed)
-                     ((and (consp form) (eq (car form) 'defun)
-                           (eq (cadr form) 'nl_apply_list_append))
-                      nelisp-standalone--reader-list-append-fixed)
-                     ((and (consp form) (eq (car form) 'defun)
-                           (eq (cadr form) 'nl_apply_do_apply))
-                      nelisp-standalone--reader-do-apply-fixed)
-                     ((and (consp form) (eq (car form) 'defun)
-                           (eq (cadr form) 'nl_apply_do_symbol_function))
-                      nelisp-standalone--reader-do-symbol-function-fixed)
-                     (t form)))
-                  (cdr src))))))
+    (cons
+     (car src)
+     (apply
+      #'append
+      (mapcar (lambda (form)
+                (cond
+                 ((and (consp form) (eq (car form) 'defun)
+                       (eq (cadr form) 'nl_apply_do_fset))
+                  (list nelisp-standalone--reader-do-fset-fixed))
+                 ((and (consp form) (eq (car form) 'defun)
+                       (eq (cadr form) 'nl_apply_list_init))
+                  (list nelisp-standalone--reader-list-init-fixed))
+                 ((and (consp form) (eq (car form) 'defun)
+                       (eq (cadr form) 'nl_apply_list_append))
+                  (list nelisp-standalone--reader-list-append-fixed))
+                 ((and (consp form) (eq (car form) 'defun)
+                       (eq (cadr form) 'nl_apply_do_apply))
+                  nelisp-standalone--reader-do-apply-rooted)
+                 ((and (consp form) (eq (car form) 'defun)
+                       (eq (cadr form) 'nl_apply_do_symbol_function))
+                  (list nelisp-standalone--reader-do-symbol-function-fixed))
+                 (t (list form))))
+              (cdr src)))))))
 
 ;; WAVE-2 (PATCH 4): condition-case clears the M6 arena signal flag on a clause
 ;; MATCH.  Pairs with PATCH 1 (the errstub no longer clears flag@268435472), so a
@@ -22061,6 +22174,7 @@ loader when it is absent."
                                  nelisp-standalone--reader-control-flow-smoke
                                  nelisp-standalone--reader-malformed-input-smoke
                                  nelisp-standalone--reader-form-location-smoke
+                                 nelisp-standalone--reader-stage3-rootstack-smoke
                                  nelisp-standalone--reader-frame-stack-pop-desync-smoke
                                  nelisp-standalone--reader-bounded-backtrace-smoke
                                  nelisp-standalone--reader-socket-smoke
@@ -23580,6 +23694,82 @@ the one line just read, not a running session count)."
      (message "[standalone-reader] FAIL: form-location smoke: %s"
               (error-message-string err))
      (kill-emacs 1))))
+
+(defun nelisp-standalone--reader-stage3-rootstack-smoke ()
+  "Doc 152 Stage 3: collect/poison and non-local-exit proof for rooted GAPs.
+
+The outer two-argument call keeps `nl_eval_inner_cons''s rooted function slot
+live while its second argument executes a 100k loop.  During the same walk,
+the first evaluated argument remains in `nl_eval_arg_list_walk''s rooted slot.
+Debug switches 19 and 5 respectively poison freed arena objects and arm the
+already-shipped Stage-4b mid-form collector.
+
+The error, throw, unwind-protect and failing-apply probes then make every
+rooted continuation return status 1 as well as status 0.  Equal root depths
+before and after prove that all those existing non-local-exit paths restore
+the saved stack top instead of leaking a root entry."
+  (let* ((src
+          (concat
+           "(progn\n"
+           "  (nelisp--debug-switch 19)\n"
+           "  (nelisp--debug-switch 5)\n"
+           "  (defun nelisp-stage3-pair (a b) (list a b))\n"
+           "  (defun nelisp-stage3-id (x) x)\n"
+           "  (defun nelisp-stage3-fail () (error \"stage3\"))\n"
+           "  (let ((i 0) (cleanup 0) (before 0) (after 0)\n"
+           "        (pair nil) (caught-error 0) (caught-throw 0)\n"
+           "        (caught-unwind 0) (caught-apply 0) (diag nil))\n"
+           "    (setq before (nth 9 (nelisp--debug-switch 0)))\n"
+           "    (setq pair\n"
+           "          (nelisp-stage3-pair\n"
+           "           (list 1 2 3)\n"
+           "           (progn\n"
+           "             (while (< i 200000) (setq i (1+ i)))\n"
+           "             (list 4 5))))\n"
+           "    (setq caught-error\n"
+           "          (condition-case nil\n"
+           "              (nelisp-stage3-id (error \"stage3-error\"))\n"
+           "            (error 11)))\n"
+           "    (setq caught-throw\n"
+           "          (catch 'nelisp-stage3-tag\n"
+           "            (nelisp-stage3-id (throw 'nelisp-stage3-tag 22))))\n"
+           "    (setq caught-unwind\n"
+           "          (condition-case nil\n"
+           "              (nelisp-stage3-id\n"
+           "               (unwind-protect (error \"stage3-unwind\")\n"
+           "                 (setq cleanup 44)))\n"
+           "            (error 33)))\n"
+           "    (setq caught-apply\n"
+           "          (condition-case nil (apply 'nelisp-stage3-fail nil)\n"
+           "            (error 55)))\n"
+           "    (setq after (nth 9 (nelisp--debug-switch 0)))\n"
+           "    (setq diag (nelisp--debug-switch 0))\n"
+           "    (list i (length (car pair)) (length (car (cdr pair)))\n"
+           "          caught-error caught-throw caught-unwind cleanup\n"
+           "          caught-apply before after diag)))"))
+         (rc nil) (value nil))
+    (with-temp-buffer
+      (setq rc (call-process nelisp-standalone--reader-out nil
+                             (list t nil) nil "--eval" src))
+      (condition-case err
+          (setq value (car (read-from-string (buffer-string))))
+        (error
+         (error "stage3 rootstack smoke unreadable: exit=%S stdout=%S (%s)"
+                rc (buffer-string) (error-message-string err)))))
+    (unless (= rc 0)
+      (error "stage3 rootstack smoke exit=%S value=%S" rc value))
+    (unless (equal (cl-subseq value 0 10)
+                   '(200000 3 2 11 22 33 44 55 3 3))
+      (error "stage3 rootstack smoke result/depth mismatch: %S" value))
+    (let ((diag (nth 10 value)))
+      (unless (and (listp diag)
+                   (= (nth 0 diag) 0)
+                   (> (nth 4 diag) 0)
+                   (= (nth 5 diag) 1)
+                   (> (nth 7 diag) 0))
+        (error "stage3 rootstack smoke trip/poison/collect mismatch: %S"
+               diag))))
+  (message "[standalone-reader] stage3 rootstack smoke PASS"))
 
 (defun nelisp-standalone--reader-frame-stack-pop-desync-smoke ()
   "Doc 180 Phase 2 item 1: against-the-bug proof for the gc-context frame

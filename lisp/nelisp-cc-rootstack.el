@@ -15,23 +15,18 @@
 ;; mid-form / safepoint GC be SOUND: the marker no longer has to "guess"
 ;; the live in-flight roots — they are all on this stack.
 ;;
-;; STATE: additive + DORMANT.  Nothing reserves a slot yet (Stage 3 wires
-;; the eval ABI), so `nl_rootstack_init' is never reached, the base ptr
-;; stays 0, and `nl_gc_mark_rootstack' returns 0 immediately.  Adding the
-;; call into `nl_gc_mark_roots' therefore introduces NO new runtime
-;; behaviour until Stage 3 — any error here surfaces at build time, not as
-;; a silent GC heisenbug.
+;; Stage 2 installed this API dormant; Doc 152 Stage 3 activates it from
+;; the evaluator.  A reserved entry is mutable 32-byte Sexp storage: eval
+;; writes the value into the entry, and the marker revisits that same entry
+;; after any allocation/safepoint.  The address of the entry is the handle;
+;; callers must not copy its value into unregistered scratch and keep that
+;; scratch across a safepoint.
 ;;
-;; Control slots (arena reserved prefix [0,0x400); free gap [0xF8,0x2b8],
-;; below the chunk metadata @0x2c0 and chunk-0 desc @0x300):
-;;   (data-addr nl_rootstack_base) (base+0xF8)  = root-stack region base ptr (0 = uninit)
-;;   (data-addr nl_rootstack_top) (base+0x100) = root-stack top ptr (next free slot addr)
-;; Region = a dedicated `nl_os_alloc_chunk' mmap (8 MiB = 262144 32-byte
-;; Sexp slots), like the §11.18 compaction forwarding table: a raw side
-;; region the sweep never walks, so slots are stable.  Each root slot is a
-;; full 32-byte Sexp slot, marked via `nl_gc_mark_slot' exactly like the
-;; ctx / result / out roots, so immediates (Nil/T/Int) are skipped and
-;; heap boxes are traced — identical semantics to the existing roots.
+;; Storage is driver-owned BSS, not arena memory:
+;;   (data-addr nl_rootstack_top)   = next free entry (0 = uninitialised)
+;;   (data-addr nl_rootstack_region)= 32768 fixed 32-byte entries
+;; BSS is outside sweep/compaction, so handles stay stable.  Each entry is
+;; marked via `nl_gc_mark_slot' exactly like ctx/result/out.
 ;;
 ;; API (consumed by Stage 3):
 ;;   nl_root_mark      -> current top (a release marker; LIFO)
@@ -52,6 +47,11 @@
           (ptr-write-u64 (data-addr nl_rootstack_top) 0 (data-addr nl_rootstack_region))
         0))
     (defun nl_root_mark () (ptr-read-u64 (data-addr nl_rootstack_top) 0))
+    (defun nl_root_depth ()
+      (if (= (ptr-read-u64 (data-addr nl_rootstack_top) 0) 0) 0
+        (sar (- (ptr-read-u64 (data-addr nl_rootstack_top) 0)
+                (data-addr nl_rootstack_region))
+             5)))
     ;; Reserve one 32-byte slot at top, zero it, bump top, return slot addr.
     (defun nl_root_reserve_slot (slot)
       (if (= slot 0) 0
@@ -76,10 +76,10 @@
                                      (ptr-read-u64 (data-addr nl_rootstack_top) 0)))))
   "AOT source for the Doc 152 §11.37 Stage 2 dynamic root stack.
 
-Additive + dormant: lazy-inits on the first `nl_root_reserve' (none yet
-until Stage 3), so the base ptr stays 0 and `nl_gc_mark_rootstack' is a
-no-op until the eval ABI parks transients here.  See the Commentary for
-the control-slot layout and the soundness rationale.")
+Lazy-inits on the first `nl_root_reserve'.  Stage-3 evaluator callers use
+the returned mutable entry directly as their eval/function result slot and
+restore a saved `nl_root_mark' on every status path.  See the Commentary for
+the storage layout and soundness rationale.")
 
 (provide 'nelisp-cc-rootstack)
 

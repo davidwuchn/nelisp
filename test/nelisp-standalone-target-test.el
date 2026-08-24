@@ -30,7 +30,72 @@
         (add-to-list 'load-path path)))))
 
 (require 'nelisp-standalone-build)
+(require 'nelisp-cc-rootstack)
+(require 'nelisp-cc-evalport-combiner-apply)
 (require 'nelisp-cc-sf-unwind-protect)
+
+(ert-deftest nelisp-standalone-target-stage3-rootstack-abi-shape ()
+  "Doc 152 Stage 3 roots the audited eval/apply GAP slots by handle.
+The checks here are deliberately structural: runtime poison/collection and
+non-local-exit behaviour are covered by the standalone reader smoke."
+  (cl-labels
+      ((defun-form
+        (name forms)
+        (cl-find-if (lambda (form)
+                      (and (consp form) (eq (car form) 'defun)
+                           (eq (cadr form) name)))
+                    (if (eq (car-safe forms) 'seq) (cdr forms) forms)))
+       (tree-symbol-p
+        (needle tree)
+        (cond
+         ((eq needle tree) t)
+         ((consp tree)
+          (or (tree-symbol-p needle (car tree))
+              (tree-symbol-p needle (cdr tree))))))
+       (tree-member-p
+        (needle tree)
+        (cond
+         ((equal needle tree) t)
+         ((consp tree)
+          (or (tree-member-p needle (car tree))
+              (tree-member-p needle (cdr tree)))))))
+    ;; Stage 2's write and mark sides both exist, and the scan applies the
+    ;; ordinary tagged-slot marker to every 32-byte entry in [region, top).
+    (dolist (name '(nl_root_mark nl_root_reserve nl_root_release
+                    nl_gc_mark_rootstack))
+      (should (defun-form name nelisp-cc-rootstack--source)))
+    (let ((walk (defun-form 'nl_gc_mark_rootstack_walk
+                            nelisp-cc-rootstack--source)))
+      (should (tree-member-p '(extern-call nl_gc_mark_slot p) walk))
+      (should (tree-symbol-p 'nl_gc_mark_slot walk)))
+
+    ;; 3b/3c/3d: the reserved slot address and saved top are threaded only as
+    ;; helper arguments.  No generated helper introduces a runtime let local.
+    (let ((rooted-forms
+           (append
+            (mapcar (lambda (name)
+                      (defun-form name nelisp-standalone--arglist-source))
+                    '(nl_eval_arg_list_after_rest nl_eval_arg_list_recurse
+                      nl_eval_arg_list_after_eval nl_eval_arg_list_with_slot
+                      nl_eval_arg_list_with_mark nl_eval_arg_list_dispatch
+                      nl_eval_arg_list_walk))
+            nelisp-standalone--mxcache-eval-inner-cons-rooted
+            nelisp-standalone--reader-do-apply-rooted)))
+      (should (tree-symbol-p 'nl_root_reserve rooted-forms))
+      (should (tree-symbol-p 'nl_root_release rooted-forms))
+      (should-not (tree-symbol-p 'let rooted-forms))
+      (should-not (tree-symbol-p 'let* rooted-forms)))
+
+    ;; The two former comparator GAPs are eliminated rather than rooted:
+    ;; compare symbol bytes in place, and use immediate-word predicates.
+    (let ((bytes (defun-form 'nl_apply_sym_eq_bytes
+                             nelisp-cc-evalport-combiner-apply--source)))
+      (should bytes)
+      (should-not (tree-symbol-p 'alloc-bytes bytes))
+      (should-not (tree-symbol-p 'nl_alloc_symbol bytes))
+      (should-not (tree-symbol-p 'nelisp_eq_symbol bytes)))
+    (should (tree-symbol-p 'nl_apply_sym_eq_w
+                           nelisp-cc-evalport-combiner-apply--source))))
 
 (ert-deftest nelisp-standalone-target-defaults-to-linux-sysv ()
   "The default target remains Linux/SysV for compatibility on every host."
@@ -810,13 +875,17 @@ Windows uses the target-correct `.obj' unit name; linux/macOS keep `.o'."
                                 (cons (plist-get sym :name) sym))
                               syms)))
         (should (equal name (plist-get u :name)))
-        (dolist (expected '(("nl_arena_base" . 0)
-                            ("nl_rootstack_top" . 8)
-                            ("nl_rootstack_region" . 16)
-                            ("nl_gc_diag" . 1048592)
-                            ("nl_gc_loop_ctx" . 1048656)
-                            ("nl_fa_tbl_base" . 1106064)
-                            ("nl_thread_parallel_ctx" . 1106464)))
+        ;; Doc 152 Stage 3 enlarged the root-stack region 1 MiB -> 4 MiB
+        ;; (32768 -> 131072 slots) so rooting's root-depth 3N+6 per non-tail
+        ;; recursion stays clear of rec_max; every symbol after the region
+        ;; shifts with it, so these are written as (+ OFFSET 4194304).
+        (dolist (expected (list (cons "nl_arena_base" 0)
+                                (cons "nl_rootstack_top" 8)
+                                (cons "nl_rootstack_region" 16)
+                                (cons "nl_gc_diag" (+ 16 4194304))
+                                (cons "nl_gc_loop_ctx" (+ 80 4194304))
+                                (cons "nl_fa_tbl_base" (+ 57488 4194304))
+                                (cons "nl_thread_parallel_ctx" (+ 57888 4194304))))
           (let ((sym (cdr (assoc (car expected) by-name))))
             (should sym)
             (should (equal (cdr expected) (plist-get sym :value)))
@@ -826,7 +895,7 @@ Windows uses the target-correct `.obj' unit name; linux/macOS keep `.o'."
         ;; Phase 2 item 3 (2026-08-23): +176 more bytes for `nl_bt_snapshot'
         ;; (the bounded backtrace capture buffer) appended after that.  Doc 199
         ;; Tier 3a appends 24 bytes of bounded parallel-section state.
-        (should (equal (+ 57616 1048576 96 176 24)
+        (should (equal (+ 57616 4194304 96 176 24)
                        (cdr (assq 'bss (plist-get u :sections)))))))))
 
 (ert-deftest nelisp-standalone-target-stage8-build-appends-arena-base-slot-unit ()

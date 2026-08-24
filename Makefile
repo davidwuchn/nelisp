@@ -1607,8 +1607,10 @@ alloc-check-collect: $(if $(wildcard target/nelisp target/nelisp.exe),,standalon
 # guard was always implemented, but rec_max sat above the real native
 # ceiling, so recursion past it was a silent exit 127 instead of a
 # catchable error (2026-08-16: measured ceiling ~136k rec levels
-# against a comment claiming ~404k).  This asserts the guard fires and
-# the process survives, so a future rec_max or frame-size change
+# against a comment claiming ~404k).  Doc 152 Stage 3's root frames add
+# a nearer fixed-region ceiling (this probe measures root-depth=3N+6),
+# so rec_max is now calibrated below both limits.  This asserts the guard
+# fires and the process survives, so a future rec_max or frame-size change
 # cannot quietly restore the silent death.
 standalone-reader-recursion-guard-smoke: standalone-reader
 	@bin=./target/nelisp; \
