@@ -370,7 +370,25 @@ ns-collision-divergent 126
 # is the whole point of the hook existing.  +1, not +0: this is a
 # tracked, explained instance, per this file's own rule, not left for
 # the count to silently absorb.
-ns-prefix-violation 874
+# 874 -> 876 on 2026-08-23 (Doc 180 Phase 2): two new public (single-
+# dash, `;;;###autoload') top-level names in `scripts/nelisp-standalone-
+# build.el' -- `nelisp-standalone-reader-frame-stack-pop-desync-test'
+# and `nelisp-standalone-reader-bounded-backtrace-test', the fast
+# focused-loop entry points for Phase 2 items 1 and 3's new smokes.
+# Same already-conceded shape as this file's several existing sibling
+# `nelisp-standalone-reader-*-test' entry points (`...-form-location-
+# test', `...-repl-test', `...-malformed-input-test', ...), each already
+# counted in this baseline for the same reason: this file's inferred
+# namespace is the `--'-private `nelisp-standalone--', so every public,
+# single-dash top-level command it exports (by design, for `make
+# standalone-reader-FOO-smoke''s fast per-smoke loop) is a "stray"
+# public definition by this checker's own rule.  Not a new kind of
+# finding, one more instance of a pattern this file already has a dozen
+# of.  The `nl_'/`bf_'/`m5_'/`wf_' helpers Phase 2 also added (the
+# desync fix, the backtrace capture/render, the new debug-switch codes)
+# live inside quoted data this checker does not descend into, so they
+# do not add to this count at all.
+ns-prefix-violation 876
 # 611 -> 613 on 2026-08-20: `nelisp--check-string'/`--check-symbol' and the
 # other argument-check helpers are referenced from the lisp/ mirrors that
 # carry copies of the functions using them.  This is the kind this file
