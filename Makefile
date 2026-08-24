@@ -808,6 +808,7 @@ STANDALONE_READER_SMOKES = \
   standalone-reader-mod-float-smoke \
   standalone-reader-nested-backquote-macro-smoke \
   standalone-reader-network-process-smoke \
+  standalone-reader-nonblocking-socket-smoke \
   standalone-reader-number-token-smoke \
   standalone-reader-pcase-quote-literal-smoke \
   standalone-reader-prelude-equal-reload-smoke \
@@ -2445,6 +2446,75 @@ standalone-reader-dns-smoke: standalone-reader
 	  exit 1; \
 	fi
 
+
+# Doc 194 P3 exit criterion: the nonblocking primitives in isolation
+# (`nelisp-socket-connect'/-accept's NOWAIT argument, `nelisp-socket-poll',
+# `nelisp-socket-connect-error') -- no elisp-layer/poll-loop wiring yet
+# (that is P4/P5, their own smokes below).  Against-the-bug: implementing
+# this smoke is what FOUND the bug -- `nl_socket_poll_impl' was first
+# written parameterizing `nl_os_process_poll_readable''s own literal
+# `syscall-direct 230 ...' (this doc's own S3.3 item 2 text says to
+# parameterize that exact pattern), which measured, under `strace -f'
+# during this phase's implementation, to never reach a real `poll'
+# syscall at all -- `230' is `clock_nanosleep' on the Linux x86_64 ABI,
+# not `poll' (`7'); `nelisp-socket-poll' always answered nil (RED: a
+# connected, writable socket read back not-ready, wall-clock ~2ms, no
+# hang -- silently wrong rather than loudly wrong, worse than a hang for
+# a smoke to catch). Fixed to `syscall-direct 7 ...' (GREEN, this
+# target) -- `nl_socket_poll_impl''s own comment records the measurement;
+# not this phase's scope to fix the pre-existing, unrelated
+# `nl_os_process_poll_readable' bug this uncovered (the subprocess pipe-
+# poll path, never called by P4/P5's own wiring).
+#
+# Positive 1 (connect, real listener): a NOWAIT connect to a real
+# loopback listener returns a fd immediately (wall-clock bounded, no
+# `accept-process-output'-style blocking call in between); `nelisp-
+# socket-poll FD t TIMEOUT' later reports writable within the bound;
+# `nelisp-socket-connect-error' reads 0.
+# Positive 2 (connect, closed port): the SAME NOWAIT connect to a closed
+# local port (1, privileged/unbound) ALSO returns a fd immediately
+# (measured this phase: Linux's own nonblocking connect(2) to a closed
+# LOOPBACK port returns -EINPROGRESS, not a synchronous -ECONNREFUSED --
+# the refusal RST arrives asynchronously) -- `nelisp-socket-poll' reports
+# writable once the refusal lands, and `nelisp-socket-connect-error'
+# reads the real errno (111, ECONNREFUSED), never 0 and never hanging.
+# Positive 3 (accept): a NOWAIT accept against an EMPTY listen queue
+# returns the -1 sentinel immediately (not a hang, not a signal); the
+# SAME call once a connection is actually pending (an ordinary blocking
+# `nelisp-socket-connect' from THIS phase's own test harness) returns a
+# real fd.
+# Unsupported-primitive proof for the three new names ("or the existing
+# target-swap harness Phase 1's own gate uses", this doc's own P3 exit
+# text): `test/nelisp-standalone-target-test.el's
+# `nelisp-standalone-target-socket-dispatch-non-linux-x86-64-unsupported'
+# -- ERT, source-level (`nelisp-standalone--target' let-bound per
+# non-linux-x86_64 target, ONE process, no cross-arch binary build/exec
+# needed since a Windows PE or aarch64 ELF built on this x86_64 Linux
+# host could not run here anyway) -- covers this alongside Phase 1's own
+# six names, closing a gap that predates this phase (Phase 1 itself had
+# no such ERT-level proof for its own six).
+standalone-reader-nonblocking-socket-smoke: standalone-reader
+	@mkdir -p target
+	@printf '%s\n' \
+	  '(let* ((start (float-time)) (lfd (nelisp-socket-listen "127.0.0.1" 55990 t)) (cfd (nelisp-socket-connect "127.0.0.1" 55990 t)) (elapsed1 (- (float-time) start)) (ready (nelisp-socket-poll cfd t 3000)) (elapsed2 (- (float-time) start)) (cerr (nelisp-socket-connect-error cfd))) (nelisp-socket-close cfd) (nelisp-socket-close lfd) (list (< elapsed1 1.0) (integerp cfd) ready (< elapsed2 1.0) cerr))' \
+	  > target/standalone-reader-nonblocking-socket-smoke-connect-ok.el
+	@printf '%s\n' \
+	  '(let* ((start (float-time)) (cfd (nelisp-socket-connect "127.0.0.1" 1 t)) (elapsed1 (- (float-time) start)) (ready (nelisp-socket-poll cfd t 3000)) (elapsed2 (- (float-time) start)) (cerr (nelisp-socket-connect-error cfd))) (nelisp-socket-close cfd) (list (< elapsed1 1.0) (integerp cfd) ready (< elapsed2 1.0) (/= cerr 0)))' \
+	  > target/standalone-reader-nonblocking-socket-smoke-connect-refused.el
+	@printf '%s\n' \
+	  '(let* ((lfd (nelisp-socket-listen "127.0.0.1" 55991 t)) (empty (nelisp-socket-accept lfd t)) (cfd (nelisp-socket-connect "127.0.0.1" 55991)) (sfd (nelisp-socket-accept lfd t))) (nelisp-socket-close cfd) (nelisp-socket-close sfd) (nelisp-socket-close lfd) (list empty (integerp sfd) (>= sfd 0)))' \
+	  > target/standalone-reader-nonblocking-socket-smoke-accept.el
+	@ok_out="$$(./target/nelisp --load target/standalone-reader-nonblocking-socket-smoke-connect-ok.el)"; \
+	refused_out="$$(./target/nelisp --load target/standalone-reader-nonblocking-socket-smoke-connect-refused.el)"; \
+	accept_out="$$(./target/nelisp --load target/standalone-reader-nonblocking-socket-smoke-accept.el)"; \
+	if [ "$$ok_out" = "(t t t t 0)" ] && \
+	   [ "$$refused_out" = "(t t t t t)" ] && \
+	   [ "$$accept_out" = "(-1 t t)" ]; then \
+	  echo "[standalone-reader-nonblocking-socket-smoke] PASS: connect-ok(bounded,fd,writable,bounded,err0)=$$ok_out connect-refused(bounded,fd,writable,bounded,err!=0)=$$refused_out accept(empty=-1,fd,fd>=0)=$$accept_out"; \
+	else \
+	  echo "[standalone-reader-nonblocking-socket-smoke] FAIL: connect-ok=$$ok_out connect-refused=$$refused_out accept=$$accept_out"; \
+	  exit 1; \
+	fi
 
 # Doc 184 P3: the `--repl' blank-line idle pump. Retired from its
 # original RED/GREEN split as of integration/wave6 phase 2A: this smoke

@@ -277,3 +277,14 @@ standalone-reader-hosts-file-smoke|packages/nelisp-process-adapter/src/nelisp-pr
 # length-prefix/RDATA parsing defect class Doc 194's own P2 exit
 # criterion asks this gate to catch.
 standalone-reader-dns-smoke|packages/nelisp-process-adapter/src/nelisp-process-adapter.el|s/(if (or (< i 0) (>= i (string-bytes buf)))/(if (or nil nil)/|the DNS response parser's own bounds check never fires, so a truncated/malformed response silently reads a wrong value from the unguarded native string-byte primitive instead of signalling the catchable nelisp-dns-error
+# Doc 194 P3 (feat/network-process-p345): manually verified RED-with-
+# injection / GREEN-with-injection-reverted before adding -- this is the
+# EXACT defect this phase's own implementation hit and fixed (see
+# `nl_socket_poll_impl''s own comment and this smoke's Makefile comment):
+# `230' is `clock_nanosleep' on the Linux x86_64 ABI, not `poll' (`7').
+# Re-injecting it reproduces the original silent-wrong-answer bug --
+# `nelisp-socket-poll' always answers not-ready, no hang, no signal --
+# measured RED at `connect-ok=(t t nil t 0) connect-refused=(t t nil t
+# t)' (the two `nil's are the `ready' checks, both wrongly false), GREEN
+# again with `7' restored.
+standalone-reader-nonblocking-socket-smoke|scripts/nelisp-standalone-build.el|s/(let\* ((rc (syscall-direct 7 pfd 1 timeout 0 0 0))/(let* ((rc (syscall-direct 230 pfd 1 timeout 0 0 0))/|nelisp-socket-poll issues clock_nanosleep(230) instead of poll(7), so it silently always answers not-ready regardless of true socket readiness

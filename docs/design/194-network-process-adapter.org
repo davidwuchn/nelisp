@@ -1,30 +1,53 @@
 #+TITLE: Doc 194 — make-network-process: sockets under the process adapter, nonblocking I/O, and DNS without libc
 #+AUTHOR: Claude (design), zawatton (direction)
 #+DATE: 2026-08-24
-#+STATUS: SHIPPED (P0-P2, 2026-08-24, branch =feat/network-process-p0=,
-#+STATUS: base =feat/socket-primitives-p1=) — the synchronous client path
+#+STATUS: SHIPPED (P0-P3, 2026-08-24, branch =feat/network-process-p345=,
+#+STATUS: base =feat/network-process-p0= / =feat/socket-primitives-p1=) —
+#+STATUS: the synchronous client path
 #+STATUS: (=make-network-process=/=open-network-stream=, §3.1), =/etc/hosts=
-#+STATUS: resolution (§3.2 Phase B), and DNS-over-TCP/53 (§3.2 Phase C) are
-#+STATUS: real, tested against a live resolver, and pushed.  P3 (nonblocking
-#+STATUS: primitives), P4 (wiring =:nowait= into the poll loop), P5
-#+STATUS: (=:server t=/auto-accept), and P6 (Windows, documented-not-built)
-#+STATUS: remain exactly as designed below — not started this pass, per
-#+STATUS: this doc's own phased plan (§4) — asking for =:server t= or
-#+STATUS: =:nowait= from the shipped =make-network-process= signals loudly
-#+STATUS: rather than silently degrading.  One substrate defect was found
-#+STATUS: and worked around during P2 implementation, out of this doc's own
-#+STATUS: scope to fix: this runtime's =aref=/=length= (Doc 161) — and
-#+STATUS: independently, =unibyte-string= — treat every string as UTF-8 text
-#+STATUS: with no separate byte-oriented type, silently corrupting a raw
-#+STATUS: wire byte >= 0x80; the DNS wire-format code uses the already-
-#+STATUS: shipped =string-byte=/=string-bytes= byte-level accessors instead
-#+STATUS: (see =nelisp--dns-byte='s own comment, =packages/nelisp-process-
+#+STATUS: resolution (§3.2 Phase B), DNS-over-TCP/53 (§3.2 Phase C), and the
+#+STATUS: P3 nonblocking primitives (=nelisp-socket-connect=/-accept's
+#+STATUS: =NOWAIT= argument, =nelisp-socket-poll=, =nelisp-socket-connect-
+#+STATUS: error=, §3.3) are real, tested (including against a live
+#+STATUS: resolver for DNS), and pushed.  P4 (wiring =:nowait= into the poll
+#+STATUS: loop), P5 (=:server t=/auto-accept), and P6 (Windows, documented-
+#+STATUS: not-built) remain exactly as designed below — not started this
+#+STATUS: pass, per this doc's own phased plan (§4) — asking for =:server t=
+#+STATUS: or =:nowait= from =make-network-process= still signals loudly
+#+STATUS: rather than silently degrading.  Two substrate/design defects
+#+STATUS: were found and fixed/worked around during this pass, both out of
+#+STATUS: this doc's own original scope to have anticipated: (1) P2 —
+#+STATUS: this runtime's =aref=/=length= (Doc 161) — and independently,
+#+STATUS: =unibyte-string= — treat every string as UTF-8 text with no
+#+STATUS: separate byte-oriented type, silently corrupting a raw wire byte
+#+STATUS: >= 0x80; the DNS wire-format code uses the already-shipped
+#+STATUS: =string-byte=/=string-bytes= byte-level accessors instead (see
+#+STATUS: =nelisp--dns-byte='s own comment, =packages/nelisp-process-
 #+STATUS: adapter/src/nelisp-process-adapter.el=, for the measurement).
-#+STATUS: =make-network-process='s contract (§1.3) and the FFI
-#+STATUS: availability matrix (§1.4) were measured directly, not recalled,
-#+STATUS: against real GNU Emacs 30.1 and =fix/ffi-surface-availability=
-#+STATUS: respectively — see each section for how.
-#+VERIFIED-BY: standalone-reader-network-process-smoke standalone-reader-hosts-file-smoke standalone-reader-dns-smoke standalone-reader-smokes
+#+STATUS: (2) P3 — this doc's own §3.3 item 2 prose ("parameterize the
+#+STATUS: existing poll(2) pattern =nl_os_process_poll_readable= already
+#+STATUS: uses") pointed at a pattern that itself issues the wrong raw
+#+STATUS: syscall number (=230=, =clock_nanosleep= on the Linux x86_64 ABI,
+#+STATUS: not =poll=, which is =7=) — measured with =strace= while
+#+STATUS: implementing =nelisp-socket-poll=: copying that literal number
+#+STATUS: verbatim reached no =poll= syscall at all and silently always
+#+STATUS: answered not-ready.  Fixed in =nl_socket_poll_impl= (=7=, see its
+#+STATUS: own comment for the measurement); the pre-existing
+#+STATUS: =nl_os_process_poll_readable= bug this uncovered is UNFIXED here
+#+STATUS: (out of this doc's scope — the subprocess pipe-poll path, never
+#+STATUS: called by this doc's own P4/P5 wiring, which uses only the new,
+#+STATUS: fixed =nelisp-socket-poll=), flagged for whichever doc owns that
+#+STATUS: path next.  =make-network-process='s contract (§1.3), the FFI
+#+STATUS: availability matrix (§1.4), and the =:nowait=/=:server t= sentinel
+#+STATUS: and child-process-shape contracts (§1.3, reused unchanged by
+#+STATUS: P4/P5) were measured directly, not recalled, against real GNU
+#+STATUS: Emacs 30.1 and =fix/ffi-surface-availability= respectively — see
+#+STATUS: each section for how.  =getsockopt='s syscall number (§6's own
+#+STATUS: open question) is confirmed =55=, immediately following
+#+STATUS: =setsockopt='s already-used =54=, against the standard, stable
+#+STATUS: x86_64 kernel syscall table (=arch/x86/entry/syscalls/
+#+STATUS: syscall_64.tbl=).
+#+VERIFIED-BY: standalone-reader-network-process-smoke standalone-reader-hosts-file-smoke standalone-reader-dns-smoke standalone-reader-nonblocking-socket-smoke standalone-reader-smokes
 
 * §0 TL;DR
 
@@ -833,7 +856,24 @@ doc's later phases add.
   length-prefix/compression-pointer parsing specifically, since that
   is where an untrusted-input bug would live.
 
-** P3 — Nonblocking primitives (1-2 d)
+** P3 — Nonblocking primitives (1-2 d) — DONE 2026-08-24
+
+=nelisp-socket-connect=/=-accept='s NOWAIT argument, =nelisp-socket-poll=,
+and =nelisp-socket-connect-error= all real on linux-x86_64, catchable
+=nelisp-unsupported-primitive= elsewhere — =standalone-reader-nonblocking-
+socket-smoke= (Makefile) and =test/nelisp-standalone-target-test.el='s
+=nelisp-standalone-target-socket-dispatch-*= pair (the target-swap ERT
+harness, source-level, no cross-arch binary needed).  =nelisp-socket-
+listen= ALSO gained the same backward-compatible NOWAIT 3rd argument —
+not in this section's own enumeration below, added because a NOWAIT
+=nelisp-socket-accept= against an empty queue cannot return immediately
+unless the LISTENING socket itself is nonblocking (=accept4='s own
+SOCK_NONBLOCK flags argument sets O_NONBLOCK on the newly ACCEPTED fd
+only, never on the fd being accepted FROM — measured against this exact
+phase's own exit criterion, see =nl_socket_listen_impl='s comment).
+=nl_socket_poll_impl='s poll(2) syscall number is =7=, not the =230=
+this section originally pointed at (see this doc's top =#+STATUS=
+block for the measurement).
 
 - =nelisp-socket-connect=/=-accept='s NOWAIT argument,
   =nelisp-socket-poll=, =nelisp-socket-connect-error= (§3.3, all three
