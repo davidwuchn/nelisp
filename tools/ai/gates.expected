@@ -633,6 +633,44 @@ nl-ns-reader-standalone-smoke?
 # real defect surfaces here first.
 nl-clj-standalone-smoke?
 #
+# nl-clj-async-standalone-smoke: added 2026-08-24, Doc 195 §4.6
+# (channels/`go' blocks over nelisp-actor).  Same shim/load-by-path
+# pattern as the smokes above, loading `packages/nl-clj/generated/
+# go-ping-pong-cps.el' -- the build-time CPS transform of a `nl-clj-go'
+# ping/pong exchange (`make nl-clj-async-cps-baseline') -- rather than
+# replaying nl-clj-async-test.el's own ERT bodies, most of which spawn
+# actors via `nl-clj-go' directly and stay host-Emacs-only by design.
+# Proves this package's own channel mediator (`nl-clj-async--make-
+# chan-1', the one piece with genuinely new protocol logic over the
+# shipped `nelisp-make-chan') and `nl-clj-go' itself both survive the
+# same standalone substrate `nelisp-actor' does, across the exchange's
+# several round trips.  Makes exactly ONE call into the baked demo --
+# a real, measured, not-yet-root-caused defect this session found: a
+# SECOND top-level call to the same baked function in one process
+# hangs (low, non-spinning CPU across a 60s wait -- genuinely blocked,
+# not a busy loop), even though a single call completes correctly
+# every time this session tested it; prime suspect named, not chased
+# further, in the smoke file's own Commentary (`nelisp-actor--reset'
+# resets the id counter, so a second call's actors reuse a first
+# call's ids while that first call's channel mediators are still
+# alive, by this package's own deliberate immortal-mediator design).
+# A second, separately-named gap the smoke does NOT paper over: the
+# demo exchange itself uses `nelisp-chan-send'/`nelisp-chan-recv'
+# directly, not this package's own `nl-clj-<!'/`nl-clj->!' -- those are
+# fully correct on host Emacs (`nl-clj-async-test.el', 29/29 green,
+# same producer/consumer and ping/pong shapes) but were separately
+# measured to hang standalone under repeated resumption from inside a
+# `while' loop, also not root-caused further; see `examples/nl-clj-
+# async/go-ping-pong.el's own Commentary for the fullest account of
+# both.  Listed optional (not promoted to required, no tools/gate-
+# mutations.txt row yet, not wired into `nelisp-ai.sh extras'): this
+# package's own next landing after `nl-clj-standalone-smoke' above,
+# following that same "just shipped, not yet promoted" precedent --
+# promote once BOTH open gaps above are closed (or the smoke's own
+# scope is re-narrowed to only what is proven), or sooner if a real
+# defect surfaces here first.
+nl-clj-async-standalone-smoke?
+#
 # substrate-presence-sweep (Task A, added same day as the addendum above):
 # own tier, `nelisp-ai.sh presence', not `extras' (see "SUBSTRATE PARITY"'s
 # addendum for the ~15-17 minute measurement).  OPTIONAL, not yet promoted

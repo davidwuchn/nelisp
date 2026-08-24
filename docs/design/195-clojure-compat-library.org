@@ -10,15 +10,67 @@
 #+STATUS: over all three plus plain Elisp lists — 6 source files, 121
 #+STATUS: ERT cases (host Emacs and, unchanged, =target/nelisp= itself
 #+STATUS: via =nl-clj-standalone-smoke=), =make compile=/=parens-
-#+STATUS: check= clean.  §5.1 refs/STM and §5.2 multicore remain
-#+STATUS: correctly UNBUILT per this doc's own §5.2 recommendation
-#+STATUS: ("do not schedule... as part of this library's own roadmap
-#+STATUS: at all"); §4.4 transients, §4.6 channels/=go=, and §4.7's
-#+STATUS: lazy half are =packages/nl-clj/README.org='s own named next
-#+STATUS: phases, not started.  Marked PARTIAL rather than SHIPPED,
-#+STATUS: following Doc 190's own precedent for a doc whose build-
-#+STATUS: first ranking (§6) has landed some items and deliberately
-#+STATUS: not others.
+#+STATUS: check= clean.
+#+STATUS:
+#+STATUS: §4.6 (channels and =go= blocks over =nelisp-actor=) landed
+#+STATUS: 2026-08-24 as =packages/nl-clj/src/nl-clj-async.el=
+#+STATUS: (=feat/nl-clj-async=): =nl-clj-chan=/=close!=/=>!=/=<!=
+#+STATUS: (parking, inside =go=)/=>!!=/=<!!= (blocking, any context)/
+#+STATUS: =go=/=alts!=, 29 ERT cases on host Emacs (Clojure's own
+#+STATUS: documented reference semantics as the control, per §4.6's
+#+STATUS: own framing — no host-Emacs analog for core.async exists to
+#+STATUS: differentially test against), =make compile=/=parens-check=
+#+STATUS: clean.  =alts!= reuses =nl-safe='s =nl-cell= as a claim-once
+#+STATUS: race adjudicator exactly as §4.6 designs, wrapped in a
+#+STATUS: =cl-defstruct= record (=nl-clj-async--alts-token=) because
+#+STATUS: =nelisp-send='s own Phase 4.3 shared-immutable message
+#+STATUS: policy deep-copies plain vectors — including =nl-cell= — and
+#+STATUS: the whole point of this cell is that two different channels'
+#+STATUS: mediators see the SAME one; measured directly, not assumed
+#+STATUS: (a raw =nl-cell= sent to two mediators arrived as two private
+#+STATUS: copies, both winning their own claim).  =nl-clj-go='s own
+#+STATUS: return channel is standalone-proven for a real, multi-round-
+#+STATUS: trip ping/pong exchange (=nl-clj-async-standalone-smoke=,
+#+STATUS: below) — against-the-bug, this took several real,
+#+STATUS: substrate-specific defects found and fixed in the same
+#+STATUS: session, each documented at its own fix site in nl-clj-
+#+STATUS: async.el's Commentary: (1) =nelisp-chan='s own struct
+#+STATUS: accessors were not covered by =nelisp-actor-cps-dump.el='s
+#+STATUS: reused struct-accessor-inlining suppression (that script only
+#+STATUS: ever covered =nelisp-actor='s own), baking real Emacs's
+#+STATUS: =aref=/=cl-struct-nelisp-chan-tags= inlining into the
+#+STATUS: generated file, which the standalone's differently-shaped
+#+STATUS: struct polyfill cannot read — silently misroutes messages
+#+STATUS: (a hang, not a crash); (2) a value derived from a form
+#+STATUS: containing a park point must never be nested as a =let=
+#+STATUS: binding's init-form OR a function-call argument when the
+#+STATUS: SAME park point is resumed 2+ times by an enclosing loop —
+#+STATUS: it must stay a literal top-level statement of the actor
+#+STATUS: body; found in =nl-clj-go='s own wrapper (fixed: only the
+#+STATUS: LAST body form is nested, into =nelisp-chan-send='s own
+#+STATUS: message argument, via =butlast=) and, separately, still
+#+STATUS: open in =nl-clj-<!=/=nl-clj->!= themselves under repeated
+#+STATUS: resumption specifically (root cause not fully isolated within
+#+STATUS: this session — see =nl-clj-async-standalone-smoke.el='s own
+#+STATUS: Commentary; the shipped standalone example therefore uses
+#+STATUS: =nelisp-chan-send=/=nelisp-chan-recv= directly, not =nl-clj-
+#+STATUS: <!=/=nl-clj->!=, an honestly named, narrower proof than the
+#+STATUS: doc's own headline "go/chan is standalone-proven" would
+#+STATUS: suggest at first read).  A third open, separately-named
+#+STATUS: item: a SECOND top-level call to the baked demo function in
+#+STATUS: the same process hangs (not a busy loop — low CPU across a
+#+STATUS: 60s wait), while a single call is correct and repeatable
+#+STATUS: across HOPS values every time this session tested it; the
+#+STATUS: standalone smoke therefore makes exactly one call.  §5.1
+#+STATUS: refs/STM and §5.2 multicore remain correctly UNBUILT per this
+#+STATUS: doc's own §5.2 recommendation ("do not schedule... as part of
+#+STATUS: this library's own roadmap at all"); §4.4 transients and
+#+STATUS: §4.7's lazy half are =packages/nl-clj/README.org='s own named
+#+STATUS: next phases, not started.  Marked PARTIAL rather than
+#+STATUS: SHIPPED, following Doc 190's own precedent for a doc whose
+#+STATUS: build-first ranking (§6) has landed some items and
+#+STATUS: deliberately not others, and because §4.6 itself landed with
+#+STATUS: the two open standalone gaps just named, not fully clean.
 #+STATUS:
 #+STATUS: Every asset claim in §2 below was either read from a file at
 #+STATUS: a cited line or measured directly against a built
@@ -39,15 +91,22 @@
 #+STATUS: against a SEPARATE =target/nelisp= built 2026-08-24 from
 #+STATUS: this implementation's own tree — see
 #+STATUS: =packages/nl-clj/README.org='s Testing section for the exact
-#+STATUS: commands.
-#+VERIFIED-BY: compile parens-check ert-full nl-clj-standalone-smoke
+#+STATUS: commands.  §4.6's own claims (the standalone defects above)
+#+STATUS: were measured 2026-08-24 against =target/nelisp= (sha256
+#+STATUS: =781be323...48c0d1=, 7784728 bytes, built 2026-08-24 16:36
+#+STATUS: from this same branch's own =feat/native-observability= fetch
+#+STATUS: point, before this branch's own elisp-only changes — §4.6 is
+#+STATUS: pure Elisp loaded via =--load=, not AOT-baked into the image,
+#+STATUS: so the binary itself is byte-identical to that fetch point;
+#+STATUS: the size ratchet's own base measurement is this exact file).
+#+VERIFIED-BY: compile parens-check ert-full nl-clj-standalone-smoke nl-clj-async-standalone-smoke
 
 * Status
 
 | item     | value                                                             |
 |----------+--------------------------------------------------------------------|
 | Doc #    | 195                                                                |
-| State    | PARTIAL — build-first Tier 1 (§4.1/§4.2/§4.5, minimal §4.7) SHIPPED 2026-08-24 as packages/nl-clj/; §4.4/§4.6/§4.7-lazy/§5 not started (see #+STATUS above) |
+| State    | PARTIAL — build-first Tier 1 (§4.1/§4.2/§4.5, minimal §4.7) SHIPPED 2026-08-24; §4.6 (channels/go) landed same day with two open, honestly-named standalone gaps (nl-clj-<!/nl-clj->! under repeated resumption; a second top-level call to the baked demo) — see #+STATUS above; §4.4/§4.7-lazy/§5 not started |
 | Parent   | Doc 168 (extension libraries, non-goals and layer discipline)     |
 | Sibling  | Doc 169 (nl-prelude/nl-condition), Doc 170 (nl-safe/nl-contract), Doc 189 (nl-ns), Doc 190 (bignums), Doc 193 (extension libraries publication), Doc 10 (nelisp-actor / Phase 4 actor runtime) |
 | Reads    | =packages/nelisp-actor/src/nelisp-actor.el=, =packages/nelisp-actor/README.org=, =packages/nl-safe/src/nl-safe.el=, =packages/nl-safe/README.org=, =packages/nl-prelude/src/nl-prelude.el=, =packages/nl-ns/src/nl-ns-in.el=, =packages/nl-ns/src/nl-ns-reader.el=, =packages/nelisp-json/README.org=, =packages/nelisp-secure-hash/README.org=, =docs/design/168/169/170/186/189/190/193=, =docs/design/39-phase9d-process-substrate.org=, =docs/design/146-low-memory-value-rep-and-gc.org=, =tools/selfhost-mt-test.sh=, =tools/gate-mutations.txt=, =tools/ai/gates.expected= |

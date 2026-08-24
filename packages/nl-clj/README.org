@@ -201,16 +201,49 @@ specific names is withheld.
 =nl-clj-index-error= (out-of-bounds =nth=/=assoc=/=pop=/=subvec=),
 =nl-clj-type-error= (wrong collection type for the operation).
 
+** Channels and =go= blocks (=nl-clj-async.el=, Doc 195 §4.6)
+
+Not part of =(require 'nl-clj)= -- pulls in =nelisp-actor= too, so
+callers who only want persistent data structures are not forced to
+load the actor scheduler.  =(require 'nl-clj-async)= explicitly.
+
+#+begin_src elisp
+(let ((ch (nl-clj-chan)))               ; unbuffered (rendezvous)
+  (nl-clj-chan 4)                        ; or buffered, 4 slots
+  (nl-clj-go (nl-clj->! ch :hi) :sent)   ; spawn; returns a channel
+                                          ; receiving :sent
+  (nl-clj-close! ch)
+  (nelisp-actor-run-until-idle)          ; drive the scheduler
+  (nl-clj-<!! ch))                       ; blocking take, top level
+(nl-clj-alts! (list ch1 ch2 (list ch3 :put-val)))  ; inside go: park
+                                                     ; until exactly
+                                                     ; one is ready
+#+end_src
+
+=alts!= reuses =nl-safe='s =nl-cell= as a claim-once race adjudicator
+per §4.6's own design, wrapped in a small =cl-defstruct= record
+(=nl-clj-async--alts-token=) because =nelisp-send='s own message-copy
+policy deep-copies plain vectors -- including =nl-cell= -- and a
+shared claim cell needs every mediator racing for it to see the SAME
+one, not a private copy; see =nl-clj-async--alts-token='s own
+Commentary for the measurement behind that.
+
+Fully ERT-tested on host Emacs (29 cases, Clojure's own documented
+reference semantics as the control -- no host-Emacs analog for
+core.async exists to differentially test against, per §4.6's own
+framing).  Standalone: =nl-clj-go= and this package's own channel
+mediator are proven via a real, multi-round-trip =go= ping/pong
+exchange (=nl-clj-async-standalone-smoke.el=); =nl-clj-<!=/=nl-clj->!=
+themselves have an open, honestly-named standalone gap under repeated
+resumption -- see that smoke file's own Commentary and "Follow-ups"
+below.
+
 * Next phases (Doc 195 §5/§6, out of scope this phase)
 
 - *Transients* (§4.4): reuses =nl-safe='s =nl-cell= borrow-cell fence
   as the mutability boundary and the "freeze forever" =persistent!=
   trick -- no new checking mechanism needed, cheap once §4.1/§4.2 have
   callers to make transient.
-- *Channels and =go= blocks over =nelisp-actor=* (§4.6): parking
-  =chan=/=close!=/=go=/=>!=/=<!= are thin wrappers over already-
-  standalone-proven =nelisp-actor= primitives; =>!!=/=<!!=/=alts!= are
-  real new plumbing, ranked last within Tier 1.
 - *Lazy sequences* (§4.7's deferred half): memoized =lazy-seq= over
   =nl-cell=, reusing the identical borrow-fence trick a second time
   for a different purpose (reentrant-force protection).
@@ -248,11 +281,40 @@ result is =equal= to the original AND still behaves as a working
 vector afterward -- the exact property Doc 195 §2.1 found =record=
 lacks on this substrate.
 
+Async (=nl-clj-async.el=; host Emacs, part of =make test=):
+
+#+begin_src sh
+emacs --batch -Q -L packages/nl-prelude/src -L packages/nl-safe/src \
+  -L packages/nelisp-actor/src -L packages/nl-clj/src -L packages/nl-clj/test \
+  -l ert -l nl-clj-async-test -f ert-run-tests-batch-and-exit
+#+end_src
+
+Standalone go/chan (proves =nl-clj-go='s own return-channel and this
+package's channel mediator survive a real, multi-round-trip ping/pong
+exchange -- see the smoke file's own Commentary for what it does and
+does NOT yet prove):
+
+#+begin_src sh
+./target/nelisp --load packages/nl-clj/test/nl-clj-async-standalone-smoke.el
+#+end_src
+
+Regenerate the standalone bake after editing =nl-clj-async.el= or
+=examples/nl-clj-async/go-ping-pong.el=: =make nl-clj-async-cps-baseline=.
+
 * Follow-ups
 
 - Small-map array-map optimization (Doc 195 §8, open question).
 - Faster =nl-clj-vector--to-list= (currently repeated =nth=; a direct
   trie walk would be O(n) instead of O(n log32 n)).
 - =add-watch=/=set-validator!= for atoms (Doc 195 §4.5, peripheral).
-- The four "Next phases" items above, in the build-first order Doc 195
-  §6 ranks them.
+- Two open standalone-specific gaps in =nl-clj-async.el=, both found
+  and named (not root-caused further) this session -- see =nl-clj-<!='s
+  and =nl-clj-async-standalone-smoke.el='s own Commentary for the full
+  account: (1) =nl-clj-<!=/=nl-clj->!= hang on `target/nelisp` under
+  repeated resumption from inside a =while= loop (raw =nelisp-chan-
+  recv=/=nelisp-chan-send= do not hit this; the standalone example uses
+  those directly instead); (2) a second top-level call to the same
+  baked demo function in one process hangs, so the standalone smoke
+  makes exactly one call.
+- Transients and the lazy-seq half of §4.7, in the build-first order
+  Doc 195 §6 ranks them.
