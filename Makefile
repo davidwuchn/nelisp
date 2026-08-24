@@ -694,6 +694,7 @@ STANDALONE_READER_SMOKES = \
   standalone-reader-current-time-smoke \
   standalone-reader-declare-strip-smoke \
   standalone-reader-derived-mode-shape-smoke \
+  standalone-reader-dns-smoke \
   standalone-reader-elt-smoke \
   standalone-reader-ffi-smoke \
   standalone-reader-fmt-smoke \
@@ -2129,6 +2130,76 @@ standalone-reader-hosts-file-smoke: standalone-reader
 	  echo "[standalone-reader-hosts-file-smoke] PASS: positive(status,roundtrip,alias-lookup)=$$pos_out fallthrough(caught,elapsed_ms)=$$fall_out,$${elapsed_ms}ms (never a hang)"; \
 	else \
 	  echo "[standalone-reader-hosts-file-smoke] FAIL: positive=$$pos_out fallthrough_rc=$$fall_rc fallthrough=$$fall_out elapsed_ms=$$elapsed_ms"; \
+	  exit 1; \
+	fi
+
+
+# Doc 194 P2 exit criterion: DNS-over-TCP/53 (RFC 7766), pure elisp on
+# Phase 1's own socket primitives.  Fixture bytes are written as RAW
+# binary files by this recipe's own `printf' calls (octal escapes),
+# never built via an elisp `(string ...)'/`unibyte-string' call -- Doc
+# 194 P2 measured both as broken for byte values >= 128 on this
+# substrate (`nelisp--dns-u16-be''s own comment): every elisp-level
+# string constructor treats its integer arguments as CODEPOINTS and
+# UTF-8-encodes them, so a "byte" >= 128 built that way becomes two raw
+# wire bytes, not one.  The test script reads each fixture back via
+# `insert-file-contents-literally' (byte-clean, like `nelisp-socket-
+# recv'), matching how a real response actually arrives.
+#
+# Against-the-bug (length-prefix/compression-pointer parsing
+# specifically, per Doc 194's own P2 exit criterion text): a truncated
+# response and an oversized RDLENGTH both signal the catchable,
+# DNS-specific `nelisp-dns-error' through the real guarded parser
+# (`nelisp--dns-parse-response'/`nelisp--dns-byte''s own bounds check on
+# every read), contrasted with the SAME truncated buffer read through
+# the raw, UNGUARDED native `string-byte' primitive this parser is built
+# on -- measured to have NO bounds check at all (unlike `aref', which at
+# least signals a generic `args-out-of-range'): `(string-byte buf 999)'
+# on a 29-byte buffer returns a plain value with no error whatsoever,
+# silently wrong rather than loudly wrong -- exactly the defect class a
+# missing bounds check in this parser would produce, and why
+# `nelisp--dns-byte' exists as the ONLY guard between a truncated
+# response and reading out of bounds.  Positive: if this
+# environment has TCP egress to the numeric resolver
+# (checked with `/dev/tcp' exactly like `standalone-reader-tls-smoke'
+# does for its own egress check, SKIPping gracefully rather than failing
+# when this sandbox has none), a REAL DNS-over-TCP A-record lookup for a
+# well-known hostname resolves to a plausible IPv4 literal and P0's own
+# client path connects to it.
+standalone-reader-dns-smoke: standalone-reader
+	@mkdir -p target
+	@printf '\022\064\201\200\000\001\000\001\000\000\000\000\007\145\170\141\155\160\154\145\003\143\157\155\000\000\001\000\001\300\014\000\001\000\001\000\000\001\054\000\004\135\270\330\042' \
+	  > target/standalone-reader-dns-smoke-full.bin
+	@printf '\022\064\201\200\000\001\000\001\000\000\000\000\007\145\170\141\155\160\154\145\003\143\157\155\000\000\001\000\001' \
+	  > target/standalone-reader-dns-smoke-truncated.bin
+	@printf '\022\064\201\200\000\001\000\001\000\000\000\000\007\145\170\141\155\160\154\145\003\143\157\155\000\000\001\000\001\300\014\000\001\000\001\000\000\001\054\377\377\135\270\330\042' \
+	  > target/standalone-reader-dns-smoke-badrdlen.bin
+	@printf '%s\n' \
+	  '$(NELISP_PROCESS_ADAPTER_LOAD_1)' \
+	  '$(NELISP_PROCESS_ADAPTER_LOAD_2)' \
+	  '(defun nelisp-dns-smoke--slurp (f) (with-temp-buffer (insert-file-contents-literally f) (buffer-string)))' \
+	  '(let* ((full (nelisp-dns-smoke--slurp "target/standalone-reader-dns-smoke-full.bin")) (truncated (nelisp-dns-smoke--slurp "target/standalone-reader-dns-smoke-truncated.bin")) (bad-rdlength (nelisp-dns-smoke--slurp "target/standalone-reader-dns-smoke-badrdlen.bin"))) (list (nelisp--dns-parse-response full) (condition-case e (nelisp--dns-parse-response truncated) (nelisp-dns-error (quote dns-error-caught))) (condition-case e (progn (string-byte truncated 999) (quote raw-unguarded-no-error)) (error (quote raw-unexpectedly-errored))) (condition-case e (nelisp--dns-byte truncated 999) (nelisp-dns-error (quote guarded-dns-error-caught))) (condition-case e (nelisp--dns-parse-response bad-rdlength) (nelisp-dns-error (quote dns-error-caught))) (nelisp--dns-skip-name full 12) (string-bytes (nelisp--dns-encode-query "example.com"))))' \
+	  > target/standalone-reader-dns-smoke-parse.el
+	@parse_out="$$(./target/nelisp --load target/standalone-reader-dns-smoke-parse.el)"; \
+	if [ "$$parse_out" != '("93.184.216.34" dns-error-caught raw-unguarded-no-error guarded-dns-error-caught dns-error-caught 25 31)' ]; then \
+	  echo "[standalone-reader-dns-smoke] FAIL: wire-format parse/against-the-bug -> $$parse_out"; \
+	  exit 1; \
+	fi; \
+	if ! timeout 6 bash -c 'exec 3<>/dev/tcp/1.1.1.1/53' 2>/dev/null; then \
+	  echo "[standalone-reader-dns-smoke] PASS (parse+against-the-bug only): parse=$$parse_out; SKIP live A-record lookup, no egress to 1.1.1.1:53 in this sandbox"; \
+	  exit 0; \
+	fi; \
+	printf '%s\n' \
+	  '$(NELISP_PROCESS_ADAPTER_LOAD_1)' \
+	  '$(NELISP_PROCESS_ADAPTER_LOAD_2)' \
+	  '(setq nelisp-dns-resolver-ip "1.1.1.1")' \
+	  '(let* ((ip (nelisp--dns-resolve-a "example.com")) (parts (split-string ip "\\.")) (nums (mapcar (lambda (s) (string-to-number s)) parts)) (plausible (and (= (length nums) 4) (not (memq nil (mapcar (lambda (n) (and (>= n 0) (<= n 255))) nums)))))) (let* ((cli (open-network-stream "web" nil ip 80))) (let ((status (process-status cli))) (delete-process cli) (list plausible status))))' \
+	  > target/standalone-reader-dns-smoke-live.el; \
+	live_out="$$(timeout 15 ./target/nelisp --load target/standalone-reader-dns-smoke-live.el)"; \
+	if [ "$$live_out" = "(t open)" ]; then \
+	  echo "[standalone-reader-dns-smoke] PASS: parse+against-the-bug=$$parse_out; live A-record lookup + connect=$$live_out"; \
+	else \
+	  echo "[standalone-reader-dns-smoke] FAIL: live A-record lookup + connect -> $$live_out"; \
 	  exit 1; \
 	fi
 

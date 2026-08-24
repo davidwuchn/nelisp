@@ -205,3 +205,14 @@ standalone-reader-network-process-smoke|packages/nelisp-process-adapter/src/neli
 # the fixture) were never consulted at all -- the P1 positive case (a
 # hostname resolved purely from the fixture, no DNS round trip) fails.
 standalone-reader-hosts-file-smoke|packages/nelisp-process-adapter/src/nelisp-process-adapter.el|s/(cdr (assoc name (nelisp--hosts-file-table file))))/(and nil (cdr (assoc name (nelisp--hosts-file-table file)))))/|/etc/hosts lookup always answers nil, as if the file (or its fixture) were never consulted
+# Doc 194 P2 (feat/network-process-p0): manually verified RED-with-
+# injection / GREEN-with-injection-reverted before adding --
+# `nelisp--dns-byte''s own out-of-bounds guard is disabled -- a
+# truncated/malformed DNS response no longer signals the catchable,
+# DNS-specific `nelisp-dns-error'; the parse instead falls through to the
+# raw, unguarded native `string-byte' primitive this parser is built on,
+# which (measured, Doc 194 P2) has NO bounds check of its own and
+# silently returns a wrong value with no error at all -- exactly the
+# length-prefix/RDATA parsing defect class Doc 194's own P2 exit
+# criterion asks this gate to catch.
+standalone-reader-dns-smoke|packages/nelisp-process-adapter/src/nelisp-process-adapter.el|s/(if (or (< i 0) (>= i (string-bytes buf)))/(if (or nil nil)/|the DNS response parser's own bounds check never fires, so a truncated/malformed response silently reads a wrong value from the unguarded native string-byte primitive instead of signalling the catchable nelisp-dns-error

@@ -85,6 +85,12 @@
 (declare-function nelisp-socket-send "ext:nelisp-runtime" (fd string))
 (declare-function nelisp-socket-recv "ext:nelisp-runtime" (fd max-bytes))
 (declare-function nelisp-socket-close "ext:nelisp-runtime" (fd))
+;; Byte-level string access (Doc 161 / Doc 194 P2): NOT prelude functions,
+;; native dispatch-table entries in scripts/nelisp-standalone-build.el
+;; (`(:lit "string-byte")'/`(:lit "string-bytes")'), same declare-function
+;; treatment as the socket primitives above.
+(declare-function string-byte "ext:nelisp-runtime" (string idx))
+(declare-function string-bytes "ext:nelisp-runtime" (string))
 
 ;; Native `nelisp-process-*' primitives (Doc 184 S1.1, dispatch-table
 ;; entries in `scripts/nelisp-standalone-build.el', not elisp defuns
@@ -526,20 +532,249 @@ matching POSIX/glibc `files' lookup order."
 if NAME is not listed there (Doc 194 P1)."
   (cdr (assoc name (nelisp--hosts-file-table file))))
 
+;; Phase C -- DNS-over-TCP/53, pure elisp on Phase 1's own primitives
+;; (Doc 194 P2/S3.2).  RFC 7766 (mandatory-to-implement in every
+;; conformant resolver): a 2-byte big-endian length prefix followed by
+;; the identical wire-format message UDP DNS uses (RFC 1035 S4).  Chosen
+;; over UDP specifically because `nl_socket_listen_impl'/`nl_socket_
+;; connect_impl' hardcode `SOCK_STREAM' at socket-creation time (Doc 194
+;; S1.1) -- TCP needs zero native changes; UDP would need a new
+;; socket-type parameter (Doc 194 S6, not built here).
+
+(define-error 'nelisp-dns-error "NeLisp DNS resolution error")
+
+(defvar nelisp-dns-resolver-ip nil
+  "Numeric IPv4 address of the DNS-over-TCP/53 resolver
+`nelisp--dns-resolve-a' connects to.  nil (the default) means \"read
+`/etc/resolv.conf''s first `nameserver' line, falling back to
+1.1.1.1\" -- see `nelisp--dns-resolver-ip'.  Set this directly to skip
+both and pin a specific resolver (e.g. a loopback DNS-over-TCP test
+stub).")
+
+(defvar nelisp-dns-resolver-port 53)
+
+(defun nelisp--resolv-conf-nameserver (&optional file)
+  "First `nameserver' line's address in /etc/resolv.conf (or FILE), or
+nil if the file does not exist or has no such line.  Plain line-split +
+`split-string' rather than buffer-based `re-search-forward' (not
+available in this runtime's prelude, Doc 143's own regex layer covers
+`string-match'/-p only) -- the same style already used by
+`nelisp--hosts-file-parse-line' above."
+  (let ((path (or file "/etc/resolv.conf")))
+    (and (file-exists-p path)
+         (with-temp-buffer
+           (insert-file-contents path)
+           (catch 'nelisp--resolv-conf-found
+             (dolist (line (split-string (buffer-string) "\n"))
+               (let ((fields (split-string line nil t)))
+                 (when (and (equal (car fields) "nameserver") (cadr fields))
+                   (throw 'nelisp--resolv-conf-found (cadr fields)))))
+             nil)))))
+
+(defun nelisp--dns-resolver-ip ()
+  (or nelisp-dns-resolver-ip (nelisp--resolv-conf-nameserver) "1.1.1.1"))
+
+(defun nelisp--dns-u16-be (n)
+  "2-byte big-endian encoding of N (0-65535), as a raw byte string.
+`string' (scripts/nelisp-stdlib-prelude.el, char-to-string + concat under
+the hood), NOT `unibyte-string' -- measured against this exact byte
+range on `target/nelisp' (not assumed): `unibyte-string' mishandles byte
+values >= 128 in this runtime's own native implementation
+(`bf_unibyte_string'/`mut-str-finalize', scripts/nelisp-standalone-
+build.el) -- (length (unibyte-string 129)) answers 0 and
+(aref (unibyte-string 200 201 202) 0) answers 521, not 200 -- while
+`string' round-trips the full 0-255 range correctly on the same binary.
+A DNS header's flags/compression-pointer/RDATA bytes routinely need
+values >= 128, so this substrate bug is load-bearing here even though it
+is out of P0-P2's own scope to FIX (native, scripts/nelisp-standalone-
+build.el -- a future doc's concern); this file works around it entirely
+in elisp, no native change needed for Doc 194 itself."
+  (string (logand (ash n -8) 255) (logand n 255)))
+
+(defun nelisp--dns-encode-qname (name)
+  "Encode NAME (a dotted hostname, e.g. \"example.com\") as a DNS QNAME:
+each dot-separated label prefixed by its own length byte, terminated by
+a zero length byte (RFC 1035 S4.1.2)."
+  (apply #'concat
+         (append
+          (mapcar (lambda (label) (concat (string (length label)) label))
+                  (split-string name "\\." t))
+          (list (string 0)))))
+
+(defvar nelisp--dns-query-id-counter 0)
+
+(defun nelisp--dns-next-id ()
+  "Return a 15-bit query ID (0-32767, not the full 16-bit range), cycling
+so consecutive lookups do not all reuse ID 0 -- not a security property
+for this synchronous, one-in-flight-request-at-a-time client, just makes
+a captured trace easier to read.  Capped below 128*256 deliberately:
+this runtime's elisp-level string constructors (`string'/`make-string'/
+`char-to-string', and `unibyte-string', independently confirmed broken
+for this exact range -- see `nelisp--dns-u16-be') treat every integer
+argument as a CODEPOINT and UTF-8-encode it, so a byte VALUE >= 128
+built this way becomes TWO raw wire bytes, not one, corrupting this
+query's own framing.  Capping the ID's high byte below 128 keeps both ID
+bytes in the ASCII range, where codepoint and raw-byte encoding coincide
+-- the only place in this client's own OUTGOING message a byte >= 128
+could otherwise appear (every other field -- flags, counts, QTYPE/
+QCLASS, hostname labels -- is already < 128 by construction)."
+  (setq nelisp--dns-query-id-counter (mod (1+ nelisp--dns-query-id-counter) 32768)))
+
+(defun nelisp--dns-encode-query (name)
+  "Return the raw DNS-over-TCP QUERY message for NAME's A record: the
+2-byte RFC 7766 length prefix, a 12-byte header (ID, flags = recursion
+desired, QDCOUNT=1, AN/NS/ARCOUNT=0), and one question (QNAME QTYPE=1
+QCLASS=1, RFC 1035 S4.1.1/S4.1.2)."
+  (let* ((header (concat (nelisp--dns-u16-be (nelisp--dns-next-id))
+                          (string 1 0)             ; flags: RD=1
+                          (nelisp--dns-u16-be 1)   ; QDCOUNT
+                          (nelisp--dns-u16-be 0)   ; ANCOUNT
+                          (nelisp--dns-u16-be 0)   ; NSCOUNT
+                          (nelisp--dns-u16-be 0))) ; ARCOUNT
+         (question (concat (nelisp--dns-encode-qname name)
+                            (nelisp--dns-u16-be 1)   ; QTYPE = A
+                            (nelisp--dns-u16-be 1)))  ; QCLASS = IN
+         (message (concat header question)))
+    (concat (nelisp--dns-u16-be (string-bytes message)) message)))
+
+(defun nelisp--dns-byte (buf i)
+  "Return the raw byte (0-255) at BUF[I], or signal a catchable
+`nelisp-dns-error' instead of an uncaught out-of-bounds read -- Doc 194
+P2's own exit criterion: a malformed/truncated response must be a
+catchable condition, never an uncaught args-out-of-range from a bare
+byte-index read past the end of BUF, and never a wild read.
+
+`string-byte'/`string-bytes' (scripts/nelisp-standalone-build.el,
+\"Doc 161: byte-level access + count for byte-IO (length is now chars)\"
+per that primitive's own comment), NOT `aref'/`length' -- measured
+against a REAL DNS-over-TCP response from a live resolver (not assumed):
+`aref'/`length' decode every string as UTF-8 to find character
+boundaries (`nl_str_charlen'/`nl_u8_decode', Doc 161's own documented,
+intentional design -- this runtime has no separate unibyte string type
+at all), so a raw byte >= 0x80 that happens to look like a UTF-8
+continuation byte gets silently absorbed into the PRECEDING character
+and a lead byte gets decoded into a multi-byte codepoint -- reading a
+real response's flags byte 0x81 through `aref' returned 64, not 129, and
+RDATA bytes came back merged into out-of-range values like 770. Wire
+bytes arriving via `nelisp-socket-recv' are stored byte-verbatim
+(`nl_alloc_str', a plain memcpy, no encode/decode pass) -- it is only
+`aref'/`length' that are UTF-8-aware on top of that byte-clean storage,
+and `string-byte'/`string-bytes' read the same storage without going
+through that decode at all.  This substrate limitation is out of P0-P2's
+own scope to fix (native, scripts/nelisp-standalone-build.el -- a future
+doc's concern); this file works around it entirely at the call site."
+  (if (or (< i 0) (>= i (string-bytes buf)))
+      (signal 'nelisp-dns-error (list "truncated DNS response" i (string-bytes buf)))
+    (string-byte buf i)))
+
+(defun nelisp--dns-u16-at (buf i)
+  (+ (ash (nelisp--dns-byte buf i) 8) (nelisp--dns-byte buf (1+ i))))
+
+(defun nelisp--dns-skip-name (buf i)
+  "Return the offset just past the NAME field starting at BUF[I] (RFC
+1035 S4.1.4): a run of length-prefixed labels ending either in a zero
+length byte, or in a 2-byte compression pointer (the label's length byte
+has both top bits set, 0xC0-0xFF).  A pointer always terminates the name
+FIELD AT THIS POSITION -- the two bytes of the pointer itself are all
+this occurrence of the field consumes; this client never needs the
+POINTED-TO name text (it only extracts A-record RDATA, Doc 194 S3.2), so
+there is no recursion into the pointer target and therefore no
+compression LOOP possible in this walk at all.  Bounded regardless by
+`nelisp--dns-byte''s own out-of-bounds guard: a label length that would
+run off the end of BUF signals `nelisp-dns-error' instead of reading
+past it."
+  (let ((len (nelisp--dns-byte buf i)))
+    (cond
+     ((= len 0) (1+ i))
+     ((= (logand len 192) 192) (+ i 2))
+     (t (nelisp--dns-skip-name buf (+ i 1 len))))))
+
+(defun nelisp--dns-parse-response (buf)
+  "Parse BUF (one complete DNS-over-TCP response message, the 2-byte TCP
+length prefix already stripped by the caller) and return the first
+A/IN-record IPv4 address string, or nil if the answer section has none
+\(NXDOMAIN and an empty ANCOUNT both land here, Doc 194 S3.2 -- neither
+is a parse ERROR).  Every offset computed while walking QDCOUNT/ANCOUNT
+records goes through `nelisp--dns-byte'/`nelisp--dns-skip-name', so a
+truncated or adversarially short RDLENGTH signals the catchable
+`nelisp-dns-error' rather than reading out of bounds."
+  (let* ((qdcount (nelisp--dns-u16-at buf 4))
+         (ancount (nelisp--dns-u16-at buf 6))
+         (pos 12))
+    (dotimes (_ qdcount)
+      (setq pos (+ (nelisp--dns-skip-name buf pos) 4)))
+    (catch 'nelisp--dns-found
+      (dotimes (_ ancount)
+        (setq pos (nelisp--dns-skip-name buf pos))
+        (let* ((rtype (nelisp--dns-u16-at buf pos))
+               (rclass (nelisp--dns-u16-at buf (+ pos 2)))
+               (rdlength (nelisp--dns-u16-at buf (+ pos 8)))
+               (rdata-pos (+ pos 10)))
+          (when (> (+ rdata-pos rdlength) (string-bytes buf))
+            (signal 'nelisp-dns-error (list "RDATA runs past end of message" rdlength)))
+          (when (and (= rtype 1) (= rclass 1) (= rdlength 4))
+            (throw 'nelisp--dns-found
+                   (format "%d.%d.%d.%d"
+                           (nelisp--dns-byte buf rdata-pos)
+                           (nelisp--dns-byte buf (+ rdata-pos 1))
+                           (nelisp--dns-byte buf (+ rdata-pos 2))
+                           (nelisp--dns-byte buf (+ rdata-pos 3)))))
+          (setq pos (+ rdata-pos rdlength))))
+      nil)))
+
+(defun nelisp--socket-recv-exact (fd n)
+  "Read exactly N bytes from FD via repeated `nelisp-socket-recv' calls --
+TCP does not preserve message boundaries, so a single `recv' may return
+fewer bytes than requested (Doc 194 S3.2).  Signals a catchable
+`nelisp-dns-error' if the peer closes before N bytes arrive.  Byte
+COUNTS throughout use `string-bytes', not `length' -- see
+`nelisp--dns-byte''s own comment for why `length' (a UTF-8 character
+count on this substrate) cannot be trusted for a raw wire buffer."
+  (let ((acc "") (remaining n))
+    (while (> remaining 0)
+      (let ((chunk (nelisp-socket-recv fd remaining)))
+        (when (or (null chunk) (= (string-bytes chunk) 0))
+          (signal 'nelisp-dns-error
+                  (list "connection closed before N bytes received" n (string-bytes acc))))
+        (setq acc (concat acc chunk))
+        (setq remaining (- remaining (string-bytes chunk)))))
+    acc))
+
+(defun nelisp--dns-resolve-a (name)
+  "Resolve NAME's first A record over DNS-over-TCP/53 against
+`nelisp--dns-resolver-ip', built entirely on Phase 1's own
+`nelisp-socket-connect'/-send/-recv/-close (Doc 194 P2/S3.2).  Returns an
+IPv4 dotted-decimal string, or nil if the resolver answered with zero A
+records -- NOT an error; the CALLER (`nelisp--resolve-host') is what
+turns an overall nil (hosts file AND DNS both came up empty) into a
+signalled `nelisp-dns-error'."
+  (let* ((resolver (nelisp--dns-resolver-ip))
+         (query (nelisp--dns-encode-query name))
+         (fd (nelisp-socket-connect resolver nelisp-dns-resolver-port)))
+    (unwind-protect
+        (progn
+          (nelisp-socket-send fd query)
+          (let* ((len-prefix (nelisp--socket-recv-exact fd 2))
+                 (msg-len (+ (ash (string-byte len-prefix 0) 8) (string-byte len-prefix 1)))
+                 (msg (nelisp--socket-recv-exact fd msg-len)))
+            (nelisp--dns-parse-response msg)))
+      (ignore-errors (nelisp-socket-close fd)))))
+
 (defun nelisp--resolve-host (host)
   "Return an IPv4 dotted-decimal string or \"localhost\" for HOST, ready
-for `nelisp-socket-connect'/-listen (Doc 194 S3.2).  Fallback chain so
-far: already-literal hosts (Phase A, feat/socket-primitives-p1,
-unchanged) pass straight through; otherwise `/etc/hosts' (Phase B, this
-commit).  Doc 194 P2 (DNS-over-TCP/53, Phase C) extends this function's
-`cond' with one more clause, inserted before this fallback -- see that
-phase's own commit.  Signals a catchable error when no phase resolves it
--- never a hang, never a wrong-address connect (Doc 194 P1 exit
-criterion)."
+for `nelisp-socket-connect'/-listen (Doc 194 S3.2).  Fallback chain:
+already-literal hosts (Phase A, feat/socket-primitives-p1, unchanged)
+pass straight through; otherwise `/etc/hosts' (Phase B); otherwise
+DNS-over-TCP/53 (Phase C).  Signals a catchable `nelisp-dns-error' when
+NO phase resolves it -- never a hang, never a wrong-address connect (Doc
+194 P1 exit criterion); a hard failure INSIDE Phase C (resolver
+unreachable, malformed response) propagates its own `nelisp-dns-error'
+unchanged, it is not re-wrapped as \"unresolvable\" here."
   (cond
    ((or (equal host "localhost") (nelisp--ipv4-dotted-p host)) host)
    ((nelisp--hosts-file-lookup host))
-   (t (signal 'error (list "unresolvable host (Doc 194 P2/DNS not yet loaded)" host)))))
+   ((nelisp--dns-resolve-a host))
+   (t (signal 'nelisp-dns-error (list "unresolvable host" host)))))
 
 ;;; make-network-process / open-network-stream: the synchronous client
 ;;; path (Doc 194 P0) -------------------------------------------------------
