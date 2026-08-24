@@ -60,9 +60,8 @@ Any error is re-signalled as the named `nl-total-error' condition."
 
 (defun nl-static--total-scan-seq (forms)
   "Check every live form in the possibly dotted list FORMS."
-  (while (consp forms)
-    (nl-static--total-scan (car forms))
-    (setq forms (cdr forms))))
+  (dolist (form (nl--walk-proper-list forms))
+    (nl-static--total-scan form)))
 
 (defun nl-static--total-scan (form)
   "Check every syntactically visible `nl-match' in FORM."
@@ -126,9 +125,8 @@ exhaustiveness and arity checker.  The emitted form is the plain
 
 (defun nl-static--borrow-scan-seq (forms active)
   "Scan each live element of FORMS with ACTIVE lexical borrows."
-  (while (consp forms)
-    (nl-static--borrow-scan (car forms) active)
-    (setq forms (cdr forms))))
+  (dolist (form (nl--walk-proper-list forms))
+    (nl-static--borrow-scan form active)))
 
 (defun nl-static--borrow-scan-let (form active sequential)
   "Scan let FORM under ACTIVE; SEQUENTIAL means `let*' semantics."
@@ -410,9 +408,8 @@ those cases at runtime."
 
 (defun nl-static--typed-scan-seq (forms environment)
   "Check typed calls in FORMS using declared binding ENVIRONMENT."
-  (while (consp forms)
-    (nl-static--typed-scan (car forms) environment)
-    (setq forms (cdr forms))))
+  (dolist (form (nl--walk-proper-list forms))
+    (nl-static--typed-scan form environment)))
 
 (defun nl-static--typed-scan-let (form environment sequential)
   "Check typed calls in let FORM; SEQUENTIAL means `let*'."
