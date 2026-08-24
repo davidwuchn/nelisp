@@ -174,7 +174,11 @@ silent-fallback        57
 # 2 cleanup sites, the socket branch's one Doc 184 follow-on cleanup
 # site), pending the RE-RUN of `fallback-inventory' on the fully
 # merged tree per the integration playbook.
-ignore-errors   60
+# ignore-errors 60 -> 61 on 2026-08-24 (wave8, IPv6 smoke).  socket-ipv6's
+# `nelisp-standalone--reader-ipv6-socket-smoke' ends with the same
+# best-effort `(ignore-errors (delete-file script))' temp-file cleanup
+# every sibling `reader-*-smoke' uses; pinned below.
+ignore-errors   61
 # 34 -> 32 on 2026-08-19: the two handlers in
 # `nelisp-artifact--ensure-native-compiler' now record the error instead of
 # discarding it.  Between them they had hidden a chain of six failures --
@@ -373,3 +377,4 @@ pinned-site silent-fallback	nelisp-substrate-parity-corpus.el	defconst nelisp-su
 pinned-site silent-fallback	nelisp-substrate-parity-corpus.el	defconst nelisp-substrate-parity-corpus	e3f2648caa3a 1
 pinned-site silent-fallback	nelisp-substrate-presence-gen.el	defun nlsp--primitive-symbols	09db60440f5b 1
 pinned-site ignore-errors	nelisp-standalone-build.el	defun nelisp-standalone--reader-socket-smoke	c143a5fded43 1
+pinned-site ignore-errors	nelisp-standalone-build.el	defun nelisp-standalone--reader-ipv6-socket-smoke	c143a5fded43 1

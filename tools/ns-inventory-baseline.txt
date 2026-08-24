@@ -181,6 +181,17 @@
 # from their own commit's prose, and the merged tree's real count is not
 # obligated to equal that arithmetic sum exactly. Raised to the measured
 # count.
+#
+#   929 -> 937 (ns-prefix-violation), 691 -> 700 (ns-private-escape) on
+#   2026-08-24 for wave8 (Docs 196/197/198 + trampoline).  The base tree
+#   measured 907/652; nl-num raised these to 929/691 for its own numeric-
+#   tower names.  Merging nl-static (nl-total/nl-typed/nl-borrow-scope +
+#   nl-prelude's factored nl--walk-* walker primitives, consumed by
+#   nl-check), nl-hygiene (nl-defmacro-hygienic), and nl-prelude-trampoline
+#   (nl-trampoline/nl-bounce/nl--bounce) adds the remaining +8 prefix and
+#   +9 private names.  Every file changed base->merged is a wave8 opt-in
+#   library or its tooling; ns-collision/ns-collision-divergent stay pinned
+#   at 250/127, so no cross-boundary drift entered outside these packages.
 ns-collision 250
 # 97 -> 96 on 2026-08-19: `string-equal' no longer differs between the two
 # files -- the prelude's now signals for a non-string instead of falling
@@ -518,7 +529,7 @@ ns-collision-divergent 127
 # nl-clj notes above concede; renaming them to satisfy file-local prefixes
 # would violate Doc 196's opt-in API decision rather than fix a collision.
 # Measured via `make ns-inventory': exactly 22 new prefix findings.
-ns-prefix-violation 929
+ns-prefix-violation 937
 # 611 -> 613 on 2026-08-20: `nelisp--check-string'/`--check-symbol' and the
 # other argument-check helpers are referenced from the lisp/ mirrors that
 # carry copies of the functions using them.  This is the kind this file
@@ -617,7 +628,7 @@ ns-prefix-violation 929
 # manifest.el still has only nl-prelude as its cross-package dependency.
 # This is the same shared-core/private-engine shape conceded for nl-clj
 # immediately above.  Measured via `make ns-inventory': exactly 39.
-ns-private-escape 691
+ns-private-escape 700
 ns-unreadable 0
 
 # `pinned-collision KEY' pins every ns-collision and ns-collision-divergent
