@@ -105,30 +105,71 @@ real Emacs never reaches FN either."
     (setq nelisp-async-core--timers (cons tm nelisp-async-core--timers))
     tm))
 
+;; Host fallback (fixed 2026-08-24, integration/wave6 full-battery
+;; run): this file's `defalias' below is GLOBAL and applies whether it
+;; is loaded standalone (the only case it was designed for -- there is
+;; no competing "real" `timerp'/`cancel-timer' to preserve, only the
+;; prelude's own synchronous stubs being upgraded) or under host Emacs
+;; alongside code that creates REAL host timers via the ordinary
+;; `run-at-time' (e.g. any other package's test file in the same ERT
+;; batch process that happens to `require' this one first -- one
+;; `nelisp-actor' test measured this exact failure:
+;; `(wrong-type-argument timerp [t nil nil nil nil nil nil nil nil
+;; nil])', a real host timer vector, `cancel-timer'd after some
+;; earlier test in the same process loaded this file). Captured ONCE,
+;; before the `defalias' below takes effect (`require' caching means
+;; this file's top level, including this `defvar', only ever runs
+;; once per Emacs session), so both functions can recognize a REAL
+;; host timer and delegate instead of misreading it as a foreign
+;; vector or, worse, `aset'ing into a slot that has nothing to do
+;; with this module's own layout.
+(defvar nelisp-async-core--host-timerp
+  (and (fboundp 'timerp) (symbol-function 'timerp))
+  "The `timerp' bound before this file's own `defalias', or nil.")
+(defvar nelisp-async-core--host-cancel-timer
+  (and (fboundp 'cancel-timer) (symbol-function 'cancel-timer))
+  "The `cancel-timer' bound before this file's own `defalias', or nil.")
+
 (defun nelisp-async-core-timerp (x)
-  "Return non-nil when X is a timer vector this module created.
-Shape check only (length 5, numeric deadline slot) -- a cancelled
-timer is still a timer (real Emacs's own `timerp' agrees: cancelling
-changes a timer's enabled state, not its type), so this deliberately
-does not look at the LIVE slot."
-  (and (vectorp x) (= (length x) 5)
-       (numberp (aref x nelisp-async-core--t-deadline))))
+  "Return non-nil when X is a timer vector this module created, OR a
+real host timer object recognized by whatever `timerp' was bound
+before this file's own `defalias' (see
+`nelisp-async-core--host-timerp').
+Shape check only for this module's own timers (length 5, numeric
+deadline slot) -- a cancelled timer is still a timer (real Emacs's own
+`timerp' agrees: cancelling changes a timer's enabled state, not its
+type), so this deliberately does not look at the LIVE slot."
+  (or (and (vectorp x) (= (length x) 5)
+           (numberp (aref x nelisp-async-core--t-deadline)))
+      (and nelisp-async-core--host-timerp
+           (funcall nelisp-async-core--host-timerp x))))
 
 (defun nelisp-async-core-cancel-timer (tm)
   "Cancel timer TM so it never fires again.
-Signals `wrong-type-argument' for a non-timer TM, matching real
-Emacs's own `cancel-timer' (measured: `(cancel-timer \"x\")' ->
-`(wrong-type-argument timerp \"x\")' on host Emacs 30.1) and the
-prelude's own pre-upgrade stub this defalias replaces -- fixed
-2026-08-24 (integration/wave6 battery run): the version this
-replaced silently accepted anything `vectorp' rejected and returned
-nil instead, a real emacs-parity regression Phase 2A's process-
-adapter wiring exposed by making this the default `cancel-timer' on
-every standalone build instead of an opt-in `--load'."
-  (unless (nelisp-async-core-timerp tm)
-    (signal 'wrong-type-argument (list 'timerp tm)))
-  (aset tm nelisp-async-core--t-live nil)
-  nil)
+Delegates to whatever `cancel-timer' was bound before this file's own
+`defalias' (see `nelisp-async-core--host-cancel-timer') for anything
+that is not one of this module's own timer vectors AND is recognized
+by the captured host `timerp' -- notably a real host-Emacs timer, so
+this never `aset's into a slot from a layout that is not its own.
+Signals `wrong-type-argument' for anything neither recognizes,
+matching real Emacs's own `cancel-timer' (measured: `(cancel-timer
+\"x\")' -> `(wrong-type-argument timerp \"x\")' on host Emacs 30.1) and
+the prelude's own pre-upgrade stub this defalias replaces -- fixed
+2026-08-24 (integration/wave6 battery run): the version this replaced
+silently accepted anything `vectorp' rejected and returned nil
+instead, a real emacs-parity regression Phase 2A's process-adapter
+wiring exposed by making this the default `cancel-timer' on every
+standalone build instead of an opt-in `--load'."
+  (cond
+   ((and (vectorp tm) (= (length tm) 5)
+         (numberp (aref tm nelisp-async-core--t-deadline)))
+    (aset tm nelisp-async-core--t-live nil)
+    nil)
+   ((and nelisp-async-core--host-timerp
+         (funcall nelisp-async-core--host-timerp tm)
+         nelisp-async-core--host-cancel-timer)
+    (funcall nelisp-async-core--host-cancel-timer tm))
+   (t (signal 'wrong-type-argument (list 'timerp tm)))))
 
 (defun nelisp-async-core--next-deadline ()
   "Return the earliest live-timer deadline, or nil when none are armed."

@@ -342,5 +342,18 @@
 # size raise in this file's history: the new `nelisp-async-core-
 # timerp' function, `nelisp-async-core-run-at-time''s restored TIME
 # validation, and their docstrings/comments.
-size 7587264
+#
+# Raised 2026-08-24 (integration/wave6 battery run: the timerp/
+# cancel-timer host-fallback fix, packages/nelisp-eventloop/src/
+# nelisp-async-core.el), 7587264 -> 7603704, +16440 bytes, +0.22%,
+# well inside the 2% slack -- raised anyway per this file's own
+# rule above, not left for slack to silently absorb. Embedded
+# prelude source growth: two new captured-host-function defvars
+# and the cond-based delegate logic in `nelisp-async-core-timerp'/
+# `nelisp-async-core-cancel-timer', fixing a real cross-test global-
+# state-leak bug (a REAL host Emacs timer, `cancel-timer'd after
+# this file's own defalias had already fired in the same Emacs
+# process, used to hit the wrong-shape branch and signal
+# incorrectly instead of delegating to the real cancel-timer).
+size 7603704
 slack-pct 2
