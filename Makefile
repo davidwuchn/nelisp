@@ -807,6 +807,7 @@ STANDALONE_READER_SMOKES = \
   standalone-reader-match-data-smoke \
   standalone-reader-mod-float-smoke \
   standalone-reader-nested-backquote-macro-smoke \
+  standalone-reader-network-process-nowait-smoke \
   standalone-reader-network-process-smoke \
   standalone-reader-nonblocking-socket-smoke \
   standalone-reader-number-token-smoke \
@@ -2281,9 +2282,17 @@ standalone-reader-process-adapter-smoke-red: standalone-reader
 # connect to a closed port, assert the `condition-case ((file-error)
 # ...)' idiom -- the one every existing `open-network-stream' caller
 # already uses -- catches it, not a bare `nelisp-socket-error' leaking
-# unmapped through the standard-name entry point.  A third case: `:server
-# t'/`:nowait' (Doc 194 P3-P5, not this pass) signal loudly rather than
-# silently degrading to a blocking connect nobody asked for.  A fourth
+# unmapped through the standard-name entry point.  A third case, UPDATED
+# by doc 194 P4 (feat/network-process-p345): `:nowait t' USED to signal
+# loudly here (P0-P2's own guard, "against-the-bug" for THIS phase per
+# doc 194's own P4 exit criterion is exactly this flip) -- now it returns
+# a real `network-process' immediately with `process-status' reading
+# `connect' \(measured against real Emacs 30.1 during P4's own
+# implementation: the identical status symbol\), never signalling; the
+# async completion / sentinel-firing positive proof lives in its own
+# dedicated `standalone-reader-network-process-nowait-smoke' below,
+# P4's own exit criterion.  `:server t' (Doc 194 P5, not this pass yet)
+# still signals loudly rather than silently degrading.  A fourth
 # case: an ordinary native subprocess and a `network-process' coexisting
 # in the SAME `nelisp-process-adapter--live' poll-set registry (Doc 194
 # S3.1's own design) do not interfere with each other -- the subprocess's
@@ -2303,7 +2312,7 @@ standalone-reader-network-process-smoke: standalone-reader
 	@printf '%s\n' \
 	  '$(NELISP_PROCESS_ADAPTER_LOAD_1)' \
 	  '$(NELISP_PROCESS_ADAPTER_LOAD_2)' \
-	  '(list (condition-case err (progn (open-network-stream "bad" nil "127.0.0.1" 1) (quote uncaught)) (file-error (car err))) (condition-case err (progn (make-network-process :name "x" :host "127.0.0.1" :service 80 :nowait t) (quote uncaught)) (error (quote signalled))) (condition-case err (progn (make-network-process :name "x" :host "127.0.0.1" :service 80 :server t) (quote uncaught)) (error (quote signalled))))' \
+	  '(list (condition-case err (progn (open-network-stream "bad" nil "127.0.0.1" 1) (quote uncaught)) (file-error (car err))) (condition-case err (let ((p (make-network-process :name "x" :host "127.0.0.1" :service 80 :nowait t))) (prog1 (process-status p) (delete-process p))) (error (quote signalled))) (condition-case err (progn (make-network-process :name "x" :host "127.0.0.1" :service 80 :server t) (quote uncaught)) (error (quote signalled))))' \
 	  > target/standalone-reader-network-process-smoke-refused.el
 	@printf '%s\n' \
 	  '$(NELISP_PROCESS_ADAPTER_LOAD_1)' \
@@ -2316,7 +2325,7 @@ standalone-reader-network-process-smoke: standalone-reader
 	mixed_out="$$(./target/nelisp --load target/standalone-reader-network-process-smoke-mixed.el)"; \
 	if [ "$$red_out" = "(quote void-function-red)" ] && \
 	   [ "$$roundtrip_out" = "(open t t closed nil t)" ] && \
-	   [ "$$refused_out" = "(file-error signalled signalled)" ] && \
+	   [ "$$refused_out" = "(file-error connect signalled)" ] && \
 	   [ "$$mixed_out" = "$$(printf '(\042finished\n\042 open nil)')" ]; then \
 	  echo "[standalone-reader-network-process-smoke] PASS: red(void-fn-on-p1-base)=$$red_out roundtrip(status,srv-got,cli-got,closed,live-p,processp)=$$roundtrip_out refused(file-error,nowait,server)=$$refused_out mixed(sub-sentinel,net-status,sub-live)=$$mixed_out"; \
 	else \
@@ -2493,6 +2502,72 @@ standalone-reader-dns-smoke: standalone-reader
 # host could not run here anyway) -- covers this alongside Phase 1's own
 # six names, closing a gap that predates this phase (Phase 1 itself had
 # no such ERT-level proof for its own six).
+# Doc 194 P4 exit criterion: wiring P3's nonblocking primitives into the
+# process adapter's ONE poll loop, and real `:nowait' support in
+# `make-network-process'.  Against-the-bug: RED is the P0-P2 guard this
+# EXACT smoke's own "refused" case in `standalone-reader-network-process-
+# smoke' used to assert (`:nowait t' unconditionally `error's) -- that
+# smoke was updated alongside this one (same commit) to assert the
+# OPPOSITE, GREEN claim (`process-status' reads `connect', no signal);
+# this target is the dedicated positive proof P4's own exit criterion
+# asks for.
+#
+# Case 1 (success): `:nowait t' against a real loopback listener returns
+# BEFORE the connect completes (wall-clock bounded, no `accept-process-
+# output' call yet); `process-status' reads `connect' immediately;
+# `accept-process-output' later drives the SAME shared poll loop to fire
+# the sentinel with `open\n' -- measured against real GNU Emacs 30.1
+# during this phase's implementation (`(let* ((srv (make-network-process
+# :server t ...)) (cli (make-network-process :nowait t ...))) ...)',
+# this doc's own reproducible probe) -- and `process-status' reads
+# `open' afterward.
+# Case 2 (failure): the SAME against a closed port -- `process-status'
+# reads `connect' immediately, then `failed' after `accept-process-
+# output', with the sentinel fired EXACTLY `(format "failed with code
+# %d\n" ERRNO)' -- measured the SAME way against real Emacs 30.1: a bare
+# `failed\n' (doc 194's own S1.3/S3.3 prose) is NOT the real string; only
+# case 2's own errno differs run to run in general (this smoke pins it
+# to the deterministic ECONNREFUSED=111 a closed local port always
+# gives), so the smoke asserts the exact formatted string, not just a
+# prefix.
+# Case 3 (shared loop, two DIFFERENT process kinds, doc 184 P2's own
+# "does not drain the other's queue" contract extended across kinds):
+# a concurrent ordinary subprocess and a `:nowait' network connect,
+# polled through the SAME `accept-process-output' call, each become
+# ready independently -- the subprocess's sentinel fires with its own
+# real status and the network connect still completes to `open'.
+standalone-reader-network-process-nowait-smoke: standalone-reader
+	@mkdir -p target
+	@printf '%s\n' \
+	  '$(NELISP_PROCESS_ADAPTER_LOAD_1)' \
+	  '$(NELISP_PROCESS_ADAPTER_LOAD_2)' \
+	  '(let* (msgs (lfd (nelisp-socket-listen "127.0.0.1" 56010)) (cli (make-network-process :name "cli" :host "127.0.0.1" :service 56010 :nowait t :sentinel (lambda (_p m) (push m msgs)))) (status0 (process-status cli))) (accept-process-output cli 2) (let ((result (list status0 (process-status cli) (reverse msgs)))) (delete-process cli) (nelisp-socket-close lfd) result))' \
+	  > target/standalone-reader-network-process-nowait-smoke-ok.el
+	@printf '%s\n' \
+	  '$(NELISP_PROCESS_ADAPTER_LOAD_1)' \
+	  '$(NELISP_PROCESS_ADAPTER_LOAD_2)' \
+	  '(let* (msgs (cli (make-network-process :name "cli" :host "127.0.0.1" :service 1 :nowait t :sentinel (lambda (_p m) (push m msgs)))) (status0 (process-status cli))) (accept-process-output cli 2) (let ((result (list status0 (process-status cli) (reverse msgs)))) (ignore-errors (delete-process cli)) result))' \
+	  > target/standalone-reader-network-process-nowait-smoke-refused.el
+	@printf '%s\n' \
+	  '$(NELISP_PROCESS_ADAPTER_LOAD_1)' \
+	  '$(NELISP_PROCESS_ADAPTER_LOAD_2)' \
+	  '(let* (net-msgs sub-msgs (lfd (nelisp-socket-listen "127.0.0.1" 56011)) (net (make-network-process :name "net" :host "127.0.0.1" :service 56011 :nowait t :sentinel (lambda (_p m) (push m net-msgs)))) (sub (make-process :name "echo" :command (list "/bin/sh" "-c" "exit 0") :sentinel (lambda (_p m) (push m sub-msgs))))) (accept-process-output nil 2) (accept-process-output nil 2) (let ((result (list (process-status net) (reverse net-msgs) (process-live-p sub) (reverse sub-msgs)))) (delete-process net) (nelisp-socket-close lfd) result))' \
+	  > target/standalone-reader-network-process-nowait-smoke-mixed.el
+	@ok_out="$$(./target/nelisp --load target/standalone-reader-network-process-nowait-smoke-ok.el)"; \
+	refused_out="$$(./target/nelisp --load target/standalone-reader-network-process-nowait-smoke-refused.el)"; \
+	mixed_out="$$(./target/nelisp --load target/standalone-reader-network-process-nowait-smoke-mixed.el)"; \
+	ok_expect="$$(printf '(connect open ("open\n"))')"; \
+	refused_expect="$$(printf '(connect failed ("failed with code 111\n"))')"; \
+	mixed_expect="$$(printf '(open ("open\n") nil ("finished\n"))')"; \
+	if [ "$$ok_out" = "$$ok_expect" ] && \
+	   [ "$$refused_out" = "$$refused_expect" ] && \
+	   [ "$$mixed_out" = "$$mixed_expect" ]; then \
+	  echo "[standalone-reader-network-process-nowait-smoke] PASS: ok(status0,status1,sentinel)=$$ok_out refused(status0,status1,sentinel)=$$refused_out mixed(net-status,net-sentinel,sub-live,sub-sentinel)=$$mixed_out"; \
+	else \
+	  echo "[standalone-reader-network-process-nowait-smoke] FAIL: ok=$$ok_out (want $$ok_expect) refused=$$refused_out (want $$refused_expect) mixed=$$mixed_out (want $$mixed_expect)"; \
+	  exit 1; \
+	fi
+
 standalone-reader-nonblocking-socket-smoke: standalone-reader
 	@mkdir -p target
 	@printf '%s\n' \

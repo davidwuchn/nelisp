@@ -288,3 +288,13 @@ standalone-reader-dns-smoke|packages/nelisp-process-adapter/src/nelisp-process-a
 # t)' (the two `nil's are the `ready' checks, both wrongly false), GREEN
 # again with `7' restored.
 standalone-reader-nonblocking-socket-smoke|scripts/nelisp-standalone-build.el|s/(let\* ((rc (syscall-direct 7 pfd 1 timeout 0 0 0))/(let* ((rc (syscall-direct 230 pfd 1 timeout 0 0 0))/|nelisp-socket-poll issues clock_nanosleep(230) instead of poll(7), so it silently always answers not-ready regardless of true socket readiness
+# Doc 194 P4 (feat/network-process-p345): manually verified RED-with-
+# injection / GREEN-with-injection-reverted before adding -- the async
+# connect-completion status machine's own success/failure branch is
+# inverted (a real SO_ERROR=0 success is misread as errno 999, a value
+# `nelisp-socket-connect-error' can never actually return), so a
+# genuinely successful nonblocking connect fires the sentinel with
+# "failed with code 0\n" and transitions to `failed' instead of `open' --
+# measured RED at `mixed=(failed ("failed with code 0\n") nil
+# ("finished\n"))' (the "ok" case's own network status, expected `open').
+standalone-reader-network-process-nowait-smoke|packages/nelisp-process-adapter/src/nelisp-process-adapter.el|s/(if (= err 0)/(if (= err 999)/|a successful nonblocking connect (real SO_ERROR 0) is misclassified as failed, firing "failed with code 0\n" instead of transitioning to open
