@@ -42,6 +42,11 @@
 
 (require 'nl-clj-core)
 
+;; Soft dependency: `nl-clj-deref' below handles futures when
+;; nl-clj-future.el is loaded, without a hard require on it.
+(declare-function nl-clj-future-p "nl-clj-future" (object))
+(declare-function nl-clj-future-await "nl-clj-future" (f))
+
 (defun nl-clj-atom (value)
   "Return a new atom wrapping VALUE."
   (vector nl-clj--atom-tag value nil))
@@ -57,9 +62,16 @@ CALLER names the public function doing the check, for the error data."
     (signal 'nl-clj-type-error (list caller "not an nl-clj atom" a))))
 
 (defun nl-clj-deref (a)
-  "Return the value currently held by atom A."
-  (nl-clj--atom-check a 'nl-clj-deref)
-  (aref a 1))
+  "Return the value held by atom A, or block for future A (Clojure `deref'/`@').
+Atoms return their current value.  Futures are supported when
+`nl-clj-future' is loaded (Doc 199 Tier 1): A blocks cooperatively until
+the future is realised.  Any other object signals `nl-clj-type-error',
+exactly as before futures existed."
+  (cond
+   ((nl-clj-atom-p a) (aref a 1))
+   ((and (fboundp 'nl-clj-future-p) (nl-clj-future-p a))
+    (nl-clj-future-await a))
+   (t (nl-clj--atom-check a 'nl-clj-deref))))
 
 (defun nl-clj-swap! (a f &rest args)
   "Set A's value to (apply F current-value ARGS); return the new value.

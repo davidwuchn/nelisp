@@ -14,6 +14,24 @@
 #+STATUS: =#+VERIFIED-BY= — this doc ships no gate, per AI.md's Definition
 #+STATUS: of Done (that requirement applies to =#+STATUS: SHIPPED= docs).
 
+* Implementation status (Doc 199 program: Tier 1 + Tier 2 + Tier 3)
+
+#+VERIFIED-BY: compile parens-check nl-clj-future-standalone-smoke
+
+- *Tier 1 (cooperative pmap/future/pcalls): IMPLEMENTED 2026-08-25.*
+  packages/nl-clj/src/nl-clj-future.el + nl-clj-future-test.el (15 ERT,
+  incl. against-the-bug order + no-worker-dropped) + nl-clj-future-
+  standalone-smoke.el (PASS on target/nelisp, 15 tests + 10000-worker
+  drive).  Deviation from §3.1's sketch, deliberate and documented in the
+  source: a deferred run-queue replaces the nelisp-actor spawn, because a
+  future worker never parks and the actor/CPS path needs generator.el
+  (host-Emacs-only on standalone).  nl-clj-deref is made polymorphic over
+  atoms and futures; atom behaviour is byte-identical.  API §7 unchanged.
+- *Tier 2 (callable nl-thread-spawn, GC-free workers + publish protocol):
+  IN PROGRESS.*  Runtime work per §4.2 + §6.2; not a pure library.
+- *Tier 3 (concurrency-safe GC): PENDING.*  The §5 epic (per-thread root
+  enumeration + a GC shape); scoped, not started.
+
 * §0 TL;DR
 
 The owner's decision stands: everything in NeLisp's parallelism story ships

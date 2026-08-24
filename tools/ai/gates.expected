@@ -647,6 +647,7 @@ nl-ns-reader-standalone-smoke?
 # required gate -- this is the same pre-existing optional gate,
 # extended).
 nl-clj-standalone-smoke?
+nl-clj-future-standalone-smoke?
 # nl-num-standalone-smoke: added 2026-08-24 for Doc 196 Phases 0-4.
 # It replays all 51 CL/Scheme/Clojure reference-contract ERT bodies on the
 # standalone and separately round-trips bignum-backed rational and complex

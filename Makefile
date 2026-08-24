@@ -17,6 +17,7 @@
         standalone-reader-buffer-smoke \
         nl-actor-standalone-smoke nelisp-actor-cps-baseline nelisp-actor-cps-parity \
         nl-clj-standalone-smoke nl-clj-async-standalone-smoke nl-clj-async-cps-baseline \
+        nl-clj-future-standalone-smoke \
         nl-num-standalone-smoke
 
 EMACS ?= emacs
@@ -548,6 +549,17 @@ nl-clj-standalone-smoke: $(if $(wildcard target/nelisp target/nelisp.exe),,stand
 	  exit 0; \
 	fi; \
 	"$$bin" --load packages/nl-clj/test/nl-clj-standalone-smoke.el
+
+# Doc 199 Tier 1: cooperative pmap/future/pcalls on target/nelisp.  Needs no
+# generator (a future worker never parks), so it runs standalone directly.
+.PHONY: nl-clj-future-standalone-smoke
+nl-clj-future-standalone-smoke: $(if $(wildcard target/nelisp target/nelisp.exe),,standalone-reader)
+	@bin=./target/nelisp; [ -f "$$bin" ] || bin=./target/nelisp.exe; \
+	if [ ! -f "$$bin" ]; then \
+	  echo "GATE-SKIP no nelisp binary in target/ after build attempt"; \
+	  exit 0; \
+	fi; \
+	"$$bin" --load packages/nl-clj/test/nl-clj-future-standalone-smoke.el
 
 # Doc 196 Phases 0-4: exact rational/complex reference-contract tests on the
 # standalone, plus tagged-vector print/read round trips for a bignum-backed

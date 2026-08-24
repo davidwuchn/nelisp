@@ -391,3 +391,34 @@ Regenerate the standalone bake after editing =nl-clj-async.el= or
   one-call form is intentional, not a workaround to remove.
 - The remaining "Next phases" items above, in the build-first order
   Doc 195 §6 ranks them.
+
+* nl-clj-future — cooperative pmap/future/pcalls (Doc 199 Tier 1)
+
+Opt-in via =(require 'nl-clj-future)= (not pulled by the umbrella =nl-clj=,
+same as =nl-clj-async=).  Clojure-shaped concurrency vocabulary:
+
+- =(nl-clj-future THUNK)= — enqueue a 0-arg worker; returns a handle.
+- =(nl-clj-deref F)= / =(nl-clj-future-await F)= — realise the value.
+  =nl-clj-deref= is polymorphic: it derefs atoms *and* futures.
+- =(nl-clj-pcalls THUNK...)= — run each; values in argument order.
+- =(nl-clj-pmap F COLL)= — F over COLL (any finite =nl-clj-seq= input);
+  results in COLL order.
+
+*Correct today, zero speedup today.*  One thread of Lisp execution: the
+workers run to completion cooperatively, so wall-clock is the *sum* of
+their CPU time, not the max.  This is the honest library ceiling Doc 199's
+owner-constraint predicts.  The value is *API stability*: these signatures
+are fixed (Doc 199 §7) so the implementation under =nl-clj-future= can
+later swap this deferred run-queue for a real =nl-thread-spawn= (Doc 199
+§4/§6) with no source change in any caller.
+
+*§7 worker-body discipline* (checkable, not yet load-bearing): a worker
+thunk must reach shared state only through nl-clj's immutable persistent
+structures or an explicit nl-safe borrow cell — never a bare shared
+mutable cons/vector/hash-table.  Harmless under the cooperative scheduler
+(no real interleaving), but a real race the day the runtime tiers land.
+
+Tests: =make test-one FILE=packages/nl-clj/test/nl-clj-future-test.el= (15
+ERT).  Standalone: =make nl-clj-future-standalone-smoke= (needs no
+=generator.el= — a future worker never parks, so it runs directly on
+=target/nelisp=; 15 tests + a 10000-worker drive).
