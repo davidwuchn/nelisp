@@ -21,6 +21,19 @@
 ;; file is the proof that choice actually survives standalone load AND
 ;; standalone execution, not just standalone byte-compilation.
 ;;
+;; The lazy phase (nl-clj-lazy.el) adds a second, independent proof
+;; below the ERT-body runner: an unbounded `nl-clj-lazy-range' taken
+;; from, on the real standalone binary, AND a range whose START is
+;; already past `most-positive-fixnum' advancing correctly -- this
+;; branch's own bignum Phase B (Doc 190) landing is what makes the
+;; second one possible; a build predating it would signal
+;; `overflow-error' the moment `range' advanced past fixnum, not
+;; produce a wrong answer, so this is a real, not merely cosmetic,
+;; substrate proof (closures/thunks surviving the standalone AND
+;; arithmetic promotion both actually being exercised here, not
+;; assumed from host-Emacs behavior, which has always had native
+;; bignums regardless of NeLisp's own progress).
+;;
 ;; Run from the repository root:
 ;;
 ;;   ./target/nelisp --load packages/nl-clj/test/nl-clj-standalone-smoke.el
@@ -81,17 +94,20 @@ KEYS supports `:type SYMBOL' for condition matching like ert."
   (provide 'ert))
 
 (load "packages/nl-prelude/src/nl-prelude.el")
+(load "packages/nl-safe/src/nl-safe.el")
 (load "packages/nl-clj/src/nl-clj-core.el")
 (load "packages/nl-clj/src/nl-clj-atom.el")
 (load "packages/nl-clj/src/nl-clj-vector.el")
 (load "packages/nl-clj/src/nl-clj-hash.el")
 (load "packages/nl-clj/src/nl-clj-seq.el")
+(load "packages/nl-clj/src/nl-clj-lazy.el")
 (load "packages/nl-clj/src/nl-clj.el")
 
 (load "packages/nl-clj/test/nl-clj-atom-test.el")
 (load "packages/nl-clj/test/nl-clj-vector-test.el")
 (load "packages/nl-clj/test/nl-clj-hash-test.el")
 (load "packages/nl-clj/test/nl-clj-seq-test.el")
+(load "packages/nl-clj/test/nl-clj-lazy-test.el")
 
 ;; The exact risk this package's own brief names: prove the tagged-
 ;; vector representation round-trips through `prin1'/`read-from-string'
@@ -104,6 +120,24 @@ KEYS supports `:type SYMBOL' for condition matching like ert."
            v reread))
   (unless (equal (nl-clj-seq reread) '(1 2 3))
     (error "nl-clj-standalone-smoke: read-back vector does not behave as one")))
+
+;; The headline lazy demo (Doc 195's own framing): an unbounded range,
+;; taken from, must terminate -- on the real standalone binary, not
+;; only under host Emacs where every ERT test above already ran.
+(let ((taken (nl-clj-lazy-doall (nl-clj-lazy-take 5 (nl-clj-lazy-range)))))
+  (unless (equal taken '(0 1 2 3 4))
+    (error "nl-clj-standalone-smoke: infinite range + take: got %S" taken)))
+
+;; Doc 195 §2.2's own measured bignum gap, closed by this branch's own
+;; bignum Phase B foundation: a range whose START is already past
+;; `most-positive-fixnum' must advance by promoting to a Bignum, not
+;; signal `overflow-error' the moment `+' is asked to step past it.
+(let* ((start (1- most-positive-fixnum))
+       (taken (nl-clj-lazy-doall (nl-clj-lazy-take 5 (nl-clj-lazy-range start nil)))))
+  (unless (and (= (length taken) 5) (= (car taken) start)
+               (> (nth 4 taken) most-positive-fixnum))
+    (error "nl-clj-standalone-smoke: bignum-promoting range: got %S (most-positive-fixnum=%S)"
+           taken most-positive-fixnum)))
 
 (let ((tests (reverse nl-smoke--tests))
       (ran 0)
@@ -129,8 +163,15 @@ KEYS supports `:type SYMBOL' for condition matching like ert."
         (setq all (cdr all))))
     (error "nl-clj-standalone-smoke: %d failure(s), %d passed"
            (length failures) ran))
-  (when (< ran 100)
-    (error "nl-clj-standalone-smoke: only %d tests ran (expected >= 100)"
+  ;; 121 (pre-lazy-phase, atom+vector+hash+seq) + 42 (nl-clj-lazy-test.el)
+  ;; = 163 at the moment this floor was raised; kept meaningfully below
+  ;; that so incidental future churn does not require touching it, but
+  ;; well above the pre-lazy-phase 100 -- AI.md rule 1: "a gate that
+  ;; executed zero cases is not green" applies just as much to "executed
+  ;; far fewer than it should have because a whole file's `load' silently
+  ;; stopped mattering."
+  (when (< ran 150)
+    (error "nl-clj-standalone-smoke: only %d tests ran (expected >= 150)"
            ran))
   (princ (format "nl-clj-standalone-smoke: PASS (%d tests)\n" ran)))
 

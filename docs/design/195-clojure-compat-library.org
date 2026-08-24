@@ -13,12 +13,42 @@
 #+STATUS: check= clean.  §5.1 refs/STM and §5.2 multicore remain
 #+STATUS: correctly UNBUILT per this doc's own §5.2 recommendation
 #+STATUS: ("do not schedule... as part of this library's own roadmap
-#+STATUS: at all"); §4.4 transients, §4.6 channels/=go=, and §4.7's
-#+STATUS: lazy half are =packages/nl-clj/README.org='s own named next
-#+STATUS: phases, not started.  Marked PARTIAL rather than SHIPPED,
-#+STATUS: following Doc 190's own precedent for a doc whose build-
-#+STATUS: first ranking (§6) has landed some items and deliberately
-#+STATUS: not others.
+#+STATUS: at all"); §4.4 transients and §4.6 channels/=go= are
+#+STATUS: =packages/nl-clj/README.org='s own named next phases, not
+#+STATUS: started.  Marked PARTIAL rather than SHIPPED, following Doc
+#+STATUS: 190's own precedent for a doc whose build-first ranking (§6)
+#+STATUS: has landed some items and deliberately not others.
+#+STATUS:
+#+STATUS: §4.7's lazy half landed 2026-08-24 as =packages/nl-clj/src/
+#+STATUS: nl-clj-lazy.el= (=feat/nl-clj-lazy=, based on this branch's
+#+STATUS: own =3bab0fe88= on =origin/feat/native-observability=, which
+#+STATUS: already carries bignum Phase B — Doc 190 §7 — so an unbounded
+#+STATUS: =nl-clj-lazy-range= promotes past fixnum instead of
+#+STATUS: signalling =overflow-error=, closing §2.2's own measured gap
+#+STATUS: for exactly the case that gap matters most): =lazy-seq=/
+#+STATUS: =lazy-cons= (memoized, realize-once, reentrancy-signals-
+#+STATUS: loudly via =nl-safe='s =nl-cell= borrow fence, the SAME
+#+STATUS: mechanism §4.4's own transient design reuses for a different
+#+STATUS: purpose), =take=/=drop=/=take-while=/=drop-while=, a
+#+STATUS: lazy-aware =nl-clj-map=/=nl-clj-filter= wired into
+#+STATUS: =nl-clj-seq.el='s own generic dispatch (staying lazy over a
+#+STATUS: lazy COLL, unchanged-eager over an eager one), =range=
+#+STATUS: (bounded AND unbounded — =(take 5 (range))= terminates),
+#+STATUS: =iterate=/=repeat=/=cycle=, and =doall=/=dorun= to force back
+#+STATUS: to eager — 1 new source file, +42 ERT cases (163 total, host
+#+STATUS: Emacs and =target/nelisp= itself via the same
+#+STATUS: =nl-clj-standalone-smoke=, extended with an inline unbounded-
+#+STATUS: range-plus-take AND bignum-promoting-range proof against the
+#+STATUS: live binary), =make compile=/=parens-check= clean.  A
+#+STATUS: refinement of this section's own §4.7 text, named rather than
+#+STATUS: silently done differently: =nl-loop=/=nl-recur= are framed
+#+STATUS: there as load-bearing for the lazy walk; the actual
+#+STATUS: implementation needs neither (every driver is a plain
+#+STATUS: =while= loop, and every lazy producer returns an unforced
+#+STATUS: value immediately rather than actually recursing) — see
+#+STATUS: =nl-clj-lazy.el='s own Commentary for the full argument.  §4.4
+#+STATUS: transients and §4.6 channels/=go= remain the only Tier-1 items
+#+STATUS: not started.
 #+STATUS:
 #+STATUS: Every asset claim in §2 below was either read from a file at
 #+STATUS: a cited line or measured directly against a built
@@ -39,7 +69,10 @@
 #+STATUS: against a SEPARATE =target/nelisp= built 2026-08-24 from
 #+STATUS: this implementation's own tree — see
 #+STATUS: =packages/nl-clj/README.org='s Testing section for the exact
-#+STATUS: commands.
+#+STATUS: commands.  The lazy phase's own bignum-promotion claim is
+#+STATUS: measured the identical way, against a THIRD =target/nelisp=
+#+STATUS: built 2026-08-24 from the =feat/nl-clj-lazy= tree itself —
+#+STATUS: same Testing section, same commands.
 #+VERIFIED-BY: compile parens-check ert-full nl-clj-standalone-smoke
 
 * Status
@@ -47,7 +80,7 @@
 | item     | value                                                             |
 |----------+--------------------------------------------------------------------|
 | Doc #    | 195                                                                |
-| State    | PARTIAL — build-first Tier 1 (§4.1/§4.2/§4.5, minimal §4.7) SHIPPED 2026-08-24 as packages/nl-clj/; §4.4/§4.6/§4.7-lazy/§5 not started (see #+STATUS above) |
+| State    | PARTIAL — build-first Tier 1 (§4.1/§4.2/§4.5, §4.7 eager+lazy) SHIPPED 2026-08-24 as packages/nl-clj/; §4.4/§4.6/§5 not started (see #+STATUS above) |
 | Parent   | Doc 168 (extension libraries, non-goals and layer discipline)     |
 | Sibling  | Doc 169 (nl-prelude/nl-condition), Doc 170 (nl-safe/nl-contract), Doc 189 (nl-ns), Doc 190 (bignums), Doc 193 (extension libraries publication), Doc 10 (nelisp-actor / Phase 4 actor runtime) |
 | Reads    | =packages/nelisp-actor/src/nelisp-actor.el=, =packages/nelisp-actor/README.org=, =packages/nl-safe/src/nl-safe.el=, =packages/nl-safe/README.org=, =packages/nl-prelude/src/nl-prelude.el=, =packages/nl-ns/src/nl-ns-in.el=, =packages/nl-ns/src/nl-ns-reader.el=, =packages/nelisp-json/README.org=, =packages/nelisp-secure-hash/README.org=, =docs/design/168/169/170/186/189/190/193=, =docs/design/39-phase9d-process-substrate.org=, =docs/design/146-low-memory-value-rep-and-gc.org=, =tools/selfhost-mt-test.sh=, =tools/gate-mutations.txt=, =tools/ai/gates.expected= |

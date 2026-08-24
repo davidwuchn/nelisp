@@ -563,7 +563,29 @@ ns-prefix-violation 898
 # baseline's own history already treats as background debt to concede, not
 # fix on sight (see the "852 and 611... two orders of magnitude larger"
 # framing at the top of this file).
-ns-private-escape 642
+# 642 -> 652 on 2026-08-24 (Doc 195 lazy phase, feat/nl-clj-lazy,
+# packages/nl-clj/src/nl-clj-lazy.el): the identical "shared core,
+# conceded cross-file `--' call" shape the 620 -> 642 note above already
+# established for this same package, applied to the forward-reference
+# wiring nl-clj-core.el's own Commentary explains (nl-clj-seq.el cannot
+# `require' nl-clj-lazy.el without a cycle, so it reads three funcallable
+# vars nl-clj-lazy.el sets instead).  Measured, not estimated -- 10
+# total, an exact 5+5 split: nl-clj-seq.el (already a private-escape
+# source above, now ALSO reaching straight past the public `nl-clj-
+# vector-p'/`nl-clj-map-p'/etc. predicates it used before, to call
+# `nl-clj--tagged-p' directly for the lazy tag check) and the new
+# nl-clj-lazy.el each newly reference the same 5 names defined in
+# nl-clj-core.el: `nl-clj--tagged-p' (the shared tag-check helper, now a
+# 4th and 5th referencing file beyond the original atom/vector/hash
+# trio), `nl-clj--lazy-tag' (the new tag constant), and the three
+# forward-reference vars `nl-clj--lazy-force-fn'/`nl-clj--lazy-map-fn'/
+# `nl-clj--lazy-filter-fn'.  None of these 10 should widen to
+# single-dash: `nl-clj--tagged-p' stays private for the same reason the
+# 620 -> 642 note already gives (a shared internal helper, not a public
+# API), and the three forward-reference vars are the require-cycle break
+# nl-clj-core.el's own Commentary documents -- making THOSE public would
+# not remove the cross-file reference this gate counts, only rename it.
+ns-private-escape 652
 ns-unreadable 0
 
 # `pinned-collision KEY' pins every ns-collision and ns-collision-divergent
