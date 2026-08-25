@@ -46,7 +46,17 @@
       (if (= (ptr-read-u64 (data-addr nl_rootstack_top) 0) 0)
           (ptr-write-u64 (data-addr nl_rootstack_top) 0 (data-addr nl_rootstack_region))
         0))
-    (defun nl_root_mark () (ptr-read-u64 (data-addr nl_rootstack_top) 0))
+    ;; Tier 3a deliberately keeps collection inhibited while clone workers use
+    ;; private EvalCtx state.  Marker 1 selects the dormant-rootstack path:
+    ;; callers still receive writable scratch slots, but no worker races the
+    ;; process-global root-stack top.  A main-thread frame reserved before the
+    ;; inhibit retains its aligned marker and is therefore still released.
+    ;; Zero remains the historical "not initialised" marker and must still be
+    ;; written back by release (the rootstack smoke checks that depth reset).
+    (defun nl_root_mark ()
+      (if (= (ptr-read-u64 (data-addr nl_gc_loop_ctx) 24) 1)
+          1
+        (ptr-read-u64 (data-addr nl_rootstack_top) 0)))
     (defun nl_root_depth ()
       (if (= (ptr-read-u64 (data-addr nl_rootstack_top) 0) 0) 0
         (sar (- (ptr-read-u64 (data-addr nl_rootstack_top) 0)
@@ -62,9 +72,15 @@
                (ptr-write-u64 (data-addr nl_rootstack_top) 0 (+ slot 32))
                slot)))
     (defun nl_root_reserve ()
-      (seq (if (= (ptr-read-u64 (data-addr nl_rootstack_top) 0) 0) (nl_rootstack_init) 0)
-           (nl_root_reserve_slot (ptr-read-u64 (data-addr nl_rootstack_top) 0))))
-    (defun nl_root_release (marker) (ptr-write-u64 (data-addr nl_rootstack_top) 0 marker))
+      (if (= (ptr-read-u64 (data-addr nl_gc_loop_ctx) 24) 1)
+          ;; Tier 3a has disabled free-list reuse, so alloc-bytes reaches the
+          ;; shared CAS bump path and gives each worker a disjoint 32-byte slot.
+          (alloc-bytes 32 8)
+        (seq (if (= (ptr-read-u64 (data-addr nl_rootstack_top) 0) 0) (nl_rootstack_init) 0)
+             (nl_root_reserve_slot (ptr-read-u64 (data-addr nl_rootstack_top) 0)))))
+    (defun nl_root_release (marker)
+      (if (= marker 1) 0
+        (ptr-write-u64 (data-addr nl_rootstack_top) 0 marker)))
     ;; GC: walk [region, top) in 32-byte steps, mark each slot like a root.
     (defun nl_gc_mark_rootstack_walk (p end)
       (if (>= p end) 0

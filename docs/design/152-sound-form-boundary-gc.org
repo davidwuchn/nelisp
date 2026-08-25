@@ -2135,3 +2135,52 @@ standalone-reader-test 27-0 / target ERT 56/56 / ert-full 5461 tests 0 unexpecte
 *教訓*: 「解放するメモリを指しうる参照」を数え上げるとき、free-list のような明示的な構造だけでなく
 **cache と診断用 BSS も含めて全部列挙する**こと。ここでは epoch という既存の一括無効化機構が
 あったので安く直せたが、無ければ chunk 返却は成立しなかった。
+
+** §11.43.2 訂正2 — chunk 返却は Tier 3a の並列 worker 中は行ってはならない（メモリ逼迫時のみ露見、2026-08-25）
+§11.43.1 の epoch 修正で =compile-elisp-artifact= の SIGSEGV は解けたが、CI round 20 は別の失敗で
+落ちた: =nelisp-thread-allocating-standalone-smoke=（Doc 199 Tier 3a）が
+=wrong-type-argument: (number-or-marker-p (2 0 <form> ADDR ADDR))= — worker が構築した生きたリストが
+読み戻すと壊れている。
+
+*決定的な再現条件（claude 実測）*: 通常メモリでは PASS するが、=( ulimit -v 4000000; ./target/nelisp
+--load tools/nelisp-thread-allocating-standalone-smoke.el )= で **決定的に再現**する。だから手元の
+無制限実行では緑で、CI runner でだけ落ちた。
+
+*二分（全て fresh build）*:
+| tree | 4 GB 制約下 |
+| round-16（Tier 3a、Stage 3/4 なし） | PASS |
+| Stage 3 + Stage 4c（reclaim ON） | CORRUPT |
+| Stage 3 のみ（reclaim OFF） | PASS |
+→ Stage 3 の rooting は無罪、**空 chunk の munmap が原因**。
+
+*root cause*: Tier 3a の worker は private EvalCtx + private root reserve を使い、process-global の
+=nl_rootstack_top= には **意図的に繋がっていない**（=nl_thread_private_env_make= の注記: 「collection
+が抑止されているので root scan は不要」）。ところが =nl_gc_sweep=（したがってその中の新しい
+empty-chunk reclaim）は **抑止フラグを見ていない**（フラグを見るのは =nl_gc_collect_from_recorded_roots=
+側）。別経路の collect が sweep を走らせると、worker のオブジェクトは marker から不可視なので
+その chunk が「全 block FREE」に見え、**まだ使用中の mapping が unmap される**。
+
+*fix*: 抑止フラグ（=nl_gc_loop_ctx+24=）と Tier 3a の worker-live bit
+（=nl_thread_parallel_ctx+16=）を、**reclaim traversal の入口と munmap の直前の両方**で確認する二重
+ガード。block 単位の sweep/free はそのままで、*unmap だけ*を止める。Tier 3a が記録する chunk
+snapshot（+8）はセクション後も保持する。
+
+*回帰 gate*: この欠陥は無制限実行では通ってしまうので、=nelisp-thread-allocating-standalone-smoke=
+の Makefile target に **=ulimit -v 4000000= での再実行**を追加した（決定的再現）。mutation row も
+追加し、両ガードを潰すと gate が red になる。
+
+*claude 独立検証（fresh build、reclaim は有効 =1= のまま）*: ulimit **8 GB / 4 GB / 2 GB すべて PASS** /
+bounded は維持（N=1M で RSS 339,924 KiB、=STEADY_SLOPE_B_PER_ITER=0.713=、**268,435,456 B 返却**、
+release failures 0、trip 0）/ =nelisp-performance-gate= checked=9 findings=0（SIGSEGV 非再発）/
+Tier 2 smoke PASS / compile 0 / parens 463-0 / emacs-parity 19970 findings=0 / reader-test 27-0 /
+**ert-full 5461 tests 0 unexpected** / ns-inventory・ns-gate clean・fallback・gate-selfcheck・doc-claims
+すべて PASS。
+
+*gate 閾値の根拠（claude 実測）*: round-16 baseline は 3 GB / 2 GB でも PASS、1.5 GB で初めて落ちる
+（= 真の OOM、欠陥ではない）。一方バグ版は 4 GB で既に決定的に壊れる。よって 4 GB は
+「baseline に余裕があり、欠陥は確実に捕まる」水準として妥当。
+
+*教訓*: 「GC を抑止したから root は要らない」という設計は、**抑止フラグを見ていない経路が一つでも
+あると崩れる**。今回 sweep がそれだった。抑止に依存する仕組みを足すときは、*抑止フラグを読む場所を
+全部数え上げて*、依存側が全部そこを通ることを確かめる必要がある。加えて、この種の欠陥は
+**メモリに余裕があると再現しない**ので、余裕を奪う gate（ulimit）を回帰テストに入れないと再発する。

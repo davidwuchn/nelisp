@@ -675,9 +675,11 @@ nelisp-thread-standalone-smoke
 # Checkpoint 1 publishes length 5 from one allocating worker.  Checkpoint 2
 # barriers three workers while their private frames hold live allocated lists,
 # attempts garbage-collect on each, then requires 5+7+11=23 after join.
-# Mutation-proven by changing the unique GC-inhibit begin store to 0; the
-# collector then cannot enumerate the other workers' private roots and this
-# gate goes red.
+# The Makefile target repeats the smoke under `ulimit -v 4000000', the
+# deterministic reproducer for the Stage 4c empty-chunk-unmap corruption.
+# Mutation-proven both by changing the unique GC-inhibit begin store to 0 and
+# by bypassing the dedicated empty-chunk release guard; either defect makes
+# this gate go red.
 nelisp-thread-allocating-standalone-smoke
 #
 # nl-clj-async-standalone-smoke: added 2026-08-24, Doc 195 §4.6

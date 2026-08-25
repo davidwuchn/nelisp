@@ -603,7 +603,9 @@ nelisp-thread-standalone-smoke: $(if $(wildcard target/nelisp target/nelisp.exe)
 
 # Doc 199 Tier 3a feasibility spike: bounded ordinary allocating Lisp on
 # clone(2) workers.  Separate from Tier 2 so its GC-inhibit/private-env
-# contract and mutation proof have an independent gate report.
+# contract and mutation proof have an independent gate report.  Run once at
+# the host's normal limit and again under the 4 GB virtual-memory ceiling that
+# made the Stage 4c empty-chunk-unmap regression deterministic in CI.
 nelisp-thread-allocating-standalone-smoke: $(if $(wildcard target/nelisp target/nelisp.exe),,standalone-reader)
 	@NELISP_STANDALONE_TARGET=$(STANDALONE_GATE_TARGET) $(EMACS) --batch -Q -L lisp -L src -L scripts -l nelisp-standalone-build \
 	  --eval '(kill-emacs (if (nelisp-standalone--target-runnable-on-host-p) 0 3))' \
@@ -618,7 +620,8 @@ nelisp-thread-allocating-standalone-smoke: $(if $(wildcard target/nelisp target/
 	  echo "GATE-SKIP no nelisp binary in target/ after build attempt"; \
 	  exit 0; \
 	fi; \
-	"$$bin" --load tools/nelisp-thread-allocating-standalone-smoke.el
+	"$$bin" --load tools/nelisp-thread-allocating-standalone-smoke.el && \
+	( ulimit -v 4000000; "$$bin" --load tools/nelisp-thread-allocating-standalone-smoke.el )
 
 # Doc 195 §4.6 (channels/go over nelisp-actor).  Same shim/load-by-path
 # pattern as the smokes above, but loads packages/nl-clj/generated/

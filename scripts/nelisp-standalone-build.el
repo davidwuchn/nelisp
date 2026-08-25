@@ -1857,7 +1857,14 @@ addressing by a runtime base, never by a fixed reservation."
     ;; zero is success, negative is failure.
     (defun nl_os_empty_chunk_reclaim_p () 1)
     (defun nl_os_reclaim_empty_chunk (base size)
-      (nl_os_free_chunk base size))
+      ;; Refuse at the actual munmap boundary while GC is inhibited, and also
+      ;; while Tier 3a's more precise bounded state says workers are live.
+      ;; Returning failure makes the caller restore the unlinked descriptor.
+      (if (= (ptr-read-u64 (data-addr nl_gc_loop_ctx) 24) 1)
+          1
+        (if (= (ptr-read-u64 (data-addr nl_thread_parallel_ctx) 16) 1)
+            1
+          (nl_os_free_chunk base size))))
     ;; mmap demand-pages on first touch, so explicit range commit is a no-op.
     (defun nl_os_commit_range (base old new) 1)
     ;; Exit code 88 = standalone arena allocation failure.
@@ -2610,10 +2617,16 @@ arm64 Linux has no legacy x86 numbering)."
               (nl_gc_reclaim_empty_chunks chunk next)
             (nl_gc_reclaim_empty_ready prev chunk next base size)))))
     (defun nl_gc_reclaim_empty_chunks (prev chunk)
-      (if (= chunk 0) 0
-        (nl_gc_reclaim_empty_one
-         prev chunk (ptr-read-u64 (+ chunk 48) 0)
-         (ptr-read-u64 chunk 0) (ptr-read-u64 (+ chunk 8) 0))))
+      ;; Worker EvalCtx/root reserves are private and deliberately absent from
+      ;; the process-global marker.  Stop before reading another candidate if
+      ;; the shared inhibit flag or Tier 3a's precise worker-live state is set.
+      ;; The OS wrapper repeats both tests at the actual release boundary.
+      (if (= (ptr-read-u64 (data-addr nl_gc_loop_ctx) 24) 1) 0
+        (if (= (ptr-read-u64 (data-addr nl_thread_parallel_ctx) 16) 1) 0
+          (if (= chunk 0) 0
+            (nl_gc_reclaim_empty_one
+             prev chunk (ptr-read-u64 (+ chunk 48) 0)
+             (ptr-read-u64 chunk 0) (ptr-read-u64 (+ chunk 8) 0))))))
     (defun nl_gc_sweep ()
       (nl_seq2
        (nl_gc_sweep_chunks (ptr-read-u64 268436160 0))
@@ -3638,10 +3651,20 @@ arm64 Linux has no legacy x86 numbering)."
                  (ptr-read-u64 (data-addr nl_gc_loop_ctx) 40))
               0
              (nl_seq2 (nl_gc_collect_from_recorded_roots 0)
-             (nl_seq2 (ptr-write-u64 (data-addr nl_gc_loop_ctx) 40
-                                     (+ (ptr-read-u64 268436184 0) 16777216))
-                      (ptr-write-u64 (data-addr nl_gc_loop_ctx) 32
-                                     (+ (ptr-read-u64 (data-addr nl_gc_loop_ctx) 32) 1)))))
+             ;; Recorded collection holds ctx+24 while it marks/sweeps, so its
+             ;; embedded reclaim traversal must refuse.  Once the collector
+             ;; returns and clears ctx+24, perform the same Stage-4c traversal
+             ;; here; Tier 3a's +16 guard still blocks it under live workers.
+             (nl_seq2
+              (if (= (nl_os_empty_chunk_reclaim_p) 1)
+                  (nl_gc_reclaim_empty_chunks
+                   (ptr-read-u64 268436160 0)
+                   (ptr-read-u64 (+ (ptr-read-u64 268436160 0) 48) 0))
+                0)
+              (nl_seq2 (ptr-write-u64 (data-addr nl_gc_loop_ctx) 40
+                                      (+ (ptr-read-u64 268436184 0) 16777216))
+                       (ptr-write-u64 (data-addr nl_gc_loop_ctx) 32
+                                      (+ (ptr-read-u64 (data-addr nl_gc_loop_ctx) 32) 1))))))
         0))
     (defun nl_gc_collect (ctx result out pool src cursor bsym)
       (if (= (ptr-read-u64 268435616 0) 1) 0    ; DEBUG: collect = pure no-op
