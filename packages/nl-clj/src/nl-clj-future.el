@@ -36,14 +36,21 @@
 ;; handed to `nl-clj-future'/`nl-clj-pmap' must reach shared state only
 ;; through nl-clj's immutable persistent structures or an explicit nl-safe
 ;; borrow cell -- never a bare shared mutable cons/vector/hash-table.
-;; Under this cooperative scheduler nothing can expose a violation (there
-;; is no real interleaving), but the day the runtime tiers land, a worker
-;; that mutates unguarded shared state becomes a real race.  See README.
+;; `nl-clj-future-with-lint' points nl-safe's existing dynamic violation
+;; logger at a pmap/pcalls run.  It cannot expose a race (there is no real
+;; interleaving), but it makes nl-safe-visible worker mistakes reproducible
+;; before the runtime tiers land.  See README.
 
 ;;; Code:
 
 (require 'nl-clj-core)
 (require 'nl-clj-seq)
+
+;; The lint path loads nl-safe lazily.  These declarations make its dynamic
+;; variables special for byte compilation without adding an nl-safe load or
+;; any worker-path work when the lint is not invoked.
+(defvar nl-safe-log-violations)
+(defvar nl-safe--violation-log)
 
 (define-error 'nl-clj-future-deadlock
   "nl-clj future cannot complete (no pending worker produced it)" 'nl-clj-error)
@@ -55,6 +62,42 @@
   "FIFO list of pending future handles awaiting a drive.
 Global and single-threaded, matching the one thread of Lisp execution
 this cooperative tier runs on.")
+
+(defvar nl-clj-future--lint-violations nil
+  "Violations captured by the most recently completed worker lint scope.
+Records retain nl-safe's native newest-first order.  Read this through
+`nl-clj-future-lint-violations'.")
+
+(defun nl-clj-future-lint-violations ()
+  "Return nl-safe records from the most recent worker lint scope.
+The list is newest first, matching `nl-safe--violation-log'.  A scope
+that logged nothing leaves this nil."
+  nl-clj-future--lint-violations)
+
+(defun nl-clj-future--call-with-lint (thunk)
+  "Call THUNK with nl-safe violation logging scoped to this invocation.
+Save the scope's newest-first records for
+`nl-clj-future-lint-violations', including when THUNK exits nonlocally.
+The original nl-safe log and enable flag are dynamically preserved."
+  ;; Load only on opt-in.  Normal future execution neither loads nl-safe
+  ;; here nor tests a flag in the worker path.
+  (require 'nl-safe)
+  (setq nl-clj-future--lint-violations nil)
+  (let ((nl-safe-log-violations t)
+        (nl-safe--violation-log nil))
+    (unwind-protect
+        (funcall thunk)
+      (setq nl-clj-future--lint-violations nl-safe--violation-log))))
+
+(defmacro nl-clj-future-with-lint (&rest body)
+  "Run BODY under nl-safe's violation logger and return BODY's value.
+BODY should contain an `nl-clj-pmap' or `nl-clj-pcalls' run.  Afterwards,
+call `nl-clj-future-lint-violations' to inspect any nl-safe records.  The
+records are also retained when BODY signals; the original error still
+propagates.  Code outside this explicit scope follows the unchanged,
+un-instrumented future path."
+  (declare (indent 0) (debug t))
+  `(nl-clj-future--call-with-lint (lambda () ,@body)))
 
 (defun nl-clj-future-p (object)
   "Return non-nil when OBJECT is an nl-clj future handle."

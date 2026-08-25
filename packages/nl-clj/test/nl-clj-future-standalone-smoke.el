@@ -63,6 +63,7 @@
 (load "packages/nl-clj/src/nl-clj-seq.el")
 (load "packages/nl-clj/src/nl-clj-future.el")
 (load "packages/nl-clj/test/nl-clj-future-test.el")
+(load "packages/nl-clj/test/nl-clj-future-lint-test.el")
 
 (let ((tests (reverse nl-smoke--tests))
       (ran 0)
@@ -80,8 +81,8 @@
       (while all (princ (format "FAIL %s\n" (car all))) (setq all (cdr all))))
     (error "nl-clj-future-standalone-smoke: %d failure(s), %d passed"
            (length failures) ran))
-  (when (< ran 15)
-    (error "nl-clj-future-standalone-smoke: only %d tests ran (expected >= 15)"
+  (when (< ran 17)
+    (error "nl-clj-future-standalone-smoke: only %d tests ran (expected >= 17)"
            ran))
   ;; Scale drive: 10000 workers must all run exactly once.
   (let* ((n 10000)
