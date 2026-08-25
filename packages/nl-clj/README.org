@@ -418,7 +418,34 @@ structures or an explicit nl-safe borrow cell — never a bare shared
 mutable cons/vector/hash-table.  Harmless under the cooperative scheduler
 (no real interleaving), but a real race the day the runtime tiers land.
 
+The discipline has an opt-in, scoped lint mode; it is off by default:
+
+#+begin_src elisp
+(nl-clj-future-with-lint
+  (nl-clj-pmap worker inputs))
+(nl-clj-future-lint-violations) ; newest-first nl-safe records, or nil
+#+end_src
+
+The scope enables the existing =nl-safe-log-violations= logger while its
+body drives the workers, then retains that scope's records even when a
+worker signals.  The violation itself is still signalled; the lint does
+not swallow or change nl-safe errors.  It catches mistakes nl-safe can
+observe: conflicting borrows, =nl-cell-set= without an exclusive borrow,
+and checked fat-pointer bounds/generation violations.
+
+This is a lint, not a race detector.  Today there is no worker
+interleaving, and nl-safe does not intercept ordinary =setcar=/=aset=/
+=puthash=, prove that captured data is immutable, or expose a hook for
+holding a borrow across an actor yield.  Therefore those cases cannot be
+reported by this mode, nor can it restore nl-safe checks that were compiled
+out with =nl-safe--enabled= nil; use nl-clj persistent structures or
+explicit nl-safe cells by discipline.  When the lint is not explicitly
+invoked, the existing future/pmap/pcalls worker path is unchanged: there is
+no flag test, dynamic binding, or nl-safe load on that path, hence no
+disabled-mode runtime cost.
+
 Tests: =make test-one FILE=packages/nl-clj/test/nl-clj-future-test.el= (15
-ERT).  Standalone: =make nl-clj-future-standalone-smoke= (needs no
+ERT) and =make test-one FILE=packages/nl-clj/test/nl-clj-future-lint-test.el=
+(2 ERT).  Standalone: =make nl-clj-future-standalone-smoke= (needs no
 =generator.el= — a future worker never parks, so it runs directly on
-=target/nelisp=; 15 tests + a 10000-worker drive).
+=target/nelisp=; all 17 future/lint tests + a 10000-worker drive).
