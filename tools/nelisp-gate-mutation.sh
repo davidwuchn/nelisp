@@ -69,6 +69,31 @@ run_gate() {
 }
 
 rows=$(grep -v '^#' tools/gate-mutations.txt | grep -v '^[[:space:]]*$')
+
+# Row selection.  Authoring a row requires proving it is REACHED -- inject it,
+# watch the gate go RED, restore, watch it go GREEN -- and doing that against
+# the whole file costs a full sweep (several rebuilds) for one new row.  Three
+# separate rows have shipped unreachable or non-lethal in this repo's history,
+# each discovered by a CI round rather than at authoring time, so make the
+# per-row check cheap enough that there is no excuse to skip it:
+#
+#   NELISP_GATE_MUTATION_ONLY=<gate-name>   only rows for that gate
+#   NELISP_GATE_MUTATION_GREP=<substring>   only rows matching anywhere
+#
+# `make gate-mutation-verify GATE=<name>' is the front door for the first.
+only=${NELISP_GATE_MUTATION_ONLY:-}
+if [ -n "$only" ]; then
+  rows=$(printf '%s\n' "$rows" | awk -F'|' -v g="$only" '$1==g')
+  [ -z "$rows" ] && { echo "gate-mutation: FAIL (no row for gate '$only')"; exit 1; }
+  echo "gate-mutation: restricted to gate '$only'"
+fi
+pat=${NELISP_GATE_MUTATION_GREP:-}
+if [ -n "$pat" ]; then
+  rows=$(printf '%s\n' "$rows" | grep -F "$pat")
+  [ -z "$rows" ] && { echo "gate-mutation: FAIL (no row matching '$pat')"; exit 1; }
+  echo "gate-mutation: restricted to rows matching '$pat'"
+fi
+
 [ -z "$rows" ] && { echo "gate-mutation: FAIL (no mutations defined)"; exit 1; }
 total=0; bad=0
 while IFS='|' read -r gate file expr what; do

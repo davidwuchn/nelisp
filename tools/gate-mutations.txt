@@ -9,6 +9,34 @@
 #
 # Keep the injections small and obviously wrong.  A subtle one that a gate
 # legitimately does not cover teaches nothing except to delete the row.
+#
+# ACCEPTANCE CRITERIA FOR A NEW ROW.  Three rows have shipped here without
+# meeting these, and each cost a full CI round to discover.  Prove the row with
+# `make gate-mutation-verify GATE=<gate-name>' BEFORE committing it -- that
+# target exists so the proof is cheap enough that skipping it is never worth
+# it.  The three failure modes, named so they can be recognised:
+#
+#   1. UNREACHABLE -- the injection sits on a path the gate never walks, so the
+#      gate stays green and reads as broken when it is fine.  A `garbage-
+#      collect' smoke was once used to police a chunk-return guard that only
+#      the mid-form collector reaches; the row was removed with its reason
+#      recorded rather than the gate being called weak.  ASK FIRST: does this
+#      gate's own execution actually go through the line I am mutating?
+#
+#   2. NON-LETHAL AFTER AN IMPROVEMENT -- the row was lethal when written, and
+#      a later change made the defect harmless.  Doc 199's park barrier did
+#      this to an inhibit-begin row.  That is the improvement WORKING; re-point
+#      or retire the row and say why.  It is not a regression.
+#
+#   3. ENVIRONMENT-SENSITIVE -- RED locally, green in CI.  A park-bypass row
+#      went RED 10 times out of 10 on the author's machine and green in CI, and
+#      was removed.  PREFER A ROW WHOSE RED-NESS IS STRUCTURAL: the check is
+#      gone, a constant is wrong, a name no longer resolves.  Avoid rows whose
+#      failure depends on timing, scheduling, load, or memory pressure -- those
+#      are the ones that pass locally and lie in CI.
+#
+# Record the evidence in the row's own comment: what you injected, what the
+# gate printed when RED, and what it prints when restored.
 emacs-parity|scripts/nelisp-stdlib-prelude.el|s/^(defun regexp-quote (s)/(defun regexp-quote (s) (setq s (concat s "@"))/|regexp-quote appends a stray character
 ns-gate|scripts/nelisp-stdlib-prelude.el|s/^(defun round (x \&optional div)/(defun round (x \&optional div) (setq x x)/|round diverges from its lisp/ mirror
 # The replacement is GLOBAL on purpose.  The first version changed one

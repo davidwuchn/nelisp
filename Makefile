@@ -1311,6 +1311,21 @@ partial-inventory:
 gate-mutation:
 	@tools/nelisp-gate-mutation.sh
 
+# Verify ONE gate's mutation row(s) without paying for the whole sweep.
+#
+#   make gate-mutation-verify GATE=standalone-midform-gc-bounded
+#
+# Authoring a row obliges you to prove it is REACHED -- inject, see RED,
+# restore, see GREEN.  Three rows in this repo's history shipped without that
+# proof and each cost a CI round: one aimed at a path its gate never walked,
+# one was quietly made non-lethal by a later improvement, and one was RED
+# locally on every attempt but green in CI.  A full `gate-mutation' sweep is
+# too slow to run per row, which is exactly why those proofs got skipped.
+.PHONY: gate-mutation-verify
+gate-mutation-verify:
+	@test -n "$(GATE)" || { echo "usage: make gate-mutation-verify GATE=<gate-name>"; exit 2; }
+	@NELISP_GATE_MUTATION_ONLY="$(GATE)" tools/nelisp-gate-mutation.sh
+
 gate-selfcheck:
 	@$(EMACS) --batch -Q -l tools/nelisp-gate-selfcheck.el
 
