@@ -1,4 +1,4 @@
-.PHONY: unsafe-inventory nl-violation-corpus standalone-reader-recursion-guard-smoke test-jit test-nojit jit-unverified nl-safe-bench nl-check-gate ns-gate ns-inventory parens-check test test-fast test-parallel test-one wasm-smoke wasm-runtime-image-smoke wasm-dtw-skeleton-smoke wasm-dtw-transpile wasm-dtw-compile wasm-dtw-smoke wasm-dtw-site wasm-dtw-site-smoke compile clean all bench bench-aot-tco gc-bench actor-bench soak soak-1h soak-full soak-worker \
+.PHONY: unsafe-inventory nl-violation-corpus standalone-reader-recursion-guard-smoke test-jit test-nojit jit-unverified nl-safe-bench nl-check-gate ns-gate ns-inventory parens-check test test-fast test-parallel test-one wasm-smoke wasm-runtime-image-smoke wasm-dtw-skeleton-smoke wasm-dtw-transpile wasm-dtw-compile wasm-dtw-smoke wasm-dtw-site wasm-dtw-site-smoke compile clean all bench bench-aot-tco bench-aot-checked-arith gc-bench actor-bench soak soak-1h soak-full soak-worker \
         sqlite-module sqlite-module-clean \
         release-artifact release-checksum soak-blocker soak-post-ship \
         bench-actual bench-allocator bench-allocator-heavy \
@@ -3086,6 +3086,17 @@ bench-aot-tco:
 	  --eval '(setq load-prefer-newer t)' \
 	  -l nelisp-aot-tco-bench \
 	  -f nelisp-aot-tco-bench-batch
+
+# Doc 187 P4: continuously cap the cost of opt-in checked arithmetic on a
+# compiled tight `+' loop.  The harness also requires the checked and
+# unchecked native-object hashes to differ, so a no-op flag fails
+# structurally rather than depending on a timing delta.  Native AOT execution
+# is Linux x86_64-only; other hosts print the gate contract's reasoned skip.
+bench-aot-checked-arith:
+	$(EMACS) --batch -Q -L lisp -L src -L bench \
+	  --eval '(setq load-prefer-newer t)' \
+	  -l nelisp-aot-checked-arith-bench \
+	  -f nelisp-aot-checked-arith-bench-batch
 
 # Phase 3c.6 GC mark-pass bench.  Advisory only — not gated.
 gc-bench: compile

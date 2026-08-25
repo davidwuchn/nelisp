@@ -265,7 +265,17 @@ cmd_perf() {
     # Artifact runtime cache vs source fallback: both paths must load and eval
     # the same module, and the build must restore the cache enable marker it
     # removed.  Builds a binary; out of `check'.
-    cmd_gate nelisp-performance-gate -- make nelisp-performance-gate
+    #
+    # Doc 187's checked-arithmetic AOT comparison belongs in this perf tier:
+    # ten independent compile + five-round measurements took 9.4s total on
+    # the wiring host (~0.94s each), well inside this tier's cost, and it is a
+    # performance ceiling rather than one of `extras'' subsystem smokes.
+    failures=0
+    cmd_gate nelisp-performance-gate -- make nelisp-performance-gate \
+        || failures=$((failures + 1))
+    cmd_gate bench-aot-checked-arith -- make bench-aot-checked-arith \
+        || failures=$((failures + 1))
+    [ "$failures" -eq 0 ]
 }
 
 cmd_smokes() {

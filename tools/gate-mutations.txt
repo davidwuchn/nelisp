@@ -195,6 +195,15 @@ ert-full|lisp/nelisp-cl-macros.el|s/(signal 'cl-no-applicable-method (cons name 
 # 11/13-16 of the same smoke now assert the promoted value instead).
 standalone-reader-test|scripts/nelisp-standalone-build.el|s/(and (> v 0) (> acc (- 2305843009213693951 v)))/(and (> v 0) nil)/|wf_sum's positive-overflow half of the literal-bound check is deleted, (+ most-positive-fixnum 1) wraps silently again instead of promoting to a bignum
 standalone-reader-test|scripts/nelisp-standalone-build.el|s#(/= (/ prod acc) v)#nil#|wf_prod's div-round-trip overflow check is deleted, (* 100000000000 100000000000) wraps silently again instead of promoting to a bignum
+# 2026-08-26 (Doc 187 P4 continuous cost gate): the exact flag-controlled
+# guard call is made unconditional-false.  The gate compiles its one-add loop
+# twice from the same source; this mutation makes the checked and unchecked
+# native-object SHA-256 values identical, so it goes red before timing.  The
+# failure is structural and does not depend on runner speed or load.  Proved
+# manually while adding the row: injected => identical hashes,
+# `GATE-COUNT checked=1 findings=1', exit nonzero; restored => distinct hashes,
+# ratio below 1.15x, `GATE-COUNT checked=1 findings=0', exit zero.
+bench-aot-checked-arith|lisp/nelisp-aot-compiler.el|s/^  (when nelisp-aot-compiler--checked-arith$/  (when nil/|the --checked-arith guard call is disabled, making the opt-in flag emit the same native object as the default unchecked path
 # 2026-08-23 (this session): Doc 180 Phase 1 (form-located errors) row.
 # `(setq form_index (+ form_index 1))' appears twice in `nl_eval_source_all'
 # (the successful-parse branch and the reader-error branch); the sed has no

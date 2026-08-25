@@ -2,7 +2,7 @@
 #+AUTHOR: nelisp / nelisp-emacs (design: Claude Opus 5 + zawatton; implementation: Claude Fable 5)
 #+DATE: 2026-08-22
 #+STATUS: SHIPPED — P0-P4 all implemented and verified (2026-08-23). See §8.
-#+VERIFIED-BY: standalone-reader-test ert-full compile
+#+VERIFIED-BY: standalone-reader-test ert-full compile bench-aot-checked-arith
 
 * §0 TL;DR
 
@@ -701,6 +701,20 @@ discipline applied to layer 2): =tools/ai/bench-compare.sh= on a compiled
 =target/ai/aot-checked-arith-add-bench.txt=).  A constant few extra
 instructions per compiled add site, exactly what §3.3 argued for without
 a number.
+
+Continuous gate (2026-08-26): =bench-aot-checked-arith= now rebuilds both
+native arms, requires their object hashes to differ, and caps the
+checked/unchecked slope ratio at *1.15x*.  Eleven independent gate runs on
+the wiring host measured median-of-five ratios *0.986x..1.046x* (median
+*1.013x*, spread *0.060x*; maximum noise/signal *0.051*), so 1.15x leaves
+about ten percentage points above the worst observed median; the drift
+limit is 0.15, nearly three times the observed maximum rather than the old
+one-shot run's copied 0.25.  The gate rewrites
+=target/ai/aot-checked-arith-add-bench.txt= on every run and is registered
+under =tools/ai/nelisp-ai.sh perf=.  It is Linux x86_64-only (cc + objcopy)
+and reports =GATE-SKIP= elsewhere.  The historical 1.27x remains the P4
+one-shot result, but it was not reproduced by this current, repeatable gate
+fixture and is no longer the acceptance baseline.
 
 ** §8.4 P3 (layer-1 bench)
 

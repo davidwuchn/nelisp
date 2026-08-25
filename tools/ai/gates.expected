@@ -230,6 +230,23 @@ nelisp-native-artifact-gate
 # selfhost' produce the reports; both build a binary, so both stay out of
 # `check'.
 nelisp-performance-gate
+# bench-aot-checked-arith (Doc 187 P4, 2026-08-26): the same native tight
+# `+' loop is compiled with `nelisp-aot-compiler--checked-arith' off/on, and
+# the checked/unchecked slope ratio must remain <= 1.15x.  Five rounds use
+# N=0 subtraction plus a repeated baseline drift guard; fewer than three
+# valid rounds produce GATE-SKIP, never a fake pass.  The native-object hashes
+# must differ before timing, so a flag that stops emitting the check is a
+# structural finding independent of machine speed.  Eleven independent full
+# gate runs on the wiring host measured median-of-five ratios 0.986x..1.046x
+# (median 1.013x, spread 0.060x); maximum observed noise/signal was 0.051, so
+# the 0.15 drift limit is almost 3x observed noise and the 1.15x ceiling leaves
+# about ten percentage points over the worst observed median.  One run costs
+# ~0.94s (ten runs: 9.4s), so `nelisp-ai.sh perf' owns it: cheap enough for
+# that existing tier, semantically a perf ceiling rather than an `extras'
+# subsystem smoke.  Linux x86_64 with cc + objcopy only; other hosts emit the
+# established reasoned GATE-SKIP.  Mutation-proven by the
+# `bench-aot-checked-arith' row in tools/gate-mutations.txt.
+bench-aot-checked-arith
 standalone-selfhost-test
 
 # binary-size-ratchet (2026-08-22): `binary_identity()' in
