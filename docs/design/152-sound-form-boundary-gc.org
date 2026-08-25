@@ -2051,3 +2051,52 @@ OS へ返さず、freelist の exact-fit reuse も取りこぼす**ためで、�
 3. safepoint を nested call / multi-form body へ拡張（§11.41 の 4c）。
 4. 2-form / 4-form battery に残る freelist guard trip 1/2（rooting 前の binary でも同数 = *既存バグ*で
    Stage 3 起因ではない。切り分け済み、Stage 4/5 で回収）。
+
+* §11.43 Stage 4c/4d SHIPPED — armed loop の RSS が bounded に（DoD #4 達成、2026-08-25）
+§11.42 が Stage 3 の残件として切り分けた「回収はしているが RSS が返らない」を解消した。armed
+mid-form collect 下の =(while (< i N) (setq i (1+ i)))= は **N を増やしても RSS が増えなくなった**。
+
+** 実装
+- *空 chunk の OS 返却（4c-1、主因）*: sweep が chunk 単位で「全 block が free か」を判定し、空と
+  *証明された* growth chunk を chunk chain（next @+48、head 268436160）から unlink して
+  =nl_os_free_chunk= 経由で munmap する。従来この関数は =0= を返すだけの stub で、platform 側の
+  munmap（linux-x86_64 = syscall 11 等）には一度も到達していなかった。chunk 0（arena base）、live
+  block を残す chunk、bump cursor が居る chunk は決して返さない。返す前にその chunk を指す free-list
+  bucket entry を落とす（残すと次の take が dangling を返す＝この変更の最大ハザード）。
+- *診断*: =nelisp--debug-switch= の診断 tuple に index 10-15（bucket / linear / bump hit 数、
+  reclaimed chunks、reclaimed bytes、release failures）を追加。=(nelisp--debug-switch 24/25)= で
+  reuse 計測を制御。
+- *4d（trigger）*: コード変更なし。16 MiB re-arm watermark に対して growth chunk が 64 MiB なので、
+  各 growth が既に次の trigger を跨ぐ。1M で fired=5 / reclaimed=4 = 最早の reclaim 機会で発火して
+  おり、trigger を触る理由が測定上無かった。
+
+** 実測（claude 独立測定。armed = =(nelisp--debug-switch 5)=）
+| N | 変更前 peak RSS | 変更後 peak RSS |
+| 250k | 274,656 KiB | 274,668 KiB |
+| 500k | 340,192 KiB | 340,204 KiB |
+| 1M | （線形増） | *340,200 KiB* |
+- *500k → 1M の steady slope: 268.231 → -0.614 B/iter*（gate script 計測 0.295 B/iter）。500k 以降
+  約 340 MiB で plateau。**変更前は ~262 B/iter の線形増**だったので、DoD #4 の「bounded」は達成。
+- *OS 返却の実働*: 500k で reclaimed=1 chunk / 67,108,864 B、1M で reclaimed=4 / 268,435,456 B、
+  release failures=0。
+- *soundness 非退行*: armed+poison 500k で result=500000、**trip=0**、32,785,290 object を poison-free、
+  fired=3 / reclaimed=2 / release failures=0。空 chunk を誤って返せば poison hit か SIGSEGV になる
+  ので、これがこのクラスの取り違えを捕まえる gate である。
+
+** gate
+- 新 gate =standalone-midform-gc-bounded=（=tools/nelisp-midform-gc-bounded.py=）: N=125k/250k/500k/1M
+  + poison 500k を回し、result 一致・trip=0・release failures=0・steady slope ≤ 32 B/iter を assert。
+  三点配線済（=gates.expected= / =nelisp-ai.sh cmd_extras= / =gate-mutations.txt=）。実測
+  =GATE-COUNT checked=5 findings=0=、report も生成される。
+- mutation row: =nl_os_empty_chunk_reclaim_p= を 1→0 にすると空 chunk 返却が止まり線形増に戻る
+  → gate が RED（against-the-bug）。
+- 既存 gate: compile 0 / parens 463-0 / **emacs-parity 19970 findings=0** / standalone-reader-test
+  27 findings=0 / target ERT 55/55 / ns-inventory・ns-gate clean・fallback・gate-selfcheck・doc-claims
+  すべて PASS。
+
+** 残（この loop 以外で bounded を主張するために）
+1. 4c-2 の reuse 率改善は未着手（bucket は 16..472 のみ、範囲外は線形 scan、guard trip 時に bucket
+   chain を丸ごと捨てる）。今回の loop は chunk 返却だけで plateau したので優先度が下がった。
+2. safepoint はまだ while backedge のみ。nested call / multi-form body への拡張（§11.41 の 4c 本来の
+   範囲）は未了で、そこに入らない形状の long-running workload は依然 collect 機会が乏しい。
+3. mid-form collect は既定 OFF（arm が必要）。既定 ON 化は Stage 5（全面化 + write barrier）の判断。

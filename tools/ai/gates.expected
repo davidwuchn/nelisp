@@ -518,6 +518,9 @@ wasm-dtw-skeleton-smoke
 nelisp-runtime-image-cache-gate
 nelisp-source-command-substrate-gate
 standalone-chunk-growth-test
+# Doc 152 Stage 4c: armed loop GC must plateau after warm-up, actually unmap
+# at least one growth chunk, and survive a poison-on-free 500k soundness run.
+standalone-midform-gc-bounded
 standalone-parallel-compile-test
 standalone-selfhost-mt-test
 standalone-eval-test

@@ -885,7 +885,9 @@ Windows uses the target-correct `.obj' unit name; linux/macOS keep `.o'."
                                 (cons "nl_gc_diag" (+ 16 4194304))
                                 (cons "nl_gc_loop_ctx" (+ 80 4194304))
                                 (cons "nl_fa_tbl_base" (+ 57488 4194304))
-                                (cons "nl_thread_parallel_ctx" (+ 57888 4194304))))
+                                (cons "nl_thread_parallel_ctx" (+ 57888 4194304))
+                                (cons "nl_alloc_diag" (+ 57912 4194304))
+                                (cons "nl_gc_reclaim_scratch" (+ 57968 4194304))))
           (let ((sym (cdr (assoc (car expected) by-name))))
             (should sym)
             (should (equal (cdr expected) (plist-get sym :value)))
@@ -895,7 +897,7 @@ Windows uses the target-correct `.obj' unit name; linux/macOS keep `.o'."
         ;; Phase 2 item 3 (2026-08-23): +176 more bytes for `nl_bt_snapshot'
         ;; (the bounded backtrace capture buffer) appended after that.  Doc 199
         ;; Tier 3a appends 24 bytes of bounded parallel-section state.
-        (should (equal (+ 57616 4194304 96 176 24)
+        (should (equal (+ 57616 4194304 96 176 24 56 40)
                        (cdr (assq 'bss (plist-get u :sections)))))))))
 
 (ert-deftest nelisp-standalone-target-stage8-build-appends-arena-base-slot-unit ()

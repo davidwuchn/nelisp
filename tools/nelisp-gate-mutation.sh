@@ -104,7 +104,8 @@ while IFS='|' read -r gate file expr what; do
   if [ "$gate" = "emacs-parity" ] || \
      [ "$gate" = "standalone-reader-buffer-smoke" ] || \
      [ "$gate" = "nelisp-thread-standalone-smoke" ] || \
-     [ "$gate" = "nelisp-thread-allocating-standalone-smoke" ]; then
+     [ "$gate" = "nelisp-thread-allocating-standalone-smoke" ] || \
+     [ "$gate" = "standalone-midform-gc-bounded" ]; then
     if ! rebuild_checked; then
       echo "  $gate: HARNESS ERROR (rebuild with the injection failed; a stale binary would have read as PASS)"
       bad=$((bad+1))
@@ -144,7 +145,8 @@ while IFS='|' read -r gate file expr what; do
     cp "$backup" "$file"
     if [ "$gate" = "emacs-parity" ] || \
        [ "$gate" = "nelisp-thread-standalone-smoke" ] || \
-       [ "$gate" = "nelisp-thread-allocating-standalone-smoke" ]; then
+       [ "$gate" = "nelisp-thread-allocating-standalone-smoke" ] || \
+       [ "$gate" = "standalone-midform-gc-bounded" ]; then
       rebuild_checked || true
     fi
     baseline_log="$(mktemp)"
@@ -169,7 +171,8 @@ while IFS='|' read -r gate file expr what; do
   cp "$backup" "$file"; rm -f "$backup"
   if [ "$gate" = "emacs-parity" ] || \
      [ "$gate" = "nelisp-thread-standalone-smoke" ] || \
-     [ "$gate" = "nelisp-thread-allocating-standalone-smoke" ]; then
+     [ "$gate" = "nelisp-thread-allocating-standalone-smoke" ] || \
+     [ "$gate" = "standalone-midform-gc-bounded" ]; then
     rebuild_checked || true
   fi
 done <<< "$rows"

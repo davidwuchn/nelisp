@@ -295,6 +295,7 @@ cmd_extras() {
     for g in nelisp-runtime-image-cache-gate \
              nelisp-source-command-substrate-gate \
              standalone-chunk-growth-test \
+             standalone-midform-gc-bounded \
              standalone-parallel-compile-test \
              standalone-selfhost-mt-test \
              standalone-eval-test \

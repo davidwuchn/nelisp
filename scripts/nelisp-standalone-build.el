@@ -595,7 +595,16 @@ storage — not an arena reservation."
    ;; current-chunk descriptor @+8, active flag @+16).  The section entry
    ;; uses this driver-owned state to force every allocating worker onto the
    ;; CAS bump path and the exit checks that no chunk growth occurred.
-   (list (cons 'bss (+ 57616 4194304 96 176 24)))
+   ;; Doc 152 Stage 4c: +56 after nl_thread_parallel_ctx = nl_alloc_diag,
+   ;; debug-gated allocation/reclamation counters.  +0 enable; +8/+16/+24
+   ;; successful bucket/linear/bump allocations; +32/+40 reclaimed chunk
+   ;; count/bytes; +48 failed OS releases.  Switch 24 enables and resets;
+   ;; switch 25 disables.  Zero-init keeps normal execution unchanged.
+   ;; +40 after nl_alloc_diag = nl_gc_reclaim_scratch, collector-private
+   ;; traversal state used to remove only free-list links into the chunk about
+   ;; to be unmapped: prev/current/next/steps/max-steps.  GC's in-progress
+   ;; guard makes this single scratch record sufficient.
+   (list (cons 'bss (+ 57616 4194304 96 176 24 56 40)))
    (list (nelisp-link-symbol "nl_arena_base" 0
                              :section 'bss :bind 'global :type 'object)
          (nelisp-link-symbol "nl_rootstack_top" 8
@@ -632,6 +641,12 @@ storage — not an arena reservation."
                              :section 'bss :bind 'global :type 'object)
          (nelisp-link-symbol "nl_thread_parallel_ctx"
                              (+ 57616 4194304 96 176)
+                             :section 'bss :bind 'global :type 'object)
+         (nelisp-link-symbol "nl_alloc_diag"
+                             (+ 57616 4194304 96 176 24)
+                             :section 'bss :bind 'global :type 'object)
+         (nelisp-link-symbol "nl_gc_reclaim_scratch"
+                             (+ 57616 4194304 96 176 24 56)
                              :section 'bss :bind 'global :type 'object))
    nil))
 
@@ -1336,7 +1351,47 @@ directory tracks the tree rather than accumulating every key ever built."
     (defun nl_arena_init () 0)
     (defun nl_os_alloc_chunk (_size) 0)
     (defun nl_os_free_chunk (_base _size) 0)  ; stub; platform source overrides w/ munmap
+    ;; Empty-chunk sweep reclamation is enabled only by a target override.
+    ;; Unsupported targets retain the historical sweep behaviour exactly.
+    (defun nl_os_empty_chunk_reclaim_p () 0)
+    (defun nl_os_reclaim_empty_chunk (_base _size) 1)
     (defun nl_os_alloc_fail () 0)
+    ;; Doc 152 Stage 4c-2: debug-gated allocation-path instrumentation.
+    ;; These helpers return OBJ unchanged so they can wrap success arms
+    ;; without changing allocator selection.  Normal execution pays one
+    ;; zero-initialised flag read; switch 24 enables/reset the counters.
+    (defun nl_alloc_diag_bucket (obj)
+      (if (= (ptr-read-u64 (data-addr nl_alloc_diag) 0) 0) obj
+        (nl_seq2
+         (ptr-write-u64 (data-addr nl_alloc_diag) 8
+                        (+ (ptr-read-u64 (data-addr nl_alloc_diag) 8) 1))
+         obj)))
+    (defun nl_alloc_diag_linear (obj)
+      (if (= (ptr-read-u64 (data-addr nl_alloc_diag) 0) 0) obj
+        (nl_seq2
+         (ptr-write-u64 (data-addr nl_alloc_diag) 16
+                        (+ (ptr-read-u64 (data-addr nl_alloc_diag) 16) 1))
+         obj)))
+    (defun nl_alloc_diag_bump (obj)
+      (if (= (ptr-read-u64 (data-addr nl_alloc_diag) 0) 0) obj
+        (nl_seq2
+         (ptr-write-u64 (data-addr nl_alloc_diag) 24
+                        (+ (ptr-read-u64 (data-addr nl_alloc_diag) 24) 1))
+         obj)))
+    (defun nl_alloc_diag_chunk_reclaimed (size)
+      (if (= (ptr-read-u64 (data-addr nl_alloc_diag) 0) 0) 0
+        (seq
+         (ptr-write-u64 (data-addr nl_alloc_diag) 32
+                        (+ (ptr-read-u64 (data-addr nl_alloc_diag) 32) 1))
+         (ptr-write-u64 (data-addr nl_alloc_diag) 40
+                        (+ (ptr-read-u64 (data-addr nl_alloc_diag) 40) size))
+         0)))
+    (defun nl_alloc_diag_release_failed ()
+      (if (= (ptr-read-u64 (data-addr nl_alloc_diag) 0) 0) 0
+        (nl_seq2
+         (ptr-write-u64 (data-addr nl_alloc_diag) 48
+                        (+ (ptr-read-u64 (data-addr nl_alloc_diag) 48) 1))
+         0)))
     ;; SIZE-SEGREGATED free-list (2026-06-06).  Replaces the old single
     ;; exact-fit O(freelist) linear scan, which -- once the GC-trigger fix
     ;; made GC actually run and free thousands of mixed-size blocks -- forced
@@ -1404,7 +1459,7 @@ directory tracks the tree rather than accumulating every key ever built."
                                    (ptr-write-u64 268435552 0 (ptr-read-u64 c 0))
                                  (ptr-write-u64 p 0 (ptr-read-u64 c 0)))
                                (nl_hdr_set_mark (- c 8) 0)
-                               (setq res c)
+                               (setq res (nl_alloc_diag_linear c))
                                (setq done 1))
                             (seq
                              (setq p c)
@@ -1456,7 +1511,8 @@ directory tracks the tree rather than accumulating every key ever built."
                     (if (= (nl_hdr_mark (- cur 8)) 2)
                         (if (= (nl_hdr_bt (- cur 8)) want)
                             (nl_seq2 (ptr-write-u64 head 0 (ptr-read-u64 cur 0))
-                                     (nl_seq2 (nl_hdr_set_mark (- cur 8) 0) cur))
+                                     (nl_seq2 (nl_hdr_set_mark (- cur 8) 0)
+                                              (nl_alloc_diag_bucket cur)))
                           (nl_seq2 (nl_fl_record_trip cur (nl_hdr_bt (- cur 8)) want) (nl_seq2 (ptr-write-u64 head 0 0) 0)))
                       (nl_seq2 (nl_fl_record_trip cur (nl_hdr_bt (- cur 8)) want) (nl_seq2 (ptr-write-u64 head 0 0) 0)))
                   (nl_seq2 (nl_fl_record_trip cur 0 want) (nl_seq2 (ptr-write-u64 head 0 0) 0)))))))))
@@ -1563,8 +1619,9 @@ directory tracks the tree rather than accumulating every key ever built."
                     (let* ((new_chunk (nl_chunk_alloc_new want)))
                       (if (= new_chunk 0)
                           (nl_seq2 (nl_os_alloc_fail) 0)
-                        (nl_chunk_try_alloc new_chunk want)))
-                  obj))
+                        (nl_alloc_diag_bump
+                         (nl_chunk_try_alloc new_chunk want))))
+                  (nl_alloc_diag_bump obj)))
             reused))))
     (defun nl_dealloc_bytes (_p _s _a) 1)
     ;; Doc 146 §3.0: immediates-only tagged-word value helpers (foundation,
@@ -1795,6 +1852,12 @@ addressing by a runtime base, never by a fixed reservation."
         (if (< p 4096) 0 p)))
     (defun nl_os_free_chunk (base size)
       (syscall-direct 11 base size 0 0 0 0))  ; munmap(base, size)
+    ;; Doc 152 Stage 4c-1: ordinary mark/sweep may release proven-empty
+    ;; growth chunks on Linux x86_64.  Return convention matches munmap:
+    ;; zero is success, negative is failure.
+    (defun nl_os_empty_chunk_reclaim_p () 1)
+    (defun nl_os_reclaim_empty_chunk (base size)
+      (nl_os_free_chunk base size))
     ;; mmap demand-pages on first touch, so explicit range commit is a no-op.
     (defun nl_os_commit_range (base old new) 1)
     ;; Exit code 88 = standalone arena allocation failure.
@@ -1811,6 +1874,8 @@ arm64 Linux has no legacy x86 numbering)."
         (if (< p 4096) 0 p)))
     (defun nl_os_free_chunk (base size)
       (syscall-direct 215 base size 0 0 0 0))  ; munmap(base, size)
+    (defun nl_os_empty_chunk_reclaim_p () 0)
+    (defun nl_os_reclaim_empty_chunk (_base _size) 1)
     ;; mmap demand-pages on first touch, so explicit range commit is a no-op.
     (defun nl_os_commit_range (base old new) 1)
     ;; Exit code 88 = standalone arena allocation failure.
@@ -1862,6 +1927,8 @@ arm64 Linux has no legacy x86 numbering)."
             base))))
     (defun nl_os_free_chunk (base _size)
       (extern-call VirtualFree base 0 32768))  ; MEM_RELEASE=0x8000; size must be 0
+    (defun nl_os_empty_chunk_reclaim_p () 0)
+    (defun nl_os_reclaim_empty_chunk (_base _size) 1)
     (defun nl_os_commit_range (base old new)
       (if (= (extern-call VirtualAlloc (+ base old) (- new old) 4096 4) 0) 0 1))
     ;; Exit code 88 = standalone arena allocation failure.
@@ -1923,6 +1990,8 @@ arm64 Linux has no legacy x86 numbering)."
         (if (< p 4096) 0 p)))
     (defun nl_os_free_chunk (base size)
       (syscall-direct 73 base size 0 0 0 0))  ; Darwin munmap(base, size)
+    (defun nl_os_empty_chunk_reclaim_p () 0)
+    (defun nl_os_reclaim_empty_chunk (_base _size) 1)
     ;; mmap demand-pages on first touch, so explicit range commit is a no-op.
     (defun nl_os_commit_range (base old new) 1)
     ;; Exit code 88 = standalone arena allocation failure.
@@ -1982,6 +2051,8 @@ arm64 Linux has no legacy x86 numbering)."
                                           (eq (car form) 'defun)
                                           (memq (cadr form)
                                                 '(nl_os_alloc_chunk nl_os_free_chunk
+                                                  nl_os_empty_chunk_reclaim_p
+                                                  nl_os_reclaim_empty_chunk
                                                   nl_os_alloc_fail)))
                                      (cl-find-if (lambda (chunk-form)
                                                    (eq (cadr chunk-form) (cadr form)))
@@ -2385,8 +2456,162 @@ arm64 Linux has no legacy x86 numbering)."
           0
         (nl_seq2 (nl_gc_sweep_chunk chunk)
                  (nl_gc_sweep_chunks (ptr-read-u64 (+ chunk 48) 0)))))
+    ;; Doc 152 Stage 4c-1: prove a swept chunk contains only FREE blocks.
+    ;; STATUS is the sole across-call loop local; END is threaded as an arg.
+    ;; Reaching END exactly is required, so a malformed block walk retains the
+    ;; chunk rather than risking an unsafe release.
+    (defun nl_gc_chunk_all_free_step (status end)
+      (if (= (nl_gc_bt_ok status (nl_hdr_bt status) end) 0) 0
+        (if (= (nl_hdr_mark status) 2)
+            (+ status (nl_hdr_bt status))
+          0)))
+    (defun nl_gc_chunk_all_free_from (status end)
+      (seq
+       (while (and (> status 0) (< status end))
+         (setq status (nl_gc_chunk_all_free_step status end)))
+       (if (= status end) 1 0)))
+    (defun nl_gc_chunk_all_free (chunk)
+      (nl_gc_chunk_all_free_from
+       (ptr-read-u64 (+ chunk 24) 0) (nl_gc_chunk_end chunk)))
+    ;; Remove every free-list node whose object pointer falls in
+    ;; [BASE,BASE+SIZE), before that mapping is released.  Retained-chunk
+    ;; nodes stay linked, preserving reuse.  Traversal state lives in a
+    ;; collector-private BSS record so no runtime let-local spans the helper
+    ;; calls.  MAX-STEPS is one more than the theoretical maximum number of
+    ;; 16-byte blocks in the whole arena: a valid acyclic list cannot reach it,
+    ;; while a corrupt cycle is truncated instead of hanging collection.
+    (defun nl_gc_reclaim_addr_in_chunk (addr base size)
+      (if (< addr base) 0 (if (< addr (+ base size)) 1 0)))
+    (defun nl_gc_freelist_purge_bad (head bt want)
+      (seq
+       (nl_fl_record_trip
+        (ptr-read-u64 (data-addr nl_gc_reclaim_scratch) 8) bt want)
+       (if (= (ptr-read-u64 (data-addr nl_gc_reclaim_scratch) 0) 0)
+           (ptr-write-u64 head 0 0)
+         (ptr-write-u64
+          (ptr-read-u64 (data-addr nl_gc_reclaim_scratch) 0) 0 0))
+       (ptr-write-u64 (data-addr nl_gc_reclaim_scratch) 8 0)
+       0))
+    (defun nl_gc_freelist_purge_valid (head base size)
+      (seq
+       (ptr-write-u64
+        (data-addr nl_gc_reclaim_scratch) 16
+        (ptr-read-u64
+         (ptr-read-u64 (data-addr nl_gc_reclaim_scratch) 8) 0))
+       (if (= (nl_gc_reclaim_addr_in_chunk
+               (ptr-read-u64 (data-addr nl_gc_reclaim_scratch) 8)
+               base size) 1)
+           (if (= (ptr-read-u64 (data-addr nl_gc_reclaim_scratch) 0) 0)
+               (ptr-write-u64
+                head 0 (ptr-read-u64 (data-addr nl_gc_reclaim_scratch) 16))
+             (ptr-write-u64
+              (ptr-read-u64 (data-addr nl_gc_reclaim_scratch) 0) 0
+              (ptr-read-u64 (data-addr nl_gc_reclaim_scratch) 16)))
+         (ptr-write-u64
+          (data-addr nl_gc_reclaim_scratch) 0
+          (ptr-read-u64 (data-addr nl_gc_reclaim_scratch) 8)))
+       (ptr-write-u64
+        (data-addr nl_gc_reclaim_scratch) 8
+        (ptr-read-u64 (data-addr nl_gc_reclaim_scratch) 16))
+       0))
+    (defun nl_gc_freelist_purge_marked (head base size want bt)
+      (if (< bt 16) (nl_gc_freelist_purge_bad head bt want)
+        (if (= (logand bt 7) 0)
+            (if (if (= want 0) 1 (if (= bt want) 1 0))
+                (nl_gc_freelist_purge_valid head base size)
+              (nl_gc_freelist_purge_bad head bt want))
+          (nl_gc_freelist_purge_bad head bt want))))
+    (defun nl_gc_freelist_purge_aligned (head base size want)
+      (if (= (nl_hdr_mark
+              (- (ptr-read-u64 (data-addr nl_gc_reclaim_scratch) 8) 8)) 2)
+          (nl_gc_freelist_purge_marked
+           head base size want
+           (nl_hdr_bt
+            (- (ptr-read-u64 (data-addr nl_gc_reclaim_scratch) 8) 8)))
+        (nl_gc_freelist_purge_bad
+         head
+         (nl_hdr_bt
+          (- (ptr-read-u64 (data-addr nl_gc_reclaim_scratch) 8) 8))
+         want)))
+    (defun nl_gc_freelist_purge_step (head base size want)
+      (seq
+       (ptr-write-u64
+        (data-addr nl_gc_reclaim_scratch) 24
+        (+ (ptr-read-u64 (data-addr nl_gc_reclaim_scratch) 24) 1))
+       (if (< (ptr-read-u64 (data-addr nl_gc_reclaim_scratch) 32)
+              (ptr-read-u64 (data-addr nl_gc_reclaim_scratch) 24))
+           (nl_gc_freelist_purge_bad head 0 want)
+         (if (= (nl_gc_in_arena
+                 (ptr-read-u64 (data-addr nl_gc_reclaim_scratch) 8)) 0)
+             (nl_gc_freelist_purge_bad head 0 want)
+           (if (= (logand
+                   (ptr-read-u64 (data-addr nl_gc_reclaim_scratch) 8) 7) 0)
+               (nl_gc_freelist_purge_aligned head base size want)
+             (nl_gc_freelist_purge_bad head 0 want))))))
+    (defun nl_gc_freelist_purge_chain (head base size want)
+      (seq
+       (ptr-write-u64 (data-addr nl_gc_reclaim_scratch) 0 0)
+       (ptr-write-u64 (data-addr nl_gc_reclaim_scratch) 8
+                      (ptr-read-u64 head 0))
+       (ptr-write-u64 (data-addr nl_gc_reclaim_scratch) 24 0)
+       (ptr-write-u64 (data-addr nl_gc_reclaim_scratch) 32
+                      (+ (/ (ptr-read-u64 268436184 0) 16) 1))
+       (while (> (ptr-read-u64 (data-addr nl_gc_reclaim_scratch) 8) 0)
+         (nl_gc_freelist_purge_step head base size want))
+       0))
+    (defun nl_gc_freelist_purge_buckets (n base size)
+      (if (> n 57)
+          (nl_gc_freelist_purge_chain 268435552 base size 0)
+        (nl_seq2
+         (nl_gc_freelist_purge_chain
+          (+ 268435696 (* n 8)) base size (+ 16 (* n 8)))
+         (nl_gc_freelist_purge_buckets (+ n 1) base size))))
+    (defun nl_gc_freelist_purge_chunk (base size)
+      (nl_gc_freelist_purge_buckets 0 base size))
+    ;; The chunk descriptor lives inside its own mapping, so NEXT/BASE/SIZE
+    ;; are read first and threaded through helper args.  The chunk is unlinked
+    ;; before the OS release.  A failed release restores the link; a successful
+    ;; release never dereferences CHUNK again.  PREV is always retained because
+    ;; chunk 0 is never eligible.
+    (defun nl_gc_reclaim_empty_released (prev chunk next base size)
+      (if (= (nl_os_reclaim_empty_chunk base size) 0)
+          (seq
+           (ptr-write-u64 268436176 0 (- (ptr-read-u64 268436176 0) 1))
+           (ptr-write-u64 268436184 0 (- (ptr-read-u64 268436184 0) size))
+           (ptr-write-u64 268436200 0 (+ (ptr-read-u64 268436200 0) size))
+           (nl_alloc_diag_chunk_reclaimed size)
+           (nl_gc_reclaim_empty_chunks prev next))
+        (seq
+         (ptr-write-u64 (+ prev 48) 0 chunk)
+         (nl_alloc_diag_release_failed)
+         (nl_gc_reclaim_empty_chunks chunk next))))
+    (defun nl_gc_reclaim_empty_unlink (prev chunk next base size)
+      (nl_seq2 (ptr-write-u64 (+ prev 48) 0 next)
+               (nl_gc_reclaim_empty_released prev chunk next base size)))
+    (defun nl_gc_reclaim_empty_ready (prev chunk next base size)
+      (nl_seq2 (nl_gc_freelist_purge_chunk base size)
+               (nl_gc_reclaim_empty_unlink prev chunk next base size)))
+    (defun nl_gc_reclaim_empty_one (prev chunk next base size)
+      (if (= chunk (ptr-read-u64 268436160 0))
+          (nl_gc_reclaim_empty_chunks chunk next)
+        (if (= chunk (ptr-read-u64 268436168 0))
+            (nl_gc_reclaim_empty_chunks chunk next)
+          (if (= (nl_gc_chunk_all_free chunk) 0)
+              (nl_gc_reclaim_empty_chunks chunk next)
+            (nl_gc_reclaim_empty_ready prev chunk next base size)))))
+    (defun nl_gc_reclaim_empty_chunks (prev chunk)
+      (if (= chunk 0) 0
+        (nl_gc_reclaim_empty_one
+         prev chunk (ptr-read-u64 (+ chunk 48) 0)
+         (ptr-read-u64 chunk 0) (ptr-read-u64 (+ chunk 8) 0))))
     (defun nl_gc_sweep ()
-      (nl_gc_sweep_chunks (ptr-read-u64 268436160 0)))
+      (nl_seq2
+       (nl_gc_sweep_chunks (ptr-read-u64 268436160 0))
+       (if (= (nl_os_empty_chunk_reclaim_p) 1)
+           (nl_gc_reclaim_empty_chunks
+            (ptr-read-u64 268436160 0)
+            (ptr-read-u64 (+ (ptr-read-u64 268436160 0) 48) 0))
+         0)))
     ;; Full collection at the form boundary.  CTX = the env (mirror@+0,
     ;; frames@+32, unbound@+64).  The remaining args are the live driver
     ;; Sexp slots that must survive.  Mark all roots, then sweep.
@@ -3382,12 +3607,15 @@ arm64 Linux has no legacy x86 numbering)."
                        (ptr-write-u64 (data-addr nl_gc_loop_ctx) 24 0)))))))))))
     ;; Gated mid-form collect (called from nl_sf_while's backedge).  enable
     ;; (ctx+8) defaults OFF -> a single cheap branch + return, so non-test runs are
-    ;; unchanged.  alloc-debt gate: fire when total chunk-bytes-reserved (268436184
-    ;; -- the SAME monotonic counter the boundary GC trips on; the chunk-0 bump
-    ;; @268435456 caps at the first chunk and is useless here) crosses the
-    ;; next-trigger watermark (ctx+40), then re-arm +16 MiB and bump the
-    ;; fired-count (ctx+32, diagnostic).  MIDFORM uses recorded frames plus the
-    ;; conservative scan (mode 0), never compaction.
+    ;; unchanged.  Alloc-debt gate: fire when currently reserved chunk bytes
+    ;; (268436184 -- also used by boundary GC; chunk-0's bump cursor caps at
+    ;; the first chunk and is useless here) crosses ctx+40.  Stage 4c subtracts
+    ;; successful unmaps before this helper re-arms at reserved+16 MiB.  Since
+    ;; normal growth chunks are 64 MiB, the next growth event crosses that
+    ;; watermark immediately: collection already runs at the earliest point
+    ;; the former current chunk can become releasable.  Bump ctx+32 for each
+    ;; fire.  MIDFORM uses recorded frames plus the conservative scan (mode 0),
+    ;; never compaction.
     (defun nl_gc_midform_collect ()
       (if (= (ptr-read-u64 (data-addr nl_gc_loop_ctx) 8) 1)
           (if (< (ptr-read-u64 268436184 0)
@@ -4713,7 +4941,9 @@ leave symbols unresolved at link time."
     ;; 0=read, 1/2=poison on/off, 3/4=push/pop loop context, 5/6=arm/disarm mid-form collect, 7/8=collections off/on, 9/10=free-list reuse off/on, 11/12=compaction on/off, 13/14=macroexpansion-cache off/on, 15/16=force/allow legacy bind clone, 17/18=closure freevar-cache off/on.
     ;; Returns the list
     ;; (trip-count bad-cur bad-bt bad-want poison-count poison-enable
-    ;;  context-depth mid-form-fired-count bind-legacy-force root-depth).
+    ;;  context-depth mid-form-fired-count bind-legacy-force root-depth
+    ;;  bucket-hits linear-hits bump-allocs reclaimed-chunks reclaimed-bytes
+    ;;  failed-os-releases).
     ;; Doc 170 Stage 2: debug-switch extension codes (19+), split out so
     ;; the historical 18-arm chain stays untouched.  ARG0:
     ;;   19 = enable checked-allocator stamping (guard/site suffix on
@@ -4731,6 +4961,8 @@ leave symbols unresolved at link time."
     ;;        toggle) is untouched, so this does not enable mid-form
     ;;        collection -- see `nl_gc_frame_record_armed_p'.
     ;;   23 = disarm (ctx+48=0).
+    ;;   24 = enable and reset allocation/reclamation counters.
+    ;;   25 = disable allocation/reclamation counters.
     ;; Unknown codes return 0 (same as the historical default arm).
     (defun bf_debug_switch_ext (args)
       (if (= (wf_argval args 0) 22)
@@ -4763,7 +4995,19 @@ leave symbols unresolved at link time."
               (nl_seq2
                (ptr-write-u64 (data-addr nl_alloc_check) 24 (wf_argval args 1))
                0)
-            0))))
+            (if (= (wf_argval args 0) 24)
+                (seq
+                 (ptr-write-u64 (data-addr nl_alloc_diag) 0 1)
+                 (ptr-write-u64 (data-addr nl_alloc_diag) 8 0)
+                 (ptr-write-u64 (data-addr nl_alloc_diag) 16 0)
+                 (ptr-write-u64 (data-addr nl_alloc_diag) 24 0)
+                 (ptr-write-u64 (data-addr nl_alloc_diag) 32 0)
+                 (ptr-write-u64 (data-addr nl_alloc_diag) 40 0)
+                 (ptr-write-u64 (data-addr nl_alloc_diag) 48 0)
+                 0)
+              (if (= (wf_argval args 0) 25)
+                  (nl_seq2 (ptr-write-u64 (data-addr nl_alloc_diag) 0 0) 0)
+                0))))))
     (defun bf_debug_switch (args out)
       (seq
         (if (= (wf_argval args 0) 1) (ptr-write-u64 (data-addr nl_gc_diag) 32 1)
@@ -4814,12 +5058,24 @@ leave symbols unresolved at link time."
                                             ;; 19+ live in the extension
                                             ;; dispatcher below.
                                             (bf_debug_switch_ext args)))))))))))))))))))
-        (let* ((nils (alloc-bytes 32 8)) (s9 (alloc-bytes 32 8)) (s8 (alloc-bytes 32 8)) (s7 (alloc-bytes 32 8)) (s6 (alloc-bytes 32 8)) (s5 (alloc-bytes 32 8)) (s4 (alloc-bytes 32 8))
+        (let* ((nils (alloc-bytes 32 8))
+               (s15 (alloc-bytes 32 8)) (s14 (alloc-bytes 32 8))
+               (s13 (alloc-bytes 32 8)) (s12 (alloc-bytes 32 8))
+               (s11 (alloc-bytes 32 8)) (s10 (alloc-bytes 32 8))
+               (s9 (alloc-bytes 32 8)) (s8 (alloc-bytes 32 8)) (s7 (alloc-bytes 32 8)) (s6 (alloc-bytes 32 8)) (s5 (alloc-bytes 32 8)) (s4 (alloc-bytes 32 8))
                (s3 (alloc-bytes 32 8)) (s2 (alloc-bytes 32 8)) (s1 (alloc-bytes 32 8)))
           (seq
             (wf_write_nil nils)
+            ;; Tail diagnostics: bucket-hit, linear-hit, bump-hit,
+            ;; reclaimed-chunks, reclaimed-bytes, failed OS releases.
+            (wf_cons_int (ptr-read-u64 (data-addr nl_alloc_diag) 48) nils s15)
+            (wf_cons_int (ptr-read-u64 (data-addr nl_alloc_diag) 40) s15 s14)
+            (wf_cons_int (ptr-read-u64 (data-addr nl_alloc_diag) 32) s14 s13)
+            (wf_cons_int (ptr-read-u64 (data-addr nl_alloc_diag) 24) s13 s12)
+            (wf_cons_int (ptr-read-u64 (data-addr nl_alloc_diag) 16) s12 s11)
+            (wf_cons_int (ptr-read-u64 (data-addr nl_alloc_diag) 8) s11 s10)
             ;; 10th element (tail): active Stage-2 root-stack depth.
-            (wf_cons_int (nl_root_depth) nils s9)
+            (wf_cons_int (nl_root_depth) s10 s9)
             (wf_cons_int (ptr-read-u64 (data-addr nl_bind_clone_force) 0) s9 s8)
             (wf_cons_int (ptr-read-u64 (data-addr nl_gc_loop_ctx) 32) s8 s7)
             (wf_cons_int (ptr-read-u64 (data-addr nl_gc_loop_ctx) 0) s7 s6)

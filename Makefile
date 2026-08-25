@@ -2962,6 +2962,26 @@ standalone-parallel-compile-test:
 standalone-chunk-growth-test:
 	@EMACS="$(EMACS)" ./tools/chunk-growth-test.sh
 
+# Doc 152 Stage 4c/4d: the armed mid-form collector must return wholly-free
+# growth chunks to Linux and reach a steady RSS plateau, while the checked
+# poison-on-free run remains sound.  The implementation under test is pure
+# Elisp AOT DSL; Python is only the host wait4(2)/ru_maxrss measurement driver.
+.PHONY: standalone-midform-gc-bounded
+standalone-midform-gc-bounded: standalone-reader
+	@NELISP_STANDALONE_TARGET=$(STANDALONE_GATE_TARGET) $(EMACS) --batch -Q -L lisp -L src -L scripts -l nelisp-standalone-build \
+	  --eval '(kill-emacs (if (nelisp-standalone--target-runnable-on-host-p) 0 3))' \
+	  >/dev/null 2>&1; \
+	host_rc=$$?; \
+	if [ "$$host_rc" = 3 ]; then \
+	  echo "GATE-SKIP target $(STANDALONE_GATE_TARGET) cannot run on this host"; \
+	  exit 0; \
+	fi; \
+	if [ "$$host_rc" != 0 ]; then \
+	  echo "standalone-midform-gc-bounded: target runnable predicate failed"; \
+	  exit "$$host_rc"; \
+	fi; \
+	PYTHONDONTWRITEBYTECODE=1 python3 tools/nelisp-midform-gc-bounded.py ./target/nelisp
+
 
 # Multi-process parallel compile (startup-bound for the current unit set:
 # usually SLOWER than serial `standalone-eval' -- see the script header).
