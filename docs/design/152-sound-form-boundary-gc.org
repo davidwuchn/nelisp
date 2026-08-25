@@ -2100,3 +2100,38 @@ mid-form collect 下の =(while (< i N) (setq i (1+ i)))= は **N を増やし�
 2. safepoint はまだ while backedge のみ。nested call / multi-form body への拡張（§11.41 の 4c 本来の
    範囲）は未了で、そこに入らない形状の long-running workload は依然 collect 機会が乏しい。
 3. mid-form collect は既定 OFF（arm が必要）。既定 ON 化は Stage 5（全面化 + write barrier）の判断。
+
+** §11.43.1 訂正 — chunk 返却は free-list 以外の arena ポインタ保持者も無効化しなければならない（SIGSEGV、2026-08-25）
+§11.43 初版の chunk 返却は free-list だけを purge していた。CI round 19 の ubuntu-30.1 lane が
+=nelisp-ai.sh perf= で落ち、中身は性能退行ではなく **=compile-elisp-artifact= の SIGSEGV**（gate は
+=GATE-COUNT checked=0 findings=1=、= 1 件も計測できずに死んだ）だった。
+
+*二分（実測）*: Stage 3 のみの binary では exit 0 / Stage 3+4c では exit 139 /
+=nl_os_empty_chunk_reclaim_p= を 1→0 にすると exit 0。→ crash は空 chunk の munmap そのもの。
+
+*root cause*: arena を指す global は free-list だけではない。=nl_mxcache_table_base=（macro 展開
+cache）と =nl_fvcache_table_base=（function-value cache）は生の arena ポインタを保持したままで、
+その chunk が munmap されると次の lookup が dangling を踏む。=compile-elisp-artifact= は macro を
+多用するので最初に踏む経路になった。mutation gate（reclaim を止める）でも bounded gate でも
+検出できない（どちらもこの cache 経路を通らない）ため、full CI が唯一の発見手段だった。
+
+*fix*: chunk 解放シーケンスを「free-list purge → =nl_mxcache_epoch= を +1 → chunk unlink → munmap」
+に変更。epoch bump は =nl_gc_compact= が relocation 前に使うのと同じ無効化機構で、mxcache と
+fvcache は同一 epoch を共有するため 1 回の bump で両方が stale 化する（両 lookup が epoch 照合を
+先に行うことを新 ERT
+=nelisp-standalone-target-chunk-reclaim-invalidates-pointer-caches= で pin）。
+
+*audit の副産物*: 同じ監査で =nl_gc_loop_ctx= も arena ポインタの BSS 保持者と判明し、nested =load=
+の外側 driver frame が **full form-boundary GC からは未走査**だったことが分かった（mid-form
+collector は既に走査していた）。=nl_gc_mark_roots= に =nl_gc_mark_recorded_contexts= を追加。
+これは今回の crash とは独立の、既存の root-coverage gap の解消である。
+
+*再検証（claude 独立実測）*: =compile-elisp-artifact= exit 0（139 から回復）/ =nelisp-performance-gate=
+=checked=9 findings=0=（0 件計測から回復）/ **bounded は維持** — N=1M で RSS 339,772 KiB、
+=STEADY_SLOPE_B_PER_ITER=0.582=、1M で 268,435,456 B 返却、release failures=0 / armed+poison 500k は
+result=500000・trip=0・32,818,196 obj free / compile 0 / parens 463-0 / emacs-parity 19970 findings=0 /
+standalone-reader-test 27-0 / target ERT 56/56 / ert-full 5461 tests 0 unexpected。
+
+*教訓*: 「解放するメモリを指しうる参照」を数え上げるとき、free-list のような明示的な構造だけでなく
+**cache と診断用 BSS も含めて全部列挙する**こと。ここでは epoch という既存の一括無効化機構が
+あったので安く直せたが、無ければ chunk 返却は成立しなかった。

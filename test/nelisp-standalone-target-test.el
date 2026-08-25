@@ -1111,6 +1111,51 @@ scratch chunks have their cursor reset."
                      '(defun nl_os_free_chunk (_base _size) 0)
                      arena))))))
 
+(ert-deftest nelisp-standalone-target-chunk-reclaim-invalidates-pointer-caches ()
+  "Empty-chunk release invalidates both raw arena-pointer caches first."
+  (cl-labels ((defun-form
+               (name forms)
+               (cl-find-if (lambda (form)
+                             (and (consp form) (eq (car form) 'defun)
+                                  (eq (cadr form) name)))
+                           (if (eq (car-safe forms) 'seq) (cdr forms) forms)))
+              (tree-member-p
+               (needle tree)
+               (cond
+                ((equal needle tree) t)
+                ((consp tree)
+                 (or (tree-member-p needle (car tree))
+                     (tree-member-p needle (cdr tree)))))))
+    (let ((ready (defun-form 'nl_gc_reclaim_empty_ready
+                             nelisp-standalone--gc-source)))
+      (should ready)
+      (should
+       (equal
+        (cadddr ready)
+        '(nl_seq2
+          (nl_gc_freelist_purge_chunk base size)
+          (nl_seq2
+           (ptr-write-u64
+            (data-addr nl_mxcache_epoch) 0
+            (+ (ptr-read-u64 (data-addr nl_mxcache_epoch) 0) 1))
+           (nl_gc_reclaim_empty_unlink prev chunk next base size))))))
+    ;; The macro-expansion and function-value caches reject a row on an epoch
+    ;; mismatch before comparing or returning either stored arena pointer.
+    (dolist (name '(nl_mxcache_lookup nl_fvcache_lookup))
+      (let ((lookup (defun-form name nelisp-standalone--gc-source)))
+        (should lookup)
+        (should
+         (tree-member-p
+          '(ptr-read-u64 (data-addr nl_mxcache_epoch) 0)
+          lookup))))
+    ;; nl_gc_loop_ctx is the other BSS owner of live arena pointers.  A full
+    ;; boundary collection may run inside a nested load, so it must retain the
+    ;; outer recorded driver frames just as the mid-form collector does.
+    (let ((roots (defun-form 'nl_gc_mark_roots
+                             nelisp-standalone--gc-source)))
+      (should roots)
+      (should (tree-member-p '(nl_gc_mark_recorded_contexts) roots)))))
+
 (ert-deftest nelisp-standalone-target-intern-region-is-target-aware ()
   "Symbol-name intern region setup uses each target's allocation surface."
   (cl-labels ((tree-member-p

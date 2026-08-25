@@ -2589,8 +2589,18 @@ arm64 Linux has no legacy x86 numbering)."
       (nl_seq2 (ptr-write-u64 (+ prev 48) 0 next)
                (nl_gc_reclaim_empty_released prev chunk next base size)))
     (defun nl_gc_reclaim_empty_ready (prev chunk next base size)
-      (nl_seq2 (nl_gc_freelist_purge_chunk base size)
-               (nl_gc_reclaim_empty_unlink prev chunk next base size)))
+      (nl_seq2
+       (nl_gc_freelist_purge_chunk base size)
+       (nl_seq2
+        ;; Both raw arena-pointer caches share this epoch.  Invalidate every
+        ;; row after the last traversal of the candidate mapping and before
+        ;; unlink/release, so a successful munmap cannot leave a lookup-visible
+        ;; key or value pointing into it.  Invalidating on release failure is a
+        ;; harmless cache miss and keeps this path free of runtime let-locals.
+        (ptr-write-u64
+         (data-addr nl_mxcache_epoch) 0
+         (+ (ptr-read-u64 (data-addr nl_mxcache_epoch) 0) 1))
+        (nl_gc_reclaim_empty_unlink prev chunk next base size))))
     (defun nl_gc_reclaim_empty_one (prev chunk next base size)
       (if (= chunk (ptr-read-u64 268436160 0))
           (nl_gc_reclaim_empty_chunks chunk next)
@@ -3031,7 +3041,13 @@ arm64 Linux has no legacy x86 numbering)."
        (nl_seq2 (nl_gc_mark_root_blocks ctx result out pool src cursor bsym)
        (nl_seq2 (nl_seq2 (nl_gc_mark_slot (+ ctx 0))
                          (nl_seq2 (nl_gc_mark_mirror_buckets (+ ctx 0))
-                                  (nl_gc_mark_rootstack))) ; mirror / globals + Doc 152 §11.37 Stage 2 dynamic root stack scan
+                          (nl_seq2
+                           (nl_gc_mark_rootstack) ; mirror / globals + Doc 152 §11.37 Stage 2 dynamic root stack scan
+                           ;; Full form-boundary collections can run inside a
+                           ;; nested `load'.  Keep every still-active outer
+                           ;; driver frame recorded in nl_gc_loop_ctx; the
+                           ;; mid-form collector already uses this same walker.
+                           (nl_gc_mark_recorded_contexts))))
         (nl_seq2 (nl_gc_mark_slot (+ ctx 32))    ; frame stack
          (nl_seq2 (nl_gc_mark_slot (+ ctx 64))   ; unbound marker
           (nl_seq2 (nl_gc_mark_slot result)      ; current parsed form
