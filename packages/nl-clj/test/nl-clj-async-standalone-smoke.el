@@ -13,32 +13,49 @@
 ;; nl-clj-async-cps-baseline'), not a wall this package's own go/chan
 ;; primitives hit that `nelisp-actor' itself did not already -- it
 ;; loads `nl-clj' + `nelisp-actor' + `nl-clj-async' on `target/nelisp'
-;; itself and runs a real ping/pong exchange entirely over `nl-clj-go'/
-;; `nl-clj-chan'/`nl-clj-close!' plus `nelisp-chan-send'/`nelisp-chan-
-;; recv' directly, proving THIS package's own channel mediator
-;; (`nl-clj-async--make-chan-1', the one piece with genuinely new
-;; protocol logic over the shipped `nelisp-make-chan') and `nl-clj-go'
-;; itself both survive the same standalone substrate `nelisp-actor'
-;; does, across many round trips.
+;; itself and runs minimal repeated-take/repeated-put fixtures plus a
+;; real ping/pong exchange entirely over `nl-clj-go'/`nl-clj-chan'/
+;; `nl-clj-<!'/`nl-clj->!', proving this package's channel mediator and
+;; both parking wrappers survive repeated resumption on the same
+;; standalone substrate `nelisp-actor' does.
 ;;
-;; A real, named gap this smoke does NOT paper over: the example does
-;; NOT use `nl-clj-<!'/`nl-clj->!' for the exchange.  Against-the-bug,
-;; measured directly across many narrowing rounds building this file:
-;; a two-`nl-clj-go' channel bounce built on `nl-clj-<!'/`nl-clj->!' is
-;; fully correct on host Emacs (`nl-clj-async-test.el', 29/29 green,
-;; including this exact shape) but was measured to hang on
-;; `target/nelisp' once the SAME park point is resumed a second time
-;; from inside a `while' loop -- reproduced with `nl-clj-<!' alone,
-;; independent of `nl-clj-go', `close!', or branching, and NOT
-;; reproduced by `nelisp-chan-recv'/`nelisp-chan-send' used directly,
-;; which this session verified complete correctly across many round
-;; trips on the same binary.  Not root-caused further within this
-;; session's time budget; see `examples/nl-clj-async/go-ping-pong.el's
-;; own Commentary for the fullest account.  What this smoke DOES prove
-;; is real and load-bearing (the channel mediator and `nl-clj-go'
-;; themselves are standalone-clean); what it does not yet prove
-;; (`nl-clj-<!'/`nl-clj->!' specifically, under repeated resumption) is
-;; named here as an open follow-up, not silently narrowed away.
+;; Resolution of the former named gap: the raw `nelisp-chan-recv'/
+;; `nelisp-chan-send' workaround and the one-call limit are both gone.
+;; On the source-matched standalone binary, the isolated `nl-clj-<!'
+;; fixture, its raw control, the symmetric `nl-clj->!' fixture, and two
+;; wrapper-based ping/pong calls in one process all completed.  The
+;; former internal-`let' expansion of `nl-clj-<!' also completed when
+;; rebaked into the same minimal fixture.  Those measurements rule out
+;; reinitialized park state, a reused continuation closure, re-consed
+;; sentinel identity, and catch/throw tag identity -- none of which was
+;; ever the cause, and `nl-clj-<!' had no defect to fix.
+;;
+;; What the original "hang" actually was, measured directly on this
+;; tree with the OLD `nl-clj-async.el' restored and this same widened
+;; smoke driving it (CPU% and RSS sampled every 3s):
+;;
+;;   mid-form collector ON  (today's default, Doc 152 Stage 5):
+;;     peak RSS ~586 MB, CPU pinned at ~100%, completes in ~63s,
+;;     `GATE-COUNT checked=10 findings=0'.
+;;   mid-form collector OFF (the pre-Stage-5 default):
+;;     RSS reaches 23,137,904 KiB -- about 23 GB -- within 18s, then
+;;     plateaus there; still running at 180s and killed, never finishing.
+;;
+;; So this fixture allocates roughly 40x more than it retains, and
+;; before Doc 152 Stage 5 turned the collector on by default nothing
+;; ever reclaimed it.  The original report's own signature -- "0% CPU,
+;; stable RSS" -- is what a process deep in swap looks like: RSS is
+;; stable because it is capped by physical memory, and CPU reads near
+;; zero because the time is iowait, not user time.  It was memory
+;; exhaustion misread as a deadlock, not elapsed time misread as one,
+;; and it was fixed by Stage 5 rather than by anything in this file.
+;; This widened smoke now waits for actual completion and asserts the
+;; values from both resumptions and both top-level calls.
+;;
+;; Practical consequence worth keeping: this smoke is only viable at
+;; all because the collector is on by default.  If a future change
+;; disarms it (`(nelisp--debug-switch 6)'), this smoke does not fail
+;; with a clear message -- it eats the machine's memory first.
 ;;
 ;; Unlike `nl-clj-standalone-smoke.el' (which replays every `nl-clj-*-
 ;; test.el' ERT body directly, since none of Tier 1's atom/vector/
@@ -50,17 +67,12 @@
 ;; standalone-smoke.el's own Commentary).  What runs standalone is
 ;; specifically `packages/nl-clj/generated/go-ping-pong-cps.el' -- the
 ;; build-time CPS transform's output -- exercising this package's own
-;; channel mediator (spawn, `:send'/`:recv'/`:close', the alts!
-;; `:recv-alt'/`:send-alt' extension) AND `nl-clj-go' itself, all
-;; without ever asking the standalone reader to see `iter-lambda'/
-;; `iter-yield'/`nl-clj-go' at all.  The host-Emacs half of this same
-;; claim (the generated forms behave IDENTICALLY to what real
-;; `generator.el' would have produced for the SAME `nl-clj-go'-based
-;; source, not just "it runs") is proven directly by `make
-;; nl-clj-async-cps-baseline''s own build step (parity checked against
-;; host Emacs before the generated file is ever committed -- see
-;; `packages/nl-clj/scripts/nl-clj-async-cps-dump.el's Commentary and
-;; this package's README.org Testing section for the exact command).
+;; channel mediator, both repeated-resumption fixtures, and `nl-clj-go'
+;; itself, all without asking the standalone reader to see `iter-
+;; lambda'/`iter-yield'/`nl-clj-go' at all.  Host behavior is checked
+;; separately by `nl-clj-async-test.el'; `make nl-clj-async-cps-
+;; baseline' regenerates the checked-in transform but does not itself
+;; claim host-vs-generated parity.
 ;;
 ;; Run from the repository root:
 ;;
@@ -70,6 +82,7 @@
 
 (defvar nl-clj-async-smoke--checked 0)
 (defvar nl-clj-async-smoke--failures nil)
+(defvar nl-clj-async-smoke--result nil)
 
 (defun nl-clj-async-smoke--check (label actual expected)
   "Record one check: LABEL passes when ACTUAL `equal's EXPECTED."
@@ -98,62 +111,59 @@
 (load "packages/nl-clj/src/nl-clj-async.el")
 (setq nl-clj-async-smoke--checked (1+ nl-clj-async-smoke--checked))
 
-;; Section 2: the build-time-transformed channel mediator and go-block
-;; ping/pong demo -- chan creation, spawn, `:send'/`:recv'/`:close',
-;; cooperative park/resume via `nl-clj-<!'/`nl-clj->!', all via the
-;; generated, generator-free closures.
+;; Section 2: build-time-transformed minimal wrapper fixtures and the
+;; go-block ping/pong demo, all via generated, generator-free closures.
 (load "packages/nl-clj/generated/go-ping-pong-cps.el")
 
-;; Exactly ONE call to `nl-clj-async-demo-ping-pong-standalone', not
-;; one per assertion.  Against-the-bug, measured directly and NOT yet
-;; root-caused within this session's time budget: a SECOND top-level
-;; call to this function in the same process -- even with identical
-;; arguments, even though `nelisp-actor--reset' runs at the top of the
-;; function every time -- hangs on `target/nelisp' (low, non-spinning
-;; CPU use across a 60s wall-clock wait; not a busy loop, genuinely
-;; blocked on something), while a SINGLE call completes and prints the
-;; correct result every time this session tested it (also true of
-;; HOPS=1/4/9 individually).  The prime suspect, named rather than
-;; chased further here: `nelisp-actor--reset' resets `nelisp-actor--
-;; id-counter' to 0, so a second call's fresh actors are assigned the
-;; IDENTICAL id symbols (`nelisp-actor-1', `nelisp-actor-2', ...) a
-;; first call's own channel mediators already used -- and those
-;; mediators are, by this package's own deliberate design (`nl-clj-
-;; async--make-chan-1-standalone's Commentary), IMMORTAL: they never
-;; reach `:dead' the way an ordinary actor does, so whatever a second
-;; call's id-reuse collides with, unlike an ordinary already-completed
-;; actor, is still a live, running closure.  Untested here: whether
-;; this is specific to the standalone substrate or would reproduce on
-;; host Emacs too, given enough calls; whether it is specific to
-;; channel immortality or would reproduce with ordinary short-lived
-;; actors reusing ids.  A real, open follow-up -- this smoke's own
-;; scope is proving ONE `nl-clj-go' ping/pong exchange survives baking
-;; and runs correctly standalone, which the single call below does.
-;;
-;; Expected values are the exact host-Emacs results (`emacs --batch
-;; ... -l examples/nl-clj-async/go-ping-pong.el --eval
-;; "(nl-clj-async-demo-ping-pong 4)"', and the host-vs-generated parity
-;; check `make nl-clj-async-cps-baseline' itself runs before the
-;; generated file is committed) for the SAME HOPS value -- this smoke
-;; does not invent its own expectations, it reuses the ones the
-;; host-Emacs example already established and pins them here,
-;; mirroring `nelisp-actor-standalone-smoke.el's own precedent exactly.
-(let ((result (nl-clj-async-demo-ping-pong-standalone 4)))
+(nl-clj-async-smoke--check
+ "same nl-clj-<! park point resumes twice"
+ (nl-clj-async-demo-repeated-take-standalone)
+ '(:first :second))
+
+(setq nl-clj-async-smoke--result
+      (nl-clj-async-demo-repeated-put-standalone))
+(nl-clj-async-smoke--check
+ "same nl-clj->! park point resumes twice"
+ (plist-get nl-clj-async-smoke--result :accepted)
+ '(t t))
+(nl-clj-async-smoke--check
+ "repeated nl-clj->! values reach the raw receiver"
+ (plist-get nl-clj-async-smoke--result :seen)
+ '(0 1))
+
+(defun nl-clj-async-smoke--check-ping-pong (label result expected-trail)
+  "Check one LABEL ping/pong RESULT against EXPECTED-TRAIL."
   (nl-clj-async-smoke--check
-   "hops=4 trail (pong replies HOPS times; ping sends the initial value
-plus HOPS-1 replies, so the trail is 2*HOPS entries, strictly
-alternating pong/ping starting at 0 -- see go-ping-pong.el's own
-Commentary for why HOPS=0 is not a supported input this smoke tries)"
+   (format "%s trail" label)
    (plist-get result :trail)
-   '((pong . 0) (ping . 1) (pong . 2) (ping . 3) (pong . 4) (ping . 5) (pong . 6) (ping . 7)))
+   expected-trail)
   (nl-clj-async-smoke--check
-   "hops=4 results"
+   (format "%s results" label)
    (list (plist-get result :ping-result) (plist-get result :pong-result))
    '(:ping-done :pong-done))
   (nl-clj-async-smoke--check
-   "hops=4 trail length"
+   (format "%s trail length" label)
    (length (plist-get result :trail))
-   8))
+   (length expected-trail)))
+
+;; Two real calls in the same process are deliberate: `nelisp-actor--
+;; reset' reuses actor ids, so this directly disproves the former
+;; immortal-mediator/id-collision hypothesis while both calls also
+;; resume `nl-clj-<!'/`nl-clj->!' repeatedly inside their loops.
+(setq nl-clj-async-smoke--result
+      (nl-clj-async-demo-ping-pong-standalone 4))
+(nl-clj-async-smoke--check-ping-pong
+ "first call, hops=4"
+ nl-clj-async-smoke--result
+ '((pong . 0) (ping . 1) (pong . 2) (ping . 3)
+   (pong . 4) (ping . 5) (pong . 6) (ping . 7)))
+
+(setq nl-clj-async-smoke--result
+      (nl-clj-async-demo-ping-pong-standalone 2))
+(nl-clj-async-smoke--check-ping-pong
+ "second call, hops=2"
+ nl-clj-async-smoke--result
+ '((pong . 0) (ping . 1) (pong . 2) (ping . 3)))
 
 ;; `tools/ai/nelisp-ai.sh gate NAME -- ...' requires this exact line to
 ;; report what the gate checked; its absence is itself a hard failure

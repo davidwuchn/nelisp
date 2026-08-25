@@ -13,7 +13,7 @@
 ;;   chan             nelisp-make-chan / spawn+recv  see below (*)
 ;;   close!           nelisp-chan-close              direct, renamed wrapper
 ;;   go               nelisp-spawn + nelisp-actor-lambda   thin wrapper
-;;   >!/<!            nelisp-chan-send/-recv         direct, renamed wrapper
+;;   >!/<!            nelisp-chan-send/-recv         wire-compatible wrapper
 ;;   >!!/<!!          (none)                         new plumbing
 ;;   alts!            (none)                         new plumbing
 ;;
@@ -34,12 +34,12 @@
 ;; nelisp-actor-test.el's channel section), plus the two new alts!
 ;; message types.  It returns a real `nelisp-chan' struct (from
 ;; nelisp-actor.el, via that package's own `nelisp-chan--make'), so
-;; `nelisp-chan-send'/`nelisp-chan-recv'/`nelisp-chan-close' -- and
-;; `nl-clj->!'/`nl-clj-<!'/`nl-clj-close!' below, which ARE literally
-;; those, unmodified -- work on an `nl-clj-chan' exactly as they do on
-;; a `nelisp-make-chan' channel.  Only channel CREATION goes through
-;; this package's own mediator; everything downstream is the shipped
-;; asset, untouched.
+;; `nelisp-chan-send'/`nelisp-chan-recv'/`nelisp-chan-close' work on an
+;; `nl-clj-chan' exactly as they do on a `nelisp-make-chan' channel.
+;; `nl-clj-<!' adds only reply unwrapping, `nl-clj->!' speaks the same
+;; send protocol directly so closed puts return nil instead of
+;; signaling, and `nl-clj-close!' is a literal renamed wrapper.  Only
+;; channel CREATION goes through this package's own mediator.
 ;;
 ;; A second, load-bearing constraint this whole file is built around
 ;; (Doc 195 §2.4's own "generator.el is not vendored standalone" fact,
@@ -370,9 +370,9 @@ table: `close!' <-> `nelisp-chan-close', direct renamed wrapper)."
 (defun nl-clj-async--unwrap-recv (v)
   "Translate `nelisp-chan-recv''s own `(:value V)'/`(:closed)' reply V
 into core.async `<!''s contract: the taken value, or nil.  A plain
-function, not a macro -- see `nl-clj-<!''s own Commentary for why this
-specific split (macro just parks and calls this; a SEPARATE, ordinary
-function does the actual unwrap logic) is load-bearing, not stylistic."
+function, not a macro: the parking receive remains textually inside
+`nl-clj-<!''s expansion while this non-parking translation stays
+independently testable and mutation-addressable."
   (if (eq (car v) :closed) nil (cadr v)))
 
 (defmacro nl-clj-<! (chan)
@@ -382,27 +382,15 @@ with core.async's own `<!' contract layered on top: returns the taken
 value, or nil once CHAN is closed and drained, via
 `nl-clj-async--unwrap-recv'.
 
-Against-the-bug, found (and fixed here) by this package's own
-multi-round-trip testing -- a SECOND, distinct instance of the same
-underlying defect class `nl-clj->!''s own Commentary already documents
-for `condition-case': an earlier version of this macro was `(let ((v
-(nelisp-chan-recv ,chan))) (if (eq (car v) :closed) nil (cadr v)))' --
-correct on host Emacs, and correct standalone for exactly ONE call, but
-measured to hang indefinitely (0% CPU, stable RSS) the moment the SAME
-`let'-wrapped park point is executed a SECOND time by a `while' loop
-\(a two-actor channel bounce exchanging 2+ round trips, both sides
-correct per host-Emacs parity, deadlocked on `target/nelisp' every
-time; the identical exchange driven through raw `nelisp-chan-recv'/
-`(cadr ...)' with NO `let' at all -- this file's own dump script test
-suite -- completed correctly for 3+ round trips on the same binary).
-The standalone's `iter-next'/`throw'/`catch' shim's handling of a
-`let'-bound park point does not survive being re-entered from a
-`while' loop's own resumed continuation, independent of whether the
-`let' body signals (the `condition-case' case) or just branches on the
-bound value (this case) -- the fix in both places is the same: never
-`let'-bind the direct result of a form containing a park point; pass
-it onward as a plain function argument instead, exactly as `nl-clj-<!'
-does here now."
+Repeated-resumption evidence is pinned by the standalone smoke's
+minimal `nl-clj-async-demo-repeated-take-standalone' fixture: one
+textual call site parks and resumes twice from the same `while'.  The
+earlier claim that an internal `let' expansion hung on its second
+resumption was rechecked against the same source-matched standalone
+binary and was false: both that former expansion and this helper-call
+expansion returned `(:first :second)'.  The smoke now exercises this
+actual expansion directly, so a future regression is observed rather
+than inferred from elapsed time."
   `(nl-clj-async--unwrap-recv (nelisp-chan-recv ,chan)))
 
 (defmacro nl-clj->! (chan val)

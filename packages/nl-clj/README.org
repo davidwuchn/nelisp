@@ -294,10 +294,10 @@ reference semantics as the control -- no host-Emacs analog for
 core.async exists to differentially test against, per §4.6's own
 framing).  Standalone: =nl-clj-go= and this package's own channel
 mediator are proven via a real, multi-round-trip =go= ping/pong
-exchange (=nl-clj-async-standalone-smoke.el=); =nl-clj-<!=/=nl-clj->!=
-themselves have an open, honestly-named standalone gap under repeated
-resumption -- see that smoke file's own Commentary and "Follow-ups"
-below.
+exchange (=nl-clj-async-standalone-smoke.el=).  That exchange now uses
+=nl-clj-<!=/=nl-clj->!= directly, the smoke separately executes one
+park point of each wrapper twice from the same =while=, and it calls
+the baked demo twice in one process.
 
 * Next phases (Doc 195 §5/§6, out of scope this phase)
 
@@ -357,9 +357,8 @@ emacs --batch -Q -L packages/nl-prelude/src -L packages/nl-safe/src \
 #+end_src
 
 Standalone go/chan (proves =nl-clj-go='s own return-channel and this
-package's channel mediator survive a real, multi-round-trip ping/pong
-exchange -- see the smoke file's own Commentary for what it does and
-does NOT yet prove):
+package's channel mediator and both parking wrappers survive repeated
+resumption in a real, multi-round-trip ping/pong exchange):
 
 #+begin_src sh
 ./target/nelisp --load packages/nl-clj/test/nl-clj-async-standalone-smoke.el
@@ -378,17 +377,6 @@ Regenerate the standalone bake after editing =nl-clj-async.el= or
   cache/throughput, Doc 195 §4.7's own noted divergence): not in this
   cut -- a real, separable performance optimization, not a correctness
   gap; every lazy-seq cell here realizes one element at a time.
-- Two open standalone-specific gaps in =nl-clj-async.el=, both found
-  and named (not root-caused further) this session -- see =nl-clj-<!='s
-  and =nl-clj-async-standalone-smoke.el='s own Commentary for the full
-  account: (1) =nl-clj-<!=/=nl-clj->!= hang on `target/nelisp` under
-  repeated resumption from inside a =while= loop (raw =nelisp-chan-
-  recv=/=nelisp-chan-send= do not hit this; the standalone example uses
-  those directly instead); (2) a second top-level call to the same
-  baked demo function in one process hangs, so the standalone smoke
-  makes exactly one call.  Not fixed here -- recorded for a future
-  phase; the gate this smoke feeds stays optional and the smoke's
-  one-call form is intentional, not a workaround to remove.
 - The remaining "Next phases" items above, in the build-first order
   Doc 195 §6 ranks them.
 

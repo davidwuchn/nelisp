@@ -674,14 +674,15 @@ nelisp-thread-percpu-roots-smoke: $(if $(wildcard target/nelisp target/nelisp.ex
 
 # Doc 195 §4.6 (channels/go over nelisp-actor).  Same shim/load-by-path
 # pattern as the smokes above, but loads packages/nl-clj/generated/
-# go-ping-pong-cps.el -- the build-time CPS transform of a `nl-clj-go'
-# ping/pong exchange (regenerate with `make nl-clj-async-cps-baseline')
+# go-ping-pong-cps.el -- the build-time CPS transform of minimal
+# repeated-`<!'/`>!' fixtures plus a `nl-clj-go' ping/pong exchange
+# (regenerate with `make nl-clj-async-cps-baseline')
 # -- rather than replaying nl-clj-async-test.el's own ERT bodies, most
 # of which spawn actors via `nl-clj-go' directly and stay host-Emacs-
 # only by design (same reasoning as nl-actor-standalone-smoke above).
-# Makes exactly ONE call into the baked demo, not one per assertion --
-# see the smoke file's own Commentary for the real, measured, not-yet-
-# root-caused reason a second call in the same process hangs.
+# The smoke makes two calls into the baked wrapper-based demo in one
+# process and separately gates each wrapper's same-park-point second
+# resumption; see the smoke file's Commentary for the resolved gap.
 nl-clj-async-standalone-smoke: $(if $(wildcard target/nelisp target/nelisp.exe),,standalone-reader)
 	@bin=./target/nelisp; [ -f "$$bin" ] || bin=./target/nelisp.exe; \
 	if [ ! -f "$$bin" ]; then \
@@ -692,9 +693,10 @@ nl-clj-async-standalone-smoke: $(if $(wildcard target/nelisp target/nelisp.exe),
 
 # Regenerates packages/nl-clj/generated/go-ping-pong-cps.el from
 # nl-clj-async.el's own `nl-clj-async--make-chan-1'/`-blocking-take-1'/
-# `-blocking-put-1' plus examples/nl-clj-async/go-ping-pong.el's
-# `nl-clj-async-demo-ping-pong', under THIS host's real Emacs +
-# generator.el (AI.md rule 7).  Run this after editing any of those,
+# `-blocking-put-1' plus examples/nl-clj-async/go-ping-pong.el's two
+# repeated-resumption fixtures and `nl-clj-async-demo-ping-pong', under
+# THIS host's real Emacs + generator.el (AI.md rule 7).  Run this after
+# editing any of those,
 # then re-run `nl-clj-async-standalone-smoke' to confirm the
 # regenerated file still runs correctly standalone before committing
 # it -- host-vs-generated parity is NOT checked by this target itself
