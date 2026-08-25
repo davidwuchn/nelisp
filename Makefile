@@ -621,7 +621,10 @@ nelisp-thread-allocating-standalone-smoke: $(if $(wildcard target/nelisp target/
 	  exit 0; \
 	fi; \
 	"$$bin" --load tools/nelisp-thread-allocating-standalone-smoke.el && \
-	( ulimit -v 4000000; "$$bin" --load tools/nelisp-thread-allocating-standalone-smoke.el )
+	for i in 1 2 3 4 5; do \
+	  ( ulimit -v 4000000; "$$bin" --load tools/nelisp-thread-allocating-standalone-smoke.el ) \
+	    || { echo "[nelisp-thread-allocating-standalone-smoke] FAIL under ulimit -v 4000000 (attempt $$i)"; exit 1; }; \
+	done
 
 # Doc 195 §4.6 (channels/go over nelisp-actor).  Same shim/load-by-path
 # pattern as the smokes above, but loads packages/nl-clj/generated/

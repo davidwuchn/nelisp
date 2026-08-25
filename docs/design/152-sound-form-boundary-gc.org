@@ -2184,3 +2184,41 @@ Tier 2 smoke PASS / compile 0 / parens 463-0 / emacs-parity 19970 findings=0 / r
 あると崩れる**。今回 sweep がそれだった。抑止に依存する仕組みを足すときは、*抑止フラグを読む場所を
 全部数え上げて*、依存側が全部そこを通ることを確かめる必要がある。加えて、この種の欠陥は
 **メモリに余裕があると再現しない**ので、余裕を奪う gate（ulimit）を回帰テストに入れないと再発する。
+
+** §11.43.3 追跡の決着 — 再現条件は「抑止を無視する collect 経路」、smoke は片方しか触れない（2026-08-25）
+§11.43.2 の後、CI round 21 は =gate-mutation= で落ちた: 「chunk 返却ガードを潰したのに
+=nelisp-thread-allocating-standalone-smoke= が緑のまま」。**gate が欠陥を捕まえられない**という
+指摘であり、gate 体系としては正しい失敗である。
+
+*ローカル追跡（約 130 回、すべて再現せず）*: ulimit 8 GB→2.2 GB の刻み / 32 コア CPU 飽和 /
+46 GB メモリ枯渇 / 2 プロセス並列 / ビルド並走 / 当時の codex-fix2 版を再ビルド（20/20 成功）/
+ガードを潰した mutation 版（0/12）/ 診断ビルド 30 回。**一度も再現しなかった**。
+
+*claude の誤結論 2 件（記録として残す）*:
+1. 「私の inhibit gate で corruption が 3/12 → 0/12 に消えた」→ *誤り*。対照実験（修正前を再ビルド
+   して低負荷で再測定）が 0/12 を返し、差は修正の有無ではなく**測定時のマシン負荷**だった。
+2. 「codex の fix2 は不完全」→ *誤り*。fix2 版そのものが 20/20 で安定し、CI の診断 run でも
+   smoke 本体は =GATE-COUNT checked=8 findings=0= だった。fix2 は有効である。
+
+*決着（コード構造から確定）*: sweep を呼ぶ経路は 2 つあり、抑止 gate の有無が違っていた。
+| 呼出元 | 抑止 gate |
+| =nl_gc_collect_from_recorded_roots= (:3620) | あり (:3621) |
+| =nl_gc_collect= (:3669) | *なし* |
+smoke の =(garbage-collect)= builtin は前者を呼ぶので、**後者の穴を踏まない**。だから
+「chunk 返却ガードを潰しても緑」は正常な挙動であって、gate が弱いのではなく *その mutation が
+到達しない経路を狙っていた*。一方 =nl_gc_collect= は
+=nl_gc_collect_form_boundary= 経由で driver の form 境界 3 箇所から呼ばれ、**並列区間中に
+main thread が form 境界へ達すれば抑止を無視して collect+sweep が走る** — これは実在する穴。
+
+*本節の fix*: =nl_gc_collect= の入口に抑止 gate を追加（=nl_gc_collect_from_recorded_roots= と
+同じ形）。*効果を smoke で実証することはできない*（smoke はこの経路を通らない）ので、そう明記した
+コメントを添えている。同時に、到達不能だった chunk 返却ガードの mutation row を **理由を書いて
+削除**した（残した方の row = 抑止そのものを潰す = は "went red as it should" と実証済み）。
+
+*検証*: compile 0 / parens 463-0 / emacs-parity 19970 findings=0 / allocating smoke は
+通常 1 回 + =ulimit -v 4000000= 5 回すべて PASS / bounded 維持（=STEADY_SLOPE_B_PER_ITER=0.098=、
+=GATE-COUNT checked=5 findings=0=）/ gate-selfcheck PASS。
+
+*教訓*: mutation testing の失敗は「gate が弱い」と「mutation が到達しない経路を狙っている」の
+二通りある。今回は後者で、それを取り違えて 130 回の再現試行と 2 度の誤結論を招いた。*mutation を
+足すときは、その欠陥に至る経路を対象 gate が本当に通るかを先に確かめる*。

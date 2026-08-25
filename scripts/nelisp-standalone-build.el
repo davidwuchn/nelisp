@@ -3667,13 +3667,23 @@ arm64 Linux has no legacy x86 numbering)."
                                       (+ (ptr-read-u64 (data-addr nl_gc_loop_ctx) 32) 1))))))
         0))
     (defun nl_gc_collect (ctx result out pool src cursor bsym)
+      ;; Doc 152 §11.43.3 / Doc 199 Tier 3a.  `nl_gc_collect_from_recorded_roots'
+      ;; honours the bounded-parallel-section gate; this entry point did not,
+      ;; and `nl_gc_collect_form_boundary' reaches it from the driver's three
+      ;; form-boundary sites.  A Tier 3a worker keeps its live values in a
+      ;; PRIVATE EvalCtx/root reserve this marker cannot enumerate, so a
+      ;; form-boundary collect landing mid-section would sweep data a worker
+      ;; still holds.  The Tier 3a smoke does not exercise this path (its
+      ;; `garbage-collect' goes through the recorded-roots entry, which was
+      ;; already gated), so this closes a real hole the smoke cannot show.
+      (if (= (ptr-read-u64 (data-addr nl_gc_loop_ctx) 24) 1) 0
       (if (= (ptr-read-u64 268435616 0) 1) 0    ; DEBUG: collect = pure no-op
       (seq
        (if (= (ptr-read-u64 268435592 0) 1) 0   ; DEBUG: skip-mark when slot==1
          (nl_gc_mark_roots ctx result out pool src cursor bsym))
        (if (= (ptr-read-u64 268435608 0) 1)    ; Doc146 §5: compact (incl. reclaim, no sweep)
            (nl_gc_compact ctx result out pool src cursor bsym)
-         (nl_gc_sweep)))))
+         (nl_gc_sweep))))))
     ;; Form-boundary collections run after a top-level form has finished
     ;; evaluating.  The RAW reader parse pool allocation itself must remain
     ;; pinned for the next parse, but stale/unused slots from prior forms are

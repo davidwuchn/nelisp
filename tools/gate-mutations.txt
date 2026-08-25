@@ -239,7 +239,15 @@ nelisp-thread-allocating-standalone-smoke|scripts/nelisp-standalone-build.el|s/(
 # leaving Linux empty-chunk reclaim enabled.  The ordinary unlimited smoke can
 # pass this defect; the same target's second `ulimit -v 4000000' run
 # deterministically exposes a worker-visible arena chunk being unmapped.
-nelisp-thread-allocating-standalone-smoke|scripts/nelisp-standalone-build.el|/^    (defun nl_os_reclaim_empty_chunk /,/^    (defun nl_os_commit_range /s/(if (= (ptr-read-u64 (data-addr nl_gc_loop_ctx) 24) 1)/(if 0/; /^    (defun nl_os_reclaim_empty_chunk /,/^    (defun nl_os_commit_range /s/(if (= (ptr-read-u64 (data-addr nl_thread_parallel_ctx) 16) 1)/(if 0/; /^    (defun nl_gc_reclaim_empty_chunks /,/^    (defun nl_gc_sweep /s/(if (= (ptr-read-u64 (data-addr nl_gc_loop_ctx) 24) 1) 0/(if 0/; /^    (defun nl_gc_reclaim_empty_chunks /,/^    (defun nl_gc_sweep /s/(if (= (ptr-read-u64 (data-addr nl_thread_parallel_ctx) 16) 1) 0/(if 0/|empty-chunk traversal and the OS release boundary ignore both the inhibit flag and Tier 3a active bit, allowing munmap under private EvalCtx/root reserves
+# NOTE (2026-08-25): a mutation that bypasses the empty-chunk release
+# guards was tried here and REMOVED because it cannot go red.  With the
+# bounded section's inhibit gate intact, no collect runs inside the
+# section, so no chunk becomes empty and the release boundary is never
+# reached -- CI round 21 and the diag/tier3a-worker-eval run both
+# reported it 'STAYED GREEN with a real defect in front of it'.  The
+# release guards are defence in depth behind the inhibit gate, and the
+# row above (which disables the inhibit itself) is what actually proves
+# this smoke can detect a collection running under private worker roots.
 # standalone-reader-frame-stack-pop-desync-smoke: added 2026-08-23 (Doc 180
 # Phase 2 item 1).  The injection reverts `nelisp_eval_call_recorded_done''s
 # pop back to unconditional -- the exact pre-fix defect -- by deleting the
