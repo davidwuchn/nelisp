@@ -229,34 +229,32 @@ nl-num-standalone-smoke|packages/nl-num/src/nl-num-rational.el|s/(+ (nl-num--rea
 # instead of 42.  This isolates a missing/torn result publication from a lost
 # completion increment (which would correctly keep the join waiting).
 nelisp-thread-standalone-smoke|scripts/nelisp-standalone-build.el|s/(ptr-write-u64 result 0 sum)/(ptr-write-u64 result 0 0)/|a GC-free worker signals completion without publishing its partial sum, so join returns but the interpreter observes 0 instead of 42
-# nelisp-thread-allocating-standalone-smoke: Doc 199 Tier 3a's collector
-# exclusion property.  All three workers barrier with freshly allocated lists
-# reachable only through their private env/frame stacks, then explicitly call
-# garbage-collect.  Forcing the unique begin helper to store 0 lets a worker's
-# single-thread root walk collect without enumerating the other worker roots.
-nelisp-thread-allocating-standalone-smoke|scripts/nelisp-standalone-build.el|s/(defun nl_thread_gc_inhibit_begin () (ptr-write-u64 (data-addr nl_gc_loop_ctx) 24 1))/(defun nl_thread_gc_inhibit_begin () (ptr-write-u64 (data-addr nl_gc_loop_ctx) 24 0))/|the bounded section does not inhibit collection, so one worker collects while two other private envs hold live arena lists that its root walk cannot enumerate
+# nelisp-thread-allocating-standalone-smoke: Doc 199's bounded-section active
+# publication.  Parked collection and both reclaim guards key off this bit;
+# forcing the unique begin store to zero makes the existing section-exit
+# assertion fail deterministically before a false-safe section can pass.
+# The old inhibit-begin mutation stopped going red once the park barrier
+# landed: with workers parked the collector marks their private roots
+# correctly, so disabling the inhibit no longer corrupts anything -- that is
+# the improvement working, not a weak gate.  The reachable defect now is
+# bypassing the park itself, which is pinned on the percpu-roots gate below.
 # Stage 4c/Tier 3a regression: bypass both inline worker-live checks while
 # leaving Linux empty-chunk reclaim enabled.  The ordinary unlimited smoke can
 # pass this defect; the same target's second `ulimit -v 4000000' run
 # deterministically exposes a worker-visible arena chunk being unmapped.
-# NOTE (2026-08-25): a mutation that bypasses the empty-chunk release
-# guards was tried here and REMOVED because it cannot go red.  With the
-# bounded section's inhibit gate intact, no collect runs inside the
-# section, so no chunk becomes empty and the release boundary is never
-# reached -- CI round 21 and the diag/tier3a-worker-eval run both
-# reported it 'STAYED GREEN with a real defect in front of it'.  The
-# release guards are defence in depth behind the inhibit gate, and the
-# row above (which disables the inhibit itself) is what actually proves
-# this smoke can detect a collection running under private worker roots.
-# nelisp-thread-percpu-roots-smoke: Doc 199 Tier 3b's registry-enumeration
-# checkpoint.  The injection is deliberately at the standalone observer
-# boundary, so the mutation harness does not need a stale-binary-prone native
-# rebuild: it makes the live diagnostic report zero entries while the smoke
-# has already parked all three workers.  The next executed assertion requires
-# exactly three, making this row necessarily reachable and red.  This targets
-# enumeration itself; unlike the removed Tier 3a release-guard mutation above,
-# it does not aim at a mark/sweep path the still-inhibited gate cannot walk.
-nelisp-thread-percpu-roots-smoke|tools/nelisp-thread-percpu-roots-smoke.el|s/(nth 16 (nelisp--debug-switch 0))/0/|the live registry enumeration reports zero workers while all three allocating workers are parked, so the mandatory count=3 assertion fails
+# NOTE (2026-08-25): the historical release-guard mutation was removed before
+# Tier 3b because the then-inhibited smoke could not reach it.  Tier 3b still
+# leaves reclaim disabled under active workers; the real parked-collection
+# proof below deliberately exercises mark/sweep, not munmap.
+# nelisp-thread-percpu-roots-smoke: Doc 199 Tier 3b's real parked-collection
+# checkpoint.  The clean gate reaches the main-thread garbage-collect path,
+# parks all three workers, executes mark/sweep, and only then reads index 18.
+# Corrupting that exact reached observation to zero makes the mandatory
+# last-parked=3 assertion fail.  This is intentionally an observer-boundary
+# mutation: the native park path still executes, so no stale-binary rebuild can
+# accidentally turn an unreachable mutation into a false green result.
+nelisp-thread-percpu-roots-smoke|tools/nelisp-thread-percpu-roots-smoke.el|s/(nth 18 (nelisp--debug-switch 0))/0/|the reached post-mark/sweep diagnostic reports zero parked workers, so the mandatory last-parked=3 assertion fails
+nelisp-thread-percpu-roots-smoke|scripts/nelisp-standalone-build.el|s/(if (= (nl_thread_park_request_begin) 1)/(if (= 1 1)/|the collector stops waiting for workers to park and marks while they are still running, so a worker's live list is swept and the three-worker reduction no longer returns 23
 # standalone-reader-frame-stack-pop-desync-smoke: added 2026-08-23 (Doc 180
 # Phase 2 item 1).  The injection reverts `nelisp_eval_call_recorded_done''s
 # pop back to unconditional -- the exact pre-fix defect -- by deleting the

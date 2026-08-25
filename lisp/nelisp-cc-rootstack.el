@@ -40,6 +40,14 @@
 ;;   nl_root_mark ENV        -> current top (a release marker; LIFO)
 ;;   nl_root_reserve ENV     -> reserve one zeroed 32B slot, return addr
 ;;   nl_root_release ENV M   -> restore top to marker M (pop the frame)
+;;
+;; Tier 3b park protocol (`nl_thread_parallel_ctx'):
+;;   +24 request flag, +32 current parked count, +40 missed-collect count,
+;;   +48 last satisfied parked count, +56 successful parked collects.
+;; A registered worker increments +32 exactly once per contiguous request,
+;; spins until +24 clears, then decrements +32 before returning to eval.  The
+;; collector waits for +32 >= the registry count with a bounded spin.  Timeout
+;; clears the request, increments +40, and MUST NOT collect.
 
 ;;; Code:
 
@@ -90,6 +98,81 @@
              1)
           top
         (nl_thread_registry_store_top entry top)))
+    ;; Tier 3b stop-the-world park barrier.  The spin loops deliberately use
+    ;; the already-proven `nl_thread_join_impl' shape: an aligned atomic/load
+    ;; predicate and an empty body.  The collector-side loop is bounded; its
+    ;; sole across-call-style local is `status', and every runtime value is
+    ;; threaded through helper arguments.
+    (defun nl_thread_park_request_store (value)
+      (if (= (atomic-compare-exchange
+              (+ (data-addr nl_thread_parallel_ctx) 24)
+              (atomic-fetch-add (+ (data-addr nl_thread_parallel_ctx) 24) 0)
+              value)
+             1)
+          value
+        (nl_thread_park_request_store value)))
+    (defun nl_thread_park_missed ()
+      (nl_seq2
+       (atomic-fetch-add (+ (data-addr nl_thread_parallel_ctx) 40) 1)
+       0))
+    (defun nl_thread_park_wait_bounded (expected)
+      (let ((status 16777216))
+        (seq
+         (while (if (< (atomic-fetch-add
+                        (+ (data-addr nl_thread_parallel_ctx) 32) 0)
+                       expected)
+                    (> status 0)
+                  0)
+           (setq status (- status 1)))
+         (if (>= (atomic-fetch-add
+                  (+ (data-addr nl_thread_parallel_ctx) 32) 0)
+                 expected)
+             1
+           0))))
+    (defun nl_thread_park_request_wait (expected)
+      (if (= (nl_thread_park_wait_bounded expected) 1)
+          (nl_seq2
+           (ptr-write-u64 (data-addr nl_thread_parallel_ctx) 48 expected)
+           1)
+        (nl_seq2
+         (nl_thread_park_request_store 0)
+         (nl_thread_park_missed))))
+    (defun nl_thread_park_request_claim (expected)
+      (if (= (atomic-fetch-add
+              (+ (data-addr nl_thread_parallel_ctx) 32) 0)
+             0)
+          (if (= (atomic-compare-exchange
+                  (+ (data-addr nl_thread_parallel_ctx) 24) 0 1)
+                 1)
+              (nl_thread_park_request_wait expected)
+            (nl_thread_park_missed))
+        (nl_thread_park_missed)))
+    (defun nl_thread_park_request_begin ()
+      (nl_thread_park_request_claim
+       (ptr-read-u64 (data-addr nl_thread_registry) 0)))
+    (defun nl_thread_park_request_end ()
+      (nl_thread_park_request_store 0))
+    (defun nl_thread_park_collect_succeeded ()
+      (nl_seq2
+       (atomic-fetch-add (+ (data-addr nl_thread_parallel_ctx) 56) 1)
+       0))
+    (defun nl_thread_park_safepoint_at (entry)
+      (if (= entry 0) 0
+        (if (= (atomic-fetch-add
+                (+ (data-addr nl_thread_parallel_ctx) 24) 0)
+               1)
+            (seq
+             (atomic-fetch-add (+ (data-addr nl_thread_parallel_ctx) 32) 1)
+             (while (= (atomic-fetch-add
+                        (+ (data-addr nl_thread_parallel_ctx) 24) 0)
+                       1)
+               0)
+             (atomic-fetch-add (+ (data-addr nl_thread_parallel_ctx) 32)
+                               (- 0 1))
+             1)
+          0)))
+    (defun nl_thread_park_safepoint (env)
+      (nl_thread_park_safepoint_at (nl_thread_registry_find env)))
     (defun nl_root_mark_at (env entry)
       (if (= entry 0)
           (ptr-read-u64 (data-addr nl_rootstack_top) 0)
@@ -153,7 +236,13 @@
     ;; still paired with reserve/release publication so the API is explicit.
     (defun nl_gc_mark_thread_roots_one (env top)
       (if (= env 0) 0
-        (nl_gc_mark_rootstack_walk (+ env 4096) top)))
+        (nl_seq2
+         ;; The mmap-resident EvalCtx is not itself in the private reserve.
+         ;; Mark its mirror/frame-stack/unbound slots exactly like a recorded
+         ;; evaluator frame before walking transient handles; otherwise a
+         ;; parked `let' can resume through a swept frame backing vector.
+         (extern-call nl_gc_mark_recorded_env env)
+         (nl_gc_mark_rootstack_walk (+ env 4096) top))))
     (defun nl_gc_mark_thread_roots_from (i count)
       (if (>= i count) 0
         (seq

@@ -677,20 +677,18 @@ nelisp-thread-standalone-smoke
 # attempts garbage-collect on each, then requires 5+7+11=23 after join.
 # The Makefile target repeats the smoke under `ulimit -v 4000000', the
 # deterministic reproducer for the Stage 4c empty-chunk-unmap corruption.
-# Mutation-proven both by changing the unique GC-inhibit begin store to 0 and
-# by bypassing the dedicated empty-chunk release guard; either defect makes
-# this gate go red.
+# Mutation-proven by suppressing the unique parallel-active publication; the
+# section-exit assertion then rejects the run deterministically.
 nelisp-thread-allocating-standalone-smoke
-# nelisp-thread-percpu-roots-smoke: Doc 199 Tier 3b's first marker-root
-# enumeration proof.  Three registry-ID-2 allocating workers park at a
-# parent-controlled barrier while private lexical frames hold live lists of
-# lengths 5, 7, and 11.  The live diagnostic tuple must enumerate exactly
-# three registered workers before and after the explicit collection attempt;
-# release must publish 5+7+11=23, and bounded-section exit must clear the
-# registry to zero.  The Makefile target runs once normally and five times
-# under `ulimit -v 4000000'.  Its gate-mutations row forces the exact live
-# registry-count observation to zero, so the mandatory count=3 checkpoint
-# necessarily turns red instead of exercising an unreachable collector path.
+# nelisp-thread-percpu-roots-smoke: Doc 199 Tier 3b's real park-barrier proof.
+# Three registry-ID-2 allocating workers wait in join safepoints while private
+# lexical frames hold live lists of lengths 5, 7, and 11.  Main-thread
+# garbage-collect must request and observe parked=3, run one actual mark/sweep,
+# resume the workers with missed-collects unchanged, and preserve 5+7+11=23;
+# bounded-section exit must clear the registry.  The Makefile target runs once
+# normally and five times under `ulimit -v 4000000'.  Its mutation corrupts the
+# reached post-collection last-parked observation, so the mandatory count=3
+# assertion necessarily turns red after the real collector path has run.
 nelisp-thread-percpu-roots-smoke
 #
 # nl-clj-async-standalone-smoke: added 2026-08-24, Doc 195 §4.6

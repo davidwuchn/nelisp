@@ -16,9 +16,9 @@
 ;; publishes its length.  Checkpoint 2 does the same on three workers.  The
 ;; workers first publish a barrier arrival and join on all three arrivals, so
 ;; every explicit collection attempt happens while all three private frame
-;; stacks hold live freshly-allocated lists.  With collection inhibited the
-;; results are 5 + 7 + 11 = 23.  Suppressing the inhibit store lets one worker
-;; collect without the other workers' envs/roots and makes this gate fail.
+;; stacks hold live freshly-allocated lists.  A worker cannot include itself
+;; in its own park request, so these worker-originated collections take the
+;; bounded missed-collect fallback; the results remain 5 + 7 + 11 = 23.
 
 ;;; Code:
 

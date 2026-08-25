@@ -590,12 +590,16 @@ storage — not an arena reservation."
    ;;   +16..+175 up to 20 form_ptr words, ring order (index 0 = outermost
    ;;       of the captured window), 8 bytes each.  BSS zero-fill = no
    ;;       snapshot, exactly like every other slot in this unit.
-   ;; Doc 199 Tier 3a spike: +24 after nl_bt_snapshot =
+   ;; Doc 199 Tier 3a spike, extended by Tier 3b: +64 after nl_bt_snapshot =
    ;; nl_thread_parallel_ctx (prior free-list-disable flag @+0, starting
-   ;; current-chunk descriptor @+8, active flag @+16).  The section entry
-   ;; uses this driver-owned state to force every allocating worker onto the
-   ;; CAS bump path and the exit checks that no chunk growth occurred.
-   ;; Doc 152 Stage 4c: +56 after nl_thread_parallel_ctx = nl_alloc_diag,
+   ;; current-chunk descriptor @+8, active flag @+16, park-request flag @+24,
+   ;; current parked-worker count @+32, missed-collect count @+40, last
+   ;; satisfied parked-worker count @+48, successful parked-collect count
+   ;; @+56).  The section entry uses this driver-owned state to force every
+   ;; allocating worker onto the CAS bump path and the exit checks that no
+   ;; chunk growth occurred.  BSS zero-fill means no request and zero
+   ;; diagnostics at process start.
+   ;; Doc 152 Stage 4c: +56 after the 64-byte nl_thread_parallel_ctx = nl_alloc_diag,
    ;; debug-gated allocation/reclamation counters.  +0 enable; +8/+16/+24
    ;; successful bucket/linear/bump allocations; +32/+40 reclaimed chunk
    ;; count/bytes; +48 failed OS releases.  Switch 24 enables and resets;
@@ -608,7 +612,7 @@ storage — not an arena reservation."
    ;; nl_thread_registry.  +0 worker count, +8 reserved, then 64 fixed 16-byte
    ;; {private EvalCtx address, atomically-published private root top} entries.
    ;; BSS zero-fill gives an empty registry on process start.
-   (list (cons 'bss (+ 57616 4194304 96 176 24 56 40 1040)))
+   (list (cons 'bss (+ 57616 4194304 96 176 64 56 40 1040)))
    (list (nelisp-link-symbol "nl_arena_base" 0
                              :section 'bss :bind 'global :type 'object)
          (nelisp-link-symbol "nl_rootstack_top" 8
@@ -647,13 +651,13 @@ storage — not an arena reservation."
                              (+ 57616 4194304 96 176)
                              :section 'bss :bind 'global :type 'object)
          (nelisp-link-symbol "nl_alloc_diag"
-                             (+ 57616 4194304 96 176 24)
+                             (+ 57616 4194304 96 176 64)
                              :section 'bss :bind 'global :type 'object)
          (nelisp-link-symbol "nl_gc_reclaim_scratch"
-                             (+ 57616 4194304 96 176 24 56)
+                             (+ 57616 4194304 96 176 64 56)
                              :section 'bss :bind 'global :type 'object)
          (nelisp-link-symbol "nl_thread_registry"
-                             (+ 57616 4194304 96 176 24 56 40)
+                             (+ 57616 4194304 96 176 64 56 40)
                              :section 'bss :bind 'global :type 'object))
    nil))
 
@@ -2624,8 +2628,8 @@ arm64 Linux has no legacy x86 numbering)."
               (nl_gc_reclaim_empty_chunks chunk next)
             (nl_gc_reclaim_empty_ready prev chunk next base size)))))
     (defun nl_gc_reclaim_empty_chunks (prev chunk)
-      ;; Tier 3b makes worker root reserves enumerable, but does not yet remove
-      ;; Tier 3a's reclaim/inhibit policy.  Stop before reading another
+      ;; Tier 3b permits mark/sweep after parking, but deliberately does not
+      ;; remove Tier 3a's chunk-reclaim policy.  Stop before reading another
       ;; candidate if the shared inhibit flag or precise worker-live state is
       ;; set.  The OS wrapper repeats both tests at the release boundary.
       (if (= (ptr-read-u64 (data-addr nl_gc_loop_ctx) 24) 1) 0
@@ -3678,26 +3682,41 @@ arm64 Linux has no legacy x86 numbering)."
     ;; evaluator ctx frames above provide the intended precise surface; the
     ;; native-stack scan remains as belt-and-braces for call-adjacent temporaries
     ;; that are not yet expressible in the 7-slot frame.
+    (defun nl_gc_collect_recorded_mark_sweep (mode)
+      (nl_seq2 (nl_gc_mark_recorded_contexts)
+       (nl_seq2 (nl_gc_mark_rootstack)
+        ;; The explicit `garbage-collect' builtin reaches this collector,
+        ;; so it needs the same private-root coverage as full boundary GC.
+        (nl_seq2 (nl_gc_mark_thread_roots)
+         (nl_seq2 (nl_gc_mark_symentry)
+          (nl_seq2 (if (= mode 0) (nl_gc_conserv_maybe) 0)
+           ;; perf/macroexpansion-cache: this collector is ALWAYS mark+sweep
+           ;; (never compact).  Mark cache entries alive here too, or a live
+           ;; cache value with no other root would be freed between iterations.
+           (nl_seq2 (nl_mxcache_mark_all)
+            (nl_seq2 (nl_fvcache_mark_all)
+                     (nl_gc_sweep)))))))))
+    (defun nl_gc_collect_recorded_parked (mode)
+      (if (= (nl_thread_park_request_begin) 1)
+          (nl_seq2
+           (nl_gc_collect_recorded_mark_sweep mode)
+           (nl_seq2
+            (nl_thread_park_request_end)
+            (nl_thread_park_collect_succeeded)))
+        0))
     (defun nl_gc_collect_from_recorded_roots (mode)
-      (if (= (ptr-read-u64 (data-addr nl_gc_loop_ctx) 24) 1) 0
-        (nl_seq2 (ptr-write-u64 (data-addr nl_gc_loop_ctx) 24 1)
-          (nl_seq2 (nl_gc_mark_recorded_contexts)
-          (nl_seq2 (nl_gc_mark_rootstack)
-           ;; The explicit `garbage-collect' builtin reaches this collector,
-           ;; so it needs the same private-root coverage as full boundary GC.
-           (nl_seq2 (nl_gc_mark_thread_roots)
-            (nl_seq2 (nl_gc_mark_symentry)
-            (nl_seq2 (if (= mode 0) (nl_gc_conserv_maybe) 0)
-             ;; perf/macroexpansion-cache: this mid-form collect collector
-             ;; is ALWAYS mark+sweep (never compact -- see the comment above
-             ;; `nl_gc_collect_from_recorded_roots'), i.e. exactly the path a hot loop's
-             ;; `nl_gc_midform_collect' back-edge can trigger.  Mark cache entries
-             ;; alive here too, or a live cache value with no other root
-             ;; would be freed between loop iterations.
-             (nl_seq2 (nl_mxcache_mark_all)
-              (nl_seq2 (nl_fvcache_mark_all)
-              (nl_seq2 (nl_gc_sweep)
-                       (ptr-write-u64 (data-addr nl_gc_loop_ctx) 24 0))))))))))))
+      ;; Tier 3b replaces the bounded-section refusal with a real park
+      ;; barrier.  `active' is checked independently of ctx+24 so a missing
+      ;; inhibit store cannot silently re-open collection under live workers.
+      ;; Timeout leaves the heap untouched and increments the missed counter.
+      (if (= (ptr-read-u64 (data-addr nl_thread_parallel_ctx) 16) 1)
+          (nl_gc_collect_recorded_parked mode)
+        (if (= (ptr-read-u64 (data-addr nl_gc_loop_ctx) 24) 1) 0
+          (nl_seq2
+           (ptr-write-u64 (data-addr nl_gc_loop_ctx) 24 1)
+           (nl_seq2
+            (nl_gc_collect_recorded_mark_sweep mode)
+            (ptr-write-u64 (data-addr nl_gc_loop_ctx) 24 0))))))
     ;; Gated mid-form collect (called from nl_sf_while's backedge).  enable
     ;; (ctx+8) defaults OFF -> a single cheap branch + return, so non-test runs are
     ;; unchanged.  Alloc-debt gate: fire when currently reserved chunk bytes
@@ -3730,27 +3749,42 @@ arm64 Linux has no legacy x86 numbering)."
                        (ptr-write-u64 (data-addr nl_gc_loop_ctx) 32
                                       (+ (ptr-read-u64 (data-addr nl_gc_loop_ctx) 32) 1))))))
         0))
-    (defun nl_gc_collect (ctx result out pool src cursor bsym)
-      ;; Doc 152 §11.43.3 / Doc 199 Tier 3a.  `nl_gc_collect_from_recorded_roots'
-      ;; honours the bounded-parallel-section gate; this entry point did not,
-      ;; and `nl_gc_collect_form_boundary' reaches it from the driver's three
-      ;; form-boundary sites.  A Tier 3a worker keeps its live values in a
-      ;; PRIVATE EvalCtx/root reserve, so a form-boundary collect landing
-      ;; mid-section could previously sweep data a worker still held.  Tier 3b
-      ;; now makes the workers' private root reserves enumerable, but
-      ;; deliberately retains this inhibit until the remaining
-      ;; worker EvalCtx/barrier invariants are gated.  The Tier 3a smoke does
-      ;; not exercise this path (its
-      ;; `garbage-collect' goes through the recorded-roots entry, which was
-      ;; already gated), so this closes a real hole the smoke cannot show.
-      (if (= (ptr-read-u64 (data-addr nl_gc_loop_ctx) 24) 1) 0
-      (if (= (ptr-read-u64 268435616 0) 1) 0    ; DEBUG: collect = pure no-op
+    (defun nl_gc_collect_parked_mark_sweep
+        (ctx result out pool src cursor bsym)
       (seq
        (if (= (ptr-read-u64 268435592 0) 1) 0   ; DEBUG: skip-mark when slot==1
          (nl_gc_mark_roots ctx result out pool src cursor bsym))
-       (if (= (ptr-read-u64 268435608 0) 1)    ; Doc146 §5: compact (incl. reclaim, no sweep)
-           (nl_gc_compact ctx result out pool src cursor bsym)
-         (nl_gc_sweep))))))
+       ;; Never compact under a live parallel section: worker-held raw arena
+       ;; pointers have no forwarding path.  Empty-chunk reclaim remains
+       ;; blocked independently by its existing ctx+24/active double guard.
+       (nl_gc_sweep)))
+    (defun nl_gc_collect_while_workers_parked
+        (ctx result out pool src cursor bsym)
+      (if (= (nl_thread_park_request_begin) 1)
+          (nl_seq2
+           (nl_gc_collect_parked_mark_sweep
+            ctx result out pool src cursor bsym)
+           (nl_seq2
+            (nl_thread_park_request_end)
+            (nl_thread_park_collect_succeeded)))
+        0))
+    (defun nl_gc_collect (ctx result out pool src cursor bsym)
+      ;; Doc 199 Tier 3b: while the bounded section is active, request a park,
+      ;; wait (bounded) for every registered worker, run ordinary mark/sweep,
+      ;; then resume.  A timeout skips collection.  Outside the section ctx+24
+      ;; keeps its original collector-reentrancy meaning and the pre-existing
+      ;; debug compaction path is unchanged.
+      (if (= (ptr-read-u64 268435616 0) 1) 0    ; DEBUG: collect = pure no-op
+        (if (= (ptr-read-u64 (data-addr nl_thread_parallel_ctx) 16) 1)
+            (nl_gc_collect_while_workers_parked
+             ctx result out pool src cursor bsym)
+          (if (= (ptr-read-u64 (data-addr nl_gc_loop_ctx) 24) 1) 0
+            (seq
+             (if (= (ptr-read-u64 268435592 0) 1) 0 ; DEBUG: skip-mark
+               (nl_gc_mark_roots ctx result out pool src cursor bsym))
+             (if (= (ptr-read-u64 268435608 0) 1) ; Doc146 §5: compact
+                 (nl_gc_compact ctx result out pool src cursor bsym)
+               (nl_gc_sweep)))))))
     ;; Form-boundary collections run after a top-level form has finished
     ;; evaluating.  The RAW reader parse pool allocation itself must remain
     ;; pinned for the next parse, but stale/unused slots from prior forms are
@@ -4009,8 +4043,13 @@ argument (reachability + in-arena bounds checks).")
          (nl_bt_print_frames_from
           (- (ptr-read-u64 (data-addr nl_bt_snapshot) 8) 1))
          0)))
-    (defun nelisp_eval_call_done (rc rec_cur rec_cur_addr _pad)
-          (nl_seq2 (ptr-write-u64 rec_cur_addr 0 rec_cur) rc))
+    (defun nelisp_eval_call_done (rc env rec_cur rec_cur_addr)
+          (seq
+           ;; Entry + return bracket every bounded eval call.  RC/ENV and the
+           ;; recursion-counter words are parameters across the park call;
+           ;; no runtime let local survives it.
+           (nl_thread_park_safepoint env)
+           (nl_seq2 (ptr-write-u64 rec_cur_addr 0 rec_cur) rc)))
         ;; fix/gc-ctx-pop-desync (Doc 180 Phase 2 item 1): PUSHED must gate the
         ;; pop the same way the depth cap gated the push.  `nl_gc_eval_ctx_push'
         ;; silently no-ops (returns 0, does not touch depth@+0) once depth >=
@@ -4029,7 +4068,8 @@ argument (reachability + in-arena bounds checks).")
         ;; `nelisp-standalone--reader-frame-stack-pop-desync-smoke' for the
         ;; against-the-bug proof (RED before this fix, GREEN after).
         (defun nelisp_eval_call_recorded_done (rc form_ptr env out rec_cur rec_cur_addr pushed)
-          (seq (nl_bt_maybe_capture rc)
+          (seq (nl_thread_park_safepoint env)
+               (nl_bt_maybe_capture rc)
                (if (= pushed 1) (nl_gc_ctx_pop) 0)
                (nl_seq2 (ptr-write-u64 rec_cur_addr 0 rec_cur) rc)))
         (defun nelisp_eval_call_stash_excessive_lisp_nesting (_env rec_max)
@@ -4049,19 +4089,28 @@ argument (reachability + in-arena bounds checks).")
              (atomic-fetch-add 268435544 1)
              1)))
         (defun nelisp_eval_call (form_ptr env out)
-          (let* ((rec_cur_addr (+ env 96)) (rec_max_addr (+ env 104)))
-            (let* ((rec_cur (ptr-read-u64 rec_cur_addr 0)) (rec_max (ptr-read-u64 rec_max_addr 0)))
-              (if (>= rec_cur rec_max)
-                  (nelisp_eval_call_stash_excessive_lisp_nesting env rec_max)
-                (nl_seq2 (ptr-write-u64 rec_cur_addr 0 (+ rec_cur 1))
-                  (if (= (nl_gc_frame_record_armed_p) 1)
-                      (let* ((pushed (nl_gc_eval_ctx_push env form_ptr out 0)))
-                       (nelisp_eval_call_recorded_done
-                        (nl_eval_inner form_ptr env out 0)
-                        form_ptr env out rec_cur rec_cur_addr pushed))
-                    (nelisp_eval_call_done
+          (seq
+           ;; Doc 199 Tier 3b: every ordinary evaluator recursion boundary is
+           ;; a worker park safepoint.  FORM_PTR/ENV/OUT are parameters, not
+           ;; runtime let-bound values surviving the call.  Main-thread envs
+           ;; are absent from the worker registry, so the normal path is a
+           ;; count-zero lookup and return.  A single non-recursing native
+           ;; builtin can still be unparkable; the collector's bounded wait
+           ;; records that case and skips collection.
+           (nl_thread_park_safepoint env)
+           (let* ((rec_cur_addr (+ env 96)) (rec_max_addr (+ env 104)))
+             (let* ((rec_cur (ptr-read-u64 rec_cur_addr 0)) (rec_max (ptr-read-u64 rec_max_addr 0)))
+               (if (>= rec_cur rec_max)
+                   (nelisp_eval_call_stash_excessive_lisp_nesting env rec_max)
+                 (nl_seq2 (ptr-write-u64 rec_cur_addr 0 (+ rec_cur 1))
+                   (if (= (nl_gc_frame_record_armed_p) 1)
+                       (let* ((pushed (nl_gc_eval_ctx_push env form_ptr out 0)))
+                        (nelisp_eval_call_recorded_done
+                         (nl_eval_inner form_ptr env out 0)
+                         form_ptr env out rec_cur rec_cur_addr pushed))
+                     (nelisp_eval_call_done
                      (nl_eval_inner form_ptr env out 0)
-                     rec_cur rec_cur_addr 0)))))))))
+                      env rec_cur rec_cur_addr))))))))))
 
 (defun nelisp-standalone--name-u64 (s)
   "Pack STRING S (<=8 ASCII bytes) little-endian into a u64 for symbol-name match."
@@ -5059,7 +5108,8 @@ leave symbols unresolved at link time."
     ;; (trip-count bad-cur bad-bt bad-want poison-count poison-enable
     ;;  context-depth mid-form-fired-count bind-legacy-force root-depth
     ;;  bucket-hits linear-hits bump-allocs reclaimed-chunks reclaimed-bytes
-    ;;  failed-os-releases registered-workers).
+    ;;  failed-os-releases registered-workers current-parked last-parked
+    ;;  missed-collects successful-parked-collects).
     ;; Doc 170 Stage 2: debug-switch extension codes (19+), split out so
     ;; the historical 18-arm chain stays untouched.  ARG0:
     ;;   19 = enable checked-allocator stamping (guard/site suffix on
@@ -5175,6 +5225,8 @@ leave symbols unresolved at link time."
                                             ;; dispatcher below.
                                             (bf_debug_switch_ext args)))))))))))))))))))
         (let* ((nils (alloc-bytes 32 8))
+               (s20 (alloc-bytes 32 8)) (s19 (alloc-bytes 32 8))
+               (s18 (alloc-bytes 32 8)) (s17 (alloc-bytes 32 8))
                (s16 (alloc-bytes 32 8))
                (s15 (alloc-bytes 32 8)) (s14 (alloc-bytes 32 8))
                (s13 (alloc-bytes 32 8)) (s12 (alloc-bytes 32 8))
@@ -5183,11 +5235,25 @@ leave symbols unresolved at link time."
                (s3 (alloc-bytes 32 8)) (s2 (alloc-bytes 32 8)) (s1 (alloc-bytes 32 8)))
           (seq
             (wf_write_nil nils)
-            ;; Tail diagnostics: bucket-hit, linear-hit, bump-hit,
-            ;; reclaimed-chunks, reclaimed-bytes, failed OS releases, and the
-            ;; Tier-3b registered-worker count at the new final index 16.
+            ;; Tier-3b park tail diagnostics.  LAST-PARKED is retained after
+            ;; resume (CURRENT-PARKED returns to zero), so standalone code can
+            ;; prove how many workers participated in the most recent
+            ;; successful request.  SUCCESS increments only after mark/sweep.
+            (wf_cons_int
+             (atomic-fetch-add (+ (data-addr nl_thread_parallel_ctx) 56) 0)
+             nils s20)
+            (wf_cons_int
+             (atomic-fetch-add (+ (data-addr nl_thread_parallel_ctx) 40) 0)
+             s20 s19)
+            (wf_cons_int
+             (ptr-read-u64 (data-addr nl_thread_parallel_ctx) 48)
+             s19 s18)
+            (wf_cons_int
+             (atomic-fetch-add (+ (data-addr nl_thread_parallel_ctx) 32) 0)
+             s18 s17)
+            ;; Existing Tier-3b registered-worker count remains index 16.
             (wf_cons_int (ptr-read-u64 (data-addr nl_thread_registry) 0)
-                         nils s16)
+                         s17 s16)
             (wf_cons_int (ptr-read-u64 (data-addr nl_alloc_diag) 48) s16 s15)
             (wf_cons_int (ptr-read-u64 (data-addr nl_alloc_diag) 40) s15 s14)
             (wf_cons_int (ptr-read-u64 (data-addr nl_alloc_diag) 32) s14 s13)
@@ -19043,14 +19109,27 @@ gets no native definitions and is gated by
              0))))
      ;; Spin join: once the SeqCst done counter reaches EXPECTED, result-slot
      ;; reads by the parent are routed after completion (Doc 199 section 6.2).
-     '(defun nl_thread_join_impl (args out)
-        (let* ((counter (wf_argval args 0))
-               (expected (wf_argval args 1)))
+     ;; Tier 3b also makes the spin a worker safepoint: the per-iteration call
+     ;; parks a registered worker while a request is live.  COUNTER/EXPECTED/
+     ;; ENV are helper ARGS, never runtime let locals across that call; `status'
+     ;; remains the sole across-call local, matching the shipped while loop.
+     '(defun nl_thread_join_wait (counter expected env _pad)
+        (let ((status 0))
           (seq
-           (while (< (ptr-read-u64 counter 0) expected) 0)
-           (wf_write_int out (ptr-read-u64 counter 0))
-           0)))
-     ;; Begin/end the bounded no-collector section.  BEGIN (nonzero arg):
+           (while (= status 0)
+             (if (>= (ptr-read-u64 counter 0) expected)
+                 (setq status 1)
+               (nl_thread_park_safepoint env)))
+           (ptr-read-u64 counter 0))))
+     '(defun nl_thread_join_finish (value out _c _d)
+        (seq (wf_write_int out value) 0))
+     '(defun nl_thread_join_impl (args env out)
+        (nl_thread_join_finish
+         (nl_thread_join_wait
+          (wf_argval args 0) (wf_argval args 1) env 0)
+         out 0 0))
+     ;; Begin/end the bounded parallel section (the public primitive retains
+     ;; its historical `gc-inhibit' name).  BEGIN (nonzero arg):
      ;; require 8 MiB free in the current chunk, snapshot that descriptor,
      ;; disable the sweep free-list so every allocator uses the CAS bump path,
      ;; then set nl_gc_loop_ctx.in_progress@+24.  END (zero arg): clear the GC
@@ -19125,7 +19204,7 @@ target the same installed names signal catchable
          `((:lit "nelisp-thread-spawn") .
            (nl_thread_spawn_impl args env out))
          `((:lit "nelisp-thread-join") .
-           (nl_thread_join_impl args out))
+           (nl_thread_join_impl args env out))
          `((:lit "nelisp-thread-gc-inhibit") .
            (nl_thread_gc_inhibit_impl args out)))
       (let ((sig (nelisp-standalone--applyfn-unsupported-primitive-form)))

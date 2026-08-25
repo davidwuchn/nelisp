@@ -63,21 +63,29 @@ non-local-exit behaviour are covered by the standalone reader smoke."
     ;; ordinary tagged-slot marker to every 32-byte entry in [region, top).
     (dolist (name '(nl_root_mark nl_root_reserve nl_root_release
                     nl_thread_registry_add nl_thread_registry_clear
-                    nl_gc_mark_rootstack nl_gc_mark_thread_roots))
+                    nl_gc_mark_rootstack nl_gc_mark_thread_roots
+                    nl_thread_park_request_begin
+                    nl_thread_park_request_end
+                    nl_thread_park_safepoint))
       (should (defun-form name nelisp-cc-rootstack--source)))
     (let ((walk (defun-form 'nl_gc_mark_rootstack_walk
                             nelisp-cc-rootstack--source)))
       (should (tree-member-p '(extern-call nl_gc_mark_slot p) walk))
       (should (tree-symbol-p 'nl_gc_mark_slot walk)))
 
-    ;; The public diagnostic tuple appends the live registry count at index 16.
+    ;; The public diagnostic tuple keeps the live registry count at index 16,
+    ;; followed by current/last parked, missed, and successful-collect counts.
     (let ((diag (defun-form 'bf_debug_switch
                             nelisp-standalone--applyfn-core-helpers)))
       (should
        (tree-member-p
         '(wf_cons_int (ptr-read-u64 (data-addr nl_thread_registry) 0)
-                      nils s16)
-        diag)))
+                      s17 s16)
+        diag))
+      (should (tree-symbol-p 'atomic-fetch-add diag))
+      (should (tree-member-p
+               '(ptr-read-u64 (data-addr nl_thread_parallel_ctx) 48)
+               diag)))
 
     ;; Doc 199 Tier 3b: the bounded registry stores {env, published-top}
     ;; entries at +16+i*16, rejects worker 65, and reuses the ordinary 32-byte
@@ -91,6 +99,12 @@ non-local-exit behaviour are covered by the standalone reader smoke."
           (publish (defun-form 'nl_thread_registry_store_top
                                nelisp-cc-rootstack--source))
           (walk-workers (defun-form 'nl_gc_mark_thread_roots_one
+                                    nelisp-cc-rootstack--source))
+          (park (defun-form 'nl_thread_park_safepoint_at
+                            nelisp-cc-rootstack--source))
+          (wait (defun-form 'nl_thread_park_wait_bounded
+                            nelisp-cc-rootstack--source))
+          (request-wait (defun-form 'nl_thread_park_request_wait
                                     nelisp-cc-rootstack--source)))
       (should (tree-member-p '(>= i 64) add))
       (should (tree-member-p
@@ -98,7 +112,36 @@ non-local-exit behaviour are covered by the standalone reader smoke."
       (should (tree-symbol-p 'atomic-compare-exchange publish))
       (should (tree-member-p
                '(nl_gc_mark_rootstack_walk (+ env 4096) top)
-               walk-workers)))
+               walk-workers))
+      (should (tree-member-p
+               '(extern-call nl_gc_mark_recorded_env env)
+               walk-workers))
+      (should (tree-symbol-p 'atomic-fetch-add park))
+      (should (tree-symbol-p 'while park))
+      (should (tree-member-p '(nl_thread_park_request_store 0) request-wait))
+      (should (tree-member-p '(nl_thread_park_missed) request-wait))
+      (should (tree-member-p '(let ((status 16777216))
+                               (seq
+                                (while
+                                    (if
+                                        (<
+                                         (atomic-fetch-add
+                                          (+ (data-addr nl_thread_parallel_ctx)
+                                             32)
+                                          0)
+                                         expected)
+                                        (> status 0)
+                                      0)
+                                  (setq status (- status 1)))
+                                (if
+                                    (>=
+                                     (atomic-fetch-add
+                                      (+ (data-addr nl_thread_parallel_ctx) 32)
+                                      0)
+                                     expected)
+                                    1
+                                  0)))
+                             wait)))
 
     ;; 3b/3c/3d: the reserved slot address and saved top are threaded only as
     ;; helper arguments.  No generated helper introduces a runtime let local.
@@ -917,9 +960,9 @@ Windows uses the target-correct `.obj' unit name; linux/macOS keep `.o'."
                                 (cons "nl_gc_loop_ctx" (+ 80 4194304))
                                 (cons "nl_fa_tbl_base" (+ 57488 4194304))
                                 (cons "nl_thread_parallel_ctx" (+ 57888 4194304))
-                                (cons "nl_alloc_diag" (+ 57912 4194304))
-                                (cons "nl_gc_reclaim_scratch" (+ 57968 4194304))
-                                (cons "nl_thread_registry" (+ 58008 4194304))))
+                                (cons "nl_alloc_diag" (+ 57952 4194304))
+                                (cons "nl_gc_reclaim_scratch" (+ 58008 4194304))
+                                (cons "nl_thread_registry" (+ 58048 4194304))))
           (let ((sym (cdr (assoc (car expected) by-name))))
             (should sym)
             (should (equal (cdr expected) (plist-get sym :value)))
@@ -928,9 +971,9 @@ Windows uses the target-correct `.obj' unit name; linux/macOS keep `.o'."
         ;; allocator control block appended after `nl_fvcache_*'.  Doc 180
         ;; Phase 2 item 3 (2026-08-23): +176 more bytes for `nl_bt_snapshot'
         ;; (the bounded backtrace capture buffer) appended after that.  Doc 199
-        ;; Tier 3a appends 24 bytes of bounded parallel-section state.  Tier 3b
+        ;; Tier 3a/Tier 3b append 64 bytes of bounded section + park state. Tier 3b
         ;; appends the 1040-byte registry (16-byte header + 64*16 entries).
-        (should (equal (+ 57616 4194304 96 176 24 56 40 1040)
+        (should (equal (+ 57616 4194304 96 176 64 56 40 1040)
                        (cdr (assq 'bss (plist-get u :sections)))))))))
 
 (ert-deftest nelisp-standalone-target-stage8-build-appends-arena-base-slot-unit ()
@@ -1197,9 +1240,38 @@ scratch chunks have their cursor reset."
     ;; Explicit `(garbage-collect)' uses the recorded-roots collector, so it
     ;; must cover private worker roots too, not only full boundary collection.
     (let ((recorded (defun-form 'nl_gc_collect_from_recorded_roots
-                                nelisp-standalone--gc-source)))
+                                nelisp-standalone--gc-source))
+          (recorded-parked
+           (defun-form 'nl_gc_collect_recorded_parked
+                       nelisp-standalone--gc-source))
+          (full (defun-form 'nl_gc_collect
+                            nelisp-standalone--gc-source))
+          (full-parked
+           (defun-form 'nl_gc_collect_while_workers_parked
+                       nelisp-standalone--gc-source))
+          (eval-call (defun-form 'nelisp_eval_call
+                                 nelisp-standalone--shim-source))
+          (eval-done (defun-form 'nelisp_eval_call_done
+                                 nelisp-standalone--shim-source))
+          (eval-recorded-done
+           (defun-form 'nelisp_eval_call_recorded_done
+                       nelisp-standalone--shim-source)))
       (should recorded)
-      (should (tree-member-p '(nl_gc_mark_thread_roots) recorded)))))
+      (should (tree-member-p '(nl_gc_collect_recorded_parked mode) recorded))
+      (should (tree-member-p '(nl_thread_park_request_begin) recorded-parked))
+      (should (tree-member-p '(nl_thread_park_request_end) recorded-parked))
+      (should (tree-member-p '(nl_thread_park_collect_succeeded)
+                             recorded-parked))
+      (should (tree-member-p
+               '(nl_gc_collect_while_workers_parked
+                 ctx result out pool src cursor bsym)
+               full))
+      (should (tree-member-p '(nl_thread_park_request_begin) full-parked))
+      (should (tree-member-p '(nl_thread_park_request_end) full-parked))
+      (should (tree-member-p '(nl_thread_park_safepoint env) eval-call))
+      (should (tree-member-p '(nl_thread_park_safepoint env) eval-done))
+      (should (tree-member-p '(nl_thread_park_safepoint env)
+                             eval-recorded-done)))))
 
 (ert-deftest nelisp-standalone-target-pointer-cache-slots-publish-atomically ()
   "Shared pointer-cache rows use an emitted CAS claim/publish protocol.
@@ -1553,6 +1625,14 @@ real) native call\"."
       (should (tree-member-p '(record-make type_slot 2 (+ env 32)) forms))
       (should (tree-member-p '(nl_thread_registry_add region) forms))
       (should (tree-member-p '(nl_thread_registry_clear) forms))
+      (should (tree-member-p '(nl_thread_park_safepoint env) forms))
+      (should (tree-member-p
+               '(defun nl_thread_join_impl (args env out)
+                  (nl_thread_join_finish
+                   (nl_thread_join_wait
+                    (wf_argval args 0) (wf_argval args 1) env 0)
+                   out 0 0))
+               forms))
       (should (tree-member-p
                '(defun nl_thread_gc_inhibit_begin ()
                   (ptr-write-u64 (data-addr nl_gc_loop_ctx) 24 1))

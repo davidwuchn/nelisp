@@ -4,22 +4,22 @@
 
 ;;; Commentary:
 
-;; Acceptance proof for the first Doc 199 Tier 3b step: the marker-side
-;; worker registry can enumerate every allocating worker's private root
-;; reserve.  This file is loaded by target/nelisp itself, using the same
+;; Acceptance proof for Doc 199 Tier 3b's park barrier: the marker-side worker
+;; registry enumerates every allocating worker's private root reserve while an
+;; actual mark/sweep runs.  This file is loaded by target/nelisp itself, using the same
 ;; fixed worker ID 2 and load-by-path shape as
 ;; tools/nelisp-thread-allocating-standalone-smoke.el.
 ;;
 ;; Three forms are fully built before clone(2).  Each worker allocates a live
 ;; list in a private lexical frame, publishes its barrier arrival, and parks
 ;; until the parent releases it.  While all three are parked, the parent
-;; requires diagnostic tuple element 16 (the first element after the existing
-;; 16-element tuple) to report exactly three registered workers and drives an
-;; explicit `garbage-collect'.  The bounded-section inhibit remains part of
-;; Tier 3b's fixed first-step contract, so the public collection path may
-;; return without mark/sweep; the registry count is required to remain three.
-;; After release, the workers must return 5, 7, and 11, and section exit must
-;; clear the registry back to zero.
+;; requires diagnostic tuple element 16 to report exactly three registered
+;; workers and drives an explicit `garbage-collect'.  The collector requests a
+;; park, waits for all three join-spin safepoints, runs mark/sweep with their
+;; published roots, then resumes them.  Diagnostics must report last-parked=3,
+;; missed-collects unchanged, and successful-parked-collects incremented by
+;; one.  After release, the workers must return 5, 7, and 11, and section exit
+;; must clear the registry back to zero.
 ;;
 ;; The fixed public diagnostic exposes the registry count, but not the raw
 ;; entry addresses.  Consequently the intended per-entry fallback assertion
@@ -47,6 +47,22 @@
 (defun nl-thread-roots-smoke--registry-count ()
   "Return the Doc 199 Tier 3b registered-worker diagnostic."
   (nth 16 (nelisp--debug-switch 0)))
+
+(defun nl-thread-roots-smoke--current-parked ()
+  "Return the number of workers still inside the current park request."
+  (nth 17 (nelisp--debug-switch 0)))
+
+(defun nl-thread-roots-smoke--last-parked ()
+  "Return the satisfied worker count from the last park request."
+  (nth 18 (nelisp--debug-switch 0)))
+
+(defun nl-thread-roots-smoke--missed-collects ()
+  "Return the bounded-timeout/no-collect diagnostic count."
+  (nth 19 (nelisp--debug-switch 0)))
+
+(defun nl-thread-roots-smoke--parked-collects ()
+  "Return the number of mark/sweeps completed through the park path."
+  (nth 20 (nelisp--debug-switch 0)))
 
 (let ((checked 0)
       (names '(nelisp-thread-shared-alloc
@@ -117,22 +133,47 @@
                   (error "per-CPU root workers did not all reach the barrier"))
                 (setq checked (+ checked 1))
 
-                ;; All three workers are parked here with live private `let'
-                ;; frames.  A missing diagnostic tuple extension yields nil
-                ;; and fails loudly; zero or a partial registration also
-                ;; fails.  The explicit collection call is retained even
-                ;; while the first-step inhibit makes it an enumeration-only
-                ;; checkpoint, so a later runtime that permits collection at
-                ;; this parked barrier exercises the same assertion site.
-                (let ((before (nl-thread-roots-smoke--registry-count)))
+                ;; All three workers wait in the join spin with live private
+                ;; `let' frames.  The main-thread collection must park all
+                ;; three, complete one real mark/sweep, and resume them.  A
+                ;; timeout is a safe skipped collect, but it is a gate failure
+                ;; here because this workload is deliberately parkable.
+                (let ((before (nl-thread-roots-smoke--registry-count))
+                      (missed-before
+                       (nl-thread-roots-smoke--missed-collects))
+                      (collects-before
+                       (nl-thread-roots-smoke--parked-collects)))
                   (unless (and (integerp before) (= before 3))
                     (error "parked worker registry count was %S, expected 3"
-                           before)))
-                (garbage-collect)
-                (let ((after (nl-thread-roots-smoke--registry-count)))
-                  (unless (and (integerp after) (= after 3))
-                    (error "worker registry count after collect was %S, expected 3"
-                           after)))
+                           before))
+                  (garbage-collect)
+                  (let ((after (nl-thread-roots-smoke--registry-count))
+                        (current (nl-thread-roots-smoke--current-parked))
+                        (parked (nl-thread-roots-smoke--last-parked))
+                        (missed (nl-thread-roots-smoke--missed-collects))
+                        (collects (nl-thread-roots-smoke--parked-collects)))
+                    (unless (and (integerp after) (= after 3))
+                      (error
+                       "worker registry count after collect was %S, expected 3"
+                       after))
+                    (unless (and (integerp parked) (= parked 3))
+                      (error "park barrier satisfied %S workers, expected 3"
+                             parked))
+                    (unless (and (integerp missed)
+                                 (= missed missed-before))
+                      (error
+                       "parkable collect changed missed count %S -> %S"
+                       missed-before missed))
+                    (unless (and (integerp collects)
+                                 (= collects (+ collects-before 1)))
+                      (error
+                       "parked collect count was %S -> %S, expected +1"
+                       collects-before collects))
+                    (princ
+                     (format
+                      (concat "PARK-DIAG parked=%d current=%d "
+                              "missed=%d collections=%d\n")
+                      parked current missed collects))))
                 (setq checked (+ checked 1))
 
                 (unless (= (nelisp-thread-atomic-add release 1) 0)
