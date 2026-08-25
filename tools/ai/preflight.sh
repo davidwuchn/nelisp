@@ -44,16 +44,35 @@ FAST_GATES=(
 SLOW_GATES=(
   "checked-alloc|make standalone-reader-checked"
   "shadow-smoke|make standalone-reader-shadow-smoke"
-  "binary-size-ratchet|make binary-size-ratchet"
   "check-tier|bash tools/ai/nelisp-ai.sh check"
   "extras|bash tools/ai/nelisp-ai.sh extras"
   "perf|bash tools/ai/nelisp-ai.sh perf"
   "ert-full|bash tools/ai/nelisp-ai.sh test"
 )
 
+# Gates that are REAL in CI but cannot be judged from a local run, so a local
+# failure here is not evidence of a defect.  They are still run -- the output is
+# worth seeing -- but they do not count toward the failure total, because a
+# preflight that cries wolf teaches people to ignore its red, which costs more
+# than the gate was ever going to save.
+#
+# binary-size-ratchet: the `size' pin in tools/nelisp-binary-size-baseline.txt
+# is calibrated against CI's toolchain.  A local build of the SAME commit
+# measures larger -- 8,033,688 B locally vs 7,976,232 B in CI on efa22af65, a
+# ~57KB gap that is environment, not source.  Comparing a local absolute size
+# to that pin therefore reports a failure CI will not have, and "fixing" it by
+# raising the pin would eat the real CI headroom (48KB there) the ratchet
+# exists to guard.  Judge it either from CI's own
+# `[binary-size-ratchet] PASS: ... is N bytes' line, or by building BASE and
+# HEAD locally and comparing only the DELTA.
+ADVISORY_GATES=(
+  "binary-size-ratchet|make binary-size-ratchet"
+)
+
 OUT=${PREFLIGHT_LOGDIR:-target/preflight}
 mkdir -p "$OUT"
 declare -a NAMES STATUS COUNTS
+declare -a ADV_NAMES ADV_STATUS ADV_COUNTS
 
 run_gate() {
   local name=${1%%|*} cmd=${1#*|}
@@ -75,7 +94,18 @@ run_gate() {
 }
 
 for g in "${FAST_GATES[@]}"; do run_gate "$g"; done
-[ $FULL -eq 1 ] && for g in "${SLOW_GATES[@]}"; do run_gate "$g"; done
+if [ $FULL -eq 1 ]; then
+  for g in "${SLOW_GATES[@]}"; do run_gate "$g"; done
+  for g in "${ADVISORY_GATES[@]}"; do
+    run_gate "$g"
+    # Move the just-recorded row into the advisory bucket.
+    last=$(( ${#NAMES[@]} - 1 ))
+    ADV_NAMES+=("${NAMES[$last]}"); ADV_STATUS+=("${STATUS[$last]}")
+    ADV_COUNTS+=("${COUNTS[$last]}")
+    unset 'NAMES[last]' 'STATUS[last]' 'COUNTS[last]'
+    NAMES=("${NAMES[@]}"); STATUS=("${STATUS[@]}"); COUNTS=("${COUNTS[@]}")
+  done
+fi
 
 fails=0
 printf '\n================ PREFLIGHT SUMMARY ================\n'
@@ -84,6 +114,14 @@ for i in "${!NAMES[@]}"; do
   case "${STATUS[$i]}" in FAIL*) fails=$((fails+1));; esac
 done
 printf '==================================================\n'
+if [ ${#ADV_NAMES[@]} -gt 0 ]; then
+  printf 'ADVISORY (run, but NOT counted -- cannot be judged locally):\n'
+  for i in "${!ADV_NAMES[@]}"; do
+    printf '  %-22s %-12s %s\n' "${ADV_NAMES[$i]}" "${ADV_STATUS[$i]}" "${ADV_COUNTS[$i]}"
+  done
+  printf '  see this script'"'"'s ADVISORY_GATES comment for how to judge these\n'
+  printf '==================================================\n'
+fi
 printf 'logs: %s\n' "$OUT"
 if [ $fails -eq 0 ]; then
   printf 'PREFLIGHT: all %d gate(s) clear\n' "${#NAMES[@]}"
