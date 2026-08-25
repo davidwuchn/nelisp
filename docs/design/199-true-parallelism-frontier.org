@@ -1,22 +1,29 @@
 #+TITLE: Doc 199 — True multicore parallelism for NeLisp: the library ceiling, and precisely where it breaks
 #+AUTHOR: Claude (design), zawatton (direction)
 #+DATE: 2026-08-24
-#+STATUS: DRAFT — read-only survey, no implementation, no commit under this
-#+STATUS: doc's own scope besides this file.  Every ground-truth claim below
-#+STATUS: was read at the cited file:line against this branch's own fetch
-#+STATUS: point on =origin/feat/native-observability= (=3bab0fe88=), from a
-#+STATUS: throwaway clone, never writing into that tree.  This doc is the
-#+STATUS: "future doc" Doc 195 §5.2 explicitly deferred to — its own words:
-#+STATUS: "building toward [refs/STM and true multicore] belongs to whatever
-#+STATUS: future doc takes on concurrent GC or a callable thread-spawn
-#+STATUS: primitive as its own first-class subject, not to a persistent-
-#+STATUS: data-structures library whose Tier 1 needs neither."  No
-#+STATUS: =#+VERIFIED-BY= — this doc ships no gate, per AI.md's Definition
-#+STATUS: of Done (that requirement applies to =#+STATUS: SHIPPED= docs).
+#+STATUS: SHIPPED — Tier 1, Tier 2, Tier 3a and Tier 3b all implemented and
+#+STATUS: CI-green (2026-08-26, run 32889146428, six lanes).  Tier 3b landed
+#+STATUS: together with Doc 152 Stage 5: unrestricted allocating Lisp on real
+#+STATUS: clone(2) threads, a park barrier that stops every mutator before
+#+STATUS: marking, per-thread precise roots via the thread registry, atomic
+#+STATUS: publish for the macro/function-value caches, and a hard refusal of
+#+STATUS: worker writes to the shared globals mirror.  See "Implementation
+#+STATUS: status" below for the per-tier record; §11.44 of Doc 152 records why
+#+STATUS: the park barrier makes a write barrier (that doc's Stage 6)
+#+STATUS: unnecessary.  This doc began as a read-only survey against
+#+STATUS: =origin/feat/native-observability= (=3bab0fe88=); every ground-truth
+#+STATUS: claim in the survey sections was read at the cited file:line from a
+#+STATUS: throwaway clone, never writing into that tree.  It is the "future
+#+STATUS: doc" Doc 195 §5.2 explicitly deferred to — its own words: "building
+#+STATUS: toward [refs/STM and true multicore] belongs to whatever future doc
+#+STATUS: takes on concurrent GC or a callable thread-spawn primitive as its
+#+STATUS: own first-class subject, not to a persistent-data-structures library
+#+STATUS: whose Tier 1 needs neither."
+#+VERIFIED-BY: compile emacs-parity ert-full nl-clj-future-standalone-smoke nelisp-thread-standalone-smoke nelisp-thread-allocating-standalone-smoke nelisp-thread-percpu-roots-smoke nelisp-thread-mirror-guard-standalone-smoke
 
-* Implementation status (Doc 199 program: Tier 1 + Tier 2 + Tier 3a shipped; Tier 3b gated on Doc 152)
+* Implementation status (Doc 199 program: Tier 1 + Tier 2 + Tier 3a + Tier 3b all shipped, CI-green 2026-08-26)
 
-#+VERIFIED-BY: compile parens-check nl-clj-future-standalone-smoke nelisp-thread-standalone-smoke nelisp-thread-allocating-standalone-smoke
+#+VERIFIED-BY: compile parens-check emacs-parity ert-full nl-clj-future-standalone-smoke nelisp-thread-standalone-smoke nelisp-thread-allocating-standalone-smoke nelisp-thread-percpu-roots-smoke nelisp-thread-mirror-guard-standalone-smoke
 
 - *Tier 1 (cooperative pmap/future/pcalls): IMPLEMENTED 2026-08-25.*
   packages/nl-clj/src/nl-clj-future.el + nl-clj-future-test.el (15 ERT,
@@ -50,11 +57,48 @@
   tasks, read-only global state, worker mmap held to process exit, arena
   must not grow mid-section.
 - *Tier 3b (UNRESTRICTED arbitrary Lisp -- mutable globals, unbounded
-  allocation, per-task reclaim, long-lived GC-ing threads): NOT STARTED,
-  gated on Doc 152.*  Needs a thread-local precise-root ABI (Doc 152's own
-  still-open handle-based-roots epic, §5.1), safe arena growth under a
-  chunk-list race, and per-task heap reclaim -- the §5 concurrent-GC work,
-  scoped here, not buildable before Doc 152 lands.
+  allocation, long-lived GC-ing threads): IMPLEMENTED 2026-08-26, CI-green
+  (run 32889146428, six lanes).*  The gate this bullet named -- "a
+  thread-local precise-root ABI" -- was discharged by Doc 152 Stage 3, and
+  Tier 3b builds the four pieces on top of it:
+  1. *Per-thread precise roots.*  =nl_thread_registry= (64 x 16B
+     ={env_addr, root_top}=) makes each worker's root top addressable from
+     the collector.  =nl_root_mark= / =nl_root_reserve= / =nl_root_release=
+     dispatch through =nl_thread_registry_find=, so a worker pushes and pops
+     its own roots while the main thread keeps using the global root stack.
+  2. *Park barrier.*  Rather than marking concurrently with running
+     mutators, =nl_gc_collect_recorded_parked= asks every registered worker
+     to park (=nl_thread_park_request_begin=), marks and sweeps with all
+     mutators stopped, then releases them.  This is what makes Doc 152's
+     Stage 6 (write barrier) unnecessary: the tri-color invariant holds by
+     construction because no mutator can create a black-to-white edge while
+     marking runs.  =nelisp-thread-percpu-roots-smoke= asserts the barrier
+     actually engaged rather than silently skipping, emitting
+     =PARK-DIAG parked=3 current=0 missed=0 collections=1= -- a real collect
+     with three live workers, not an empty-registry no-op.
+  3. *Atomic cache publish.*  =nl_mxcache_store= / =nl_fvcache_store= claim a
+     slot with a sentinel via =atomic-compare-exchange=, fill it, and publish
+     the key last, so a concurrent reader never observes a key whose payload
+     is still being written.
+  4. *Shared-mirror write refusal.*  A worker attempting to mutate the shared
+     globals mirror (=set-value= / =set-function= / =set-constant= / their
+     =-or-insert= forms / =clear-*= / =install-entry*= / =bucket-prepend=,
+     plus =nelisp-cc-env-set-value=) signals a catchable
+     =nelisp-worker-mirror-mutation= instead of corrupting it.  The read path
+     is untouched, so workers still resolve globals normally.
+     =nelisp-thread-mirror-guard-smoke= (checked=14) pins both halves,
+     including that a worker cannot insert a new name into the shared intern
+     table.
+  Ceiling reached: workers may now allocate without bound and trigger
+  collection; what remains outside this tier is per-task heap reclaim (a
+  worker's arena share is returned at process exit, not at task end) and
+  shared-mirror *writes* from workers, which are refused rather than
+  serialised.  Zero Rust.
+- *§7 lint (=nl-clj-future-with-lint=): IMPLEMENTED 2026-08-25.*  Dynamically
+  binds =nl-safe-log-violations= / =nl-safe--violation-log= around a future
+  body so borrow/cell violations are recorded rather than raised, with
+  =unwind-protect= preserving the records; outside the macro's scope the
+  future path is unchanged and un-instrumented.
 
 * §0 TL;DR
 

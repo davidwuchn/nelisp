@@ -1,7 +1,12 @@
 #+TITLE: Doc 152 — Sound form-boundary tracing GC（稼働 GC の有効化と健全性）
 #+AUTHOR: nelisp / nelisp-emacs
 #+DATE: 2026-06-14
-#+STATUS: DESIGN（実装前）。Doc 146（統合設計）の「② root-coverage 健全性」+「稼働化」を、run-suite 完走を gate にして carve out。
+#+STATUS: Stage 1-5 SHIPPED（2026-08-26）— mid-form collect が既定 ON になり、既定ビルドの
+#+STATUS: 200k 割り当て loop peak RSS が 669,936 → 339,920 KiB（-49.3%）、1M でも RSS 横ばい。
+#+STATUS: Stage 6（write barrier）は Doc 199 の park barrier により不要と確定（§11.44）。残は
+#+STATUS: Stage 7（世代別コピー）と §11.43「残」1/2（reuse 率・safepoint 拡張）のみ。
+#+STATUS: 出自: Doc 146（統合設計）の「② root-coverage 健全性」+「稼働化」を carve out。
+#+VERIFIED-BY: standalone-midform-gc-bounded emacs-parity ert-full compile nelisp-thread-percpu-roots-smoke
 #+OPTIONS: toc:3 num:t
 
 * §0 要旨
@@ -2222,3 +2227,94 @@ main thread が form 境界へ達すれば抑止を無視して collect+sweep �
 *教訓*: mutation testing の失敗は「gate が弱い」と「mutation が到達しない経路を狙っている」の
 二通りある。今回は後者で、それを取り違えて 130 回の再現試行と 2 度の誤結論を招いた。*mutation を
 足すときは、その欠陥に至る経路を対象 gate が本当に通るかを先に確かめる*。
+
+* §11.44 Stage 5 SHIPPED — mid-form collect の既定 ON 化（既定ビルドで RSS 半減、2026-08-26）
+§11.43 の「残」3 が指していた最後の一手。Stage 4c/4d は空 chunk を OS へ返すところまで作ったが、
+collect 自体が =(nelisp--debug-switch 5)= の裏にあり、**既定ビルドではこの節までの成果が一切
+効いていなかった**。200k 割り当て loop
+=(let ((i 0) (acc nil)) (while (< i 200000) (setq acc (list i (list 1 2 3))) (setq i (1+ i))) (length acc))=
+の実測:
+
+| build | peak RSS |
+| 本節の変更前（既定） | 669,936 KiB |
+| *本節の変更後（既定）* | *339,920 KiB（-49.3%）* |
+
+** 実装
+- *boot 経路での arming*: reader driver が permanent-generation watermark を凍結した **直後** に、
+  switch 5 と同一の 3 書き込みを行う — enable（=nl_gc_loop_ctx= +8）、next-trigger（+40）=
+  chunk-bytes-reserved（268436184）+ 16 MiB、fired-count（+32）= 0。この位置は必然であって
+  任意ではない: =nl_arena_init= が 268436184 を seed し boot 中の chunk 確保がそれを維持するので、
+  watermark はここで初めて意味を持つ。BSS 既定は OFF のままなので、watermark 確定前に collect が
+  走る窓は無い。switch 5 は runtime re-arm、switch 6 は escape hatch として残す。
+- *tag-9 / tag-10 の子エッジ精密化（既定 ON 化の前提）*: 後述 §11.44.1。
+- *Stage 6（write barrier）は不要と確定*: §11.43 の「残」3 は既定 ON 化を「Stage 5（全面化 +
+  write barrier）」と書いていたが、Doc 199 Tier 3b の park barrier が全 mutator を停止させた
+  状態でのみ mark するため、tri-color 不変条件は **構成上** 成立する。barrier で守るべき
+  「mark 中に mutator が黒→白の辺を作る」窓が存在しない。Stage 6 は本 doc の残件から落ちる。
+
+** §11.44.1 既定 ON 化が偽と暴いた前提 — CharTable / BoolVector の子は walk されていなかった
+=nelisp-standalone--gc-source= は tag 9（CharTable）/ tag 10（BoolVector）について
+「*reader graph に出現しない*ので box は mark するが children は walk しない（documented
+limitation, gated by the test suite）」と宣言していた。**この宣言は偽だった** — reader 自身の
+char-table command smoke が tag-9 値を global mirror に保持する。到達可能なのに未 walk = 生存
+ブロックが sweep される潜在欠陥で、*既定で collect していなかったから顕在化していなかっただけ*。
+
+- =nl_gc_mark_char_table_box=: subtype（box+0）と default（box+32）slot、entries buffer と
+  その 40 バイト ={i64 key, 32B Sexp}= 行、parent 連鎖、extra-slots buffer と その 32 バイト行を
+  すべて mark。parent 再帰の停止性は =nl_gc_mark_block= が **fresh mark のときだけ 1 を返す**
+  （mark 0 または 4 を 1 に昇格、既 mark / free / 非 arena は 0）契約に依存する。
+- =nl_gc_mark_bool_vector_box=: raw data ポインタを mark。
+- =nl_gc_mark_char_table_slots=: buffer membership guard を全 dereference の前に置く
+  （=nl_gc_mark_vec_slots= と同じ防御契約）。
+
+*教訓*: 既定 OFF の機構を既定 ON にする作業は「機能追加」ではなく **「これまで検査されて
+いなかった前提の一斉検査」**。「起きないから正しい」と書かれた限定は、起こす側に回った瞬間に
+検証対象になる。
+
+** §11.44.2 二次効果 — ctx+8 は frame recording も arm する
+=nl_gc_loop_ctx= +8 は mid-form collect だけでなく frame recording も arm するため、既定 ON に
+した時点で「素の既定プロセス」は =standalone-reader-bounded-backtrace-smoke= の dormant control
+として成立しなくなった（Doc 180 Phase 2 item 3）。同 smoke の control 側を =(nelisp--debug-switch 6)=
+で明示的に disarm してから測る形に改めた。armed 側は disarm 後に item 2 の
+=(nelisp--debug-switch 22)=（collector 非依存の frame arm）を重ねる。
+
+** 実測（claude 独立検証 → CI round 28 で追認）
+| 計測 | claude ローカル | CI round 28 (Linux) |
+| 200k loop peak RSS（既定） | 339,920 KiB | — |
+| 500k =standalone-midform-gc-bounded= | 339,908 KiB / FIRED=2 RECLAIMED=1 / 64 MiB 返却 | 352,624 KiB / FIRED=2 RECLAIMED=1 / 64 MiB |
+| 1M 同上 | — | *352,620 KiB* / FIRED=5 RECLAIMED=4 / *256 MiB 返却* |
+| =binary-size-ratchet= | delta +152 B | *7,976,384 B*（ceiling 8,024,470）PASS |
+| =bench-aot-tco= | 0.987x（base 0.974x、floor 0.95） | 0.997x PASS |
+
+- *500k → 1M で RSS が横ばい*（352,624 → 352,620 KiB）。割り当てを倍にしても常駐が増えない =
+  §11.43 が armed 限定で示した bounded RSS が、**既定ビルドで成立**した。=RELEASE_FAILURES=0=。
+- *実行時間は速くなった*: 同一バイナリで 200k loop が既定 ON 5,204 ms / disarm 8,125 ms（-36%）。
+  小ヒープの locality 改善と成長 mmap 回避による。**メモリと速度のトレードオフを前提に設計判断
+  してはいけない** ことの実例。AOT 経路の backedge チェックコストは測定限界以下
+  （=bench-aot-tco= の絶対時間 tco 0.0982s vs base 0.0993s）。
+
+** gate
+- =standalone-midform-gc-bounded= は明示 arm（switch 5）を式から落とし、**production の既定 boot
+  状態のまま**回収を証明する gate になった。mutation row（=nl_os_empty_chunk_reclaim_p= 1→0）は
+  同じ注入のまま「既定経路で到達する」旨に記述を改めた。
+- 既存 gate 非退行: =emacs-parity= checked=19961 findings=0（*不動*）/ check-tier VERDICT PASS
+  (22 gates) / verify VERDICT PASS (66 gates) / =ert-full= 5466 tests 0 unexpected 157 skipped /
+  extras 7 gate findings=0（=PARK-DIAG parked=3 current=0 missed=0 collections=1= を含む）。
+- =tools/unsafe-inventory-baseline.txt=: =unsafe-call= 632 → 636、
+  =pinned-kernel-call scripts/nelisp-standalone-build.el= 608 → 612。§11.44.1 の子 walker が足す
+  4 件の raw read。既に計上済みのものと同種であって新しい種類ではない。
+
+** §11.44.3 手順上の教訓 — ratchet をローカル絶対値で判定しない
+=binary-size-ratchet= の pin は **CI のビルドに校正されている**。同一コミット =efa22af65= で
+CI 7,976,232 B に対しローカルは 8,033,688 B（差 ~57KB は toolchain 差であって source 増ではない）。
+ローカル絶対値を pin と突き合わせると「落ちる」と誤判定し、そこで baseline を上げると **CI 側に
+実在する 48KB の余裕を潰して**将来の実増加を隠す。正しい見方は (a) CI ログの
+=[binary-size-ratchet] PASS: ... is N bytes= を読む、または (b) BASE と HEAD を両方ローカルで
+ビルドして **delta だけ**を見る。本節は (b) で +152 B と切り分け、そこから CI 値 7,976,384 B を
+予測し、実測とバイト単位で一致した。baseline 更新は不要だった。
+
+** 残（Doc 152 として）
+1. *Stage 7（世代別コピー GC）* のみ。Stage 6 は上記のとおり不要と確定した。
+2. §11.43「残」1（reuse 率改善）と 2（safepoint を while backedge 以外へ拡張）は依然未着手。
+   既定 ON 化で while 形状の workload は bounded になったが、その形に入らない long-running
+   workload の collect 機会が乏しい点は変わっていない。
