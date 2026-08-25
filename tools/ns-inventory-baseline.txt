@@ -248,6 +248,12 @@ ns-collision 250
 # `insert'/`insert-file-contents' stopped being divergent (their
 # lisp/nelisp-stdlib-misc.el copies were deleted, dead cruft per Doc 188
 # §1.4's own research, not synced -- see scripts/nl-ns-accepted.el's
+#
+#   701 -> 702 on 2026-08-25 for Doc 199 §7's opt-in worker lint:
+#   packages/nl-clj/src/nl-clj-future.el gains nl-clj-future--lint-violations
+#   and nl-clj-future--call-with-lint.  ns-prefix-violation is unchanged at
+#   941 (the public surface added only nl-clj-future-with-lint and
+#   nl-clj-future-lint-violations, both already nl-clj-prefixed).
 # updated notes); `with-current-buffer'/`with-temp-buffer' stayed
 # divergent but both changed shape (the latter also dropped from a
 # triple to a pair, for the same reason) and are re-pinned below with
@@ -633,7 +639,7 @@ ns-prefix-violation 941
 # manifest.el still has only nl-prelude as its cross-package dependency.
 # This is the same shared-core/private-engine shape conceded for nl-clj
 # immediately above.  Measured via `make ns-inventory': exactly 39.
-ns-private-escape 701
+ns-private-escape 702
 ns-unreadable 0
 
 # `pinned-collision KEY' pins every ns-collision and ns-collision-divergent
