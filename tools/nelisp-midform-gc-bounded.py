@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Gate Doc 152 Stage 4c empty-chunk reclamation on Linux.
+"""Gate Doc 152 Stage 4c/Stage 5 default empty-chunk reclamation on Linux.
 
 The runtime change remains entirely in the pure-Elisp AOT DSL.  This host-side
 runner uses wait4(2) only to read each standalone child's own ru_maxrss; using
@@ -52,10 +52,9 @@ def run_child(binary: str, expression: str) -> tuple[int, str, int]:
 
 
 def expression(n: int, poison: bool = False) -> str:
-    arms = "(a (nelisp--debug-switch 19)) " if poison else ""
+    setup = "(a (nelisp--debug-switch 19)) " if poison else ""
     return (
-        f"(let* ({arms}(d (nelisp--debug-switch 24)) "
-        f"(g (nelisp--debug-switch 5)) (i 0)) "
+        f"(let* ({setup}(d (nelisp--debug-switch 24)) (i 0)) "
         f"(while (< i {n}) (setq i (1+ i))) "
         "(list i (nelisp--debug-switch 0)))"
     )

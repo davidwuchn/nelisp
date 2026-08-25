@@ -3014,10 +3014,11 @@ standalone-parallel-compile-test:
 standalone-chunk-growth-test:
 	@EMACS="$(EMACS)" ./tools/chunk-growth-test.sh
 
-# Doc 152 Stage 4c/4d: the armed mid-form collector must return wholly-free
-# growth chunks to Linux and reach a steady RSS plateau, while the checked
-# poison-on-free run remains sound.  The implementation under test is pure
-# Elisp AOT DSL; Python is only the host wait4(2)/ru_maxrss measurement driver.
+# Doc 152 Stage 4c/4d/5: the default-on mid-form collector must return wholly-
+# free growth chunks to Linux and reach a steady RSS plateau without an
+# explicit arm, while the checked poison-on-free run remains sound.  The
+# implementation under test is pure Elisp AOT DSL; Python is only the host
+# wait4(2)/ru_maxrss measurement driver.
 .PHONY: standalone-midform-gc-bounded
 standalone-midform-gc-bounded: standalone-reader
 	@NELISP_STANDALONE_TARGET=$(STANDALONE_GATE_TARGET) $(EMACS) --batch -Q -L lisp -L src -L scripts -l nelisp-standalone-build \

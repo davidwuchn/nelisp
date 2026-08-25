@@ -131,8 +131,9 @@
     ;; COMPLETE iteration, status==0) -- the one point where per-iteration scratch
     ;; (arg-list cons / materialising-accessor box / test+body intermediates) is
     ;; provably dead, with only env / out / recorded-roots / rootstack holding
-    ;; live values.  `nl_gc_midform_collect' is gated (enable + alloc-debt, default OFF)
-    ;; and reads its root-set from nl_gc_loop_ctx, so this takes no arguments.
+    ;; live values.  `nl_gc_midform_collect' is gated (enable + alloc-debt;
+    ;; reader boot enables it after freezing the boot watermark) and reads its
+    ;; root-set from nl_gc_loop_ctx, so this takes no arguments.
     ;; arity 4 (even -> rsp 16-aligned at the call site), exactly one extern-call.
     (defun nl_sf_while_midform_collect (_a _b _c _d)
       (extern-call nl_gc_midform_collect))

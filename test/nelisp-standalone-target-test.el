@@ -396,6 +396,37 @@ non-local-exit behaviour are covered by the standalone reader smoke."
     (should (string-suffix-p "target/nelisp.exe"
                              (nelisp-standalone--output-path t)))))
 
+(ert-deftest nelisp-standalone-target-midform-gc-default-boot-state ()
+  "Doc 152 Stage 5 arms mid-form GC only after the boot watermark is valid."
+  (let* ((forms (nelisp-standalone--reader-driver-source))
+         (driver (cl-find-if (lambda (form)
+                               (and (consp form)
+                                    (eq (car form) 'defun)
+                                    (eq (cadr form) 'driver)))
+                             forms))
+         (driver-let (nth 3 driver))
+         (driver-seq (nth 2 driver-let))
+         (body (cdr driver-seq))
+         (watermark
+          '(ptr-write-u64 268435664 0
+                          (+ 268435456 (ptr-read-u64 268435456 0))))
+         (watermark-pos (cl-position watermark body :test #'equal)))
+    (should driver)
+    (should (eq (car driver-let) 'let*))
+    (should (eq (car driver-seq) 'seq))
+    (should watermark-pos)
+    ;; These must remain adjacent and after the watermark: enabling earlier
+    ;; permits a while backedge to collect boot objects before the permanent
+    ;; generation is frozen.  The trigger reads the live reserved-byte counter;
+    ;; a zero BSS trigger would otherwise collect on every backedge.
+    (should (equal (nth (+ watermark-pos 1) body)
+                   '(ptr-write-u64 (data-addr nl_gc_loop_ctx) 8 1)))
+    (should (equal (nth (+ watermark-pos 2) body)
+                   '(ptr-write-u64 (data-addr nl_gc_loop_ctx) 40
+                                   (+ (ptr-read-u64 268436184 0) 16777216))))
+    (should (equal (nth (+ watermark-pos 3) body)
+                   '(ptr-write-u64 (data-addr nl_gc_loop_ctx) 32 0)))))
+
 (ert-deftest nelisp-standalone-target-reader-cli-uses-long-options ()
   "The standalone reader exposes Lisp-like no-args REPL plus long options."
   (let* ((forms (nelisp-standalone--reader-driver-source))
@@ -1258,6 +1289,27 @@ scratch chunks have their cursor reset."
                              nelisp-standalone--gc-source))
       (should (tree-member-p '(setq chunk (ptr-read-u64 (+ chunk 48) 0))
                              nelisp-standalone--gc-source))
+      ;; Doc 152 Stage 5 made tag-9 reader char tables reachable by mid-form
+      ;; collection.  Pin the complete owned-edge walk: two inline Sexps,
+      ;; 40-byte entry rows, the parent box, 32-byte extra slots, and the
+      ;; analogous raw data buffer owned by tag-10 bool vectors.
+      (should (tree-member-p
+               '(nl_gc_mark_char_table_box (ptr-read-u64 sp 8))
+               nelisp-standalone--gc-source))
+      (should (tree-member-p '(nl_gc_mark_slot (+ box 32))
+                             nelisp-standalone--gc-source))
+      (should (tree-member-p
+               '(nl_gc_mark_char_table_slots entries 0 entries_len 40 8)
+               nelisp-standalone--gc-source))
+      (should (tree-member-p
+               '(if (= parent 0) 0 (nl_gc_mark_char_table_box parent))
+               nelisp-standalone--gc-source))
+      (should (tree-member-p
+               '(nl_gc_mark_char_table_slots extra 0 extra_len 32 0)
+               nelisp-standalone--gc-source))
+      (should (tree-member-p
+               '(nl_gc_mark_bool_vector_box (ptr-read-u64 sp 8))
+               nelisp-standalone--gc-source))
       (should-not
        (tree-member-p
         '(defun nl_gc_sweep

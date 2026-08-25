@@ -2110,13 +2110,21 @@ arm64 Linux has no legacy x86 numbering)."
 ;;   Str/Symbol (tag 5/4): INLINE String in the Sexp (cap@sp+8, ptr@sp+16,
 ;;                   len@sp+24); ptr -> separate char buffer (no Sexp kids).
 ;;   MutStr (tag 6): sp+8 NlStr* box (cap@+0,ptr@+8,len@+16); ptr -> buf.
+;;   CharTable (tag 9): box+0 subtype Sexp, box+32 default Sexp,
+;;                   entries {ptr@+64,cap@+72,len@+80} with 40-byte
+;;                   {i64 key,32-byte Sexp} rows, parent box ptr@+88,
+;;                   extra {ptr@+96,cap@+104,len@+112} of 32-byte Sexps,
+;;                   rc@+120.
+;;   BoolVector (tag 10): box+8 data_ptr, box+16 len, box+24 rc;
+;;                   data_ptr -> raw byte buffer (no Sexp kids).
 ;;   Bignum (tag 13, Doc 190 Phase A): sign@sp+8 (0/1), limb-ptr@sp+16,
 ;;                   limb-count@sp+24 -- inline pointer+len, same shape as
 ;;                   Str above (no boxed refcounted structure); limb-ptr ->
 ;;                   a raw u32-limb buffer (no Sexp children).
-;; CharTable(9)/BoolVector(10) do not occur in the reader graph (bool-vector
-;; is a plain Vector in the stdlib); a box of those tags is marked but its
-;; children are not walked — documented limitation, gated by the test suite.
+;; Doc 152 Stage 5 made the collector default-on and exposed the old claim that
+;; CharTable never occurs as false: the reader's own char-table command smoke
+;; keeps tag-9 values in the global mirror.  Their owned child blocks therefore
+;; have to be enumerated just like every other live box.
 (defconst nelisp-standalone--gc-source
   '(seq
     ;; Chunk-aware membership.  During Doc 140 Stage 3 only chunk 0 is active,
@@ -2312,6 +2320,37 @@ arm64 Linux has no legacy x86 numbering)."
                            (nl_seq2 (setq sp dw) (setq go 1))
                          (nl_gc_mark_slot dw)))))))))) 
          0)))
+    ;; Doc 152 Stage 5: walk LEN inline 32-byte Sexp slots held in a raw
+    ;; char-table buffer.  Entries use STRIDE=40/OFF=8 ({i64 key,Sexp});
+    ;; extras use STRIDE=32/OFF=0.  The buffer membership guard precedes every
+    ;; dereference, matching `nl_gc_mark_vec_slots''s defensive contract.
+    (defun nl_gc_mark_char_table_slots (base i len stride off)
+      (if (= (nl_gc_in_arena base) 0) 0
+        (let ((k i))
+          (while (< k len)
+            (nl_seq2 (nl_gc_mark_slot (+ base (+ off (* k stride))))
+                     (setq k (+ k 1))))
+          0)))
+    ;; Mark a tag-9 box and every owned edge.  `nl_gc_mark_block' is the cycle
+    ;; guard for parent/default graphs, so a parent cycle terminates safely.
+    (defun nl_gc_mark_char_table_box (box)
+      (if (= (nl_gc_mark_block box) 0) 0
+        (let* ((entries (ptr-read-u64 (+ box 64) 0))
+               (entries_len (ptr-read-u64 (+ box 80) 0))
+               (parent (ptr-read-u64 (+ box 88) 0))
+               (extra (ptr-read-u64 (+ box 96) 0))
+               (extra_len (ptr-read-u64 (+ box 112) 0)))
+          (seq
+           (nl_gc_mark_slot box)
+           (nl_gc_mark_slot (+ box 32))
+           (nl_gc_mark_buf entries)
+           (nl_gc_mark_char_table_slots entries 0 entries_len 40 8)
+           (if (= parent 0) 0 (nl_gc_mark_char_table_box parent))
+           (nl_gc_mark_buf extra)
+           (nl_gc_mark_char_table_slots extra 0 extra_len 32 0)))))
+    (defun nl_gc_mark_bool_vector_box (box)
+      (if (= (nl_gc_mark_block box) 0) 0
+        (nl_gc_mark_buf (ptr-read-u64 (+ box 8) 0))))
     ;; Mark one Sexp slot at SP (32 bytes).  Pure recursion per type.
     (defun nl_gc_mark_slot (sp)
       (let ((tag (ptr-read-u8 sp 0)))
@@ -2358,9 +2397,8 @@ arm64 Linux has no legacy x86 numbering)."
                       ;; marked the SAME way: mark the limb buffer block,
                       ;; no recursion (there is nothing to recurse into).
                       (if (= tag 13) (nl_gc_mark_buf (ptr-read-u64 sp 16))
-                      ;; tag 9/10 boxed-no-walk (do not occur); else inline atom.
-                      (if (= tag 9) (nl_seq2 (nl_gc_mark_block (ptr-read-u64 sp 8)) 0)
-                        (if (= tag 10) (nl_seq2 (nl_gc_mark_block (ptr-read-u64 sp 8)) 0)
+                      (if (= tag 9) (nl_gc_mark_char_table_box (ptr-read-u64 sp 8))
+                        (if (= tag 10) (nl_gc_mark_bool_vector_box (ptr-read-u64 sp 8))
                           0))))))))))))
     ;; Free one dead block (header at HDR): set FREE sentinel, link the
     ;; object (hdr+16) onto the free-list head.  Returns 0.  Isolated into
@@ -3717,9 +3755,10 @@ arm64 Linux has no legacy x86 numbering)."
            (nl_seq2
             (nl_gc_collect_recorded_mark_sweep mode)
             (ptr-write-u64 (data-addr nl_gc_loop_ctx) 24 0))))))
-    ;; Gated mid-form collect (called from nl_sf_while's backedge).  enable
-    ;; (ctx+8) defaults OFF -> a single cheap branch + return, so non-test runs are
-    ;; unchanged.  Alloc-debt gate: fire when currently reserved chunk bytes
+    ;; Gated mid-form collect (called from nl_sf_while's backedge).  BSS leaves
+    ;; enable (ctx+8) OFF during boot; the reader driver turns it ON immediately
+    ;; after freezing the boot watermark.  Alloc-debt gate: fire when currently
+    ;; reserved chunk bytes
     ;; (268436184 -- also used by boundary GC; chunk-0's bump cursor caps at
     ;; the first chunk and is useless here) crosses ctx+40.  Stage 4c subtracts
     ;; successful unmaps before this helper re-arms at reserved+16 MiB.  Since
@@ -5181,8 +5220,11 @@ leave symbols unresolved at link time."
             (if (= (wf_argval args 0) 3) (nl_gc_ctx_push 0 0 0 0 0 0 0)
               (if (= (wf_argval args 0) 4) (nl_gc_ctx_pop)
                 ;; Doc 152 §11.41 Stage 4b step 2: arm / disarm the mid-form
-                ;; collect.  5 = arm (enable=1, next-trigger = total + 16 MiB,
-                ;; reset fired-count); 6 = disarm (enable=0).  Default OFF.
+                ;; collect.  5 = re-arm (enable=1, next-trigger = total + 16 MiB,
+                ;; reset fired-count); 6 = disarm (enable=0).  The reader boot
+                ;; path installs the same armed state by default after its
+                ;; watermark is valid; these switches remain the runtime
+                ;; re-arm and escape-hatch controls.
                 (if (= (wf_argval args 0) 5)
                     (seq (ptr-write-u64 (data-addr nl_gc_loop_ctx) 8 1)
                          (ptr-write-u64 (data-addr nl_gc_loop_ctx) 40
@@ -20824,6 +20866,17 @@ correctly."
         ;; need to enumerate every boot-internal raw-pointer edge precisely.
         ;; Per-form eval garbage (allocated ABOVE the line) is fully collected.
         (ptr-write-u64 268435664 0 (+ 268435456 (ptr-read-u64 268435456 0)))
+        ;; Doc 152 Stage 5: mid-form collection is ON by default, but only
+        ;; after the permanent-generation watermark above has made collection
+        ;; sound.  `nl_arena_init' seeded chunk-bytes-reserved@268436184 and
+        ;; every boot-time chunk allocation maintained it, so it is meaningful
+        ;; here.  Match `(nelisp--debug-switch 5)' exactly: enable, defer the
+        ;; first collection until another 16 MiB is reserved, and start the
+        ;; fired counter at zero.  Switch 6 remains the runtime escape hatch.
+        (ptr-write-u64 (data-addr nl_gc_loop_ctx) 8 1)
+        (ptr-write-u64 (data-addr nl_gc_loop_ctx) 40
+                       (+ (ptr-read-u64 268436184 0) 16777216))
+        (ptr-write-u64 (data-addr nl_gc_loop_ctx) 32 0)
         ;; cold path: GC is now ENABLED over the cold-loaded image (no override
         ;; here, so base+160 = 0 from `nl_arena_init').  This is sound because
         ;; relocation is COMPLETE (nl_fa_slot mirrors nl_gc_mark_slot exactly, so
@@ -24332,11 +24385,15 @@ Exits 0/1."
 (defun nelisp-standalone--reader-bounded-backtrace-smoke ()
   "Doc 180 Phase 2 item 3: against-the-bug proof for the bounded backtrace.
 
-Today (frame stack dormant, the default): an uncaught error prints only
-Phase 1's location line -- no trace of the call chain that led to it.
-After (frame stack armed via `(nelisp--debug-switch 22)', the opt-in,
-collector-free arm added by Phase 2 item 2): the same error additionally
-prints a bounded backtrace naming the call chain, innermost first.
+Control (mid-form collector explicitly disarmed via
+`(nelisp--debug-switch 6)'): an uncaught error prints only Phase 1's
+location line -- no trace of the call chain that led to it.  Armed
+(`(nelisp--debug-switch 6)' followed by `(nelisp--debug-switch 22)', the
+independent collector-free frame arm added by Phase 2 item 2): the same
+error additionally prints a bounded backtrace naming the call chain,
+innermost first.  Stage 5 made ctx+8 default-on, and ctx+8 intentionally
+also arms frame recording, so an untouched default process is no longer a
+valid dormant control.
 
 The fixture is a known 3-level chain (`level-a' -> `level-b' -> `level-c'
 -> `(error ...)'), so the DoD's \"verify frame names against a known call
@@ -24353,14 +24410,16 @@ pair, not just a positive assertion."
                "(defun nelisp-doc180-level-b () (nelisp-doc180-level-c))\n"
                "(defun nelisp-doc180-level-c () (error \"boom\"))\n"
                "(nelisp-doc180-level-a)\n"))
+         (disarm-line "(nelisp--debug-switch 6)\n")
          (arm-line "(nelisp--debug-switch 22)\n")
          (dormant-file (make-temp-file "nelisp-bt-dormant-" nil ".el"))
          (armed-file (make-temp-file "nelisp-bt-armed-" nil ".el")))
     (unwind-protect
         (progn
-          (with-temp-file dormant-file (insert src))
-          (with-temp-file armed-file (insert arm-line) (insert src))
-          ;; Dormant: no backtrace text at all -- today's behavior.
+          (with-temp-file dormant-file (insert disarm-line) (insert src))
+          (with-temp-file armed-file
+            (insert disarm-line) (insert arm-line) (insert src))
+          ;; Explicitly dormant: no backtrace text at all.
           (let* ((stderr-file (make-temp-file "nelisp-bt-dormant-stderr-"))
                  dormant-err)
             (unwind-protect

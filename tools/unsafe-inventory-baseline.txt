@@ -212,7 +212,9 @@
 # nl_bi_strptr/nl_bi_strlen, bf_eq2/bf_eq/bf_marker_vec_is) is new
 # raw-memory-inside-a-native-unit source, same shape as every sibling
 # generator already counted here -- no new KIND of unsafe call.
-unsafe-call 632
+# 632 -> 636 on 2026-08-26 (Doc 152 Stage 5): the four tag-9/tag-10
+# collector edge reads itemised with the per-file pin below.
+unsafe-call 636
 
 # `pinned-kernel-call FILE COUNT' pins the per-file unquoted `unsafe-call'
 # count behind `total' above -- the three kernel files that actually carry
@@ -246,4 +248,9 @@ pinned-kernel-call scripts/nelisp-flat-arena-probe.el 6
 # `unsafe-inventory' on the fully merged tree.
 # integration/wave6 full-battery run (2026-08-24): 587 -> 608, +21,
 # same reason as the `unsafe-call' total above.
-pinned-kernel-call scripts/nelisp-standalone-build.el 608
+# 608 -> 612 on 2026-08-26 (Doc 152 Stage 5): four raw reads in the
+# mid-form collector's tag-9/tag-10 child walkers.  Char tables now mark the
+# entries pointer, parent pointer, and extra-slots pointer; bool vectors mark
+# their raw data pointer.  These are the exact native heap edges needed before
+# enabling mid-form collection at boot, not a new kind of unsafe operation.
+pinned-kernel-call scripts/nelisp-standalone-build.el 612

@@ -291,13 +291,15 @@ standalone-reader-frame-stack-pop-desync-smoke|scripts/nelisp-standalone-build.e
 # position (the smoke's own ordered-position check); GREEN with it
 # removed.
 standalone-reader-bounded-backtrace-smoke|scripts/nelisp-standalone-build.el|s/(ptr-write-u64 (+ (data-addr nl_bt_snapshot) (+ 16 (\* i 8))) 0/(ptr-write-u64 (+ (data-addr nl_bt_snapshot) (+ 16 (* (- count (+ i 1)) 8))) 0/|the bounded backtrace prints outermost-first instead of innermost-first (the capture write index is reversed)
-# standalone-midform-gc-bounded: Doc 152 Stage 4c's against-the-bug row.
+# standalone-midform-gc-bounded: Doc 152 Stage 4c/Stage 5's against-the-bug row.
 # Disabling the Linux-only capability leaves ordinary sweep sound but restores
 # the measured ~262 B/iteration RSS growth; the 500k->1M plateau and positive
-# reclaimed-chunk assertions must both go red.  The mutation harness rebuilds
-# the injected and restored binaries because this row changes generated native
-# code, not the host-side checker.
-standalone-midform-gc-bounded|scripts/nelisp-standalone-build.el|s/(defun nl_os_empty_chunk_reclaim_p () 1)/(defun nl_os_empty_chunk_reclaim_p () 0)/|Linux sweep stops releasing proven-empty growth chunks, restoring linear armed-loop RSS growth
+# reclaimed-chunk assertions must both go red.  Stage 5 removed the gate's
+# explicit debug-switch arm, so this row now reaches reclamation through the
+# production default boot state.  The mutation harness rebuilds the injected
+# and restored binaries because this row changes generated native code, not
+# the host-side checker.
+standalone-midform-gc-bounded|scripts/nelisp-standalone-build.el|s/(defun nl_os_empty_chunk_reclaim_p () 1)/(defun nl_os_empty_chunk_reclaim_p () 0)/|Linux sweep stops releasing proven-empty growth chunks, restoring linear default-loop RSS growth
 # standalone-reader-socket-smoke: added 2026-08-24 (socket primitives,
 # Doc 184 follow-on, feat/socket-primitives-p1).  The injection changes
 # accept4's raw syscall number from 288 (the real Linux x86_64 number)
