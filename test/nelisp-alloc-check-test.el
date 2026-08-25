@@ -239,7 +239,10 @@ renamed, and still handles enable (19) / disable (20) / site id (21)."
 ;;; BSS slot block --------------------------------------------------------
 
 (ert-deftest nelisp-alloc-check-bss-slot-declared ()
-  "`nl_alloc_check' is a bss global and the unit reserves its 96 bytes."
+  "`nl_alloc_check' is a bss global and the unit reserves its 96 bytes.
+The 4194304 below is the root-stack region size (Doc 152 Stage 3 grew it
+1 MiB -> 4 MiB); every arena-base bss symbol after the region moves with it,
+so this expectation is written against that constant rather than a literal."
   (let* ((unit (nelisp-standalone--arena-base-slot-unit))
          (sections (plist-get unit :sections))
          (bss-size (cdr (assq 'bss sections)))
@@ -248,9 +251,9 @@ renamed, and still handles enable (19) / disable (20) / site id (21)."
                           (plist-get unit :symbols))))
     (should sym)
     (should (eq (plist-get sym :section) 'bss))
-    (should (= (plist-get sym :value) (+ 57616 1048576)))
+    (should (= (plist-get sym :value) (+ 57616 4194304)))
     ;; The block's 96 bytes fit inside the unit's bss reservation.
-    (should (>= bss-size (+ 57616 1048576 96)))
+    (should (>= bss-size (+ 57616 4194304 96)))
     ;; No overlap with any other declared bss symbol's start against
     ;; `nl_alloc_check''s own 96-byte span.  Doc 180 Phase 2 item 3
     ;; (2026-08-23) appended `nl_bt_snapshot' right AFTER `nl_alloc_check'
@@ -259,8 +262,8 @@ renamed, and still handles enable (19) / disable (20) / site id (21)."
     ;; is, and holds for a symbol on either side.
     (dolist (other (plist-get unit :symbols))
       (unless (equal (plist-get other :name) "nl_alloc_check")
-        (should (or (< (plist-get other :value) (+ 57616 1048576))
-                    (>= (plist-get other :value) (+ 57616 1048576 96))))))))
+        (should (or (< (plist-get other :value) (+ 57616 4194304))
+                    (>= (plist-get other :value) (+ 57616 4194304 96))))))))
 
 ;;; Windows boot env probe ------------------------------------------------
 
