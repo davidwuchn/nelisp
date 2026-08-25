@@ -11100,7 +11100,19 @@ Wave-2 (C) appends bf_ash (shl/sar compose) + bf_str_lt (byte-lexicographic).")
     ;; from a wrong assumption about what it held.
     ((:lit "intern")      . (let* ((a (wf_arg_ptr args 0)) (tg (ptr-read-u64 a 0)))
                               (if (if (= tg 5) 1 (if (= tg 6) 1 0))
-                                  (seq (bf_intern a out) 0)
+                                  ;; An existing intern is a lookup, not a
+                                  ;; mutation.  Only the miss that would insert
+                                  ;; into the shared intern table is refused.
+                                  (if (= (nl_intern_lookup
+                                          (bf_str_ptr a) (bf_str_len a) out)
+                                         0)
+                                      (if (= (extern-call
+                                              nl_thread_mirror_mutation_guard
+                                              (+ env 0) a)
+                                             1)
+                                          1
+                                        (seq (bf_intern a out) 0))
+                                    0)
                                 (bf_wrong_type_stringp a))))
     ((:lit "make-symbol") . (seq (bf_make_symbol (wf_arg_ptr args 0) out) 0))
     ;; nelisp--intern-lookup: probe-only counterpart of `intern' (Doc 163
@@ -13550,7 +13562,11 @@ from the patched combiner-cons (see `nelisp-standalone--patch-combiner-cons').")
              (unbound-ptr (+ env 64)))
         (if (and (or (= (sexp-tag alias-sym-ptr) 4) (= (sexp-tag alias-sym-ptr) 5))
                  (or (= (sexp-tag base-sym-ptr) 4) (= (sexp-tag base-sym-ptr) 5)))
-            (let* ((base-entry-hit
+            (if (= (extern-call nl_thread_mirror_mutation_guard
+                                mirror-ptr alias-sym-ptr)
+                   1)
+                1
+              (let* ((base-entry-hit
                     (extern-call nelisp_mirror_lookup_entry mirror-ptr base-sym-ptr))
                    (scratch (alloc-bytes 32 8)))
               (let* ((base-entry
@@ -13598,7 +13614,7 @@ from the patched combiner-cons (see `nelisp-standalone--patch-combiner-cons').")
                    (extern-call nelisp_mirror_bucket_prepend
                                 mirror-ptr alias-sym-ptr base-entry scratch)
                    (nl_sexp_clone_into base-sym-ptr out)
-                   0))))
+                   0)))))
           1)))
     (defun nl_sf_defvaralias (args env out _pad)
       ;; (defvaralias NEW-ALIAS-FORM BASE-VARIABLE-FORM [DOCSTRING-FORM])
@@ -18991,7 +19007,9 @@ gets no native definitions and is gated by
           (seq
            (ptr-write-u64
             result 0
-            (if (= rc 0)
+            (if (if (= rc 0)
+                    (= (ptr-read-u64 268435472 0) 0)
+                  0)
                 (if (= (ptr-read-u64 out 0) 2)
                     (ptr-read-u64 out 8)
                   (- 0 1002))
@@ -21297,7 +21315,17 @@ correctly."
     (defun nelisp_eval_call_with_err (form env out err_out)
       (let* ((rc (nelisp_eval_call form env out)))
         (if (= rc 0)
-            (nl_cce_clear err_out)
+            ;; A few low-level mirror APIs historically normalise their
+            ;; mutation helper's return value to success.  The physical
+            ;; mirror guard still stashes the signal and performs no write;
+            ;; recover that signal at the worker's catch boundary so it stays
+            ;; catchable instead of becoming a stale flag.
+            (if (= (ptr-read-u64 268435472 0) 1)
+                (if (= (nl_thread_registry_find env) 0)
+                    (nl_cce_clear err_out)
+                  (seq (nelisp_cons_construct 268435480 268435512 err_out)
+                       1))
+              (nl_cce_clear err_out))
           (if (= (ptr-read-u64 268435472 0) 1)
               (seq (nelisp_cons_construct 268435480 268435512 err_out)
                    1)
@@ -21585,84 +21613,73 @@ This swaps `nl_bf_bind_rest' for the rc/lifetime-safe version and makes
          ;; synthesised into `fset', so both were assigning under a key that
          ;; is not a symbol and answering the definition.  Checking here
          ;; covers both -- and this is the copy that ships: the lisp/ source
-         ;; of `nl_apply_do_fset' is REPLACED by this defconst at build time,
-         ;; so an edit there would have been discarded (the same shape as the
-         ;; sf-cc patch).
-         ;; nil and t ARE symbols -- they carry their own tags rather than
-         ;; the Symbol one, and rejecting them made (defalias t F) a type
-         ;; error about t where Emacs simply defines it.
-         ;; Setting nil's function cell to NIL changes nothing, and Emacs
-         ;; lets that through -- only a real definition is `setting-constant'.
+         ;; of `nl_apply_do_fset' is REPLACED by this defconst at build time.
          (if (if (= (ptr-read-u64 sym_ptr 0) 0)
                  (if (= (ptr-read-u64 def_ptr 0) 0) 0 1)
                0)
              (bf_setting_constant sym_ptr)
-         (if (if (= (ptr-read-u64 sym_ptr 0) 4) 1
-               (if (= (ptr-read-u64 sym_ptr 0) 1) 1
-                 (if (= (ptr-read-u64 sym_ptr 0) 0) 1 0)))
-         (if (= def_ptr 0) (nl_apply_stash_wta env args_list_ptr)
-           ;; A NIL definition is Emacs's *unbound* state, not a stored
-           ;; value: `fmakunbound' is literally `(fset SYM nil)', and there
-           ;; `(fboundp SYM)' is nil and a call names SYM, not the cell.
-           ;; Route it to `nelisp_mirror_set_function' -- the hit-only
-           ;; variant.  Never inserting matters twice over: an unbound
-           ;; symbol has no entry to begin with (Emacs leaves it that way),
-           ;; and inserting an entry whose function slot is an immediate
-           ;; corrupts the mirror -- measured: six such inserts destroy two
-           ;; to three UNRELATED global bindings, and more of them segfault
-           ;; the process.  See handoff/nelisp_mirror_immediate_insert_corruption.md.
-           (if (= (ptr-read-u64 def_ptr 0) 0)
-               (let* ((mirror_ptr (+ env 0)) (unbound_ptr (+ env 64))
-                      (probe_slot (alloc-bytes 32 8)))
-                 (seq
-                  (if (= (nelisp_env_lookup_function mirror_ptr unbound_ptr sym_ptr probe_slot) 0)
-                      (let* ((resolved_slot (alloc-bytes 32 8))
-                             (scratch_slot (alloc-bytes 32 8)))
-                        (seq (nl_sexp_clone_into def_ptr resolved_slot)
-                             (nl_apply_build_fn_scratch unbound_ptr resolved_slot scratch_slot)
-                             (nelisp_mirror_set_function_or_insert mirror_ptr sym_ptr scratch_slot 0)))
-                    0)
-                  (nl_sexp_clone_into def_ptr out)
-                  0))
-           (if (if (= (ptr-read-u64 def_ptr 0) 4)
-                   (if (= (ptr-read-u64 sym_ptr 0) 4)
-                       (let* ((r (alloc-bytes 32 8)))
-                         (seq (nelisp_eq_symbol sym_ptr def_ptr r)
-                              (if (= (ptr-read-u64 r 0) 1) 1 0)))
-                     0)
-                 0)
-               (bf_cyclic_function sym_ptr)
-           (let* ((mirror_ptr (+ env 0)) (unbound_ptr (+ env 64))
-                  (def_tag (ptr-read-u64 def_ptr 0)))
-             (let* ((resolved_slot (alloc-bytes 32 8)))
-               (let* ((resolve_rc
-                       (if (= def_tag 4)
-                           (nelisp_env_lookup_function mirror_ptr unbound_ptr def_ptr resolved_slot)
-                         (seq (nl_sexp_clone_into def_ptr resolved_slot) 0))))
-                 (if (= resolve_rc 0)
-                     (let* ((scratch_slot (alloc-bytes 32 8)))
-                       (seq
-                        (nl_apply_build_fn_scratch unbound_ptr resolved_slot scratch_slot)
-                        (nelisp_mirror_set_function_or_insert mirror_ptr sym_ptr scratch_slot 0)
-                        (nl_sexp_clone_into def_ptr out)
-                        0))
-                   ;; RESOLVE_RC != 0 here only when DEF_PTR is a Symbol whose
-                   ;; `nelisp_env_lookup_function' lookup missed (the non-symbol
-                   ;; arm above always forces 0) -- i.e. `(fset 'alias 'target)'
-                   ;; where TARGET is not defined YET.  Emacs stores the symbol
-                   ;; and resolves it at call time, so this is not an error at
-                   ;; all: (fset 'zz 'later) then (defun later ...) then (zz)
-                   ;; works there, and signalling here made `defalias' fail on
-                   ;; every forward reference.  Store the symbol; the call-time
-                   ;; arm in `nl_apply_function' follows it.
-                   (let* ((sym_scratch (alloc-bytes 32 8)))
-                     (seq
-                      (nl_sexp_clone_into def_ptr resolved_slot)
-                      (nl_apply_build_fn_scratch unbound_ptr resolved_slot sym_scratch)
-                      (nelisp_mirror_set_function_or_insert mirror_ptr sym_ptr sym_scratch 0)
-                      (nl_sexp_clone_into def_ptr out)
-                      0)))))))))
-           (nl_apply_stash_wrong_symbolp env sym_ptr))))))
+           (if (if (= (ptr-read-u64 sym_ptr 0) 4) 1
+                 (if (= (ptr-read-u64 sym_ptr 0) 1) 1
+                   (if (= (ptr-read-u64 sym_ptr 0) 0) 1 0)))
+               (if (= def_ptr 0) (nl_apply_stash_wta env args_list_ptr)
+                   ;; NIL definition = unbound function cell.
+                   (if (= (ptr-read-u64 def_ptr 0) 0)
+                       (let* ((mirror_ptr (+ env 0)) (unbound_ptr (+ env 64))
+                              (probe_slot (alloc-bytes 32 8)))
+                         (seq
+                          (if (= (nelisp_env_lookup_function
+                                  mirror_ptr unbound_ptr sym_ptr probe_slot)
+                                 0)
+                              (let* ((resolved_slot (alloc-bytes 32 8))
+                                     (scratch_slot (alloc-bytes 32 8)))
+                                (seq
+                                 (nl_sexp_clone_into def_ptr resolved_slot)
+                                 (nl_apply_build_fn_scratch
+                                  unbound_ptr resolved_slot scratch_slot)
+                                 (nelisp_mirror_set_function_or_insert
+                                  mirror_ptr sym_ptr scratch_slot 0)))
+                            0)
+                          (nl_sexp_clone_into def_ptr out)
+                          0))
+                     (if (if (= (ptr-read-u64 def_ptr 0) 4)
+                             (if (= (ptr-read-u64 sym_ptr 0) 4)
+                                 (let* ((r (alloc-bytes 32 8)))
+                                   (seq (nelisp_eq_symbol sym_ptr def_ptr r)
+                                        (if (= (ptr-read-u64 r 0) 1) 1 0)))
+                               0)
+                           0)
+                         (bf_cyclic_function sym_ptr)
+                       (let* ((mirror_ptr (+ env 0)) (unbound_ptr (+ env 64))
+                              (def_tag (ptr-read-u64 def_ptr 0)))
+                         (let* ((resolved_slot (alloc-bytes 32 8)))
+                           (let* ((resolve_rc
+                                   (if (= def_tag 4)
+                                       (nelisp_env_lookup_function
+                                        mirror_ptr unbound_ptr def_ptr resolved_slot)
+                                     (seq
+                                      (nl_sexp_clone_into def_ptr resolved_slot)
+                                      0))))
+                             (if (= resolve_rc 0)
+                                 (let* ((scratch_slot (alloc-bytes 32 8)))
+                                   (seq
+                                    (nl_apply_build_fn_scratch
+                                     unbound_ptr resolved_slot scratch_slot)
+                                    (nelisp_mirror_set_function_or_insert
+                                     mirror_ptr sym_ptr scratch_slot 0)
+                                    (nl_sexp_clone_into def_ptr out)
+                                    0))
+                               ;; A forward-reference symbol is stored and
+                               ;; resolved at call time.
+                               (let* ((sym_scratch (alloc-bytes 32 8)))
+                                 (seq
+                                  (nl_sexp_clone_into def_ptr resolved_slot)
+                                  (nl_apply_build_fn_scratch
+                                   unbound_ptr resolved_slot sym_scratch)
+                                  (nelisp_mirror_set_function_or_insert
+                                   mirror_ptr sym_ptr sym_scratch 0)
+                                  (nl_sexp_clone_into def_ptr out)
+                                  0)))))))))
+             (nl_apply_stash_wrong_symbolp env sym_ptr))))))
   "Rc-correct, `not'-free replacement for the shipped nl_apply_do_fset.")
 
 ;; `(symbol-function SYM)' (FINDINGS.md recommendation 1(a), same class as

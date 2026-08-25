@@ -33,6 +33,19 @@
 (require 'nelisp-cc-rootstack)
 (require 'nelisp-cc-evalport-combiner-apply)
 (require 'nelisp-cc-sf-unwind-protect)
+(require 'nelisp-cc-env-set-value)
+(require 'nelisp-cc-mirror-lookup-entry)
+(require 'nelisp-cc-mirror-bucket-prepend)
+(require 'nelisp-cc-mirror-set-value)
+(require 'nelisp-cc-mirror-set-function)
+(require 'nelisp-cc-mirror-clear-value)
+(require 'nelisp-cc-mirror-clear-function)
+(require 'nelisp-cc-mirror-set-constant)
+(require 'nelisp-cc-mirror-install-entry)
+(require 'nelisp-cc-mirror-set-value-or-insert)
+(require 'nelisp-cc-mirror-set-function-or-insert)
+(require 'nelisp-cc-mirror-set-constant-or-insert)
+(require 'nelisp-cc-mirror-install-entry-or-insert)
 
 (ert-deftest nelisp-standalone-target-stage3-rootstack-abi-shape ()
   "Doc 152 Stage 3 roots the audited eval/apply GAP slots by handle.
@@ -170,6 +183,133 @@ non-local-exit behaviour are covered by the standalone reader smoke."
       (should-not (tree-symbol-p 'nelisp_eq_symbol bytes)))
     (should (tree-symbol-p 'nl_apply_sym_eq_w
                            nelisp-cc-evalport-combiner-apply--source))))
+
+(ert-deftest nelisp-standalone-target-thread-mirror-mutation-guard-shape ()
+  "Doc 199 workers read the shared mirror but cannot mutate it."
+  (cl-labels
+      ((defun-form
+        (name forms)
+        (cl-find-if (lambda (form)
+                      (and (consp form) (eq (car form) 'defun)
+                           (eq (cadr form) name)))
+                    (if (eq (car-safe forms) 'seq) (cdr forms) forms)))
+       (tree-symbol-p
+        (needle tree)
+        (cond
+         ((eq needle tree) t)
+         ((consp tree)
+          (or (tree-symbol-p needle (car tree))
+              (tree-symbol-p needle (cdr tree))))))
+       (tree-member-p
+        (needle tree)
+        (cond
+         ((equal needle tree) t)
+         ((consp tree)
+          (or (tree-member-p needle (car tree))
+              (tree-member-p needle (cdr tree)))))))
+    ;; Option (a) is sound in both layouts: globals_record is env+0, frames are
+    ;; env+32, and a worker registers the private region itself as its env.
+    (let ((thread-forms (nelisp-standalone--thread-forms)))
+      (should (tree-member-p '(nl_thread_copy_words region penv 0 4)
+                             thread-forms))
+      (should (tree-member-p
+               '(nl_thread_private_frames_init
+                 penv region type_slot backing_slot depth_slot 0)
+               thread-forms))
+      (should (tree-member-p '(record-make type_slot 2 (+ env 32))
+                             thread-forms))
+      (should (tree-member-p '(nl_thread_registry_add region) thread-forms)))
+
+    ;; With no registered worker, the guard is exactly one count load/compare.
+    ;; On a non-zero count it uses mirror-ptr directly as the registry env key.
+    (let ((guard (defun-form 'nl_thread_mirror_mutation_guard
+                             nelisp-cc-rootstack--source))
+          (signal (defun-form 'nl_thread_mirror_mutation_signal_at
+                              nelisp-cc-rootstack--source))
+          (add (defun-form 'nl_thread_registry_add
+                           nelisp-cc-rootstack--source)))
+      (should (tree-member-p
+               '(if (= (ptr-read-u64 (data-addr nl_thread_registry) 0) 0)
+                    0
+                  (nl_thread_mirror_mutation_guard_registered
+                   (nl_thread_registry_find mirror-ptr) name-ptr))
+               guard))
+      (should (tree-member-p '(nl_thread_mirror_condition_init) add))
+      (should (tree-member-p
+               '(extern-call nelisp_cons_construct
+                             name-ptr nil-slot 268435512)
+               signal))
+      (should (tree-member-p '(ptr-write-u64 268435472 0 1) signal))
+      (should (tree-member-p '(extern-call nl_alloc_symbol
+                                           tag-buf 29 268435480)
+                             signal)))
+
+    ;; Every public mirror mutation entry point guards before its hit/miss
+    ;; implementation.  The unpublished alloc-entry constructor is excluded.
+    (dolist (case
+             `((nelisp_mirror_set_value
+                ,nelisp-cc-mirror-set-value--source)
+               (nelisp_mirror_set_function
+                ,nelisp-cc-mirror-set-function--source)
+               (nelisp_mirror_clear_value
+                ,nelisp-cc-mirror-clear-value--source)
+               (nelisp_mirror_clear_function
+                ,nelisp-cc-mirror-clear-function--source)
+               (nelisp_mirror_set_constant
+                ,nelisp-cc-mirror-set-constant--source)
+               (nelisp_mirror_install_entry
+                ,nelisp-cc-mirror-install-entry--source)
+               (nelisp_mirror_bucket_prepend
+                ,nelisp-cc-mirror-bucket-prepend--source)
+               (nelisp_mirror_set_value_or_insert
+                ,nelisp-cc-mirror-set-value-or-insert--source)
+               (nelisp_mirror_set_function_or_insert
+                ,nelisp-cc-mirror-set-function-or-insert--source)
+               (nelisp_mirror_set_constant_or_insert
+                ,nelisp-cc-mirror-set-constant-or-insert--source)
+               (nelisp_mirror_install_entry_or_insert
+                ,nelisp-cc-mirror-install-entry-or-insert--source)))
+      (let ((form (defun-form (car case) (cadr case))))
+        (should form)
+        (should (tree-member-p
+                 '(extern-call nl_thread_mirror_mutation_guard
+                               mirror-ptr sym-ptr)
+                 form))
+        (should (tree-member-p '(- 0 4) form))))
+
+    ;; `_or_insert' miss paths use the already-admitted internal prepend, so
+    ;; the ordinary single-thread path pays only one guard load+compare.
+    (dolist (source (list nelisp-cc-mirror-set-value-or-insert--source
+                          nelisp-cc-mirror-set-function-or-insert--source
+                          nelisp-cc-mirror-set-constant-or-insert--source
+                          nelisp-cc-mirror-install-entry-or-insert--source))
+      (should (tree-symbol-p 'nelisp_mirror_bucket_prepend_unchecked source)))
+
+    ;; setq turns the mirror's -4 refusal into evaluator rc=1.  The reader's
+    ;; condition-case boundary also recovers a stashed worker signal from old
+    ;; low-level wrappers that normalise the mutation return to rc=0; the outer
+    ;; worker publisher likewise refuses to publish such a call as success.
+    (should
+     (tree-member-p
+      '(if (= set-rv (- 0 4)) 1 0)
+      (defun-form 'nelisp_env_setv_mirror_finish
+                  nelisp-cc-env-set-value--source)))
+    (should (tree-member-p '(nl_thread_registry_find env)
+                           nelisp-standalone--reader-errstub-source))
+    (should (tree-member-p '(ptr-read-u64 268435472 0)
+                           (nelisp-standalone--thread-forms)))
+    (should (tree-member-p
+             '(extern-call nl_thread_mirror_mutation_guard
+                           mirror-ptr alias-sym-ptr)
+             nelisp-standalone--sf-defvaralias))
+    (should (tree-member-p
+             '(extern-call nl_thread_mirror_mutation_guard (+ env 0) a)
+             nelisp-standalone--applyfn-bf-arms))
+
+    ;; The read entry point is source-identical in shape: no guard symbol at
+    ;; all.  Only mutation sources above depend on the new guard.
+    (should-not (tree-symbol-p 'nl_thread_mirror_mutation_guard
+                               nelisp-cc-mirror-lookup-entry--source))))
 
 (ert-deftest nelisp-standalone-target-defaults-to-linux-sysv ()
   "The default target remains Linux/SysV for compatibility on every host."

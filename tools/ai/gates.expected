@@ -680,6 +680,14 @@ nelisp-thread-standalone-smoke
 # Mutation-proven by suppressing the unique parallel-active publication; the
 # section-exit assertion then rejects the run deterministically.
 nelisp-thread-allocating-standalone-smoke
+# nelisp-thread-mirror-guard-standalone-smoke: the enforced Doc 199 Tier
+# 3a/3b ceiling.  A registered ID-2 worker calls a global function and reads a
+# global value successfully, then hit-path and miss-path setq attempts must
+# raise the named catchable condition without changing/inserting mirror state.
+# A fresh intern-table insertion is refused and remains absent as well.  The
+# mutation row disables the reached registry-match branch and makes these
+# assertions go red against a freshly rebuilt binary.
+nelisp-thread-mirror-guard-standalone-smoke
 # nelisp-thread-percpu-roots-smoke: Doc 199 Tier 3b's real park-barrier proof.
 # Three registry-ID-2 allocating workers wait in join safepoints while private
 # lexical frames hold live lists of lengths 5, 7, and 11.  Main-thread

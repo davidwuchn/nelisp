@@ -48,6 +48,15 @@
 ;; spins until +24 clears, then decrements +32 before returning to eval.  The
 ;; collector waits for +32 >= the registry count with a bounded spin.  Timeout
 ;; clears the request, increments +40, and MUST NOT collect.
+;;
+;; A registered worker is also forbidden to mutate the shared globals mirror.
+;; Both the main EvalCtx and the private worker EvalCtx put globals_record at
+;; env+0 and frames_record at env+32.  Mirror mutation helpers receive the
+;; ADDRESS of globals_record, so their mirror-ptr is numerically the EvalCtx
+;; address and can be looked up directly in this same registry.  The guard's
+;; count-zero path is deliberately one BSS load + compare; mirror reads never
+;; call it.  A refusal raises `nelisp-worker-mirror-mutation' with the attempted
+;; global name as its sole data element.
 
 ;;; Code:
 
@@ -76,9 +85,26 @@
                         (ptr-read-u64 env 120))
          (ptr-write-u64 (data-addr nl_thread_registry) 0 (+ i 1))
          i)))
+    ;; Intern the refusal condition on the parent before publishing any worker.
+    ;; Otherwise the first refusal would make `nl_alloc_symbol' insert the
+    ;; condition name into the shared intern table from the worker itself.
+    ;; Runtime allocation results are threaded through helper arguments: the
+    ;; cc-unit has no general across-call local other than `status'.
+    (defun nl_thread_mirror_condition_init_at (tag-buf tag-slot)
+      (seq
+       (ptr-write-u64 tag-buf 0 8587643705457665390)
+       (ptr-write-u64 (+ tag-buf 8) 0 7596778115794956911)
+       (ptr-write-u64 (+ tag-buf 16) 0 8391733522635649650)
+       (ptr-write-u64 (+ tag-buf 24) 0 474315584609)
+       (extern-call nl_alloc_symbol tag-buf 29 tag-slot)))
+    (defun nl_thread_mirror_condition_init ()
+      (nl_thread_mirror_condition_init_at
+       (alloc-bytes 32 1) (alloc-bytes 32 8)))
     (defun nl_thread_registry_add (env)
-      (nl_thread_registry_add_at
-       env (ptr-read-u64 (data-addr nl_thread_registry) 0)))
+      (seq
+       (nl_thread_mirror_condition_init)
+       (nl_thread_registry_add_at
+        env (ptr-read-u64 (data-addr nl_thread_registry) 0))))
     (defun nl_thread_registry_clear ()
       (ptr-write-u64 (data-addr nl_thread_registry) 0 0))
     (defun nl_thread_registry_find_from (env i count)
@@ -89,6 +115,37 @@
     (defun nl_thread_registry_find (env)
       (nl_thread_registry_find_from
        env 0 (ptr-read-u64 (data-addr nl_thread_registry) 0)))
+    ;; Catchable mirror-write refusal.  TAG/VAL/flag use the established M6
+    ;; signal stash.  Build VAL as (NAME), so the uncaught diagnostic names the
+    ;; attempted global and a condition-case handler can inspect `(cadr err)'.
+    (defun nl_thread_mirror_mutation_signal_at
+        (name-ptr tag-buf nil-slot _pad)
+      (seq
+       (ptr-write-u64 tag-buf 0 8587643705457665390)
+       (ptr-write-u64 (+ tag-buf 8) 0 7596778115794956911)
+       (ptr-write-u64 (+ tag-buf 16) 0 8391733522635649650)
+       (ptr-write-u64 (+ tag-buf 24) 0 474315584609)
+       (extern-call nl_alloc_symbol tag-buf 29 268435480)
+       (ptr-write-u64 nil-slot 0 0)
+       (ptr-write-u64 (+ nil-slot 8) 0 0)
+       (ptr-write-u64 (+ nil-slot 16) 0 0)
+       (ptr-write-u64 (+ nil-slot 24) 0 0)
+       (extern-call nelisp_cons_construct name-ptr nil-slot 268435512)
+       (ptr-write-u64 268435472 0 1)
+       (atomic-fetch-add 268435544 1)
+       1))
+    (defun nl_thread_mirror_mutation_signal (name-ptr)
+      (nl_thread_mirror_mutation_signal_at
+       name-ptr (alloc-bytes 32 1) (alloc-bytes 32 8) 0))
+    (defun nl_thread_mirror_mutation_guard_registered (entry name-ptr)
+      (if (= entry 0) 0
+        (nl_thread_mirror_mutation_signal name-ptr)))
+    (defun nl_thread_mirror_mutation_guard (mirror-ptr name-ptr)
+      ;; Outside a parallel section count is zero: one load + compare, no scan.
+      (if (= (ptr-read-u64 (data-addr nl_thread_registry) 0) 0)
+          0
+        (nl_thread_mirror_mutation_guard_registered
+         (nl_thread_registry_find mirror-ptr) name-ptr)))
     ;; The AOT DSL has no separate atomic-store operation.  A successful
     ;; SeqCst compare-exchange is the required atomic publication store; the
     ;; fetch-add by zero supplies its SeqCst expected value / marker load.

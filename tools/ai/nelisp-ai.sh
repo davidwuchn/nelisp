@@ -308,6 +308,7 @@ cmd_extras() {
              nl-num-standalone-smoke \
              nelisp-thread-standalone-smoke \
              nelisp-thread-allocating-standalone-smoke \
+             nelisp-thread-mirror-guard-standalone-smoke \
              nelisp-thread-percpu-roots-smoke \
              standalone-reader-buffer-smoke \
              nl-actor-standalone-smoke; do

@@ -20,6 +20,7 @@
         nl-clj-future-standalone-smoke \
         nl-num-standalone-smoke nelisp-thread-standalone-smoke \
         nelisp-thread-allocating-standalone-smoke \
+        nelisp-thread-mirror-guard-standalone-smoke \
         nelisp-thread-percpu-roots-smoke
 
 EMACS ?= emacs
@@ -626,6 +627,25 @@ nelisp-thread-allocating-standalone-smoke: $(if $(wildcard target/nelisp target/
 	  ( ulimit -v 4000000; "$$bin" --load tools/nelisp-thread-allocating-standalone-smoke.el ) \
 	    || { echo "[nelisp-thread-allocating-standalone-smoke] FAIL under ulimit -v 4000000 (attempt $$i)"; exit 1; }; \
 	done
+
+# Doc 199 Tier 3a/3b enforced read-only global-state ceiling.  Registered
+# workers may perform mirror lookups, but mirror/intern-table mutations must
+# signal `nelisp-worker-mirror-mutation' and leave shared state unchanged.
+nelisp-thread-mirror-guard-standalone-smoke: $(if $(wildcard target/nelisp target/nelisp.exe),,standalone-reader)
+	@NELISP_STANDALONE_TARGET=$(STANDALONE_GATE_TARGET) $(EMACS) --batch -Q -L lisp -L src -L scripts -l nelisp-standalone-build \
+	  --eval '(kill-emacs (if (nelisp-standalone--target-runnable-on-host-p) 0 3))' \
+	  >/dev/null 2>&1; \
+	host_rc=$$?; \
+	if [ "$$host_rc" = 3 ]; then \
+	  echo "GATE-SKIP target $(STANDALONE_GATE_TARGET) cannot run on this host"; \
+	  exit 0; \
+	fi; \
+	bin=./target/nelisp; [ -f "$$bin" ] || bin=./target/nelisp.exe; \
+	if [ ! -f "$$bin" ]; then \
+	  echo "GATE-SKIP no nelisp binary in target/ after build attempt"; \
+	  exit 0; \
+	fi; \
+	"$$bin" --load tools/nelisp-thread-mirror-guard-smoke.el
 
 # Doc 199 Tier 3b first step: enumerate all allocating workers' private root
 # reserves while three live-list frames are parked at a parent-controlled

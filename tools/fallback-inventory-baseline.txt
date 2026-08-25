@@ -100,7 +100,11 @@
 # C's two unwind-protect corpus forms each wrap a deliberately-injected
 # test error and discard it after observing cleanup order, plus the
 # presence-sweep generator's end-of-file read-loop terminator).
-silent-fallback        57
+# silent-fallback 57 -> 60 on 2026-08-26 (Doc 199 Tier 3b mirror guard):
+# nl-thread-mirror-guard-smoke.el asserts that a worker's global write is
+# refused, so every such assertion must catch the signalled condition to
+# inspect it.  Each site is pinned individually below.
+silent-fallback        60
 # 41 -> 42 on 2026-08-23: one new site, reviewed and pinned below (the
 # presence-sweep auto-note's defensive shape-extraction for a report-only
 # string, falls back to "?" on a malformed corpus form -- never on a
@@ -384,3 +388,8 @@ pinned-site silent-fallback	nelisp-thread-standalone-smoke.el	defmacro nl-thread
 pinned-site silent-fallback	nelisp-thread-allocating-standalone-smoke.el	defmacro nl-thread-alloc-smoke--should-unsupported	85196b856e10 1
 # 2026-08-25 (Doc 199 Tier 3b): nl-thread-percpu-roots-smoke.el's `nl-thread-roots-smoke--should-unsupported' asserts a call signals `nelisp-unsupported-primitive'; the condition-case inspects the error's car -- an intentional test assertion, same shape as Tier 2 and Tier 3a.
 pinned-site silent-fallback	nelisp-thread-percpu-roots-smoke.el	defmacro nl-thread-roots-smoke--should-unsupported	f7551c4bcafa 1
+# 2026-08-26 (Doc 199 Tier 3b mirror guard): nl-thread-mirror-guard-smoke.el proves that a worker's global write is REFUSED, so each assertion wraps the refused call in a condition-case to inspect the signalled condition -- intentional test assertions, same shape as the Tier 2 / 3a / 3b smokes.
+pinned-site silent-fallback	nelisp-thread-mirror-guard-smoke.el	defmacro nl-thread-mirror-guard--should-unsupported	4abd64a9479e 1
+pinned-site silent-fallback	nelisp-thread-mirror-guard-smoke.el	let	33fdb6550dec 1
+pinned-site silent-fallback	nelisp-thread-mirror-guard-smoke.el	let	0e7205a57114 1
+pinned-site silent-fallback	nelisp-thread-mirror-guard-smoke.el	let	0da415661074 1
