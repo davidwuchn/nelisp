@@ -62,12 +62,43 @@ non-local-exit behaviour are covered by the standalone reader smoke."
     ;; Stage 2's write and mark sides both exist, and the scan applies the
     ;; ordinary tagged-slot marker to every 32-byte entry in [region, top).
     (dolist (name '(nl_root_mark nl_root_reserve nl_root_release
-                    nl_gc_mark_rootstack))
+                    nl_thread_registry_add nl_thread_registry_clear
+                    nl_gc_mark_rootstack nl_gc_mark_thread_roots))
       (should (defun-form name nelisp-cc-rootstack--source)))
     (let ((walk (defun-form 'nl_gc_mark_rootstack_walk
                             nelisp-cc-rootstack--source)))
       (should (tree-member-p '(extern-call nl_gc_mark_slot p) walk))
       (should (tree-symbol-p 'nl_gc_mark_slot walk)))
+
+    ;; The public diagnostic tuple appends the live registry count at index 16.
+    (let ((diag (defun-form 'bf_debug_switch
+                            nelisp-standalone--applyfn-core-helpers)))
+      (should
+       (tree-member-p
+        '(wf_cons_int (ptr-read-u64 (data-addr nl_thread_registry) 0)
+                      nils s16)
+        diag)))
+
+    ;; Doc 199 Tier 3b: the bounded registry stores {env, published-top}
+    ;; entries at +16+i*16, rejects worker 65, and reuses the ordinary 32-byte
+    ;; rootstack walker for each private [env+4096, top) reserve.  Publication
+    ;; is a SeqCst CAS store because the AOT DSL has no separate atomic-store
+    ;; primitive; the marker's fetch-add by zero is its SeqCst atomic load.
+    (let ((entry (defun-form 'nl_thread_registry_entry
+                             nelisp-cc-rootstack--source))
+          (add (defun-form 'nl_thread_registry_add_at
+                           nelisp-cc-rootstack--source))
+          (publish (defun-form 'nl_thread_registry_store_top
+                               nelisp-cc-rootstack--source))
+          (walk-workers (defun-form 'nl_gc_mark_thread_roots_one
+                                    nelisp-cc-rootstack--source)))
+      (should (tree-member-p '(>= i 64) add))
+      (should (tree-member-p
+               '(+ (data-addr nl_thread_registry) (+ 16 (* i 16))) entry))
+      (should (tree-symbol-p 'atomic-compare-exchange publish))
+      (should (tree-member-p
+               '(nl_gc_mark_rootstack_walk (+ env 4096) top)
+               walk-workers)))
 
     ;; 3b/3c/3d: the reserved slot address and saved top are threaded only as
     ;; helper arguments.  No generated helper introduces a runtime let local.
@@ -887,7 +918,8 @@ Windows uses the target-correct `.obj' unit name; linux/macOS keep `.o'."
                                 (cons "nl_fa_tbl_base" (+ 57488 4194304))
                                 (cons "nl_thread_parallel_ctx" (+ 57888 4194304))
                                 (cons "nl_alloc_diag" (+ 57912 4194304))
-                                (cons "nl_gc_reclaim_scratch" (+ 57968 4194304))))
+                                (cons "nl_gc_reclaim_scratch" (+ 57968 4194304))
+                                (cons "nl_thread_registry" (+ 58008 4194304))))
           (let ((sym (cdr (assoc (car expected) by-name))))
             (should sym)
             (should (equal (cdr expected) (plist-get sym :value)))
@@ -896,8 +928,9 @@ Windows uses the target-correct `.obj' unit name; linux/macOS keep `.o'."
         ;; allocator control block appended after `nl_fvcache_*'.  Doc 180
         ;; Phase 2 item 3 (2026-08-23): +176 more bytes for `nl_bt_snapshot'
         ;; (the bounded backtrace capture buffer) appended after that.  Doc 199
-        ;; Tier 3a appends 24 bytes of bounded parallel-section state.
-        (should (equal (+ 57616 4194304 96 176 24 56 40)
+        ;; Tier 3a appends 24 bytes of bounded parallel-section state.  Tier 3b
+        ;; appends the 1040-byte registry (16-byte header + 64*16 entries).
+        (should (equal (+ 57616 4194304 96 176 24 56 40 1040)
                        (cdr (assq 'bss (plist-get u :sections)))))))))
 
 (ert-deftest nelisp-standalone-target-stage8-build-appends-arena-base-slot-unit ()
@@ -1154,7 +1187,19 @@ scratch chunks have their cursor reset."
     (let ((roots (defun-form 'nl_gc_mark_roots
                              nelisp-standalone--gc-source)))
       (should roots)
-      (should (tree-member-p '(nl_gc_mark_recorded_contexts) roots)))))
+      (should (tree-member-p '(nl_gc_mark_recorded_contexts) roots))
+      (should
+       (tree-member-p
+        '(nl_seq2 (nl_gc_mark_rootstack)
+                  (nl_seq2 (nl_gc_mark_thread_roots)
+                           (nl_gc_mark_recorded_contexts)))
+        roots)))
+    ;; Explicit `(garbage-collect)' uses the recorded-roots collector, so it
+    ;; must cover private worker roots too, not only full boundary collection.
+    (let ((recorded (defun-form 'nl_gc_collect_from_recorded_roots
+                                nelisp-standalone--gc-source)))
+      (should recorded)
+      (should (tree-member-p '(nl_gc_mark_thread_roots) recorded)))))
 
 (ert-deftest nelisp-standalone-target-intern-region-is-target-aware ()
   "Symbol-name intern region setup uses each target's allocation surface."
@@ -1416,6 +1461,8 @@ real) native call\"."
       (should (tree-member-p
                '(syscall-direct 9 0 1052672 3 34 (- 0 1) 0) forms))
       (should (tree-member-p '(record-make type_slot 2 (+ env 32)) forms))
+      (should (tree-member-p '(nl_thread_registry_add region) forms))
+      (should (tree-member-p '(nl_thread_registry_clear) forms))
       (should (tree-member-p
                '(defun nl_thread_gc_inhibit_begin ()
                   (ptr-write-u64 (data-addr nl_gc_loop_ctx) 24 1))

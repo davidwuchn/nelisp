@@ -248,6 +248,15 @@ nelisp-thread-allocating-standalone-smoke|scripts/nelisp-standalone-build.el|s/(
 # release guards are defence in depth behind the inhibit gate, and the
 # row above (which disables the inhibit itself) is what actually proves
 # this smoke can detect a collection running under private worker roots.
+# nelisp-thread-percpu-roots-smoke: Doc 199 Tier 3b's registry-enumeration
+# checkpoint.  The injection is deliberately at the standalone observer
+# boundary, so the mutation harness does not need a stale-binary-prone native
+# rebuild: it makes the live diagnostic report zero entries while the smoke
+# has already parked all three workers.  The next executed assertion requires
+# exactly three, making this row necessarily reachable and red.  This targets
+# enumeration itself; unlike the removed Tier 3a release-guard mutation above,
+# it does not aim at a mark/sweep path the still-inhibited gate cannot walk.
+nelisp-thread-percpu-roots-smoke|tools/nelisp-thread-percpu-roots-smoke.el|s/(nth 16 (nelisp--debug-switch 0))/0/|the live registry enumeration reports zero workers while all three allocating workers are parked, so the mandatory count=3 assertion fails
 # standalone-reader-frame-stack-pop-desync-smoke: added 2026-08-23 (Doc 180
 # Phase 2 item 1).  The injection reverts `nelisp_eval_call_recorded_done''s
 # pop back to unconditional -- the exact pre-fix defect -- by deleting the

@@ -19,7 +19,8 @@
         nl-clj-standalone-smoke nl-clj-async-standalone-smoke nl-clj-async-cps-baseline \
         nl-clj-future-standalone-smoke \
         nl-num-standalone-smoke nelisp-thread-standalone-smoke \
-        nelisp-thread-allocating-standalone-smoke
+        nelisp-thread-allocating-standalone-smoke \
+        nelisp-thread-percpu-roots-smoke
 
 EMACS ?= emacs
 
@@ -624,6 +625,31 @@ nelisp-thread-allocating-standalone-smoke: $(if $(wildcard target/nelisp target/
 	for i in 1 2 3 4 5; do \
 	  ( ulimit -v 4000000; "$$bin" --load tools/nelisp-thread-allocating-standalone-smoke.el ) \
 	    || { echo "[nelisp-thread-allocating-standalone-smoke] FAIL under ulimit -v 4000000 (attempt $$i)"; exit 1; }; \
+	done
+
+# Doc 199 Tier 3b first step: enumerate all allocating workers' private root
+# reserves while three live-list frames are parked at a parent-controlled
+# barrier.  Keep Tier 3a's runnable-target guard and memory-pressure repeat:
+# Doc 152 sections 11.43.2-3 showed this defect class can be intermittent and
+# invisible without the 4 GB virtual-memory ceiling.
+nelisp-thread-percpu-roots-smoke: $(if $(wildcard target/nelisp target/nelisp.exe),,standalone-reader)
+	@NELISP_STANDALONE_TARGET=$(STANDALONE_GATE_TARGET) $(EMACS) --batch -Q -L lisp -L src -L scripts -l nelisp-standalone-build \
+	  --eval '(kill-emacs (if (nelisp-standalone--target-runnable-on-host-p) 0 3))' \
+	  >/dev/null 2>&1; \
+	host_rc=$$?; \
+	if [ "$$host_rc" = 3 ]; then \
+	  echo "GATE-SKIP target $(STANDALONE_GATE_TARGET) cannot run on this host"; \
+	  exit 0; \
+	fi; \
+	bin=./target/nelisp; [ -f "$$bin" ] || bin=./target/nelisp.exe; \
+	if [ ! -f "$$bin" ]; then \
+	  echo "GATE-SKIP no nelisp binary in target/ after build attempt"; \
+	  exit 0; \
+	fi; \
+	"$$bin" --load tools/nelisp-thread-percpu-roots-smoke.el && \
+	for i in 1 2 3 4 5; do \
+	  ( ulimit -v 4000000; "$$bin" --load tools/nelisp-thread-percpu-roots-smoke.el ) \
+	    || { echo "[nelisp-thread-percpu-roots-smoke] FAIL under ulimit -v 4000000 (attempt $$i)"; exit 1; }; \
 	done
 
 # Doc 195 §4.6 (channels/go over nelisp-actor).  Same shim/load-by-path

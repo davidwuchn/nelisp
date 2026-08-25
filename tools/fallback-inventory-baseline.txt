@@ -382,3 +382,5 @@ pinned-site ignore-errors	nelisp-standalone-build.el	defun nelisp-standalone--re
 pinned-site silent-fallback	nelisp-thread-standalone-smoke.el	defmacro nl-thread-smoke--should-unsupported	ba2b5f025f0f 1
 # 2026-08-25 (Doc 199 Tier 3a): nl-thread-allocating-standalone-smoke.el's `nl-thread-alloc-smoke--should-unsupported' asserts a call signals `nelisp-unsupported-primitive'; its condition-case catches the error to inspect its car -- an intentional test assertion, same shape as Tier 2's.
 pinned-site silent-fallback	nelisp-thread-allocating-standalone-smoke.el	defmacro nl-thread-alloc-smoke--should-unsupported	85196b856e10 1
+# 2026-08-25 (Doc 199 Tier 3b): nl-thread-percpu-roots-smoke.el's `nl-thread-roots-smoke--should-unsupported' asserts a call signals `nelisp-unsupported-primitive'; the condition-case inspects the error's car -- an intentional test assertion, same shape as Tier 2 and Tier 3a.
+pinned-site silent-fallback	nelisp-thread-percpu-roots-smoke.el	defmacro nl-thread-roots-smoke--should-unsupported	f7551c4bcafa 1

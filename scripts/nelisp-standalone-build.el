@@ -604,7 +604,11 @@ storage — not an arena reservation."
    ;; traversal state used to remove only free-list links into the chunk about
    ;; to be unmapped: prev/current/next/steps/max-steps.  GC's in-progress
    ;; guard makes this single scratch record sufficient.
-   (list (cons 'bss (+ 57616 4194304 96 176 24 56 40)))
+   ;; Doc 199 Tier 3b: +1040 after nl_gc_reclaim_scratch =
+   ;; nl_thread_registry.  +0 worker count, +8 reserved, then 64 fixed 16-byte
+   ;; {private EvalCtx address, atomically-published private root top} entries.
+   ;; BSS zero-fill gives an empty registry on process start.
+   (list (cons 'bss (+ 57616 4194304 96 176 24 56 40 1040)))
    (list (nelisp-link-symbol "nl_arena_base" 0
                              :section 'bss :bind 'global :type 'object)
          (nelisp-link-symbol "nl_rootstack_top" 8
@@ -647,6 +651,9 @@ storage — not an arena reservation."
                              :section 'bss :bind 'global :type 'object)
          (nelisp-link-symbol "nl_gc_reclaim_scratch"
                              (+ 57616 4194304 96 176 24 56)
+                             :section 'bss :bind 'global :type 'object)
+         (nelisp-link-symbol "nl_thread_registry"
+                             (+ 57616 4194304 96 176 24 56 40)
                              :section 'bss :bind 'global :type 'object))
    nil))
 
@@ -2617,10 +2624,10 @@ arm64 Linux has no legacy x86 numbering)."
               (nl_gc_reclaim_empty_chunks chunk next)
             (nl_gc_reclaim_empty_ready prev chunk next base size)))))
     (defun nl_gc_reclaim_empty_chunks (prev chunk)
-      ;; Worker EvalCtx/root reserves are private and deliberately absent from
-      ;; the process-global marker.  Stop before reading another candidate if
-      ;; the shared inhibit flag or Tier 3a's precise worker-live state is set.
-      ;; The OS wrapper repeats both tests at the actual release boundary.
+      ;; Tier 3b makes worker root reserves enumerable, but does not yet remove
+      ;; Tier 3a's reclaim/inhibit policy.  Stop before reading another
+      ;; candidate if the shared inhibit flag or precise worker-live state is
+      ;; set.  The OS wrapper repeats both tests at the release boundary.
       (if (= (ptr-read-u64 (data-addr nl_gc_loop_ctx) 24) 1) 0
         (if (= (ptr-read-u64 (data-addr nl_thread_parallel_ctx) 16) 1) 0
           (if (= chunk 0) 0
@@ -3056,11 +3063,16 @@ arm64 Linux has no legacy x86 numbering)."
                          (nl_seq2 (nl_gc_mark_mirror_buckets (+ ctx 0))
                           (nl_seq2
                            (nl_gc_mark_rootstack) ; mirror / globals + Doc 152 §11.37 Stage 2 dynamic root stack scan
-                           ;; Full form-boundary collections can run inside a
-                           ;; nested `load'.  Keep every still-active outer
-                           ;; driver frame recorded in nl_gc_loop_ctx; the
-                           ;; mid-form collector already uses this same walker.
-                           (nl_gc_mark_recorded_contexts))))
+                           (nl_seq2
+                            ;; Doc 199 Tier 3b: workers are stopped at the
+                            ;; parallel-section barrier, so enumerate every
+                            ;; atomically-published private root reserve.
+                            (nl_gc_mark_thread_roots)
+                            ;; Full form-boundary collections can run inside a
+                            ;; nested `load'.  Keep every still-active outer
+                            ;; driver frame recorded in nl_gc_loop_ctx; the
+                            ;; mid-form collector already uses this same walker.
+                            (nl_gc_mark_recorded_contexts)))))
         (nl_seq2 (nl_gc_mark_slot (+ ctx 32))    ; frame stack
          (nl_seq2 (nl_gc_mark_slot (+ ctx 64))   ; unbound marker
           (nl_seq2 (nl_gc_mark_slot result)      ; current parsed form
@@ -3620,9 +3632,12 @@ arm64 Linux has no legacy x86 numbering)."
     (defun nl_gc_collect_from_recorded_roots (mode)
       (if (= (ptr-read-u64 (data-addr nl_gc_loop_ctx) 24) 1) 0
         (nl_seq2 (ptr-write-u64 (data-addr nl_gc_loop_ctx) 24 1)
-         (nl_seq2 (nl_gc_mark_recorded_contexts)
+          (nl_seq2 (nl_gc_mark_recorded_contexts)
           (nl_seq2 (nl_gc_mark_rootstack)
-           (nl_seq2 (nl_gc_mark_symentry)
+           ;; The explicit `garbage-collect' builtin reaches this collector,
+           ;; so it needs the same private-root coverage as full boundary GC.
+           (nl_seq2 (nl_gc_mark_thread_roots)
+            (nl_seq2 (nl_gc_mark_symentry)
             (nl_seq2 (if (= mode 0) (nl_gc_conserv_maybe) 0)
              ;; perf/macroexpansion-cache: this mid-form collect collector
              ;; is ALWAYS mark+sweep (never compact -- see the comment above
@@ -3633,7 +3648,7 @@ arm64 Linux has no legacy x86 numbering)."
              (nl_seq2 (nl_mxcache_mark_all)
               (nl_seq2 (nl_fvcache_mark_all)
               (nl_seq2 (nl_gc_sweep)
-                       (ptr-write-u64 (data-addr nl_gc_loop_ctx) 24 0)))))))))))
+                       (ptr-write-u64 (data-addr nl_gc_loop_ctx) 24 0))))))))))))
     ;; Gated mid-form collect (called from nl_sf_while's backedge).  enable
     ;; (ctx+8) defaults OFF -> a single cheap branch + return, so non-test runs are
     ;; unchanged.  Alloc-debt gate: fire when currently reserved chunk bytes
@@ -3671,9 +3686,12 @@ arm64 Linux has no legacy x86 numbering)."
       ;; honours the bounded-parallel-section gate; this entry point did not,
       ;; and `nl_gc_collect_form_boundary' reaches it from the driver's three
       ;; form-boundary sites.  A Tier 3a worker keeps its live values in a
-      ;; PRIVATE EvalCtx/root reserve this marker cannot enumerate, so a
-      ;; form-boundary collect landing mid-section would sweep data a worker
-      ;; still holds.  The Tier 3a smoke does not exercise this path (its
+      ;; PRIVATE EvalCtx/root reserve, so a form-boundary collect landing
+      ;; mid-section could previously sweep data a worker still held.  Tier 3b
+      ;; now makes the workers' private root reserves enumerable, but
+      ;; deliberately retains this inhibit until the remaining
+      ;; worker EvalCtx/barrier invariants are gated.  The Tier 3a smoke does
+      ;; not exercise this path (its
       ;; `garbage-collect' goes through the recorded-roots entry, which was
       ;; already gated), so this closes a real hole the smoke cannot show.
       (if (= (ptr-read-u64 (data-addr nl_gc_loop_ctx) 24) 1) 0
@@ -4992,7 +5010,7 @@ leave symbols unresolved at link time."
     ;; (trip-count bad-cur bad-bt bad-want poison-count poison-enable
     ;;  context-depth mid-form-fired-count bind-legacy-force root-depth
     ;;  bucket-hits linear-hits bump-allocs reclaimed-chunks reclaimed-bytes
-    ;;  failed-os-releases).
+    ;;  failed-os-releases registered-workers).
     ;; Doc 170 Stage 2: debug-switch extension codes (19+), split out so
     ;; the historical 18-arm chain stays untouched.  ARG0:
     ;;   19 = enable checked-allocator stamping (guard/site suffix on
@@ -5108,6 +5126,7 @@ leave symbols unresolved at link time."
                                             ;; dispatcher below.
                                             (bf_debug_switch_ext args)))))))))))))))))))
         (let* ((nils (alloc-bytes 32 8))
+               (s16 (alloc-bytes 32 8))
                (s15 (alloc-bytes 32 8)) (s14 (alloc-bytes 32 8))
                (s13 (alloc-bytes 32 8)) (s12 (alloc-bytes 32 8))
                (s11 (alloc-bytes 32 8)) (s10 (alloc-bytes 32 8))
@@ -5116,8 +5135,11 @@ leave symbols unresolved at link time."
           (seq
             (wf_write_nil nils)
             ;; Tail diagnostics: bucket-hit, linear-hit, bump-hit,
-            ;; reclaimed-chunks, reclaimed-bytes, failed OS releases.
-            (wf_cons_int (ptr-read-u64 (data-addr nl_alloc_diag) 48) nils s15)
+            ;; reclaimed-chunks, reclaimed-bytes, failed OS releases, and the
+            ;; Tier-3b registered-worker count at the new final index 16.
+            (wf_cons_int (ptr-read-u64 (data-addr nl_thread_registry) 0)
+                         nils s16)
+            (wf_cons_int (ptr-read-u64 (data-addr nl_alloc_diag) 48) s16 s15)
             (wf_cons_int (ptr-read-u64 (data-addr nl_alloc_diag) 40) s15 s14)
             (wf_cons_int (ptr-read-u64 (data-addr nl_alloc_diag) 32) s14 s13)
             (wf_cons_int (ptr-read-u64 (data-addr nl_alloc_diag) 24) s13 s12)
@@ -14219,14 +14241,14 @@ form_ptr (the whole macro-call FORM, = the cache key) and stores the freshly
 computed expansion into `nl_mxcache_store' before evaluating it.")
 
 (defconst nelisp-standalone--mxcache-eval-inner-cons-rooted
-  '((defun nl_cons_root_finish (root_mark status)
-      (seq (nl_root_release root_mark) status))
+  '((defun nl_cons_root_finish (env root_mark status)
+      (seq (nl_root_release env root_mark) status))
     (defun nl_eval_inner_cons_after_args
         (rc_args env out root_mark func_slot args_slot)
       (if (= rc_args 0)
           (nl_cons_root_finish
-           root_mark (nl_apply_function func_slot args_slot env out))
-        (nl_cons_root_finish root_mark 1)))
+           env root_mark (nl_apply_function func_slot args_slot env out))
+        (nl_cons_root_finish env root_mark 1)))
     (defun nl_eval_inner_cons_eval_args
         (tail_ptr env out root_mark func_slot args_slot)
       (nl_eval_inner_cons_after_args
@@ -14237,16 +14259,16 @@ computed expansion into `nl_mxcache_store' before evaluating it.")
       (if (= rc_lu 0)
           (if (= (sexp-tag func_slot) 0)
               (nl_cons_root_finish
-               root_mark (nl_cons_stash_void_function env head_ptr))
+               env root_mark (nl_cons_stash_void_function env head_ptr))
             (if (= (nl_cons_is_macro func_slot) 1)
                 (nl_cons_root_finish
-                 root_mark
+                 env root_mark
                  (nl_cons_macro_apply_eval
                   form_ptr func_slot tail_ptr env out))
               (nl_eval_inner_cons_eval_args
                tail_ptr env out root_mark func_slot (alloc-bytes 32 8))))
         (nl_cons_root_finish
-         root_mark (nl_cons_stash_void_function env head_ptr))))
+         env root_mark (nl_cons_stash_void_function env head_ptr))))
     (defun nl_eval_inner_cons_symbol_slot
         (form_ptr head_ptr tail_ptr env out root_mark func_slot)
       (nl_eval_inner_cons_after_lookup
@@ -14255,19 +14277,19 @@ computed expansion into `nl_mxcache_store' before evaluating it.")
     (defun nl_eval_inner_cons_symbol_mark
         (form_ptr head_ptr tail_ptr env out root_mark)
       (nl_eval_inner_cons_symbol_slot
-       form_ptr head_ptr tail_ptr env out root_mark (nl_root_reserve)))
+       form_ptr head_ptr tail_ptr env out root_mark (nl_root_reserve env)))
     (defun nl_eval_inner_cons_symbol_dispatch
         (special_rc form_ptr head_ptr tail_ptr env out)
       (if (= special_rc 0) 0
         (if (= special_rc 1) 1
           (nl_eval_inner_cons_symbol_mark
-           form_ptr head_ptr tail_ptr env out (nl_root_mark)))))
+           form_ptr head_ptr tail_ptr env out (nl_root_mark env)))))
     (defun nl_eval_inner_cons_after_head_eval
         (rc_eval tail_ptr env out root_mark func_slot)
       (if (= rc_eval 0)
           (nl_eval_inner_cons_eval_args
            tail_ptr env out root_mark func_slot (alloc-bytes 32 8))
-        (nl_cons_root_finish root_mark 1)))
+        (nl_cons_root_finish env root_mark 1)))
     (defun nl_eval_inner_cons_callable_slot
         (head_ptr tail_ptr env out root_mark func_slot)
       (nl_eval_inner_cons_after_head_eval
@@ -14276,14 +14298,14 @@ computed expansion into `nl_mxcache_store' before evaluating it.")
     (defun nl_eval_inner_cons_callable_mark
         (head_ptr tail_ptr env out root_mark)
       (nl_eval_inner_cons_callable_slot
-       head_ptr tail_ptr env out root_mark (nl_root_reserve)))
+       head_ptr tail_ptr env out root_mark (nl_root_reserve env)))
     (defun nl_eval_inner_cons (form_ptr head_ptr tail_ptr env out)
       (if (= (sexp-tag head_ptr) 4)
           (nl_eval_inner_cons_symbol_dispatch
            (nl_apply_special head_ptr tail_ptr env out)
            form_ptr head_ptr tail_ptr env out)
         (nl_eval_inner_cons_callable_mark
-         head_ptr tail_ptr env out (nl_root_mark)))))
+         head_ptr tail_ptr env out (nl_root_mark env)))))
   "Doc 152 Stage 3c rooted replacement for nl_eval_inner_cons.
 
 The resolved/evaluated function value lives directly in a Stage-2 root slot
@@ -14361,27 +14383,27 @@ and `nl_eval_inner_cons' swapped for the cache-aware/rooted versions above."
     ;; propagation.  EVAL-SLOT is BSS-owned root storage, so unlike the old
     ;; arena scratch it must not pass through nl_arg_slot_recycle.
     (defun nl_eval_arg_list_after_rest
-        (rc_rest acc_slot root_mark eval_slot rest_slot)
+        (rc_rest env_ptr acc_slot root_mark eval_slot rest_slot)
       (if (= rc_rest 0)
           (seq
            (nelisp_cons_construct
             eval_slot
             (nl_arg_slot_recycle rest_slot (nl_val_store_word rest_slot))
             acc_slot)
-           (nl_root_release root_mark)
+           (nl_root_release env_ptr root_mark)
            0)
-        (seq (nl_root_release root_mark) 1)))
+        (seq (nl_root_release env_ptr root_mark) 1)))
     (defun nl_eval_arg_list_recurse
         (cur_ptr env_ptr acc_slot root_mark eval_slot rest_slot)
       (nl_eval_arg_list_after_rest
        (nl_eval_arg_list_walk (nl_cons_cdr_ptr cur_ptr) env_ptr rest_slot)
-       acc_slot root_mark eval_slot rest_slot))
+       env_ptr acc_slot root_mark eval_slot rest_slot))
     (defun nl_eval_arg_list_after_eval
         (rc_eval cur_ptr env_ptr acc_slot root_mark eval_slot rest_slot)
       (if (= rc_eval 0)
           (nl_eval_arg_list_recurse
            cur_ptr env_ptr acc_slot root_mark eval_slot rest_slot)
-        (seq (nl_root_release root_mark) 1)))
+        (seq (nl_root_release env_ptr root_mark) 1)))
     (defun nl_eval_arg_list_with_slot
         (cur_ptr env_ptr acc_slot root_mark eval_slot rest_slot)
       (nl_eval_arg_list_after_eval
@@ -14390,14 +14412,14 @@ and `nl_eval_inner_cons' swapped for the cache-aware/rooted versions above."
     (defun nl_eval_arg_list_with_mark
         (cur_ptr env_ptr acc_slot root_mark rest_slot)
       (nl_eval_arg_list_with_slot
-       cur_ptr env_ptr acc_slot root_mark (nl_root_reserve) rest_slot))
+       cur_ptr env_ptr acc_slot root_mark (nl_root_reserve env_ptr) rest_slot))
     (defun nl_eval_arg_list_dispatch (cur_ptr env_ptr acc_slot rest_slot)
       ;; Doc 150 P1: a self-eval immediate literal arg (tag<4) needs no
       ;; eval/root slot.  Every other argument takes the rooted path.
       (if (< (nl_val_tag (nl_cons_car_ptr cur_ptr)) 4)
           (nl_eval_arg_list_immediate cur_ptr env_ptr acc_slot rest_slot)
         (nl_eval_arg_list_with_mark
-         cur_ptr env_ptr acc_slot (nl_root_mark) rest_slot)))
+         cur_ptr env_ptr acc_slot (nl_root_mark env_ptr) rest_slot)))
     (defun nl_eval_arg_list_walk (cur_ptr env_ptr acc_slot)
       (if (= (ptr-read-u64 cur_ptr 0) 7)
           (nl_eval_arg_list_dispatch
@@ -18818,11 +18840,9 @@ gets no native definitions and is gated by
      ;;   +128..159 result Sexp slot
      ;;   +4096..   private 1 MiB root-stack reserve
      ;; Doc 152 Stage 3 uses the process-global root stack in the single-thread
-     ;; evaluator.  This Tier-3a worker must still NOT install its private
-     ;; reserve in process-global nl_rootstack_top: doing so would create the
-     ;; very race this spike avoids.  With collection inhibited no root scan is
-     ;; needed; the private reserve makes the ABI boundary explicit for a
-     ;; future per-thread-root conversion.
+     ;; evaluator.  Tier 3b registers this private EvalCtx after construction;
+     ;; root reserve/release then select env+120 without touching the global
+     ;; top, and atomically publish that top for the marker's registry walk.
      '(defun nl_thread_private_env_make (penv)
         (let* ((region (syscall-direct 9 0 1052672 3 34 (- 0 1) 0)))
           (if (< region 4096)
@@ -18843,7 +18863,9 @@ gets no native definitions and is gated by
                (ptr-write-u64 region 136 0)
                (ptr-write-u64 region 144 0)
                (ptr-write-u64 region 152 0)
-               region)))))
+               (if (< (nl_thread_registry_add region) 0)
+                   (- 0 12)
+                 region))))))
      ;; ID 2 evaluates a pre-built form through the ordinary interpreter.  It
      ;; publishes only an integer payload; -1001 is eval failure and -1002 is
      ;; a successful non-integer result.  Result store precedes the SeqCst done
@@ -19002,6 +19024,11 @@ gets no native definitions and is gated by
                       (ptr-read-u64 (data-addr nl_thread_parallel_ctx) 0))
                      (ptr-write-u64
                       (data-addr nl_thread_parallel_ctx) 16 0)
+                     ;; Every allocating worker has joined before END.  Drop
+                     ;; the now-stale private Env/root mappings as one bounded
+                     ;; registry reset; entries need not be individually
+                     ;; scrubbed because the count is the publication bound.
+                     (nl_thread_registry_clear)
                      (wf_write_int out same)
                      0))
                 (seq (wf_write_int out 0) 0))
@@ -21686,14 +21713,14 @@ always return 0, so `signal' flows to the builtin applyfn (bf_signal) instead of
   "HEAD ++ TAIL into OUT-SLOT, returning rc 0 on success.")
 
 (defconst nelisp-standalone--reader-do-apply-rooted
-  '((defun nl_apply_root_finish (root_mark status)
-      (seq (nl_root_release root_mark) status))
+  '((defun nl_apply_root_finish (env root_mark status)
+      (seq (nl_root_release env root_mark) status))
     (defun nl_apply_do_apply_after_append
         (rc_app env out root_mark func_slot spliced_slot)
       (if (= rc_app 0)
           (nl_apply_root_finish
-           root_mark (nl_apply_function func_slot spliced_slot env out))
-        (nl_apply_root_finish root_mark 1)))
+           env root_mark (nl_apply_function func_slot spliced_slot env out))
+        (nl_apply_root_finish env root_mark 1)))
     (defun nl_apply_do_apply_append
         (prefix_slot last_ptr env out root_mark func_slot spliced_slot)
       (nl_apply_do_apply_after_append
@@ -21705,7 +21732,7 @@ always return 0, so `signal' flows to the builtin applyfn (bf_signal) instead of
           (nl_apply_do_apply_append
            prefix_slot (nl_apply_list_last_cdr rest_args)
            env out root_mark func_slot (alloc-bytes 32 8))
-        (nl_apply_root_finish root_mark 1)))
+        (nl_apply_root_finish env root_mark 1)))
     (defun nl_apply_do_apply_list
         (rest_args env out root_mark func_slot prefix_slot)
       (nl_apply_do_apply_after_init
@@ -21716,14 +21743,14 @@ always return 0, so `signal' flows to the builtin applyfn (bf_signal) instead of
       (if (= resolve_rc 0)
           (if (= (sexp-tag func_slot) 0)
               (nl_apply_root_finish
-               root_mark (nl_cons_stash_void_function env arg0_ptr))
+               env root_mark (nl_cons_stash_void_function env arg0_ptr))
             (nl_apply_do_apply_list
              (if (= (sexp-tag args_list_ptr) 7)
                  (nl_cons_cdr_ptr args_list_ptr)
                args_list_ptr)
              env out root_mark func_slot (alloc-bytes 32 8)))
         (nl_apply_root_finish
-         root_mark (nl_cons_stash_void_function env arg0_ptr))))
+         env root_mark (nl_cons_stash_void_function env arg0_ptr))))
     (defun nl_apply_do_apply_resolve
         (arg0_ptr args_list_ptr env out root_mark func_slot)
       (nl_apply_do_apply_after_resolve
@@ -21735,12 +21762,12 @@ always return 0, so `signal' flows to the builtin applyfn (bf_signal) instead of
     (defun nl_apply_do_apply_marked
         (arg0_ptr args_list_ptr env out root_mark)
       (nl_apply_do_apply_resolve
-       arg0_ptr args_list_ptr env out root_mark (nl_root_reserve)))
+       arg0_ptr args_list_ptr env out root_mark (nl_root_reserve env)))
     (defun nl_apply_do_apply_arg0 (arg0_ptr args_list_ptr env out)
       (if (= arg0_ptr 0)
           (nl_apply_stash_wta env args_list_ptr)
         (nl_apply_do_apply_marked
-         arg0_ptr args_list_ptr env out (nl_root_mark))))
+         arg0_ptr args_list_ptr env out (nl_root_mark env))))
     (defun nl_apply_do_apply (args_list_ptr env out)
       (nl_apply_do_apply_arg0
        (nl_apply_list_nth args_list_ptr 0) args_list_ptr env out)))
