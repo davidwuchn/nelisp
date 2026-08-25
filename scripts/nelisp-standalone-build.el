@@ -2854,6 +2854,27 @@ arm64 Linux has no legacy x86 numbering)."
     ;; finalised), so this excludes exactly the unsafe "reused driver
     ;; scratch slot" case while keeping every genuinely-repeated,
     ;; stable-address call site (the intended, motivating use case) cached.
+    ;; Tier 3a makes this table genuinely shared between mutators.  Key word 1
+    ;; is an impossible Sexp-box pointer and means "writer owns this row".
+    ;; A writer CAS-claims the row, fills value+epoch, then release-publishes
+    ;; the real key with a second CAS.  A contending writer drops its optional
+    ;; cache fill rather than waiting.  A prospective hit similarly CAS-claims
+    ;; the key before reading value+epoch and release-restores it afterwards;
+    ;; this closes key ABA as well as the simpler half-published-row race.
+    ;; Runtime snapshots are threaded through helper args: cc-unit runtime
+    ;; let-locals are not reliable across generated calls.
+    (defun nl_mxcache_lookup_release (candidate slot form_ptr _pad)
+      (if (= (atomic-compare-exchange slot 1 form_ptr) 1)
+          candidate
+        0))
+    (defun nl_mxcache_lookup_claim (slot form_ptr _pad1 _pad2)
+      (if (= (atomic-compare-exchange slot form_ptr 1) 1)
+          (if (= (ptr-read-u64 (+ slot 16) 0)
+                 (ptr-read-u64 (data-addr nl_mxcache_epoch) 0))
+              (nl_mxcache_lookup_release
+               (ptr-read-u64 (+ slot 8) 0) slot form_ptr 0)
+            (seq (atomic-compare-exchange slot 1 form_ptr) 0))
+        0))
     (defun nl_mxcache_lookup (form_ptr)
       (if (= (nl_gc_is_boot form_ptr) 1) 0
       (if (= (ptr-read-u64 (data-addr nl_mxcache_disable_lookup) 0) 1) 0
@@ -2862,7 +2883,7 @@ arm64 Linux has no legacy x86 numbering)."
             (let* ((slot (+ base (* (nl_mxcache_hash form_ptr) 24))))
               (if (= (ptr-read-u64 (+ slot 16) 0) (ptr-read-u64 (data-addr nl_mxcache_epoch) 0))
                   (if (= (ptr-read-u64 slot 0) form_ptr)
-                      (ptr-read-u64 (+ slot 8) 0)
+                      (nl_mxcache_lookup_claim slot form_ptr 0 0)
                     0)
                 0)))))))
     ;; ROOT-CAUSE FIX (found via A/B debug-compare over lisp/nelisp-artifact.el
@@ -2896,6 +2917,17 @@ arm64 Linux has no legacy x86 numbering)."
     ;; first place.  Both are required; skip the store entirely (mirroring
     ;; the lookup-side skip) when form_ptr is boot-region, so a boot-region
     ;; form_ptr never reaches the mutation-epoch bump either.
+    (defun nl_mxcache_store_claim (observed_key slot form_ptr expansion_ptr)
+      (if (= observed_key 1) 0
+        (if (= (atomic-compare-exchange slot observed_key 1) 1)
+            (seq
+             (ptr-write-u64 (+ slot 8) 0 expansion_ptr)
+             (ptr-write-u64 (+ slot 16) 0
+                            (ptr-read-u64 (data-addr nl_mxcache_epoch) 0))
+             (if (= (atomic-compare-exchange slot 1 form_ptr) 1)
+                 (seq (atomic-fetch-add 268435544 1) 0)
+               0))
+          0)))
     (defun nl_mxcache_store (form_ptr expansion_ptr)
       (if (= (nl_gc_is_boot form_ptr) 1) 0
       (seq
@@ -2903,11 +2935,8 @@ arm64 Linux has no legacy x86 numbering)."
        (let* ((base (ptr-read-u64 (data-addr nl_mxcache_table_base) 0)))
          (if (= base 0) 0
            (let* ((slot (+ base (* (nl_mxcache_hash form_ptr) 24))))
-             (seq (ptr-write-u64 slot 0 form_ptr)
-                  (ptr-write-u64 (+ slot 8) 0 expansion_ptr)
-                  (ptr-write-u64 (+ slot 16) 0 (ptr-read-u64 (data-addr nl_mxcache_epoch) 0))
-                  (atomic-fetch-add 268435544 1)
-                  0)))))))
+             (nl_mxcache_store_claim
+              (ptr-read-u64 slot 0) slot form_ptr expansion_ptr)))))))
     ;; GUARD (found by a real SIGSEGV in development): the table is
     ;; lazily `nl_os_alloc_chunk'-ed (zero-filled, like every other fresh OS
     ;; page) and MXCACHE_EPOCH itself starts at 0 (boot-zeroed, same as
@@ -2975,7 +3004,7 @@ arm64 Linux has no legacy x86 numbering)."
         (if (= base 0) 0
           (let* ((slot (+ base (* (nl_mxcache_hash addr) 24))))
             (if (= (ptr-read-u64 slot 0) addr)
-                (seq (ptr-write-u64 slot 0 0) 0)
+                (seq (atomic-compare-exchange slot addr 0) 0)
               0)))))
     ;; ===================================================================
     ;; LAMBDA FREE-VARIABLE FILTER CACHE (perf/closure-freevar-cache).
@@ -3007,6 +3036,18 @@ arm64 Linux has no legacy x86 numbering)."
               (seq (nl_os_commit_range p 0 98304)
                    (ptr-write-u64 (data-addr nl_fvcache_table_base) 0 p))))
         0))
+    (defun nl_fvcache_lookup_release (candidate slot args_ptr _pad)
+      (if (= (atomic-compare-exchange slot 1 args_ptr) 1)
+          candidate
+        0))
+    (defun nl_fvcache_lookup_claim (slot args_ptr _pad1 _pad2)
+      (if (= (atomic-compare-exchange slot args_ptr 1) 1)
+          (if (= (ptr-read-u64 (+ slot 16) 0)
+                 (ptr-read-u64 (data-addr nl_mxcache_epoch) 0))
+              (nl_fvcache_lookup_release
+               (ptr-read-u64 (+ slot 8) 0) slot args_ptr 0)
+            (seq (atomic-compare-exchange slot 1 args_ptr) 0))
+        0))
     (defun nl_fvcache_lookup (args_ptr)
       (if (= (nl_gc_is_boot args_ptr) 1) 0
       (if (= (ptr-read-u64 (data-addr nl_fvcache_disable_lookup) 0) 1) 0
@@ -3015,9 +3056,20 @@ arm64 Linux has no legacy x86 numbering)."
             (let* ((slot (+ base (* (nl_fvcache_hash args_ptr) 24))))
               (if (= (ptr-read-u64 (+ slot 16) 0) (ptr-read-u64 (data-addr nl_mxcache_epoch) 0))
                   (if (= (ptr-read-u64 slot 0) args_ptr)
-                      (ptr-read-u64 (+ slot 8) 0)
+                      (nl_fvcache_lookup_claim slot args_ptr 0 0)
                     0)
                 0)))))))
+    (defun nl_fvcache_store_claim (observed_key slot args_ptr filter_ptr)
+      (if (= observed_key 1) 0
+        (if (= (atomic-compare-exchange slot observed_key 1) 1)
+            (seq
+             (ptr-write-u64 (+ slot 8) 0 filter_ptr)
+             (ptr-write-u64 (+ slot 16) 0
+                            (ptr-read-u64 (data-addr nl_mxcache_epoch) 0))
+             (if (= (atomic-compare-exchange slot 1 args_ptr) 1)
+                 (seq (atomic-fetch-add 268435544 1) 0)
+               0))
+          0)))
     (defun nl_fvcache_store (args_ptr filter_ptr)
       (if (= (nl_gc_is_boot args_ptr) 1) 0
       (seq
@@ -3025,11 +3077,8 @@ arm64 Linux has no legacy x86 numbering)."
        (let* ((base (ptr-read-u64 (data-addr nl_fvcache_table_base) 0)))
          (if (= base 0) 0
            (let* ((slot (+ base (* (nl_fvcache_hash args_ptr) 24))))
-             (seq (ptr-write-u64 slot 0 args_ptr)
-                  (ptr-write-u64 (+ slot 8) 0 filter_ptr)
-                  (ptr-write-u64 (+ slot 16) 0 (ptr-read-u64 (data-addr nl_mxcache_epoch) 0))
-                  (atomic-fetch-add 268435544 1)
-                  0)))))))
+             (nl_fvcache_store_claim
+              (ptr-read-u64 slot 0) slot args_ptr filter_ptr)))))))
     (defun nl_fvcache_mark_one (base i epoch)
       (let* ((slot (+ base (* i 24))))
         (if (= (ptr-read-u64 (+ slot 16) 0) epoch)

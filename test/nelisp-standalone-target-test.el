@@ -1156,6 +1156,96 @@ scratch chunks have their cursor reset."
       (should roots)
       (should (tree-member-p '(nl_gc_mark_recorded_contexts) roots)))))
 
+(ert-deftest nelisp-standalone-target-pointer-cache-slots-publish-atomically ()
+  "Shared pointer-cache rows use an emitted CAS claim/publish protocol.
+The runtime race is scheduler-dependent, so this structural assertion is the
+deterministic against-the-bug gate for both emitted cache implementations."
+  (cl-labels ((defun-form
+               (name forms)
+               (cl-find-if (lambda (form)
+                             (and (consp form) (eq (car form) 'defun)
+                                  (eq (cadr form) name)))
+                           (if (eq (car-safe forms) 'seq) (cdr forms) forms)))
+              (tree-member-p
+               (needle tree)
+               (cond
+                ((equal needle tree) t)
+                ((consp tree)
+                 (or (tree-member-p needle (car tree))
+                     (tree-member-p needle (cdr tree))))))
+              (tree-symbol-p
+               (needle tree)
+               (cond
+                ((eq needle tree) t)
+                ((consp tree)
+                 (or (tree-symbol-p needle (car tree))
+                     (tree-symbol-p needle (cdr tree)))))))
+    (dolist (spec '((nl_mxcache_lookup nl_mxcache_lookup_claim
+                     nl_mxcache_lookup_release nl_mxcache_store
+                     nl_mxcache_store_claim form_ptr expansion_ptr)
+                    (nl_fvcache_lookup nl_fvcache_lookup_claim
+                     nl_fvcache_lookup_release nl_fvcache_store
+                     nl_fvcache_store_claim args_ptr filter_ptr)))
+      (cl-destructuring-bind
+          (lookup-name lookup-claim-name lookup-release-name store-name
+                       store-claim-name key value)
+          spec
+        (let ((lookup (defun-form lookup-name nelisp-standalone--gc-source))
+              (lookup-claim
+               (defun-form lookup-claim-name nelisp-standalone--gc-source))
+              (lookup-release
+               (defun-form lookup-release-name nelisp-standalone--gc-source))
+              (store (defun-form store-name nelisp-standalone--gc-source))
+              (store-claim
+               (defun-form store-claim-name nelisp-standalone--gc-source)))
+          (dolist (form (list lookup lookup-claim lookup-release store
+                              store-claim))
+            (should form))
+          ;; Readers take exclusive ownership before the payload snapshot and
+          ;; restore the key only after the epoch has been revalidated.
+          (should (tree-member-p
+                   `(,lookup-claim-name slot ,key 0 0) lookup))
+          (should (tree-member-p
+                   `(atomic-compare-exchange slot ,key 1) lookup-claim))
+          (should (tree-member-p
+                   `(,lookup-release-name
+                     (ptr-read-u64 (+ slot 8) 0) slot ,key 0)
+                   lookup-claim))
+          (should (tree-member-p
+                   `(atomic-compare-exchange slot 1 ,key) lookup-release))
+          (should (tree-member-p
+                   '(ptr-read-u64 (data-addr nl_mxcache_epoch) 0)
+                   lookup-claim))
+          ;; Writers first CAS any published key to the impossible pointer 1,
+          ;; fill value+epoch while owned, and atomically publish the key last.
+          (should (tree-member-p
+                   `(,store-claim-name
+                     (ptr-read-u64 slot 0) slot ,key ,value)
+                   store))
+          (should (tree-member-p
+                   '(atomic-compare-exchange slot observed_key 1)
+                   store-claim))
+          (should
+           (tree-member-p
+            `(seq
+              (ptr-write-u64 (+ slot 8) 0 ,value)
+              (ptr-write-u64 (+ slot 16) 0
+                             (ptr-read-u64
+                              (data-addr nl_mxcache_epoch) 0))
+              (if (= (atomic-compare-exchange slot 1 ,key) 1)
+                  (seq (atomic-fetch-add 268435544 1) 0)
+                0))
+            store-claim))
+          ;; All across-call runtime state is carried by helper parameters.
+          (dolist (form (list lookup-claim lookup-release store-claim))
+            (should-not (tree-symbol-p 'let form))
+            (should-not (tree-symbol-p 'let* form))))))
+    (let ((evict (defun-form 'nl_mxcache_evict
+                             nelisp-standalone--gc-source)))
+      (should evict)
+      (should (tree-member-p
+               '(atomic-compare-exchange slot addr 0) evict)))))
+
 (ert-deftest nelisp-standalone-target-intern-region-is-target-aware ()
   "Symbol-name intern region setup uses each target's allocation surface."
   (cl-labels ((tree-member-p
