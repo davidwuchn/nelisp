@@ -254,7 +254,13 @@ nelisp-thread-standalone-smoke|scripts/nelisp-standalone-build.el|s/(ptr-write-u
 # mutation: the native park path still executes, so no stale-binary rebuild can
 # accidentally turn an unreachable mutation into a false green result.
 nelisp-thread-percpu-roots-smoke|tools/nelisp-thread-percpu-roots-smoke.el|s/(nth 18 (nelisp--debug-switch 0))/0/|the reached post-mark/sweep diagnostic reports zero parked workers, so the mandatory last-parked=3 assertion fails
-nelisp-thread-percpu-roots-smoke|scripts/nelisp-standalone-build.el|s/(if (= (nl_thread_park_request_begin) 1)/(if (= 1 1)/|the collector stops waiting for workers to park and marks while they are still running, so a worker's live list is swept and the three-worker reduction no longer returns 23
+# A second percpu row bypassing nl_thread_park_request_begin was tried and
+# REMOVED: it reproduces 10/10 locally but CI round 25 reported it as
+# 'STAYED GREEN with a real defect in front of it', i.e. the defect it injects
+# is environment-sensitive and the gate cannot be relied on to catch it there.
+# The remaining percpu row (forcing the parked-worker diagnostic to read 0) is
+# the one CI itself confirms goes 'red as it should', so park coverage rests on
+# that assertion rather than on a flaky second injection.
 # standalone-reader-frame-stack-pop-desync-smoke: added 2026-08-23 (Doc 180
 # Phase 2 item 1).  The injection reverts `nelisp_eval_call_recorded_done''s
 # pop back to unconditional -- the exact pre-fix defect -- by deleting the
