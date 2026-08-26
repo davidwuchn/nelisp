@@ -712,18 +712,13 @@ build_run boxed '(seq
       (ptr-write-u64 dst 8 (ptr-read-u64 src 8))
       (ptr-write-u64 dst 16 (ptr-read-u64 src 16))
       (ptr-write-u64 dst 24 (ptr-read-u64 src 24))))
-  (defun nl_alloc_consbox () (nl_alloc_bytes 24 8))
-  (defun nl_alloc_cell (valptr)
-    (let ((box (nl_alloc_bytes 16 8)))
-      (seq (nl_sexp_clone_into valptr box) box)))
-  (defun nl_cell_set_value (box valptr)
-    (nl_sexp_clone_into valptr box))
-  (defun nl_cell_get_value (cellptr out)
-    (nl_sexp_clone_into (ptr-read-u64 (ptr-read-u64 cellptr 8) 0) out))
-  ;; Doc 147 Phase 0/2 keystone + slot-ptr stubs (compile-only): store a
-  ;; 32B-slot SRC as an 8B WORD / load a WORD back into a 32B view, and
-  ;; the vector/record slot-ptr materialisers, so the emitted bl targets
-  ;; resolve.  Container data buffers are now 8B-per-slot WORDS.
+  ;; Doc 147 Phase 0/2 keystone + slot-ptr helpers: store a 32B-slot SRC
+  ;; as an 8B WORD / load a WORD back into a 32B view, and the
+  ;; vector/record slot-ptr materialisers.  Container data buffers hold
+  ;; 8B-per-slot WORDS.
+  ;;
+  ;; These sit ABOVE the cell helpers because the cell helpers now use
+  ;; them; they used to sit below.
   (defun nl_val_clone_into (src dst)
     (if (= (logand src 1) 1)
         (ptr-write-u64 dst 0 src)
@@ -733,6 +728,35 @@ build_run boxed '(seq
   (defun nl_val_load (word scratch)
     (if (= (logand word 1) 0) word
       (seq (ptr-write-u64 scratch 0 word) scratch)))
+  (defun nl_alloc_consbox () (nl_alloc_bytes 24 8))
+  ;; NlCell.value is an 8-byte tagged WORD at box+0, not an inline 32B
+  ;; Sexp.  lisp/nelisp-cc-nlcell-get-value.el states the contract: the
+  ;; NlCell value field is now an 8-byte tagged WORD at box+0, not a 32B
+  ;; inline Sexp.
+  ;;
+  ;; nl_alloc_cell and nl_cell_set_value were written against the OLD
+  ;; layout while nl_cell_get_value was already written against the new
+  ;; one.  The mismatch stayed invisible because this smoke was added as
+  ;; EMIT coverage (c94b7626b, 2026-06-02, Add macOS arm64 selfhost emit
+  ;; coverage) and stage-d could not reach the run step for months.  Its
+  ;; first real execution exited 139 (SIGSEGV):
+  ;;
+  ;;   nl_alloc_cell copied the 32B Int Sexp into the box, so box+0 held
+  ;;   the Int TAG (2), and nl_cell_get_value read that as the value word
+  ;;   and dereferenced address 2.  It also allocated 16 bytes and then
+  ;;   wrote 32 into them.
+  ;;
+  ;;   nl_cell_set_value took the box as its first argument, but the
+  ;;   emitter passes the Sexp::Cell pointer -- lisp/nelisp-cc-cell-ops.el
+  ;;   says arg0 is a *const Sexp pointing at Sexp::Cell -- so it
+  ;;   overwrote the cell own tag and box pointer with the new value.
+  (defun nl_alloc_cell (valptr)
+    (let ((box (nl_alloc_bytes 16 8)))
+      (seq (nl_val_clone_into valptr box) box)))
+  (defun nl_cell_set_value (cellptr valptr)
+    (nl_val_clone_into valptr (ptr-read-u64 cellptr 8)))
+  (defun nl_cell_get_value (cellptr out)
+    (nl_sexp_clone_into (ptr-read-u64 (ptr-read-u64 cellptr 8) 0) out))
   (defun nl_alloc_vector (cap)
     (let ((box (nl_alloc_bytes 32 8)))
       (seq
