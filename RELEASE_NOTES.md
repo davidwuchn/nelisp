@@ -1,3 +1,51 @@
+# NeLisp Release Notes
+
+## v1.0.0 — 2026-08-26
+
+Full notes: [`release/v1.0.0/RELEASE.md`](release/v1.0.0/RELEASE.md).
+
+Two things make this 1.0 rather than another point release.
+
+**The runtime collects garbage by default.** The precise-root collector
+existed before and was correct, but only ran behind a debug switch, so a
+default build grew without bound. On a 200k allocating loop peak RSS falls
+**669,936 KiB → 339,920 KiB (-49.3%)**, RSS is flat from 500k to 1M
+iterations, and 256 MiB goes back to the OS. It is also faster — 5,204 ms
+collected vs 8,125 ms uncollected — so this was not a memory-for-speed trade.
+
+**Ordinary allocating Elisp runs on real OS threads.** Doc 199 Tiers 1–3b:
+cooperative futures, GC-free `clone(2)` workers, bounded allocating tasks, and
+finally unrestricted allocating Elisp with per-thread precise roots and a park
+barrier. The barrier stops every mutator before marking, which is why Doc 152's
+planned write barrier (Stage 6) was retired rather than implemented.
+
+Also in 1.0:
+
+- **Standard Emacs names are the API.** `current-buffer`, `insert`, `point`,
+  `make-process`, `set-process-filter`, `make-network-process`, `run-at-time`,
+  `add-hook` and 15 more are `fboundp` in a default `target/nelisp` with no
+  `--load`. The `nelisp-`-prefixed functions are the implementation beneath.
+- **Opt-in language extensions**, all sharing one rule — loading them changes
+  nothing about plain Elisp semantics: `nl-safe`/`nl-static`/`nl-check`/
+  `nl-contract` (borrow cells, fat pointers, an `nl-unsafe` boundary under a CI
+  ratchet, expansion-time totality and types, contracts with blame), `nl-ns`
+  (namespace crossings reported, nothing rewritten, nothing at run time),
+  `nl-clj` (persistent vector/map/set, atom, eager and lazy seqs). 39 packages.
+- **Buffers, bignums and full backquote** — all three were listed as deferred
+  in the v0.6.0 README and all three had in fact shipped.
+- **Networking** — processes, event loop, `make-network-process`,
+  `open-network-stream`, `/etc/hosts`, DNS over TCP, nonblocking sockets, IPv6.
+- **Zero Rust.** No `.rs` files remain.
+
+Verification: 5,466 tests / 0 unexpected; `emacs-parity` **19,961 checks, 0
+findings** against a real stock Emacs; `verify` PASS (66 gates); six CI lanes
+plus a fast Linux `gates` job.
+
+Known limits are listed in the full notes — no windows or frames, no markers
+or overlays, Linux-only sockets, worker heaps reclaimed at process exit.
+
+---
+
 # NeLisp v0.6.0 Release Notes — Pure-Elisp Standalone Runtime
 
 v0.6.0 (2026-06-26) is the current stable SemVer tag.  It collects the

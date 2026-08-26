@@ -28,7 +28,7 @@ default_platform() {
   esac
 }
 
-VERSION="v0.6.0"
+VERSION="v1.0.0"
 PLATFORM="${NELISP_STANDALONE_TARGET:-$(default_platform)}"
 EMACS_BIN="${EMACS:-emacs}"
 POSITIONAL=()
