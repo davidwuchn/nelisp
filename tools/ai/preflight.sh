@@ -73,6 +73,10 @@ OUT=${PREFLIGHT_LOGDIR:-target/preflight}
 mkdir -p "$OUT"
 declare -a NAMES STATUS COUNTS
 declare -a ADV_NAMES ADV_STATUS ADV_COUNTS
+# Assign, do not merely declare: under `set -u` a never-assigned array makes
+# ${#ADV_NAMES[@]} in the summary an unbound-variable error, which is what
+# the summary printed instead of the advisory table.
+ADV_NAMES=(); ADV_STATUS=(); ADV_COUNTS=()
 
 run_gate() {
   local name=${1%%|*} cmd=${1#*|}

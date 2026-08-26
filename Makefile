@@ -1053,26 +1053,7 @@ standalone-reader-smokes:
 	  echo "[reader-smokes] SKIP: target cannot run on this host"; \
 	  exit 0; \
 	fi; \
-	mkdir -p target/tmp; \
-	ran=0; failed=0; failed_names=""; \
-	for t in $(STANDALONE_READER_SMOKES); do \
-	  log="target/tmp/nelisp-smoke-$$t.log"; \
-	  if $(MAKE) --no-print-directory "$$t" > "$$log" 2>&1; then \
-	    ran=$$((ran + 1)); \
-	  else \
-	    ran=$$((ran + 1)); failed=$$((failed + 1)); \
-	    failed_names="$$failed_names $$t"; \
-	    echo "[reader-smokes] FAIL: $$t"; \
-	    tail -3 "$$log" | sed 's/^/    /'; \
-	  fi; \
-	  rm -f "$$log"; \
-	done; \
-	echo "GATE-COUNT checked=$$ran findings=$$failed"; \
-	if [ "$$failed" -eq 0 ]; then \
-	  echo "[reader-smokes] PASS: $$ran smokes"; \
-	else \
-	  echo "[reader-smokes] FAIL:$$failed_names"; exit 1; \
-	fi
+	MAKE="$(MAKE)" tools/nelisp-reader-smokes.sh $(STANDALONE_READER_SMOKES)
 
 standalone-reader-test:
 	$(EMACS) --batch -Q -L lisp -L src -L scripts \
