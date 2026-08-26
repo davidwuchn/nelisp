@@ -28,7 +28,8 @@ default_platform() {
   esac
 }
 
-VERSION="v1.0.1"
+. "$(dirname "${BASH_SOURCE[0]}")/nelisp-version.sh"
+VERSION="$(nelisp_version)"
 PLATFORM="${NELISP_STANDALONE_TARGET:-$(default_platform)}"
 EMACS_BIN="${EMACS:-emacs}"
 POSITIONAL=()

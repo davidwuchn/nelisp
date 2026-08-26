@@ -4,6 +4,12 @@
 # Expected: last line = "=== Cross-platform verify PASS ==="
 set -euo pipefail
 
+# One version for the whole run.  The tarball is built under this name and
+# the installer smoke looks for it under the same name; they used to be
+# separate literals and drifted apart at the v1.0.1 bump.
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/tools/nelisp-version.sh"
+NELISP_RELEASE_VERSION="$(nelisp_version)"
+
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_ROOT"
 EMACS="${EMACS:-emacs}"
@@ -32,7 +38,8 @@ run_posix_standalone_install_smoke() {
   prefix="$root/install"
   (
     trap 'rm -rf "$root"' EXIT
-    release/stage-d-v3.0/install-v3.sh --from "$(pwd)/dist" --prefix "$prefix"
+    release/stage-d-v3.0/install-v3.sh --version "$NELISP_RELEASE_VERSION" \
+      --from "$(pwd)/dist" --prefix "$prefix"
     set +e
     output="$("$prefix/bin/nelisp" --eval "(+ 40 2)")"
     code=$?
@@ -123,11 +130,11 @@ if [ "$(uname -s)" = "Darwin" ]; then
   if [ "$INCLUDE_TARBALL" -eq 1 ]; then
     echo ""
     echo "--- macOS standalone tarball smoke ---"
-    tools/build-standalone-tarball.sh v1.0.1 macos-aarch64 --emacs "$EMACS"
+    tools/build-standalone-tarball.sh "$NELISP_RELEASE_VERSION" macos-aarch64 --emacs "$EMACS"
     if [ "$BUILD_ONLY_STANDALONE_SMOKES" -eq 1 ]; then
-      tools/verify-standalone-tarball.sh v1.0.1 macos-aarch64 --layout-only
+      tools/verify-standalone-tarball.sh "$NELISP_RELEASE_VERSION" macos-aarch64 --layout-only
     else
-      tools/verify-standalone-tarball.sh v1.0.1 macos-aarch64
+      tools/verify-standalone-tarball.sh "$NELISP_RELEASE_VERSION" macos-aarch64
     fi
 
     if [ "$BUILD_ONLY_STANDALONE_SMOKES" -eq 0 ]; then
@@ -175,8 +182,8 @@ tools/linux-standalone-reader-test.sh --emacs "$EMACS"
 if [ "$INCLUDE_TARBALL" -eq 1 ]; then
   echo ""
   echo "--- Linux standalone tarball smoke ---"
-  tools/build-standalone-tarball.sh v1.0.1 linux-x86_64 --emacs "$EMACS"
-  tools/verify-standalone-tarball.sh v1.0.1 linux-x86_64
+  tools/build-standalone-tarball.sh "$NELISP_RELEASE_VERSION" linux-x86_64 --emacs "$EMACS"
+  tools/verify-standalone-tarball.sh "$NELISP_RELEASE_VERSION" linux-x86_64
 
   echo ""
   echo "--- Linux standalone installer smoke ---"

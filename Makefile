@@ -1,4 +1,4 @@
-.PHONY: actor-bench all aot-differential bench bench-aot-checked-arith bench-aot-tco clean compile gc-bench jit-unverified neln-loader-test nl-check-gate nl-dev-loop nl-safe-bench nl-safe-native-bench nl-violation-corpus ns-gate ns-inventory parens-check soak soak-1h soak-full soak-worker standalone-reader-recursion-guard-smoke test test-fast test-jit test-nojit test-one test-parallel unsafe-inventory wasm-dtw-compile wasm-dtw-site wasm-dtw-site-smoke wasm-dtw-skeleton-smoke wasm-dtw-smoke wasm-dtw-transpile wasm-runtime-image-smoke wasm-smoke \
+.PHONY: version-consistency actor-bench all aot-differential bench bench-aot-checked-arith bench-aot-tco clean compile gc-bench jit-unverified neln-loader-test nl-check-gate nl-dev-loop nl-safe-bench nl-safe-native-bench nl-violation-corpus ns-gate ns-inventory parens-check soak soak-1h soak-full soak-worker standalone-reader-recursion-guard-smoke test test-fast test-jit test-nojit test-one test-parallel unsafe-inventory wasm-dtw-compile wasm-dtw-site wasm-dtw-site-smoke wasm-dtw-skeleton-smoke wasm-dtw-smoke wasm-dtw-transpile wasm-runtime-image-smoke wasm-smoke \
         sqlite-module sqlite-module-clean \
         release-artifact release-checksum soak-blocker soak-post-ship \
         bench-actual bench-allocator bench-allocator-heavy \
@@ -1355,6 +1355,9 @@ gate-mutation:
 gate-mutation-verify:
 	@test -n "$(GATE)" || { echo "usage: make gate-mutation-verify GATE=<gate-name>"; exit 2; }
 	@NELISP_GATE_MUTATION_ONLY="$(GATE)" tools/nelisp-gate-mutation.sh
+
+version-consistency:
+	@bash tools/nelisp-version-consistency.sh
 
 gate-selfcheck:
 	@$(EMACS) --batch -Q -l tools/nelisp-gate-selfcheck.el
@@ -3082,7 +3085,7 @@ standalone-reader-prelude-test:
 #   make standalone-tarball PLATFORM=linux-x86_64
 #   make standalone-tarball PLATFORM=macos-aarch64
 #   make standalone-tarball-verify PLATFORM=linux-x86_64
-STANDALONE_VERSION ?= v1.0.1
+STANDALONE_VERSION ?= $(shell tr -d " \t\n\r" < $(CURDIR)/VERSION 2>/dev/null || echo v1.0.1)
 standalone-tarball:
 	@./tools/build-standalone-tarball.sh $(STANDALONE_VERSION) $(PLATFORM) --emacs "$(EMACS)"
 

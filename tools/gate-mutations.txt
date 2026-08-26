@@ -441,3 +441,8 @@ standalone-reader-ipv6-socket-smoke|scripts/nelisp-standalone-build.el|s/(ptr-wr
 # blocking result check instead of printing a green GATE-COUNT; restored,
 # the widened smoke reports `GATE-COUNT checked=10 findings=0'.
 nl-clj-async-standalone-smoke|packages/nl-clj/src/nl-clj-async.el|s/^  (if (eq (car v) :closed) nil (cadr v)))$/  (if (eq (car v) :closed) nil :gate-mutated))/|successful nl-clj-<! takes unwrap to a sentinel instead of their payload, so the repeated-take fixture and wrapper-based ping/pong cannot complete correctly
+# The version drift that took stage-d red on all four platforms on
+# 2026-08-26: the tarball was built as v1.0.1 and the installer, whose
+# default is a self-contained copy, still said v0.6.0.  Reproduce that
+# exact drift and require the gate to catch it.
+version-consistency|release/stage-d-v3.0/install-v3.sh|s/RELEASE_VERSION:-v1\.0\.1/RELEASE_VERSION:-v0.6.0/|installer default left behind at the previous release version

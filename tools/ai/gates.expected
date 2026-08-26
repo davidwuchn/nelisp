@@ -481,6 +481,7 @@ partial-inventory
 # far from ~19949 (or fails again), that is new evidence and should be
 # investigated on its own, not folded into this reasoning after the fact.
 gate-selfcheck
+version-consistency
 #
 # ns-gate / ns-inventory: 2026-08-23 Windows inventory measured 19-20
 # `ns-collision-divergent' fingerprints (packages/nl-ns/src/nl-ns.el's

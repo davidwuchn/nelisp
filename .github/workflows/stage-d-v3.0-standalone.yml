@@ -340,10 +340,23 @@ jobs:
               git ls-remote --exit-code --heads $url $Ref *> $null
               if ($LASTEXITCODE -eq 0) {
                   git clone --depth 1 --branch $Ref $url "..\$Dest"
-              } else {
-                  Write-Error "required related repo $Repo has no branch $Ref; push matching branches for standalone vendor CI"
-                  exit 1
+                  return
               }
+              # Same fallback the POSIX half of this step already had: not every
+              # related repo calls its default branch "main".  anvil.el calls it
+              # "master", so demanding $Ref outright failed the Windows job while
+              # the Linux job cloned that very repo without trouble.  Probe the
+              # usual defaults before giving up.
+              foreach ($candidate in @("main", "master")) {
+                  git ls-remote --exit-code --heads $url $candidate *> $null
+                  if ($LASTEXITCODE -eq 0) {
+                      Write-Host "::notice::related repo $Repo has no branch $Ref; using its default branch $candidate"
+                      git clone --depth 1 --branch $candidate $url "..\$Dest"
+                      return
+                  }
+              }
+              Write-Error "required related repo $Repo has neither branch $Ref nor a readable default branch"
+              exit 1
           }
           Clone-Related "nelisp-emacs" "nelisp-emacs" $env:NELISP_EMACS_REF
           Clone-Related "anvil.el" "anvil.el" $env:ANVIL_REF
