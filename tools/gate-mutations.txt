@@ -68,6 +68,13 @@ ns-inventory|lisp/nelisp-stdlib.el|s/^  (if (nelisp--num-lt2 x 0) (nelisp--sub2 
 fallback-inventory|lisp/nelisp-artifact.el|s/^               (error nil)))$/               (error (progn nil))))/|a pinned bare-handler site's exact shape drifts while its file and toplevel stay the same
 pkg-graph|src/nelisp-file-notify.el|s/(require 'filenotify)/(require 'ert-x)/|a hard host require is swapped for a different unresolved one, count unchanged
 generated-source-parse|scripts/nelisp-standalone-build.el|s/"(defvar features nil)\\n"/"(defvar features nil\\n"/|drops a closing paren inside a generated string literal, invisible to parens-check
+# doc200-census proof (2026-08-26): changing the sole direct tag-5 test in
+# `nl_jit_length' to 50 made the live key vanish.  RED printed
+# `STALE-LEDGER-ROW ... tag-test-sexp-tag 0' and
+# `GATE-COUNT checked=630 findings=169'; restored GREEN printed PASS and the
+# same GATE-COUNT.  `make gate-mutation-verify GATE=doc200-census' exercised
+# the injection, observed RED, restored the file, and observed GREEN.
+doc200-census|lisp/nelisp-cc-jit-length.el|s/(= (sexp-tag arg) 5)/(= (sexp-tag arg) 50)/|the sole direct Str-tag test in nl_jit_length vanishes from the live census
 #
 # 2026-08-22 (this session): ert-full had never been mutation-proven --
 # `nelisp-ai.sh test' is not a raw `make' target, so it could not go

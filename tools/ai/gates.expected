@@ -32,6 +32,11 @@ parens-check
 # days before a bisect found it.  This one parses the generated text.
 generated-source-parse
 
+# Doc 200's countable pre-change audit: every tracked production/tool Elisp
+# file is structurally read, quoted standalone DSL is walked, and live stable
+# keys must exactly match tools/nelisp-doc200-tag-sites.txt.
+doc200-census
+
 unsafe-inventory
 # ns-inventory: 2026-08-23 Windows inventory finding -- see the ns-gate
 # note further down (same `nl-ns--definition-shape' fingerprint, same

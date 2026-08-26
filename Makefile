@@ -830,6 +830,7 @@ bootstrap-contract:
 # running anything.
 .PHONY: prelude-toplevel-check
 .PHONY: generated-source-parse
+.PHONY: doc200-census
 .PHONY: partial-inventory
 .PHONY: gate-mutation
 .PHONY: gate-selfcheck
@@ -1315,6 +1316,14 @@ generated-source-parse:
 	  --eval '(setq load-prefer-newer t)' \
 	  -l tools/nelisp-generated-source-parse.el \
 	  -f nelisp-generated-source-parse-run
+
+# Doc 200 option A cannot safely add string tags until every existing Str (5)
+# and MutStr (6) test/write has a stable audit row.  This source-only reader
+# regenerates the live (FILE, ENCLOSING, KIND, NTH) keys and compares only
+# those keys with the ledger, preserving its human STATUS and NOTE columns.
+doc200-census:
+	@$(EMACS) --batch -Q -l tools/nelisp-doc200-tag-census.el \
+	  -f nelisp-doc200-tag-census-run
 
 partial-inventory:
 	@$(EMACS) --batch -Q -l tools/nelisp-partial-inventory.el

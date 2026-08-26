@@ -122,7 +122,7 @@ cmd_check() {
     # The full ERT suite is deliberately NOT here: it takes minutes, and
     # `verify' already holds you to the last ert-full report and prints
     # its age.  Run `test' when the age column says the evidence is old.
-    check_steps="compile parens-check generated-source-parse \
+    check_steps="compile parens-check generated-source-parse doc200-census \
 prelude-toplevel-check partial-inventory gate-selfcheck version-consistency \
 gate-mutation \
 ns-gate nl-check-gate fallback-inventory-selftest \
