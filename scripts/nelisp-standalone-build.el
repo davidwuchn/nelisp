@@ -15402,7 +15402,8 @@ Parallelism pays off only once per-unit compilation dominates startup
        ;; Windows (untested on that platform at the time of that fix).
        (nelisp-link-units-pe32 out units "_start"
                                '("ExitProcess" "VirtualAlloc" "VirtualFree"
-                                 "GetStdHandle" "WriteFile")
+                                 "GetStdHandle" "WriteFile"
+                                 "GetSystemTimeAsFileTime")
                                (list :stack-reserve
                                      nelisp-standalone--windows-stack-reserve)))
       ('windows-aarch64
@@ -15637,37 +15638,116 @@ preserved."
     (nelisp-asm-arm64-ret buf)
     (nelisp-asm-arm64-buffer-bytes buf)))
 
+(defun nelisp-standalone--float-time-unit-windows-x86_64 ()
+  "Return (TEXT . RELOCS) for the Win64 body of `nl_os_float_time'.
+
+rcx=out/rax=out, NOT rdi=out like the Linux/Darwin bodies below: this
+file's own AOT-generated Windows callers pass the first argument in
+RCX (standard Win64 ABI), confirmed by disassembling `wf_float_time''s
+own call site (`push rax / pop rcx' immediately before `call
+nl_os_float_time' in the built binary) -- the rdi-based first attempt
+here linked cleanly but silently read garbage and returned nil, because
+Windows callers never populate rdi for this call.  There is no
+`gettimeofday' syscall to make on Windows -- the NT kernel's clock is
+read through `KERNEL32!GetSystemTimeAsFileTime', an ordinary DLL call
+via this unit's own IAT thunk (see `nelisp-standalone--windows-reader-
+imports' / `nelisp-standalone-build''s Windows import lists, both of
+which now carry \"GetSystemTimeAsFileTime\"), unlike every other body
+in `nelisp-standalone--float-time-unit' which is a raw syscall.
+
+`GetSystemTimeAsFileTime' fills a caller-supplied FILETIME (a single
+64-bit little-endian count of 100ns ticks since 1601-01-01) and returns
+void.  The Unix-epoch delta is 116444736000000000 (100ns units between
+1601-01-01 and 1970-01-01), so:
+
+    unix_seconds = (filetime_ticks - 116444736000000000) / 1e7
+
+Win64 ABI requirements this body has to satisfy around the call that
+the Linux/Darwin syscall bodies do not:
+- arg0 goes in RCX (not RDI), and the call site's RSP must be 16-byte
+  aligned with 32 bytes of shadow space reserved below the return
+  address for the callee to spill into.
+- rbx (holds `out' across the call and the trailing float math) and
+  rcx/r11 (this file's own established rule, see the Linux body's own
+  comment: the AOT extern-call model assumes both survive an internal
+  call) are pushed before the call and popped after.  Three 8-byte
+  pushes leave RSP 16-aligned again, so `sub rsp, 48' (32 shadow + 8
+  bytes for the FILETIME local + 8 bytes padding) is what keeps the
+  call site itself 16-aligned.
+
+Verified: `make standalone-eval-test' and `scripts/verify-cross-
+platform.ps1' both pass on Windows 11 x86_64 with this body linked in
+(2026-08-26); `(float-time)' returns a value that round-trips through
+`format-time-string' as the current wall-clock time."
+  (let* ((head (append
+                (list #x53)                          ; push rbx
+                (list #x48 #x89 #xcb)                 ; mov rbx, rcx (save out)
+                (list #x51)                           ; push rcx
+                (list #x41 #x53)                      ; push r11
+                (list #x48 #x83 #xec #x30)            ; sub rsp, 48
+                (list #x48 #x8d #x4c #x24 #x20)       ; lea rcx, [rsp+32] (&FILETIME)
+                (list #xe8)))                         ; call GetSystemTimeAsFileTime
+         (call-reloc-off (length head))
+         (body (append
+                head
+                (list 0 0 0 0)
+                (list #x48 #x8b #x44 #x24 #x20)       ; mov rax, [rsp+32] (FILETIME u64)
+                (list #x48 #x83 #xc4 #x30)            ; add rsp, 48
+                (list #x48 #xba)                      ; mov rdx, imm64 (epoch delta)
+                (list #x00 #x80 #x3e #xd5 #xde #xb1 #x9d #x01) ; 116444736000000000
+                (list #x48 #x29 #xd0)                 ; sub rax, rdx
+                (list #xf2 #x48 #x0f #x2a #xc0)       ; cvtsi2sd xmm0, rax
+                (list #x48 #xb8)                      ; mov rax, imm64 (bits of 1e7)
+                (list #x00 #x00 #x00 #x00 #xd0 #x12 #x63 #x41) ; 10000000.0
+                (list #x66 #x48 #x0f #x6e #xc8)       ; movq xmm1, rax
+                (list #xf2 #x0f #x5e #xc1)            ; divsd xmm0, xmm1 (unix seconds)
+                (list #x48 #xc7 #x03 #x03 #x00 #x00 #x00) ; mov qword [rbx], 3 (tag Float)
+                (list #x66 #x0f #xd6 #x43 #x08)       ; movq [rbx+8], xmm0 (f64 bits)
+                (list #x48 #xc7 #x43 #x10 #x00 #x00 #x00 #x00) ; mov qword [rbx+16], 0
+                (list #x48 #xc7 #x43 #x18 #x00 #x00 #x00 #x00) ; mov qword [rbx+24], 0
+                (list #x48 #x89 #xd8)                 ; mov rax, rbx (return out)
+                (list #x41 #x5b)                      ; pop r11
+                (list #x59)                           ; pop rcx
+                (list #x5b)                           ; pop rbx
+                (list #xc3))))                        ; ret
+    (cons (apply #'unibyte-string body)
+          (list (list :offset call-reloc-off :type 'plt32
+                      :symbol "GetSystemTimeAsFileTime" :addend 0
+                      :section 'text)))))
+
 (defun nelisp-standalone--float-time-unit ()
   "Return the raw link unit exporting `nl_os_float_time'."
-  (let ((text
-         (pcase nelisp-standalone--target
+  (let* ((text-and-relocs
+          (pcase nelisp-standalone--target
            ;; Darwin arm64: BSD gettimeofday 116 via SVC #0x80, 32-bit
            ;; tv_usec.
            ('macos-aarch64
-            (nelisp-standalone--float-time-unit-aarch64-text 116 #x80 nil))
+            (cons (nelisp-standalone--float-time-unit-aarch64-text 116 #x80 nil) nil))
            ;; Linux arm64: generic-table gettimeofday 169 via SVC #0,
            ;; 64-bit tv_usec (LP64 `suseconds_t' is `long').  Emitted and
            ;; encoding-checked here; never executed on real hardware yet,
            ;; because no aarch64 Linux host has built this reader.
            ('linux-aarch64
-            (nelisp-standalone--float-time-unit-aarch64-text 169 0 t))
-           ;; Windows has no syscall this body could make: the x86_64
-           ;; bytes below are `mov eax, 96; syscall', which is the LINUX
-           ;; gettimeofday number handed to the NT kernel.  That was
-           ;; linked into both Windows targets and only ever mattered if
-           ;; someone called `float-time'.  A build-time error is the
-           ;; honest state: `GetSystemTimeAsFileTime' through the
-           ;; kernel32 import table is the answer, and it has not been
-           ;; written.  Chosen over leaving the foreign body in place
-           ;; (2026-08-26): this stops the Windows reader build until
-           ;; that unit exists, which is the point.
-           ((or 'windows-x86_64 'windows-aarch64)
+            (cons (nelisp-standalone--float-time-unit-aarch64-text 169 0 t) nil))
+           ;; Windows x86_64: `GetSystemTimeAsFileTime' via this unit's own
+           ;; IAT thunk -- see `nelisp-standalone--float-time-unit-windows-
+           ;; x86_64''s own doc comment for the full design.
+           ('windows-x86_64
+            (nelisp-standalone--float-time-unit-windows-x86_64))
+           ;; windows-aarch64 has no aarch64 Windows host to build or run
+           ;; this on; left as a build-time error rather than an
+           ;; unverified guess (same reasoning as the previous commit's
+           ;; choice for both Windows arches, narrowed now that x86_64
+           ;; has a real body).
+           ('windows-aarch64
             (error (concat "standalone: nl_os_float_time has no body for %S"
-                           " -- Windows needs a GetSystemTimeAsFileTime unit;"
-                           " the x86_64 body is a Linux syscall")
+                           " -- Windows/aarch64 needs a GetSystemTimeAsFileTime"
+                           " unit (see the windows-x86_64 body for the design);"
+                           " no aarch64 Windows host exists to verify one")
                    nelisp-standalone--target))
            ('linux-x86_64
-            (apply #'unibyte-string
+            (cons
+             (apply #'unibyte-string
                      ;; rcx/r11 are saved across the body: the `syscall'
                      ;; instruction clobbers them, and the AOT extern-call model
                      ;; assumes the callee leaves them intact -- so without this
@@ -15698,15 +15778,18 @@ preserved."
                        #x41 #x5b                         ; pop r11
                        #x59                              ; pop rcx
                        #x5b                              ; pop rbx
-                       #xc3)))
+                       #xc3))
+             nil))
            (other
-            (error "standalone: nl_os_float_time has no body for %S" other)))))
+            (error "standalone: nl_os_float_time has no body for %S" other))))
+         (text (car text-and-relocs))
+         (relocs (cdr text-and-relocs)))
     (nelisp-link-unit-make
      (nelisp-standalone--target-object-name "float-time.o")
      (list (cons 'text text))
      (list (nelisp-link-symbol "nl_os_float_time" 0
                                :section 'text :bind 'global :type 'func))
-     nil)))
+     relocs)))
 
 (defun nelisp-standalone--reader-src ()
   "Embedded source text for the reader build (NELISP_SRC; default \"(+ 40 2)\")."
@@ -15825,7 +15908,11 @@ dispatch arm in `nelisp-standalone--applyfn-dispatch-table'.")
                     "CreateProcessW" "WaitForSingleObject" "GetExitCodeProcess"
                     ;; fix/windows-env-inherit: startup `nl_os_environ_init'
                     ;; env-block walk (see the windows os-base-forms comment).
-                    "GetEnvironmentStringsW" "FreeEnvironmentStringsW"))
+                    "GetEnvironmentStringsW" "FreeEnvironmentStringsW"
+                    ;; nl_os_float_time (raw hand-assembled unit, this file's
+                    ;; own `nelisp-standalone--float-time-unit-windows-x86_64'):
+                    ;; FILETIME source for `float-time'/`round'/etc.
+                    "GetSystemTimeAsFileTime"))
         (cons "SHELL32.dll" (list "CommandLineToArgvW")))
   "PE imports needed by the Windows-native standalone reader.")
 
