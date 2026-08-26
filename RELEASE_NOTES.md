@@ -1,5 +1,35 @@
 # NeLisp Release Notes
 
+## v1.0.1 — 2026-08-26
+
+Full notes: [`release/v1.0.1/RELEASE.md`](release/v1.0.1/RELEASE.md).
+
+A same-day follow-up to v1.0.0, carrying the in-process `.neln` loader and
+three defects that v1.0.0's own change -- the collector running by default --
+brought into the open.
+
+- **The loader runs any artifact, read at run time.** v1.0.0's version was a
+  demo: bytes and extern addresses baked in at build time, one function only.
+- **`pcase` now supports `(cl-type TYPE)`.** It signalled where Emacs answers.
+  `emacs-parity` compares 19,995 behaviours and this was not among them.
+- **`base64-decode-string` returns bytes, not characters.** The pair did not
+  round-trip for any input with a high byte; only the encoder had been fixed.
+- **The loader's digest buffer was not a GC root.** The same intact artifact
+  digested differently on every run -- the signature of reading reclaimed
+  storage. Impossible before the collector ran by default.
+- **The native harness's slot registry grows** instead of stopping at 64,
+  which every tight arithmetic loop exhausted in tens of iterations.
+- **`stage-d` parity ran for the first time in 12 attempts** -- it had been
+  demanding a `main` branch from a sibling that is on `master`.
+
+Known issues, both stated in the full notes: macOS aarch64's `boxed` parity
+case segfaults (not a regression -- previously unreachable), and unibyte
+strings are still not a distinct representation, which is what makes `append`
+answer `(521 640 0)` for three raw bytes. `docs/design/200-unibyte-string-
+representation.org` records that one rather than half-fixing it.
+
+---
+
 ## v1.0.0 — 2026-08-26
 
 Full notes: [`release/v1.0.0/RELEASE.md`](release/v1.0.0/RELEASE.md).

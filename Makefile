@@ -3082,7 +3082,7 @@ standalone-reader-prelude-test:
 #   make standalone-tarball PLATFORM=linux-x86_64
 #   make standalone-tarball PLATFORM=macos-aarch64
 #   make standalone-tarball-verify PLATFORM=linux-x86_64
-STANDALONE_VERSION ?= v1.0.0
+STANDALONE_VERSION ?= v1.0.1
 standalone-tarball:
 	@./tools/build-standalone-tarball.sh $(STANDALONE_VERSION) $(PLATFORM) --emacs "$(EMACS)"
 

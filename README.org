@@ -1,4 +1,4 @@
-#+TITLE: NeLisp — Self-Hosted Emacs Lisp VM (v1.0.0)
+#+TITLE: NeLisp — Self-Hosted Emacs Lisp VM (v1.0.1)
 #+AUTHOR: zawatton
 #+DATE: 2026-08-26
 
@@ -44,12 +44,12 @@ way: standalone file I/O, stdout/stderr, process exit, raw memory,
 syscall surface used by the standalone reader are expressed from Elisp
 via AOT codegen and =syscall-direct=.
 
-Current stable release: *v1.0.0* (2026-08-26).  This release keeps the
+Current stable release: *v1.0.1* (2026-08-26).  This release keeps the
 project versioned by SemVer git tags, in the same style as =anvil.el=:
-pin users to =v1.0.0=, let =main= carry active development, and use
+pin users to =v1.0.1=, let =main= carry active development, and use
 release notes for the exact gate status.
 
-v1.0.0 ships:
+v1.0.1 ships:
 - *Pure-Elisp runtime implementation* — evaluator, reader, special
   forms, builtins, compiler, allocator, GC, object writers, codegen,
   and standalone OS interaction all live in Elisp source.
@@ -93,13 +93,18 @@ substrate for Lisp Machine / new-dialect experiments.
 
 * Current Release Highlights
 
-v1.0.0 is the current stable tag.  Two things make it a 1.0 rather than
-another point release: the runtime now collects garbage by default, and
-ordinary allocating Elisp runs on real OS threads.  Before this release a
-long-running loop grew without bound unless a debug switch was flipped, and
-"parallelism" meant cooperative scheduling on one thread.
+v1.0.1 is the current stable tag.  What made the 1.0 line a 1.0 rather than
+another point release: the runtime collects garbage by default, and ordinary
+allocating Elisp runs on real OS threads.  Before it, a long-running loop grew
+without bound unless a debug switch was flipped, and "parallelism" meant
+cooperative scheduling on one thread.
 
-Every figure below was measured on the v1.0.0 tree; see =Test status= for how.
+v1.0.1 followed the same day, carrying the in-process =.neln= loader and three
+defects that turning the collector on by default had brought into the open --
+see =release/v1.0.1/RELEASE.md=, which also names two known issues this line
+does NOT fix.
+
+Every figure below was measured on the 1.0 tree; see =Test status= for how.
 
 | Area | What changed |
 |------+--------------|
@@ -488,9 +493,9 @@ RBP/RBX/RDI/RSI/R12-R15 callee-save) are pure elisp.
 
 Deferred: aarch64 Windows (=arm64ec=) — currently x86_64 Windows only.
 
-* Status — v1.0.0 (2026-08-26)
+* Status — v1.0.1 (2026-08-26)
 
-NeLisp v1.0.0 centers the runtime in Elisp, keeps the standalone path
+NeLisp v1.0.1 centers the runtime in Elisp, keeps the standalone path
 as the primary user surface, and adds cross-platform native emit across
 5 OS×arch targets.
 
@@ -509,28 +514,28 @@ as the primary user surface, and adds cross-platform native emit across
 
 Two paths.
 
-*** Stable tag — =v1.0.0= (recommended)
+*** Stable tag — =v1.0.1= (recommended)
 
 For source users, pin the current stable tag:
 
 #+begin_src shell
 git clone https://github.com/zawatton/nelisp ~/nelisp
 cd ~/nelisp
-git checkout v1.0.0
+git checkout v1.0.1
 make standalone-reader
 make standalone-reader-test
 #+end_src
 
-For release artifacts, v1.0.0 tarballs use:
+For release artifacts, v1.0.1 tarballs use:
 
 #+begin_src text
-anvil-v1.0.0-linux-x86_64.tar.gz
-anvil-v1.0.0-macos-aarch64.tar.gz
-anvil-v1.0.0-windows-x86_64.tar.gz
+anvil-v1.0.1-linux-x86_64.tar.gz
+anvil-v1.0.1-macos-aarch64.tar.gz
+anvil-v1.0.1-windows-x86_64.tar.gz
 #+end_src
 
 =main= is the development branch.  Use it when hacking on NeLisp
-itself; pin =v1.0.0= when you want reproducible runtime behavior.
+itself; pin =v1.0.1= when you want reproducible runtime behavior.
 
 *** Prerequisites by platform
 
@@ -611,8 +616,8 @@ iwr https://github.com/zawatton/nelisp/releases/latest/download/install-v3.ps1 -
 .\install-v3.ps1
 #+end_src
 
-Default install root: =$HOME/.local/share/anvil-v1.0.0/=.
-On Windows the default root is under =$env:LOCALAPPDATA\anvil-v1.0.0=.
+Default install root: =$HOME/.local/share/anvil-v1.0.1/=.
+On Windows the default root is under =$env:LOCALAPPDATA\anvil-v1.0.1=.
 (The =anvil-= prefix is historical packaging — the tarball *is* the
 NeLisp runtime; use =bin/nelisp= or =bin/nelisp.exe= directly.)
 Full install-to-run runbook for Linux x86_64, macOS arm64, and Windows x86_64
@@ -807,7 +812,7 @@ checked against =target/nelisp= before being written here.
 - *Linux arm64 remains best-effort.*  Linux x86_64, macOS arm64 and Windows
   x86_64 are the gated native standalone targets.
 
-** Test status (v1.0.0, 2026-08-26)
+** Test status (v1.0.1, 2026-08-26)
 
 Measured on this tree, Linux x86_64, after a clean =make standalone-reader=:
 
