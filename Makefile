@@ -1408,6 +1408,13 @@ inner: standalone-reader emacs-parity
 # sequential writes landed", because there is only one write. Not
 # Windows-verified; the owner's next runbook run on Windows is the actual
 # proof this holds there too.
+# `wc -c' is piped through `tr -d " "' below because BSD wc right-pads its
+# count.  Without that, the line reads `GATE-COUNT checked=   19900' and the
+# `checked=\([0-9]+\)' parsers in tools/nelisp-gate-selfcheck.el and
+# tools/ai/nelisp-ai.sh match nothing -- so a gate that had just compared
+# 19,900 bytes was reported as one that examined nothing, on macOS only.
+# `binary-size-ratchet' below already strips it; this target and the
+# checked-allocator soak did not.
 emacs-parity: $(if $(wildcard target/nelisp target/nelisp.exe),,standalone-reader)
 	@mkdir -p target; \
 	host_version="$${NELISP_EMACS_PARITY_HOST_VERSION:-$$($(EMACS) --version | head -1 | grep -oE '[0-9]+\.[0-9]+' | head -1)}"; \
@@ -1427,7 +1434,7 @@ emacs-parity: $(if $(wildcard target/nelisp target/nelisp.exe),,standalone-reade
 	if [ ! -s target/emacs-parity-emacs.txt ]; then \
 	  echo "[emacs-parity] FAIL: Emacs produced no output -- the cases file did not evaluate"; exit 1; \
 	fi; \
-	n=$$(wc -c < target/emacs-parity-emacs.txt); \
+	n=$$(wc -c < target/emacs-parity-emacs.txt | tr -d ' '); \
 	head -c $$n target/emacs-parity-nelisp.txt > target/emacs-parity-nelisp-head.txt; \
 	if cmp -s target/emacs-parity-emacs.txt target/emacs-parity-nelisp-head.txt; then findings=0; else findings=1; fi; \
 	echo "GATE-COUNT checked=$$n findings=$$findings"; \
@@ -1588,7 +1595,7 @@ standalone-reader-checked-soak: $(if $(wildcard target/nelisp target/nelisp.exe)
 	rounds_file=target/checked-soak-rounds.txt; \
 	NELISP_ALLOC_CHECK=1 $$bin --load target/checked-soak.el 2>&1 \
 	  | grep '^ROUND ' > $$rounds_file || true; \
-	n=$$(wc -l < $$rounds_file); \
+	n=$$(wc -l < $$rounds_file | tr -d ' '); \
 	if [ "$$n" -ne "$(STANDALONE_CHECKED_SOAK_ROUNDS)" ]; then \
 	  echo "[checked-soak] FAIL: $$n of $(STANDALONE_CHECKED_SOAK_ROUNDS) round(s) reported -- the run died partway"; \
 	  exit 1; \

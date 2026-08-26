@@ -775,9 +775,9 @@ a `:cls' (= `gp' or `f64') tag and a `:varargs-p' flag for emit
 to inspect when fixing register placement + the SysV AMD64 AL
 register before the call instruction.  f64 args are validated
 against the xmm register budget (= 8).  GP args may exceed the
-register budget on x86_64 SysV / Win64, where the emitter can place
-later args on the ABI-specific outgoing call stack; other ABIs still
-raise `:extern-call-too-many-gp-args'.
+register budget on x86_64 SysV / Win64 and on aarch64, where the
+emitter can place later args on the ABI-specific outgoing call
+stack; other ABIs still raise `:extern-call-too-many-gp-args'.
 
 Per-class budget is total across the fixed + varargs sets — SysV
 AMD64 still passes variadic args through the same register pool
@@ -856,7 +856,12 @@ already distinguishes `extern-call' (i64 return) from
       (when (and (> (length gp-args)
                     (length (nelisp-aot-compiler--current-arg-regs)))
                  (not (and (eq nelisp-aot-compiler--arch 'x86_64)
-                           (memq nelisp-aot-compiler--abi '(sysv win64)))))
+                           (memq nelisp-aot-compiler--abi '(sysv win64))))
+                 ;; aarch64 spills the ninth argument onward into the
+                 ;; AAPCS64 outgoing stack area -- the same path
+                 ;; `--emit-call-arm64' has always used for a direct
+                 ;; call; `--emit-extern-call-arm64' reuses it.
+                 (not (eq nelisp-aot-compiler--arch 'aarch64)))
         (signal 'nelisp-aot-compiler-error
                 (list :extern-call-too-many-gp-args name
                       (length gp-args))))
@@ -17479,17 +17484,35 @@ result (zero-extended byte) in x0."
 
 (defun nelisp-aot-compiler--emit-extern-call-arm64 (node buf)
   "Emit a GP-only `extern-call' for aarch64.
-This matches the existing fixed-arity AAPCS64 call path: evaluate args
-left-to-right, spill them in 16-byte stack slots, pop into x0..x7, then
-BL the target.  f64 and stack arguments remain explicitly unsupported
-on this arm64 path."
+This matches the existing AAPCS64 call path: evaluate args left-to-right,
+spill them in 16-byte stack slots, pop into x0..x7, then BL the target.
+
+Arguments past the eighth travel in the ABI-visible outgoing stack area,
+laid out exactly as `--emit-call-arm64' lays them out for a direct call:
+8-byte slots at SP when the BL executes, with the temporary 16-byte
+spills still above them.  That path had been written for direct calls
+only, so an `extern-call' with a ninth GP argument raised
+`:extern-call-too-many-args-aarch64' -- which is what stopped the macOS
+reader building once Doc 180 Phase 1 grew `nl_eval_source_all' to ten.
+
+f64 arguments remain explicitly unsupported on this arm64 path."
   (let* ((name (nelisp-aot-compiler--ir-get node :name))
          (args (nelisp-aot-compiler--ir-get node :args))
          (gp-regs nelisp-aot-compiler--aarch64-arg-regs)
-         (n (length args)))
-    (when (> n (length gp-regs))
-      (signal 'nelisp-aot-compiler-error
-              (list :extern-call-too-many-args-aarch64 name n)))
+         (reg-budget (length gp-regs))
+         (n (length args))
+         ;; Executable/selfhost smoke resolves helper defuns as in-buffer
+         ;; labels, possibly forward-defined.  Relocatable object mode
+         ;; records externs.  Both stack modes need the same BL.
+         (emit-bl
+          (lambda ()
+            (if nelisp-aot-compiler--allow-external-user-calls
+                (progn
+                  (nelisp-asm-arm64-emit-reloc buf 'b26-pc (symbol-name name))
+                  (nelisp-asm-arm64--emit-word buf #x94000000))
+              (nelisp-asm-arm64--emit-word buf #x94000000)
+              (nelisp-asm-arm64-emit-fixup
+               buf (- (nelisp-asm-arm64-buffer-pos buf) 4) name 'bl26)))))
     (dolist (a args)
       (unless (eq (nelisp-aot-compiler--ir-get a :cls) 'gp)
         (signal 'nelisp-aot-compiler-error
@@ -17497,17 +17520,36 @@ on this arm64 path."
     (dolist (a args)
       (nelisp-aot-compiler--emit-value a buf)
       (nelisp-asm-arm64-str-pre-sp-16 buf 'x0))
-    (cl-loop for i from (1- n) downto 0
-             do (nelisp-asm-arm64-ldr-post-sp-16 buf (nth i gp-regs)))
-    ;; Executable/selfhost smoke resolves helper defuns as in-buffer labels,
-    ;; possibly forward-defined.  Relocatable object mode records externs.
-    (if nelisp-aot-compiler--allow-external-user-calls
+    (if (<= n reg-budget)
         (progn
-          (nelisp-asm-arm64-emit-reloc buf 'b26-pc (symbol-name name))
-          (nelisp-asm-arm64--emit-word buf #x94000000))
-      (nelisp-asm-arm64--emit-word buf #x94000000)
-      (nelisp-asm-arm64-emit-fixup
-       buf (- (nelisp-asm-arm64-buffer-pos buf) 4) name 'bl26))))
+          (cl-loop for i from (1- n) downto 0
+                   do (nelisp-asm-arm64-ldr-post-sp-16 buf (nth i gp-regs)))
+          (funcall emit-bl))
+      ;; AAPCS64 stack-argument path.  The temporary arg saves are 16-byte
+      ;; slots above the outgoing stack area; ABI-visible stack args are
+      ;; 8-byte slots at SP when BL executes.  SP stays 16-byte aligned
+      ;; throughout, which Darwin requires at the call boundary.
+      (let* ((stack-count (- n reg-budget))
+             (stack-bytes (* 8 stack-count))
+             (stack-rounded (if (zerop (logand stack-bytes 15))
+                                stack-bytes
+                              (+ stack-bytes (- 16 (logand stack-bytes 15))))))
+        (nelisp-aot-compiler--arm64-emit-sp-adjust buf 'sub stack-rounded)
+        (cl-loop for idx from reg-budget below n
+                 for stack-slot from 0
+                 do
+                 (nelisp-aot-compiler--arm64-emit-ldr-sp
+                  buf 'x9 (+ stack-rounded (* 16 (- (1- n) idx))))
+                 (nelisp-aot-compiler--arm64-emit-str-sp
+                  buf 'x9 (* 8 stack-slot)))
+        (cl-loop for idx below reg-budget
+                 for reg in gp-regs
+                 do
+                 (nelisp-aot-compiler--arm64-emit-ldr-sp
+                  buf reg (+ stack-rounded (* 16 (- (1- n) idx)))))
+        (funcall emit-bl)
+        (nelisp-aot-compiler--arm64-emit-sp-adjust
+         buf 'add (+ stack-rounded (* 16 n)))))))
 
 (defun nelisp-aot-compiler--emit-call-arm64 (node buf)
   "Emit a fixed-arity call for aarch64 (AAPCS64), direct or indirect.

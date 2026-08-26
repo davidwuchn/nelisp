@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # macOS standalone eval smoke.
 #
-# Builds target/nelisp-standalone-eval-macos-* as a pure-elisp Mach-O executable.
+# Builds the standalone eval binary as a pure-elisp Mach-O executable.
 # On native macOS it also executes the binary and checks the exit code.
 set -euo pipefail
 
@@ -57,7 +57,11 @@ export NELISP_FORM_B="$B"
   -f nelisp-standalone-build
 
 case "$TARGET" in
-  macos-aarch64) EXE="$REPO_ROOT/target/nelisp-standalone-eval-macos-aarch64" ;;
+  # `nelisp-standalone--output-path' keeps the macOS arm64 eval binary at the
+  # short `target/nelisp-standalone-eval' name -- only cross-built targets get
+  # an arch suffix, and aarch64 is the host arch here (same rule the reader
+  # smoke documents for `target/nelisp').
+  macos-aarch64) EXE="$REPO_ROOT/target/nelisp-standalone-eval" ;;
   macos-x86_64) EXE="$REPO_ROOT/target/nelisp-standalone-eval-macos-x86_64" ;;
   *) echo "[macos-standalone-eval] FAIL: unsupported target $TARGET" >&2; exit 2 ;;
 esac

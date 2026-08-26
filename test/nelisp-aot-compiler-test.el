@@ -3948,6 +3948,55 @@ SysV would emit `push rdi' = 57 instead."
                      (unibyte-string #x48 #x81 #xc4 #x28 #x00 #x00 #x00)))))
       (ignore-errors (delete-file path)))))
 
+(ert-deftest nelisp-aot-compiler/aarch64-extern-call-ten-gp-stack-args ()
+  "AArch64 `extern-call' spills the ninth and tenth GP args to the stack.
+
+Before this, `--emit-extern-call-arm64' raised
+`:extern-call-too-many-args-aarch64' for any ninth GP argument, even
+though `--emit-call-arm64' had carried the AAPCS64 outgoing-stack path
+for direct calls all along.  Doc 180 Phase 1 grew `nl_eval_source_all'
+to ten GP arguments, which made the macOS standalone reader
+uncompilable -- caught only after the macos-aarch64 CI lane stopped
+dying in an earlier smoke.
+
+The asserted shape is the same one `--emit-call-arm64' emits: ten
+16-byte temporary spills, `sub sp,sp,#16' for the two 8-byte outgoing
+slots, the two stack args copied through x9, x0-x7 reloaded from the
+temporaries, then BL and a single `add sp,sp,#176' unwinding both
+areas.  SP stays 16-byte aligned across the BL, which Darwin requires."
+  (let ((path (make-temp-file "nelisp-aarch64-extern-call-10gp-" nil ".o")))
+    (unwind-protect
+        (progn
+          (nelisp-aot-compile-to-object
+           '(defun probe () (extern-call ext10 1 2 3 4 5 6 7 8 9 10))
+           path :arch 'aarch64)
+          (let* ((bytes (nelisp-aot-compiler-test--read-bytes path))
+                 (sec (nelisp-aot-compiler-test--elf-find-section bytes ".text"))
+                 (text (substring bytes
+                                  (plist-get sec :offset)
+                                  (+ (plist-get sec :offset)
+                                     (plist-get sec :size)))))
+            (should
+             (nelisp-aot-compiler-test--bytes-contain-p
+              text
+              ;; sub sp,sp,#0x10 -- two 8-byte outgoing slots, already
+              ;; 16-aligned so no pad.
+              (unibyte-string #xff #x43 #x00 #xd1
+                              ;; ldr x9,[sp,#0x20]; str x9,[sp]      (arg 9)
+                              #xe9 #x13 #x40 #xf9  #xe9 #x03 #x00 #xf9
+                              ;; ldr x9,[sp,#0x10]; str x9,[sp,#8]   (arg 10)
+                              #xe9 #x0b #x40 #xf9  #xe9 #x07 #x00 #xf9
+                              ;; x0..x7 <- the first eight temporaries.
+                              #xe0 #x53 #x40 #xf9  #xe1 #x4b #x40 #xf9
+                              #xe2 #x43 #x40 #xf9  #xe3 #x3b #x40 #xf9
+                              #xe4 #x33 #x40 #xf9  #xe5 #x2b #x40 #xf9
+                              #xe6 #x23 #x40 #xf9  #xe7 #x1b #x40 #xf9
+                              ;; bl (reloc, addend 0)
+                              #x00 #x00 #x00 #x94
+                              ;; add sp,sp,#0xb0 = 16 outgoing + 10*16 temps.
+                              #xff #xc3 #x02 #x91)))))
+      (ignore-errors (delete-file path)))))
+
 (ert-deftest nelisp-aot-compiler/win64-internal-call-odd-arity-no-pad ()
   "Win64 internal calls do not use SysV arity-based alignment pads."
   (let ((text (nelisp-aot-compiler-test--coff-text-for

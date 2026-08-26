@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# release/stage-d-v3.0/install-v3.sh — v0.6.0 standalone installer
+# release/stage-d-v3.0/install-v3.sh — v1.0.1 standalone installer
 
 set -euo pipefail
 
-RELEASE_VERSION="${RELEASE_VERSION:-v0.6.0}"
+RELEASE_VERSION="${RELEASE_VERSION:-v1.0.1}"
 ANVIL_PREFIX="${ANVIL_PREFIX:-$HOME/.local/share/anvil-${RELEASE_VERSION}}"
 # Default to GitHub's `releases/latest' redirect so the install URL keeps
 # resolving through future patch releases (v0.6.1, v0.6.2, ...) without
@@ -14,7 +14,7 @@ FROM_DIR=""
 
 usage() {
   cat <<USAGE
-NeLisp standalone installer (v0.6.0 default; true standalone, no Emacs runtime dependency)
+NeLisp standalone installer (v1.0.1 default; true standalone, no Emacs runtime dependency)
 
 Usage:
   install-v3.sh [--from DIR] [--prefix DIR] [--version VERSION] [--help]

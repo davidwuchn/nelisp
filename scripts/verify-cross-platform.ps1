@@ -45,7 +45,7 @@ function Invoke-WindowsStandaloneInstallSmoke {
         & (Join-Path $RepoRoot "release\stage-d-v3.0\install-v3.ps1") `
             -From (Join-Path $RepoRoot "dist") `
             -Prefix $Prefix `
-            -Version "v0.6.0"
+            -Version "v1.0.1"
         $InstallCode = $LASTEXITCODE
         if ($null -eq $InstallCode) {
             $InstallCode = 0
@@ -120,10 +120,10 @@ if ($IncludeTarball) {
     Invoke-Checked "Windows standalone tarball smoke" {
         & (Join-Path $RepoRoot "tools\build-standalone-tarball.ps1") `
             -Emacs $Emacs `
-            -Version "v0.6.0" `
+            -Version "v1.0.1" `
             -Target "windows-x86_64"
         & (Join-Path $RepoRoot "tools\verify-standalone-tarball.ps1") `
-            -Version "v0.6.0" `
+            -Version "v1.0.1" `
             -Target "windows-x86_64"
     }
 

@@ -1270,6 +1270,43 @@ external configuration is required."
        module-file-suffix
        (fboundp 'module-load)))
 
+(defun nelisp-cc-runtime-host-x86-64-p ()
+  "Return non-nil when this host executes x86_64 machine code natively."
+  (and (stringp system-configuration)
+       (string-match-p "\\`\\(x86_64\\|amd64\\)-" system-configuration)
+       t))
+
+(defun nelisp-cc-runtime-in-process-exec-available-p ()
+  "Return non-nil when in-process native exec can actually run here.
+
+This is the predicate the ERT skip-gates want, and it is deliberately
+stricter than \"the module file exists\":
+
+- The module is only HALF the bootstrap contract.  `--ensure-module-
+  loaded\=' hands the sibling `libnelisp_runtime.so\=' to the module by
+  absolute path, and skips that step when the file is not there -- so a
+  module without its cdylib loads clean and then fails at the FIRST exec
+  with `dlopen failed\='.  A gate that stops at `file-readable-p\= MODULE\='
+  therefore lets the whole lane run and fail rather than skip.  Measured
+  2026-08-26: a four-month-old `nelisp-runtime-module.so\=' left in an
+  otherwise clean macOS checkout turned 36 skips into 36 failures, and
+  the same file on a machine that had never built the cdylib would do it
+  on any platform.
+
+- The callers that use this gate compile for `x86_64\=' explicitly, so an
+  aarch64 host cannot run what they produce even with a perfect module.
+  Executing those bytes is a SIGILL, not a Lisp error, which is the one
+  outcome a test suite cannot report."
+  (and (nelisp-cc-runtime--module-supported-p)
+       (nelisp-cc-runtime-host-x86-64-p)
+       (let ((path (ignore-errors (nelisp-cc-runtime--locate-runtime-module))))
+         (and path
+              (file-readable-p path)
+              (file-readable-p
+               (expand-file-name "libnelisp_runtime.so"
+                                 (file-name-directory path)))))
+       t))
+
 (defvar nelisp-cc-runtime--module-loaded-p nil
   "Non-nil when `nelisp-runtime-module.so' has been `module-load'-ed.
 
