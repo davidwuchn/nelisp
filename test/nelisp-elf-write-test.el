@@ -1034,16 +1034,28 @@ the multibyte → write-region byte-doubling regression."
   "Fastest of ATTEMPTS emits of a KB-kilobyte ELF to PATH, in seconds.
 
 These are perf ACCEPTANCE gates (Doc 91 §91.d): the claim is that the
-chunk-build path can emit this much, not that a shared CI runner never
-stalls.  A single sample cannot tell those apart.  On 2026-08-26 the
-1 MB gate failed at 7.57 sec on macos-latest/29.4 while the other
-eleven samples in the same CI run -- including the same JIT lane on
-macOS 30.1 and on both Windows lanes -- came in between 0.003 and
-0.009 sec.  The code was fine; that one runner stalled for seven
-seconds, and a 1700x margin was not enough to absorb it because only
-one sample was taken.  Taking the best of a few makes a spurious
-failure require every attempt to stall, while a real regression --
-which slows every attempt -- still trips the bound."
+chunk-build path can emit this much.  A single sample was too fragile
+to support it -- the 1 MB gate failed at 7.57 sec on macos-latest/29.4
+on 2026-08-26 -- so take the best of ATTEMPTS instead: a bad sample
+needs every attempt to be bad, while a real regression slows all of
+them and still trips the bound.
+
+What the sample spread actually shows, measured across one CI run
+(32956362867) with this helper in place, per attempt:
+
+  macOS 30.1     ~0.0025 s     Windows 30.1   ~0.007 s
+  macOS 29.4     ~1.1-2.2 s
+
+That is a ~500x gap between Emacs 29.4 and 30.1 on the same runner
+image, the same commit, the same run -- reproducible, not a stall.  An
+earlier reading of this called the 7.57 sec a one-off runner hiccup and
+put the true cost at ~5 ms; the 29.4 lane disproves that.  The bound is
+therefore about 2.3x the real 29.4 cost, not the 1700x the fast lanes
+suggest, so keep the attempts: on that lane this gate has ordinary
+margin, not enormous margin.
+
+Why 29.4 is ~500x slower here is not established and is worth its own
+look; nothing in this file explains it."
   (let ((best nil))
     (dotimes (_ attempts)
       (let ((elapsed (car (benchmark-run 1
