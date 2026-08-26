@@ -195,7 +195,15 @@ jobs:
       # rebuilds target/nelisp through the same cc + objcopy native-exec
       # toolchain `bench-aot-tco' above notes is Linux-only.
       - name: "AI toolchain check-tier gates (tools/ai/nelisp-ai.sh check); Linux x86_64"
-        if: runner.os == 'Linux'
+        # Emacs-version-independent: this exercises the standalone
+        # BINARY; the host Emacs only builds it.  Running it on both
+        # 29.4 and 30.1 did the same work twice -- measured, the 29.4
+        # lane took 108 minutes against 61 for 30.1, while every other
+        # lane in the matrix finished in 2-12.  check: gate-mutation rebuilds target/nelisp once per row.
+        # Anything that actually differs BY Emacs version -- compile,
+        # emacs-parity, the ERT suites, test-jit/test-nojit -- still
+        # runs on both lanes.
+        if: runner.os == 'Linux' && matrix.emacs-version == '30.1'
         shell: bash
         run: bash tools/ai/nelisp-ai.sh check
 
@@ -280,7 +288,15 @@ jobs:
         shell: bash
         run: bash tools/ai/nelisp-ai.sh perf
       - name: "AI toolchain binary-tier gate: reader smokes (tools/ai/nelisp-ai.sh smokes, 28 standalone-reader-* targets); Linux x86_64"
-        if: runner.os == 'Linux'
+        # Emacs-version-independent: this exercises the standalone
+        # BINARY; the host Emacs only builds it.  Running it on both
+        # 29.4 and 30.1 did the same work twice -- measured, the 29.4
+        # lane took 108 minutes against 61 for 30.1, while every other
+        # lane in the matrix finished in 2-12.  smokes: 28 standalone-reader-* targets against the built binary.
+        # Anything that actually differs BY Emacs version -- compile,
+        # emacs-parity, the ERT suites, test-jit/test-nojit -- still
+        # runs on both lanes.
+        if: runner.os == 'Linux' && matrix.emacs-version == '30.1'
         shell: bash
         run: bash tools/ai/nelisp-ai.sh smokes
       # `nelisp-ai.sh extras' bundles six more binary-tier gates that were
@@ -295,7 +311,15 @@ jobs:
       # twice; extras needs target/nelisp already built, which the
       # `standalone-reader-test' step above provides.
       - name: "AI toolchain binary-tier gates: extras (tools/ai/nelisp-ai.sh extras); Linux x86_64"
-        if: runner.os == 'Linux'
+        # Emacs-version-independent: this exercises the standalone
+        # BINARY; the host Emacs only builds it.  Running it on both
+        # 29.4 and 30.1 did the same work twice -- measured, the 29.4
+        # lane took 108 minutes against 61 for 30.1, while every other
+        # lane in the matrix finished in 2-12.  extras: subsystem smokes against the built binary.
+        # Anything that actually differs BY Emacs version -- compile,
+        # emacs-parity, the ERT suites, test-jit/test-nojit -- still
+        # runs on both lanes.
+        if: runner.os == 'Linux' && matrix.emacs-version == '30.1'
         shell: bash
         run: bash tools/ai/nelisp-ai.sh extras
 
@@ -313,7 +337,15 @@ jobs:
       # reasoned skip" is actually assertable on a runner, rather than
       # only ever checked on a developer's own machine.
       - name: "AI toolchain verify (all tiers); Linux x86_64"
-        if: runner.os == 'Linux'
+        # Emacs-version-independent: this exercises the standalone
+        # BINARY; the host Emacs only builds it.  Running it on both
+        # 29.4 and 30.1 did the same work twice -- measured, the 29.4
+        # lane took 108 minutes against 61 for 30.1, while every other
+        # lane in the matrix finished in 2-12.  verify aggregates the tiers below it.
+        # Anything that actually differs BY Emacs version -- compile,
+        # emacs-parity, the ERT suites, test-jit/test-nojit -- still
+        # runs on both lanes.
+        if: runner.os == 'Linux' && matrix.emacs-version == '30.1'
         shell: bash
         run: bash tools/ai/nelisp-ai.sh verify
 
