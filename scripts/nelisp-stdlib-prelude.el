@@ -8875,6 +8875,16 @@ and only running both says which."
       (apply 'concat (nreverse chunks)))))
 (unless (fboundp 'base64-decode-string)
   (defun base64-decode-string (string &optional base64url ignore-invalid)
+    ;; Bytes, not characters.  `char-to-string' builds the CHARACTER whose
+    ;; code is the byte, and a byte >= 128 is then held in its multi-byte
+    ;; UTF-8 form, so decoding "yMnK" answered (195 136 195 137 195 138)
+    ;; where every other base64 answers (200 201 202) -- the payload silently
+    ;; doubled and no longer matched what was encoded.
+    ;;
+    ;; The ENCODER above was already byte-clean (`string-byte' /
+    ;; `string-bytes', see its own comment); this is the same defect on the
+    ;; way back, so the pair did not round-trip for any input with a high
+    ;; byte -- which is most compiled output.  `unibyte-string' keeps the byte.
     (nelisp--check-string string)
     ;; Emacs REFUSES what it cannot decode: a character outside the alphabet
     ;; and a group short of four both signal, and skipping them quietly
@@ -8932,17 +8942,17 @@ and only running both says which."
                                   (if (= c -2) 0 (ash c 6))
                                   (if (= d -2) 0 d))))
               (setq bytes
-                    (cons (char-to-string (logand (ash triple -16) 255))
+                    (cons (unibyte-string (logand (ash triple -16) 255))
                           bytes))
               (setq byte-count (1+ byte-count))
               (unless (= c -2)
                 (setq bytes
-                      (cons (char-to-string (logand (ash triple -8) 255))
+                      (cons (unibyte-string (logand (ash triple -8) 255))
                             bytes))
                 (setq byte-count (1+ byte-count)))
               (unless (= d -2)
                 (setq bytes
-                      (cons (char-to-string (logand triple 255))
+                      (cons (unibyte-string (logand triple 255))
                             bytes))
                 (setq byte-count (1+ byte-count)))
               (when (>= byte-count 128)
@@ -8957,9 +8967,9 @@ and only running both says which."
         ;; of noise instead of one byte of answer.
         (let ((triple (logior (ash a 18) (ash b 12)
                               (if (and (>= vals-count 3) (>= c 0)) (ash c 6) 0))))
-          (setq bytes (cons (char-to-string (logand (ash triple -16) 255)) bytes))
+          (setq bytes (cons (unibyte-string (logand (ash triple -16) 255)) bytes))
           (when (and (>= vals-count 3) (>= c 0))
-            (setq bytes (cons (char-to-string (logand (ash triple -8) 255)) bytes)))))
+            (setq bytes (cons (unibyte-string (logand (ash triple -8) 255)) bytes)))))
       (setq chunks (nelisp--base64-flush-chunk bytes chunks))
       (apply 'concat (nreverse chunks)))))
 ;; nelisp stdlib lowering helpers (referenced by the dotimes/loop macro

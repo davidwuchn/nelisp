@@ -1015,6 +1015,31 @@
        (condition-case e (base64-decode-string "ABC") (error e))
        (condition-case e (base64-decode-string "A!BC") (error e))
        (base64-decode-string "AB==")
+       ;; Raw-byte round trip.  Every base64 case above this line is ASCII,
+       ;; which is exactly why a real defect survived here: the decoder built
+       ;; each output byte with `char-to-string', so a byte >= 128 came back
+       ;; as its two-byte UTF-8 form and the pair did not round-trip at all
+       ;; for binary input.  ASCII never notices.  These do.
+       ;;
+       ;; Only DERIVED values are compared -- an encode result, an `equal', a
+       ;; byte count -- never a decoded binary string: this gate diffs printed
+       ;; output, and a raw byte string prints differently on the two sides for
+       ;; reasons unrelated to the decoder.  A byte-by-byte list is also NOT
+       ;; taken: `string-byte' does not exist in a real Emacs, and `append' on
+       ;; a unibyte string answers (521 640 1 1835048 0 0) on this runtime
+       ;; against (200 201 202 0 1 255) in Emacs -- a separate, real defect in
+       ;; string-to-list conversion, out of scope here.  The `equal' case below
+       ;; already fails if a single byte is wrong.
+       (base64-encode-string (unibyte-string 200 201 202))
+       (equal (unibyte-string 200 201 202)
+              (base64-decode-string (base64-encode-string
+                                     (unibyte-string 200 201 202))))
+       (string-bytes (base64-decode-string
+                      (base64-encode-string (unibyte-string 200 201 202 0 1 255))))
+       (equal (apply #'unibyte-string (number-sequence 0 255))
+              (base64-decode-string
+               (base64-encode-string (apply #'unibyte-string
+                                            (number-sequence 0 255)))))
        (condition-case e (seq-concatenate '(1 2 3) 'foo) (error e))
        (condition-case e (mapc t '(1 2 . 3)) (error e))
        (condition-case e (mapcar 7 '(1 . 2)) (error e))
