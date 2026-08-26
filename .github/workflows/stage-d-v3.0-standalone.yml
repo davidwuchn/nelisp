@@ -78,9 +78,20 @@ jobs:
               git clone --depth 1 --branch "$ref" "$url" "../${dest}"
               return
             fi
-            local fallback
-            fallback="$(git ls-remote --symref "$url" HEAD 2>/dev/null \
-                        | sed -n 's#^ref: refs/heads/\([^\t]*\)\tHEAD$#\1#p')"
+            # Probe the two names a default branch actually has here rather
+            # than parsing `--symref' output: that parse works locally but
+            # came back empty on the runner, and `gh api' is not an option
+            # because this workflow is given no token.  `git ls-remote
+            # --heads NAME' is a plain yes/no against the same URL that is
+            # about to be cloned.
+            local fallback=""
+            local candidate
+            for candidate in main master; do
+              if git ls-remote --exit-code --heads "$url" "$candidate" >/dev/null 2>&1; then
+                fallback="$candidate"
+                break
+              fi
+            done
             if [ -n "$fallback" ] && [ "$fallback" != "$ref" ]; then
               echo "::notice::related repo ${repo} has no branch ${ref}; using its default branch ${fallback}"
               git clone --depth 1 --branch "$fallback" "$url" "../${dest}"
@@ -147,9 +158,20 @@ jobs:
               git clone --depth 1 --branch "$ref" "$url" "../${dest}"
               return
             fi
-            local fallback
-            fallback="$(git ls-remote --symref "$url" HEAD 2>/dev/null \
-                        | sed -n 's#^ref: refs/heads/\([^\t]*\)\tHEAD$#\1#p')"
+            # Probe the two names a default branch actually has here rather
+            # than parsing `--symref' output: that parse works locally but
+            # came back empty on the runner, and `gh api' is not an option
+            # because this workflow is given no token.  `git ls-remote
+            # --heads NAME' is a plain yes/no against the same URL that is
+            # about to be cloned.
+            local fallback=""
+            local candidate
+            for candidate in main master; do
+              if git ls-remote --exit-code --heads "$url" "$candidate" >/dev/null 2>&1; then
+                fallback="$candidate"
+                break
+              fi
+            done
             if [ -n "$fallback" ] && [ "$fallback" != "$ref" ]; then
               echo "::notice::related repo ${repo} has no branch ${ref}; using its default branch ${fallback}"
               git clone --depth 1 --branch "$fallback" "$url" "../${dest}"
@@ -216,9 +238,20 @@ jobs:
               git clone --depth 1 --branch "$ref" "$url" "../${dest}"
               return
             fi
-            local fallback
-            fallback="$(git ls-remote --symref "$url" HEAD 2>/dev/null \
-                        | sed -n 's#^ref: refs/heads/\([^\t]*\)\tHEAD$#\1#p')"
+            # Probe the two names a default branch actually has here rather
+            # than parsing `--symref' output: that parse works locally but
+            # came back empty on the runner, and `gh api' is not an option
+            # because this workflow is given no token.  `git ls-remote
+            # --heads NAME' is a plain yes/no against the same URL that is
+            # about to be cloned.
+            local fallback=""
+            local candidate
+            for candidate in main master; do
+              if git ls-remote --exit-code --heads "$url" "$candidate" >/dev/null 2>&1; then
+                fallback="$candidate"
+                break
+              fi
+            done
             if [ -n "$fallback" ] && [ "$fallback" != "$ref" ]; then
               echo "::notice::related repo ${repo} has no branch ${ref}; using its default branch ${fallback}"
               git clone --depth 1 --branch "$fallback" "$url" "../${dest}"
