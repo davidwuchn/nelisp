@@ -223,7 +223,27 @@
 # writing machine code into it, patching relocations and entering it via
 # `ptr-call' is what a loader IS, and every call is the same shape as the
 # arena and syscall work already counted here.
-unsafe-call 693
+# 693 -> 694 on 2026-08-26 (macOS v1.0.1 verification, Doc 180 Phase 1
+# call-site fix).  ONE call: `alloc-bytes' for the `<repl>' source-name
+# buffer in the REPL's blank-Enter idle-pump branch.  Doc 180 Phase 1 grew
+# `nl_eval_source_all' to ten parameters and gave the typed-form branch a
+# freshly allocated name buffer, but left the idle-pump branch calling the
+# old eight-argument shape, so FILE_PTR/FILE_LEN read whatever the ninth
+# and tenth outgoing stack slots held.  This is the same buffer, allocated
+# the same way, for the sibling branch three lines below -- not a new kind
+# of unsafe operation.
+# 694 -> 702 on 2026-08-26 (macOS `default-directory').  EIGHT calls, all
+# in the Darwin arm of `nl_os_getcwd', which was a `wf_write_nil' stub:
+# three `syscall-direct' (open(".", O_DIRECTORY) / fcntl(fd, F_GETPATH,
+# buf) / close(fd) -- Darwin has no getcwd syscall, so F_GETPATH on a
+# descriptor for "." is the syscall-level answer), two `alloc-bytes' (the
+# 8-byte "." literal and the 4096-byte path buffer), one `ptr-write-u64'
+# (writing that literal), one `ptr-write-u8' (the trailing slash Emacs
+# keeps) and one `ptr-read-u8' (checking whether the path already ends in
+# one).  Every one of these has an exact counterpart in the POSIX
+# `nl_os_getcwd' body already counted here; nothing is a new KIND of
+# unsafe operation, and the Linux arm is untouched.
+unsafe-call 702
 
 # `pinned-kernel-call FILE COUNT' pins the per-file unquoted `unsafe-call'
 # count behind `total' above -- the three kernel files that actually carry
@@ -276,4 +296,8 @@ pinned-kernel-call scripts/nelisp-flat-arena-probe.el 6
 # entries pointer, parent pointer, and extra-slots pointer; bool vectors mark
 # their raw data pointer.  These are the exact native heap edges needed before
 # enabling mid-form collection at boot, not a new kind of unsafe operation.
-pinned-kernel-call scripts/nelisp-standalone-build.el 612
+# 612 -> 613 on 2026-08-26: the one `alloc-bytes' of the idle-pump name
+# buffer described at the `unsafe-call 694' note above.
+# 613 -> 621 on 2026-08-26: the eight Darwin `nl_os_getcwd' calls broken
+# out at the `unsafe-call 702' note above.
+pinned-kernel-call scripts/nelisp-standalone-build.el 621

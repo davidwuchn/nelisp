@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # macOS standalone eval cache identity smoke.
 #
-# Builds target/nelisp-standalone-eval-macos-* once from a clean macOS target cache,
+# Builds the standalone eval binary once from a clean macOS target cache,
 # builds it again from cached units, and verifies both Mach-O images are
 # byte-stable.  No Rust toolchain is used.
 set -euo pipefail
@@ -39,7 +39,11 @@ export NELISP_FORM_A="1"
 export NELISP_FORM_B="2"
 
 case "$TARGET" in
-  macos-aarch64) EXE="$REPO_ROOT/target/nelisp-standalone-eval-macos-aarch64" ;;
+  # `nelisp-standalone--output-path' keeps the macOS arm64 eval binary at the
+  # short `target/nelisp-standalone-eval' name -- only cross-built targets get
+  # an arch suffix, and aarch64 is the host arch here (same rule the reader
+  # smoke documents for `target/nelisp').
+  macos-aarch64) EXE="$REPO_ROOT/target/nelisp-standalone-eval" ;;
   macos-x86_64) EXE="$REPO_ROOT/target/nelisp-standalone-eval-macos-x86_64" ;;
   *) echo "[macos-standalone-cache] FAIL: unsupported target $TARGET" >&2; exit 2 ;;
 esac

@@ -10335,10 +10335,19 @@ baked build's own `<'/`>'/`=' arms need it too.")
                 (if (= (bf_fboundp_cell_p tmp) 0) (wf_write_nil out) (wf_write_t out))
               (wf_write_nil out))
           (bf_wrong_type_symbolp sym))))
+    ;; UNBOUND is `nelisp_mirror_is_bound''s third parameter and was simply
+    ;; not being passed: the call handed it two arguments, so the callee read
+    ;; whatever the third ABI argument register happened to hold and compared
+    ;; the mirror entry's slot 0 against it.  On x86_64 that garbage was
+    ;; usually a non-zero address whose tag byte was not `Symbol', so `boundp'
+    ;; answered t and nobody noticed; on aarch64 x2 came in zero and the tag
+    ;; load faulted -- the standalone reader took SIGSEGV on the first
+    ;; `boundp' of every `--eval'/`--load'/bare-FILE run.  Same `(+ env 64)'
+    ;; the sibling `bf_fboundp' above already reads.
     (defun bf_boundp (args env out)
-      (let* ((sym (wf_arg_ptr args 0)) (mirror (+ env 0)))
+      (let* ((sym (wf_arg_ptr args 0)) (mirror (+ env 0)) (unbound (+ env 64)))
         (if (= (ptr-read-u64 sym 0) 4)
-            (if (= (nelisp_mirror_is_bound mirror sym) 1)
+            (if (= (nelisp_mirror_is_bound mirror sym unbound) 1)
                 (wf_write_t out) (wf_write_nil out))
           (bf_wrong_type_symbolp sym))))
     ;; The reader keeps provided features in the evaluator's global mirror.
@@ -15385,13 +15394,22 @@ Parallelism pays off only once per-unit compilation dominates startup
          (out (nelisp-standalone--output-path nil)))
     (pcase nelisp-standalone--target
       ('windows-x86_64
+       ;; `nl_os_write_stderr' (from `nelisp-standalone--eval-bt-extra-unit-
+       ;; source', added 2026-08-24 for the bounded-backtrace printer) calls
+       ;; GetStdHandle/WriteFile on this target; the small eval build's own
+       ;; import list had never grown past the base ExitProcess/VirtualAlloc/
+       ;; VirtualFree set, so this link failed with an unresolved symbol on
+       ;; Windows (untested on that platform at the time of that fix).
        (nelisp-link-units-pe32 out units "_start"
-                               '("ExitProcess" "VirtualAlloc" "VirtualFree")
+                               '("ExitProcess" "VirtualAlloc" "VirtualFree"
+                                 "GetStdHandle" "WriteFile"
+                                 "GetSystemTimeAsFileTime")
                                (list :stack-reserve
                                      nelisp-standalone--windows-stack-reserve)))
       ('windows-aarch64
        (nelisp-link-units-pe32 out units "_start"
-                               '("ExitProcess" "VirtualAlloc" "VirtualFree")
+                               '("ExitProcess" "VirtualAlloc" "VirtualFree"
+                                 "GetStdHandle" "WriteFile")
                                (list :machine 'aarch64
                                      :stack-reserve
                                      nelisp-standalone--windows-stack-reserve)))
@@ -15505,15 +15523,45 @@ baked-form path never references; these units resolve them.")
 ;; rdi, value in xmm0, return slot in rax.  Keep this as a tiny raw unit
 ;; because Phase47 does not expose a direct f64-bit-pattern-to-GP value
 ;; form suitable for writing the inline payload here.
+(defun nelisp-standalone--reader-float-unit-aarch64-text ()
+  "Return the AAPCS64 body of `nl_sexp_write_float'.
+
+x0 = the 32-byte Sexp slot, d0 = the value, x0 is also the return
+value -- so the slot register is simply left alone rather than moved
+the way the x86_64 body moves rdi into rax.
+
+This exists because the x86_64 body below was linked into EVERY
+target, aarch64 included: an arm64 image carried `mov qword [rdi], 3'
+and executed it, so every operation that returns a float
+(`round\='/`fround\='/`ftruncate\=', the reader\='s own Float-token path)
+died with SIGILL on the first instruction.  Measured on macOS arm64
+2026-08-26; the unit\='s own comment had said `linux-x86_64 only ...
+other arches need their own stub\=' since it was written."
+  (require 'nelisp-asm-arm64)
+  (let ((buf (nelisp-asm-arm64-make-buffer)))
+    ;; Sexp layout, written as the literals the x86_64 sibling body uses
+    ;; rather than through `nelisp-sexp-layout''s private constants: tag
+    ;; byte 3 (= Float) at +0, the f64 payload at +8.
+    (nelisp-asm-arm64-mov-imm64 buf 'x9 3)
+    (nelisp-asm-arm64-str-imm buf 'x9 'x0 0)
+    (nelisp-asm-arm64-stur-d-base-disp buf 'd0 'x0 8)
+    (nelisp-asm-arm64-str-imm buf 'xzr 'x0 16)
+    (nelisp-asm-arm64-str-imm buf 'xzr 'x0 24)
+    (nelisp-asm-arm64-ret buf)
+    (nelisp-asm-arm64-buffer-bytes buf)))
+
 (defun nelisp-standalone--reader-float-unit ()
   "Return the raw link unit exporting `nl_sexp_write_float'."
-  (let ((text (apply #'unibyte-string
-                     '(#x48 #xc7 #x07 #x03 #x00 #x00 #x00 ; mov qword [rdi], 3
-                       #x66 #x0f #xd6 #x47 #x08           ; movq [rdi+8], xmm0
-                       #x48 #xc7 #x47 #x10 #x00 #x00 #x00 #x00 ; clear +16
-                       #x48 #xc7 #x47 #x18 #x00 #x00 #x00 #x00 ; clear +24
-                       #x48 #x89 #xf8                     ; mov rax, rdi
-                       #xc3))))                            ; ret
+  (let ((text
+         (if (eq (nelisp-standalone--target-arch) 'aarch64)
+             (nelisp-standalone--reader-float-unit-aarch64-text)
+           (apply #'unibyte-string
+                  '(#x48 #xc7 #x07 #x03 #x00 #x00 #x00 ; mov qword [rdi], 3
+                    #x66 #x0f #xd6 #x47 #x08           ; movq [rdi+8], xmm0
+                    #x48 #xc7 #x47 #x10 #x00 #x00 #x00 #x00 ; clear +16
+                    #x48 #xc7 #x47 #x18 #x00 #x00 #x00 #x00 ; clear +24
+                    #x48 #x89 #xf8                     ; mov rax, rdi
+                    #xc3)))))                           ; ret
     (nelisp-link-unit-make
      (nelisp-standalone--target-object-name "reader-float.o")
      (list (cons 'text text))
@@ -15530,9 +15578,176 @@ baked-form path never references; these units resolve them.")
 ;; rdi = out (32-byte slot); fills it with a Float Sexp = tv_sec + tv_usec*1e-6
 ;; and returns out.  linux-x86_64 only (__NR_gettimeofday=96), matching the
 ;; x86_64-specific reader-float.o; other arches need their own stub.
+(defun nelisp-standalone--float-time-unit-aarch64-text (syscall-nr svc-imm usec-64-p)
+  "Return an AAPCS64 body of `nl_os_float_time' for one OS.
+
+x0 = the 32-byte Sexp slot; fills it with Float(tv_sec + tv_usec/1e6)
+and returns it in x0.  SYSCALL-NR is the OS gettimeofday number, SVC-IMM
+the `SVC' immediate its ABI uses, and USEC-64-P says whether tv_usec is
+a full 64-bit field.
+
+The three OS-dependent pieces, and why each is a parameter rather than a
+constant:
+
+- Darwin is BSD 116 through `SVC #0x80'; Linux/arm64 is 169 through
+  `SVC #0'.  Every other syscall in this reader already goes through the
+  matching door for its target.
+- `struct timeval' on arm64 Darwin is `{ int64 tv_sec; int32 tv_usec; }'
+  padded to 16 bytes, so tv_usec is read with a 32-bit LDR -- reading
+  eight bytes there would fold the four padding bytes into the count.
+  On LP64 Linux `suseconds_t' is `long', so the field really is 64-bit
+  and the wider load is the correct one.
+
+Only caller-saved registers are touched (x0/x1/x9-x12/x16, d0-d2).  The
+x86_64 body has to push rcx/r11 because `syscall' clobbers them; `SVC'
+clobbers x0/x1 and nothing else the AOT extern-call model assumes is
+preserved."
+  (require 'nelisp-asm-arm64)
+  (let ((buf (nelisp-asm-arm64-make-buffer))
+        ;; 1e6 as an IEEE-754 double.
+        (million-bits #x412E848000000000))
+    (nelisp-asm-arm64-sub-imm buf 'sp 'sp 32)
+    (nelisp-asm-arm64-str-imm buf 'x0 'sp 16)      ; save the out slot
+    (nelisp-asm-arm64-str-imm buf 'xzr 'sp 0)
+    (nelisp-asm-arm64-str-imm buf 'xzr 'sp 8)
+    (nelisp-asm-arm64-add-imm buf 'x0 'sp 0)       ; x0 = &tv (ADD: SP-capable)
+    (nelisp-asm-arm64-mov-imm64 buf 'x1 0)         ; tzp = NULL
+    (nelisp-asm-arm64-mov-imm64 buf 'x16 syscall-nr) ; gettimeofday
+    (nelisp-asm-arm64-svc buf svc-imm)
+    (nelisp-asm-arm64-ldr-imm buf 'x9 'sp 0)       ; tv_sec
+    (if usec-64-p
+        (nelisp-asm-arm64-ldr-imm buf 'x10 'sp 8)  ; tv_usec (64-bit)
+      (nelisp-asm-arm64-add-imm buf 'x12 'sp 8)
+      (nelisp-asm-arm64-ldrw-reg-reg buf 'x10 'x12 'xzr)) ; tv_usec (32-bit)
+    (nelisp-asm-arm64-ldr-imm buf 'x0 'sp 16)      ; restore the out slot
+    (nelisp-asm-arm64-scvtf-d-from-x buf 'd0 'x9)
+    (nelisp-asm-arm64-scvtf-d-from-x buf 'd1 'x10)
+    (nelisp-asm-arm64-mov-imm64 buf 'x11 million-bits)
+    (nelisp-asm-arm64-fmov-d-from-x buf 'd2 'x11)
+    (nelisp-asm-arm64-fdiv-reg-reg buf 'd1 'd1 'd2)
+    (nelisp-asm-arm64-fadd-reg-reg buf 'd0 'd0 'd1)
+    ;; Sexp layout, written as the literals the x86_64 sibling body uses
+    ;; rather than through `nelisp-sexp-layout''s private constants: tag
+    ;; byte 3 (= Float) at +0, the f64 payload at +8.
+    (nelisp-asm-arm64-mov-imm64 buf 'x9 3)
+    (nelisp-asm-arm64-str-imm buf 'x9 'x0 0)
+    (nelisp-asm-arm64-stur-d-base-disp buf 'd0 'x0 8)
+    (nelisp-asm-arm64-str-imm buf 'xzr 'x0 16)
+    (nelisp-asm-arm64-str-imm buf 'xzr 'x0 24)
+    (nelisp-asm-arm64-add-imm buf 'sp 'sp 32)
+    (nelisp-asm-arm64-ret buf)
+    (nelisp-asm-arm64-buffer-bytes buf)))
+
+(defun nelisp-standalone--float-time-unit-windows-x86_64 ()
+  "Return (TEXT . RELOCS) for the Win64 body of `nl_os_float_time'.
+
+rcx=out/rax=out, NOT rdi=out like the Linux/Darwin bodies below: this
+file's own AOT-generated Windows callers pass the first argument in
+RCX (standard Win64 ABI), confirmed by disassembling `wf_float_time''s
+own call site (`push rax / pop rcx' immediately before `call
+nl_os_float_time' in the built binary) -- the rdi-based first attempt
+here linked cleanly but silently read garbage and returned nil, because
+Windows callers never populate rdi for this call.  There is no
+`gettimeofday' syscall to make on Windows -- the NT kernel's clock is
+read through `KERNEL32!GetSystemTimeAsFileTime', an ordinary DLL call
+via this unit's own IAT thunk (see `nelisp-standalone--windows-reader-
+imports' / `nelisp-standalone-build''s Windows import lists, both of
+which now carry \"GetSystemTimeAsFileTime\"), unlike every other body
+in `nelisp-standalone--float-time-unit' which is a raw syscall.
+
+`GetSystemTimeAsFileTime' fills a caller-supplied FILETIME (a single
+64-bit little-endian count of 100ns ticks since 1601-01-01) and returns
+void.  The Unix-epoch delta is 116444736000000000 (100ns units between
+1601-01-01 and 1970-01-01), so:
+
+    unix_seconds = (filetime_ticks - 116444736000000000) / 1e7
+
+Win64 ABI requirements this body has to satisfy around the call that
+the Linux/Darwin syscall bodies do not:
+- arg0 goes in RCX (not RDI), and the call site's RSP must be 16-byte
+  aligned with 32 bytes of shadow space reserved below the return
+  address for the callee to spill into.
+- rbx (holds `out' across the call and the trailing float math) and
+  rcx/r11 (this file's own established rule, see the Linux body's own
+  comment: the AOT extern-call model assumes both survive an internal
+  call) are pushed before the call and popped after.  Three 8-byte
+  pushes leave RSP 16-aligned again, so `sub rsp, 48' (32 shadow + 8
+  bytes for the FILETIME local + 8 bytes padding) is what keeps the
+  call site itself 16-aligned.
+
+Verified: `make standalone-eval-test' and `scripts/verify-cross-
+platform.ps1' both pass on Windows 11 x86_64 with this body linked in
+(2026-08-26); `(float-time)' returns a value that round-trips through
+`format-time-string' as the current wall-clock time."
+  (let* ((head (append
+                (list #x53)                          ; push rbx
+                (list #x48 #x89 #xcb)                 ; mov rbx, rcx (save out)
+                (list #x51)                           ; push rcx
+                (list #x41 #x53)                      ; push r11
+                (list #x48 #x83 #xec #x30)            ; sub rsp, 48
+                (list #x48 #x8d #x4c #x24 #x20)       ; lea rcx, [rsp+32] (&FILETIME)
+                (list #xe8)))                         ; call GetSystemTimeAsFileTime
+         (call-reloc-off (length head))
+         (body (append
+                head
+                (list 0 0 0 0)
+                (list #x48 #x8b #x44 #x24 #x20)       ; mov rax, [rsp+32] (FILETIME u64)
+                (list #x48 #x83 #xc4 #x30)            ; add rsp, 48
+                (list #x48 #xba)                      ; mov rdx, imm64 (epoch delta)
+                (list #x00 #x80 #x3e #xd5 #xde #xb1 #x9d #x01) ; 116444736000000000
+                (list #x48 #x29 #xd0)                 ; sub rax, rdx
+                (list #xf2 #x48 #x0f #x2a #xc0)       ; cvtsi2sd xmm0, rax
+                (list #x48 #xb8)                      ; mov rax, imm64 (bits of 1e7)
+                (list #x00 #x00 #x00 #x00 #xd0 #x12 #x63 #x41) ; 10000000.0
+                (list #x66 #x48 #x0f #x6e #xc8)       ; movq xmm1, rax
+                (list #xf2 #x0f #x5e #xc1)            ; divsd xmm0, xmm1 (unix seconds)
+                (list #x48 #xc7 #x03 #x03 #x00 #x00 #x00) ; mov qword [rbx], 3 (tag Float)
+                (list #x66 #x0f #xd6 #x43 #x08)       ; movq [rbx+8], xmm0 (f64 bits)
+                (list #x48 #xc7 #x43 #x10 #x00 #x00 #x00 #x00) ; mov qword [rbx+16], 0
+                (list #x48 #xc7 #x43 #x18 #x00 #x00 #x00 #x00) ; mov qword [rbx+24], 0
+                (list #x48 #x89 #xd8)                 ; mov rax, rbx (return out)
+                (list #x41 #x5b)                      ; pop r11
+                (list #x59)                           ; pop rcx
+                (list #x5b)                           ; pop rbx
+                (list #xc3))))                        ; ret
+    (cons (apply #'unibyte-string body)
+          (list (list :offset call-reloc-off :type 'plt32
+                      :symbol "GetSystemTimeAsFileTime" :addend 0
+                      :section 'text)))))
+
 (defun nelisp-standalone--float-time-unit ()
   "Return the raw link unit exporting `nl_os_float_time'."
-  (let ((text (apply #'unibyte-string
+  (let* ((text-and-relocs
+          (pcase nelisp-standalone--target
+           ;; Darwin arm64: BSD gettimeofday 116 via SVC #0x80, 32-bit
+           ;; tv_usec.
+           ('macos-aarch64
+            (cons (nelisp-standalone--float-time-unit-aarch64-text 116 #x80 nil) nil))
+           ;; Linux arm64: generic-table gettimeofday 169 via SVC #0,
+           ;; 64-bit tv_usec (LP64 `suseconds_t' is `long').  Emitted and
+           ;; encoding-checked here; never executed on real hardware yet,
+           ;; because no aarch64 Linux host has built this reader.
+           ('linux-aarch64
+            (cons (nelisp-standalone--float-time-unit-aarch64-text 169 0 t) nil))
+           ;; Windows x86_64: `GetSystemTimeAsFileTime' via this unit's own
+           ;; IAT thunk -- see `nelisp-standalone--float-time-unit-windows-
+           ;; x86_64''s own doc comment for the full design.
+           ('windows-x86_64
+            (nelisp-standalone--float-time-unit-windows-x86_64))
+           ;; windows-aarch64 has no aarch64 Windows host to build or run
+           ;; this on; left as a build-time error rather than an
+           ;; unverified guess (same reasoning as the previous commit's
+           ;; choice for both Windows arches, narrowed now that x86_64
+           ;; has a real body).
+           ('windows-aarch64
+            (error (concat "standalone: nl_os_float_time has no body for %S"
+                           " -- Windows/aarch64 needs a GetSystemTimeAsFileTime"
+                           " unit (see the windows-x86_64 body for the design);"
+                           " no aarch64 Windows host exists to verify one")
+                   nelisp-standalone--target))
+           ('linux-x86_64
+            (cons
+             (apply #'unibyte-string
                      ;; rcx/r11 are saved across the body: the `syscall'
                      ;; instruction clobbers them, and the AOT extern-call model
                      ;; assumes the callee leaves them intact -- so without this
@@ -15563,13 +15778,18 @@ baked-form path never references; these units resolve them.")
                        #x41 #x5b                         ; pop r11
                        #x59                              ; pop rcx
                        #x5b                              ; pop rbx
-                       #xc3))))                          ; ret
+                       #xc3))
+             nil))
+           (other
+            (error "standalone: nl_os_float_time has no body for %S" other))))
+         (text (car text-and-relocs))
+         (relocs (cdr text-and-relocs)))
     (nelisp-link-unit-make
      (nelisp-standalone--target-object-name "float-time.o")
      (list (cons 'text text))
      (list (nelisp-link-symbol "nl_os_float_time" 0
                                :section 'text :bind 'global :type 'func))
-     nil)))
+     relocs)))
 
 (defun nelisp-standalone--reader-src ()
   "Embedded source text for the reader build (NELISP_SRC; default \"(+ 40 2)\")."
@@ -15688,7 +15908,11 @@ dispatch arm in `nelisp-standalone--applyfn-dispatch-table'.")
                     "CreateProcessW" "WaitForSingleObject" "GetExitCodeProcess"
                     ;; fix/windows-env-inherit: startup `nl_os_environ_init'
                     ;; env-block walk (see the windows os-base-forms comment).
-                    "GetEnvironmentStringsW" "FreeEnvironmentStringsW"))
+                    "GetEnvironmentStringsW" "FreeEnvironmentStringsW"
+                    ;; nl_os_float_time (raw hand-assembled unit, this file's
+                    ;; own `nelisp-standalone--float-time-unit-windows-x86_64'):
+                    ;; FILETIME source for `float-time'/`round'/etc.
+                    "GetSystemTimeAsFileTime"))
         (cons "SHELL32.dll" (list "CommandLineToArgvW")))
   "PE imports needed by the Windows-native standalone reader.")
 
@@ -19675,11 +19899,54 @@ target the same installed names signal catchable
        ;; sysctl KERN_PROCARGS2, so SP is not the entry-stack vector the
        ;; Linux walk reads (see `nelisp-standalone--reader-posix-env-forms').
        (defun nl_os_environ_init (_sp result-slot) (wf_write_nil result-slot))
-       (defun nl_os_getcwd (out) (wf_write_nil out))
        (defun nl_darwin_skip_to_nul (ptr off)
          (if (= (ptr-read-u8 ptr off) 0)
              off
            (nl_darwin_skip_to_nul ptr (+ off 1))))
+       ;; `default-directory' on macOS.  This was a `wf_write_nil' stub, so
+       ;; the symbol was bound to nil and `(expand-file-name "a")' answered
+       ;; "/a" -- the exact failure the POSIX body's own comment describes
+       ;; from before getcwd(2) was wired there.
+       ;;
+       ;; Darwin has no getcwd syscall at all: `sys/syscall.h' on macOS 26
+       ;; carries 459 numbers and not one of them is a cwd call (296, the
+       ;; number some older tables give for `__getcwd', is
+       ;; `vm_pressure_monitor' here -- checked, not assumed).  libc's
+       ;; `getcwd' is a library routine.  The supported syscall-level answer
+       ;; is `fcntl(fd, F_GETPATH, buf)' on a descriptor for ".", which
+       ;; writes the absolute path the kernel itself holds:
+       ;;
+       ;;   open(".", O_DIRECTORY)  -- BSD 5,  O_DIRECTORY = 0x100000
+       ;;   fcntl(fd, F_GETPATH=50, buf)  -- BSD 92, 0 on success
+       ;;   close(fd)                     -- BSD 6
+       ;;
+       ;; F_GETPATH wants at least MAXPATHLEN (1024); the 4096 buffer below
+       ;; is the same size the POSIX body passes to getcwd(2).  Errors arrive
+       ;; as a negative errno (the Darwin carry-flag conversion), so `(< fd 0)'
+       ;; and `(= rc 0)' are the real tests.  The descriptor is closed on both
+       ;; paths.  Length comes from `nl_darwin_skip_to_nul' above, then the
+       ;; trailing-slash rule Emacs keeps: append one unless the path already
+       ;; ends in it, which only "/" itself does.
+       (defun nl_os_getcwd (out)
+         (let* ((dot (alloc-bytes 8 1)))
+           (seq
+            (ptr-write-u64 dot 0 46)          ; "." + NUL, little-endian
+            (let* ((fd (syscall-direct 5 dot 1048576 0 0 0 0)))
+              (if (< fd 0)
+                  (wf_write_nil out)
+                (let* ((buf (alloc-bytes 4096 1))
+                       (rc (syscall-direct 92 fd 50 buf 0 0 0)))
+                  (seq
+                   (syscall-direct 6 fd 0 0 0 0 0)
+                   (if (= rc 0)
+                       (let* ((n (nl_darwin_skip_to_nul buf 0)))
+                         (if (> n 0)
+                             (if (= (ptr-read-u8 buf (- n 1)) 47)
+                                 (nl_alloc_str buf n out)
+                               (seq (ptr-write-u8 buf n 47)
+                                    (nl_alloc_str buf (+ n 1) out)))
+                           (wf_write_nil out)))
+                     (wf_write_nil out)))))))))
        (defun nl_darwin_skip_nuls (ptr off)
          (if (= (ptr-read-u8 ptr off) 0)
              (nl_darwin_skip_nuls ptr (+ off 1))
@@ -20761,7 +21028,18 @@ correctly."
                   ;; QUIT_FLAG handling as a typed form, for consistency.
                   (seq
                    (nl_repl_pump_source fbuf src)
-                   (nl_eval_source_all src cursor result pool out ctx builtin_sym 2)
+                   ;; Doc 180 Phase 1 grew `nl_eval_source_all' to ten
+                   ;; parameters and updated the typed-form branch just
+                   ;; below, but not this one -- the idle pump kept the
+                   ;; old eight-argument shape, so FILE_PTR/FILE_LEN were
+                   ;; whatever the ninth and tenth outgoing stack slots
+                   ;; happened to hold.  Same fresh-each-iteration name
+                   ;; buffer as the typed branch, for the same GC reason.
+                   (let* ((idle-name-buf (alloc-bytes 8 1)))
+                     (seq
+                      ,@(nelisp-standalone--byte-write-forms 'idle-name-buf "<repl>")
+                      (nl_eval_source_all src cursor result pool out ctx builtin_sym 2
+                                           idle-name-buf ,(length (encode-coding-string "<repl>" 'utf-8 t)))))
                    (if (= (ptr-read-u64 268435464 0) 0) 0
                      (setq done 1)))
                 (seq

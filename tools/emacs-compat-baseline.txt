@@ -56,7 +56,29 @@
 # check has nowhere else to live.  `boundp' has to answer t for the
 # self-evaluating symbols; `assoc' has to honour TESTFN, which the native
 # arm ignored.  Both call the native walk underneath.
-shared-shadowing 251
+# 251 -> 268 on 2026-08-26 (macOS v1.0.1 verification).  NOT this
+# verification's own changes -- measured identical, 268 against a pin of
+# 251, on a pristine v1.0.1 worktree (54707c95) with nothing applied.  The
+# pin was left behind by the tree's own growth over the 497 commits between
+# v0.x and v1.0.1: the process/network adapter (`make-process',
+# `make-network-process', `open-network-stream', `accept-process-output',
+# `delete-process', `kill-process', `process-contact', `process-filter',
+# `process-sentinel', `set-process-filter', `set-process-sentinel',
+# `process-send-string', `timerp'), the cl-generic surface
+# (`cl-defgeneric', `cl-defmethod', `cl-call-next-method',
+# `cl-next-method-p'), the printer variables (`print-length',
+# `print-level') and `set' / `safe-length' / `proper-list-p' /
+# `file-name-sans-versions'.
+#
+# Host drift was ruled out rather than assumed: this machine runs Emacs
+# 30.2 and CI's `gates' job runs 30.1, but every name above exists in
+# 30.1 too (none of them is new in 30.2), so the count is the same on
+# both -- the difference is what this tree defines, not what stock Emacs
+# has.  `docs/emacs-compat-table.txt' is stale for the same reason the pin
+# was (its header reads 7114 names; the scan now sees 7817), so the list
+# above is what a 30.2 regeneration adds over that stale table, minus the
+# `boundp' / `assoc' pair the 251 note already accounts for.
+shared-shadowing 268
 
 # 2026-08-19, reviewing the 245 rather than counting them.  The table now
 # carries the defining file, which is half of what makes a class actionable:

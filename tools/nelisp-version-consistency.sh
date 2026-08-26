@@ -96,6 +96,23 @@ else
   echo "  windows literal: OK (uses \$NelispReleaseVersion)"
 fi
 
+# The Windows installer and tarball scripts each carry their own default.
+# They were self-consistent at v0.6.0 while the POSIX side had moved to
+# v1.0.1, so CI shipped v0.6.0-labelled tarballs for a v1.0.1 release and
+# nothing complained: a set of copies that agree with each other and with
+# nothing else is exactly what this gate has to catch.
+check_site "windows installer default" \
+  release/stage-d-v3.0/install-v3.ps1 \
+  '.*\[string\]\$Version *= *"\(v[0-9.]*\)".*'
+
+check_site "windows tarball builder" \
+  tools/build-standalone-tarball.ps1 \
+  '.*\$Version *= *"\(v[0-9.]*\)".*'
+
+check_site "windows tarball verifier" \
+  tools/verify-standalone-tarball.ps1 \
+  '.*\$Version *= *"\(v[0-9.]*\)".*'
+
 echo "GATE-COUNT checked=$checked findings=$findings"
 if [ "$findings" -gt 0 ]; then
   echo "version-consistency: FAIL"
