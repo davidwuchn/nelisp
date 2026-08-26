@@ -11,6 +11,18 @@ A same-day follow-up to v1.0.0. Three defects that v1.0.0's own change --
 turning the mid-form collector on by default -- brought into the open, plus
 the in-process `.neln` loader that the collector change was blocking.
 
+Then the release verification found more than it was meant to. Fixing the
+one workflow that had been red for twelve consecutive runs let the macOS
+lane reach its own tests for the first time, and it stopped at the first
+one. Fixing that reached the second. Nine in all -- including every
+float-returning operation dying with SIGILL on arm64, and `boundp`
+answering `t` from an uninitialised register on x86_64. None is a
+regression; each had simply never been executed. Two of the nine were
+gates that had been reporting success while examining nothing.
+
+CI itself went from 108 minutes to 16 along the way, without testing any
+less.
+
 ## The loader now runs any artifact, read at run time
 
 v1.0.0 shipped a loader, but as a demo: the artifact's bytes and its externs'
@@ -51,22 +63,104 @@ v1.0.0, because the collector did not run by default.
 a value per iteration outruns it in tens of iterations" — which is every tight
 arithmetic loop. Grown on demand instead.
 
+
+### macOS arm64: the lane had never run to its end
+
+v1.0.0 shipped with `stage-d-v3.0 standalone parity` red, and the run
+before this one was the first time it reached its own tests. It stopped
+at the `boxed` parity case on a `set -e`, so nothing after
+`macos-selfhost-test.sh` had ever executed on macOS: not the standalone
+eval smoke, not cache identity, not the reader, not the tarball, not the
+installer. Fixing `boxed` made the next failure reachable, and so on.
+Nine in all. None is a regression — each reproduces on a pristine v1.0.1
+worktree, or sits on a path that had never run.
+
+1. **`boxed` exited 139.** The smoke's own NlCell stubs were written
+   before Doc 147 Phase 1, which shrank NlCell 40B→16B and moved the
+   value to an 8-byte tagged WORD at box+0. The vector and record stubs
+   were updated; the cell trio was not, so `nl_alloc_cell` copied a
+   32-byte Sexp into a 16-byte box while `nl_cell_get_value` read box+0
+   as a WORD — dereferencing a tag byte. lldb: `EXC_BAD_ACCESS` at
+   address `0x2`.
+
+2. **The eval and cache-identity smokes expected a filename the builder
+   has never written.** Only cross-built targets get an arch suffix, and
+   aarch64 is the host arch there.
+
+3. **The macOS reader could not be built at all.**
+   `(:extern-call-too-many-gp-args nl_eval_source_all 10)` — AArch64
+   passes eight arguments in registers and the extern-call emitter had
+   no stack path, though the direct-call emitter had carried one all
+   along. Verified by disassembly, and by a test that fails with the old
+   emitter and passes with the new.
+
+4. **`bf_boundp` passed two arguments to a three-parameter function.** On
+   x86_64 the missing third register usually held a non-null address
+   whose tag was not Symbol, so `boundp` answered `t` and the defect sat
+   silent. On aarch64 that register arrives zero and the tag load faults:
+   SIGSEGV on the first `boundp` of every `--eval`, `--load` or bare-file
+   run.
+
+5. **The REPL's blank-Enter idle pump still called the pre-Doc-180
+   shape**, leaving two outgoing stack slots uninitialised.
+
+6. **Six files still pinned v0.6.0.** The Windows set was self-consistent
+   at v0.6.0 while the POSIX side had moved to v1.0.1, so CI shipped
+   v0.6.0-labelled tarballs for a v1.0.1 release and nothing complained.
+
+7. **`default-directory` was nil on macOS**, so `(expand-file-name "a")`
+   answered `"/a"`. Darwin has no getcwd syscall; it is
+   `fcntl(fd, F_GETPATH, buf)` on a descriptor for `"."`.
+
+8. **Every operation returning a float died with SIGILL on arm64.**
+   `nl_sexp_write_float` and `nl_os_float_time` were hand-written x86_64
+   machine code linked into every target, and the arm64 image executed
+   `mov qword [rdi], 3`. Both now have aarch64 bodies generated through
+   the assembler rather than hand-encoded, compared word-for-word against
+   Xcode's `as`.
+
+9. **`gate-selfcheck` reported `emacs-parity` as a gate that examined
+   nothing — on macOS only.** BSD `wc` right-pads its count, so
+   `checked=   19900` matched no parser. A gate that had just compared
+   19,900 behaviours against stock Emacs was recorded as one that found
+   no inputs: precisely the failure gate-selfcheck exists to catch,
+   produced by gate-selfcheck.
+
+The lane now ends with `=== Cross-platform verify PASS ===` — 79 checks,
+zero failures — and the gate battery is 27/27.
+
+### CI ran for 108 minutes and now runs for 16
+
+Not by testing less: the CPU time is unchanged at ~104 minutes. The
+Linux lane carried the entire gate suite alone and serially — 39 of its
+46 minutes was work no other lane does at all, while on the steps every
+OS shares Linux is *faster* than Windows. That work is now split across
+parallel jobs (`gate-mutation` in four shards, the subsystem tiers in
+three), and `verify` runs last over the union of every job's gate
+reports, so "did every required gate actually run" survives the split.
+Three other things fell out of measuring it: the reader smokes were
+rebuilding the same binary 41 times (1269s → 209s), `gate-mutation` now
+narrows to the rows a change can affect on branches, and a wall-clock
+benchmark that sampled once now takes the best of three.
+
 ## Also
 
 - `stage-d-v3.0 standalone parity` had failed 12 runs consecutively without
   testing anything: it demanded a `main` branch from a sibling repository
   that is on `master`, so it died before cloning. It now probes for a usable
-  default branch. See *Known issues*.
+  default branch — which is how the nine macOS defects above became
+  reachable at all. The Windows half of that step wanted the same fix and
+  did not get it until this release.
+- The release version now has one source, `./VERSION`, and a
+  `version-consistency` gate holds the copies that cannot read it — the
+  standalone installers, which users fetch on their own with curl — equal to
+  it. Nine sites, with a `gate-mutation` row proving the gate goes red when
+  one of them is left behind.
+- `macos-x86_64` could no longer install Emacs at all: Nixpkgs 26.11 dropped
+  x86_64-darwin. That job builds from Homebrew now.
 - Doc 200 records a defect this release does NOT fix; see below.
 
 ## Known issues
-
-**macOS aarch64: the `boxed` parity case segfaults.** With the clone failure
-above fixed, that workflow reached its actual tests for the first time, and
-one of roughly two dozen cases fails: `boxed -> exit 139 (expected 121)`. This
-is not a regression from v1.0.0 — it was equally true then and simply
-unreachable, because the job never got past cloning. Linux and Windows are
-unaffected, and the six-lane `ci.yml` matrix is green.
 
 **Unibyte strings are not a distinct representation.** `(unibyte-string 227
 129 130)` and `"あ"` are `equal` on this runtime; a real Emacs answers `nil`.
@@ -81,7 +175,16 @@ release that shipped the same day.
 
 ## Verification
 
-preflight, all 16 gates clear: `emacs-parity` 19,995 checks 0 findings;
-`ert-full` 0 unexpected; `neln-loader-test` 16/16 with the digest stable
-across five runs; `check-tier` PASS including `gate-mutation`. CI green on
-Linux/macOS/Windows × Emacs 29.4/30.1 plus the fast `gates` job.
+`tools/ai/preflight.sh --full`, all 16 gates clear on the release commit.
+`gate-mutation` 45/45 rows caught their injected defect. `emacs-parity`
+19,994 checks, 0 findings.
+
+CI: 15 jobs green on Linux/macOS/Windows x Emacs 29.4/30.1, plus the fast
+`gates` job, the four `gate-mutation` shards, the three subsystem tiers,
+and `verify` — which reads the union of every job's gate reports and
+answered `VERDICT: PASS (68 gates)`. 16.2 minutes wall clock.
+
+macOS arm64: `=== Cross-platform verify PASS ===`, 79 checks, zero
+failures; gate battery 27/27, `make test` included. Verified on hardware,
+not in CI — the nine defects above are the reason that distinction
+matters.
