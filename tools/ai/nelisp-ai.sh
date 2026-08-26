@@ -132,6 +132,16 @@ unsafe-inventory ns-inventory \
 reader-surface-audit pkg-graph pkg-load-lists \
 parity-coverage substrate-presence-corpus-check \
 doc-claims ns"
+    # NELISP_CHECK_SKIP lets CI hand a step to a job of its own rather than
+    # drop it.  `gate-mutation' is the only user today: it is 1257 of the
+    # Linux lane's 2784 seconds, in one serial stretch, and it now runs as
+    # four parallel shards elsewhere.  A skipped step leaves no gate report,
+    # so `verify' still counts it MISSING unless that other job's report is
+    # merged in -- which is exactly the property that must not be lost here.
+    for skip in ${NELISP_CHECK_SKIP:-}; do
+        check_steps=$(printf '%s\n' $check_steps | grep -vx "$skip" | tr '\n' ' ')
+        printf 'check: skipping %s (NELISP_CHECK_SKIP; it must run elsewhere)\n' "$skip"
+    done
     failures=0
     for step in $check_steps; do
         printf '\n=== %s ===\n' "$step"

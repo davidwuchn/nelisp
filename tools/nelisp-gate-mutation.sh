@@ -141,6 +141,41 @@ if [ -n "$pat" ]; then
 fi
 
 [ -z "$rows" ] && { echo "gate-mutation: FAIL (no mutations defined)"; exit 1; }
+
+# Shard selection, for splitting the sweep across parallel CI jobs.
+#
+#   NELISP_GATE_MUTATION_SHARD=<k>/<n>   run rows where (index mod n) == k
+#
+# A full sweep is the single longest thing CI does -- 1257 s of the Linux
+# lane's 46 minutes on run 32956362867, in one serial stretch.  The rows
+# are independent (each injects, checks, and restores before the next
+# begins), so they split cleanly.  Modulo rather than contiguous blocks:
+# the slow rows (the six that rebuild the binary, the six that run a
+# scoped ERT suite) are clustered in the table, and contiguous blocks
+# would put them all in one shard.
+shard=${NELISP_GATE_MUTATION_SHARD:-}
+if [ -n "$shard" ]; then
+  shard_k=${shard%%/*}
+  shard_n=${shard##*/}
+  case "$shard_k/$shard_n" in
+    [0-9]*/[0-9]*) ;;
+    *) echo "gate-mutation: FAIL (NELISP_GATE_MUTATION_SHARD must be <k>/<n>, got '$shard')"; exit 1 ;;
+  esac
+  if [ "$shard_n" -lt 1 ] || [ "$shard_k" -ge "$shard_n" ]; then
+    echo "gate-mutation: FAIL (shard $shard_k out of range for $shard_n shards)"
+    exit 1
+  fi
+  rows=$(printf '%s\n' "$rows" | awk -v k="$shard_k" -v n="$shard_n" 'NR % n == k { print }')
+  if [ -z "$rows" ]; then
+    # More shards than rows.  Not a failure, but it must not read as a
+    # clean full sweep either.
+    echo "GATE-SKIP shard $shard_k of $shard_n has no rows (more shards than rows)"
+    echo "gate-mutation: SKIP (empty shard $shard)"
+    exit 0
+  fi
+  echo "gate-mutation: shard $shard_k of $shard_n ($(printf '%s\n' "$rows" | wc -l | tr -d ' ') rows)"
+fi
+
 # Show the selection and stop.  Inspecting which rows a filter picks used
 # to mean starting a sweep and killing it, which is how an injected defect
 # once got left in the tree -- the harness restores the file at the END of
