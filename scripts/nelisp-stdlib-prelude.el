@@ -5990,6 +5990,16 @@ bindings provide.  &rest is honoured."
        ;; lisp/ and src/ the only pattern heads in use are quote (245),
        ;; backquote (47) and or (32), all handled, so nothing in the tree
        ;; relies on the old always-match.
+       ;; (cl-type TYPE) -- kept in sync with lisp/nelisp-pcase.el's copy.
+       ;; Built into the engine rather than registered through a
+       ;; `pcase-macroexpander' property, because this prelude loads before
+       ;; `get'/`put' exist.  Real Emacs registers it in cl-macs.el.
+       ((eq head 'cl-type)
+        (nelisp-pcase--test
+         (list 'pred (list 'lambda (list 'v)
+                           (list 'cl-typep 'v
+                                 (list 'quote (car rest)))))
+         value-form))
        (t (error "Unknown %s pattern: %S" head pattern)))))
    (t (cons (list 'equal value-form (list 'quote pattern)) nil))))
 

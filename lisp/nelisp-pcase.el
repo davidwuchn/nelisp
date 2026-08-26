@@ -110,6 +110,20 @@
        ;; lisp/ and src/ the only pattern heads in use are quote (245),
        ;; backquote (47) and or (32), all handled, so nothing in the tree
        ;; relies on the old always-match.
+       ;; (cl-type TYPE) -- built into the engine rather than registered
+       ;; through the `pcase-macroexpander' property, because this file is
+       ;; spliced into the stdlib prelude and loads BEFORE `get'/`put'
+       ;; exist; a load-time registration form dies with void-function: get.
+       ;; Real Emacs registers this in cl-macs.el.  `cl-typep' itself is
+       ;; already correct on this substrate -- (cl-typep 5 'integer) and
+       ;; (cl-typep "s" 'integer) answer t and nil here exactly as they do
+       ;; in stock Emacs -- so the pattern lowers straight to a `pred'.
+       ((eq head 'cl-type)
+        (nelisp-pcase--test
+         (list 'pred (list 'lambda (list 'v)
+                           (list 'cl-typep 'v
+                                 (list 'quote (car rest)))))
+         value-form))
        (t (error "Unknown %s pattern: %S" head pattern)))))
    (t (cons (list 'equal value-form (list 'quote pattern)) nil))))
 
