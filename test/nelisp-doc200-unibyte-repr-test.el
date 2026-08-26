@@ -1,4 +1,4 @@
-;;; nelisp-doc200-unibyte-repr-test.el --- Doc 200 P1 representation gate  -*- lexical-binding: t; -*-
+;;; nelisp-doc200-unibyte-repr-test.el --- Doc 200 unibyte representation gate  -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2026 zawatton
 
@@ -8,11 +8,12 @@
 
 ;;; Commentary:
 
-;; Phase 1 deliberately has no tag-14/tag-15 producer.  This test therefore
-;; writes both Sexp layouts by hand in a freestanding AOT executable and sends
-;; them through the real consumer defuns.  The GC mark-buffer shim records the
-;; pointer it was asked to mark, making a missing mark arm observable rather
-;; than merely checking that `nl_gc_mark_slot' returns.
+;; Phase 1 wrote both Sexp layouts by hand and sent them through the real
+;; consumer defuns.  Phase 2 keeps that coverage and additionally executes the
+;; production tag-14/tag-15 allocators and tag-15 -> tag-14 finalizer.  The GC
+;; mark-buffer shim records the pointer it was asked to mark, making a missing
+;; mark arm observable rather than merely checking that `nl_gc_mark_slot'
+;; returns.
 
 ;;; Code:
 
@@ -36,6 +37,7 @@
 (require 'nelisp-standalone-build)
 (require 'nelisp-cc-sexp-clone-into)
 (require 'nelisp-cc-jit-type-of)
+(require 'nelisp-cc-nlstr-direct-ops)
 
 (defconst nelisp-doc200-unibyte-repr-test--page #x30000000
   "Fixed scratch page used only by the freestanding representation probe.")
@@ -64,6 +66,15 @@
   "Build a test-local defun NAME with ARGS returning VALUE."
   `(defun ,name ,args ,value))
 
+(defun nelisp-doc200-unibyte-repr-test--contains-p (tree needle)
+  "Return non-nil when TREE contains a subtree equal to NEEDLE."
+  (or (equal tree needle)
+      (and (consp tree)
+           (or (nelisp-doc200-unibyte-repr-test--contains-p
+                (car tree) needle)
+               (nelisp-doc200-unibyte-repr-test--contains-p
+                (cdr tree) needle)))))
+
 (defun nelisp-doc200-unibyte-repr-test--probe-source ()
   "Return the freestanding AOT source for the tag-14/tag-15 consumer probe."
   (let* ((base nelisp-doc200-unibyte-repr-test--page)
@@ -75,6 +86,13 @@
          (dst14 (+ base 208))
          (dst15 (+ base 240))
          (printbuf (+ base 288))
+         (producer14 (+ base 352))
+         (producer15 (+ base 384))
+         (finalized14 (+ base 416))
+         (producerbox (+ base 448))
+         (producerstrbuf (+ base 480))
+         (producerbuf (+ base 512))
+         (finalizedbuf (+ base 544))
          (gc-mark-slot
           (nelisp-doc200-unibyte-repr-test--defun
            'nl_gc_mark_slot nelisp-standalone--gc-source))
@@ -104,6 +122,23 @@
          (strlen
           (nelisp-doc200-unibyte-repr-test--defun
            'nl_bi_strlen nelisp-standalone--fileio-forms-part1))
+         (producer-forms
+          (append
+           (mapcar
+            (lambda (name)
+              (nelisp-doc200-unibyte-repr-test--defun
+               name nelisp-cc-nlstr-direct-ops--alloc-str-source))
+            '(nl_alloc_str_copy_loop nl_alloc_str_write_tag))
+           (list
+            (nelisp-doc200-unibyte-repr-test--defun
+             'nl_alloc_mut_str_write_tag
+             nelisp-cc-nlstr-direct-ops--alloc-mut-str-source))
+           (mapcar
+            (lambda (name)
+              (nelisp-doc200-unibyte-repr-test--defun
+               name nelisp-cc-nlstr-direct-ops--mut-str-finalize-source))
+            '(nl_mut_str_finalize_copy_loop
+              nl_mut_str_finalize_unibyte_write))))
          (gc-stubs
           `((defun nl_gc_mark_buf (ptr)
               (seq (ptr-write-u64 ,base 0 ptr) 0))
@@ -204,6 +239,33 @@
                 (if (= (ptr-read-u8 (+ ,printbuf 32) 3) 51) 0 2)
                 (if (= (ptr-read-u8 (+ ,printbuf 32) 4) 49) 0 4)
                 (if (= (ptr-read-u8 (+ ,printbuf 32) 5) 49) 0 8))))
+            (defun doc200_producer_probe ()
+              (seq
+               ;; Immutable raw-byte allocation must write tag 14 and retain
+               ;; the byte payload without UTF-8 interpretation.
+               (nl_alloc_str_write_tag
+                ,buf14 3 3 ,producer14 ,producerstrbuf 14)
+               ;; Mutable raw-byte allocation must write tag 15.  Populate
+               ;; its fresh NlStr buffer, then exercise the production
+               ;; finalizer and require a tag-14 immutable result.
+               (nl_alloc_mut_str_write_tag
+                3 ,producer15 ,producerbox ,producerbuf 15)
+               (ptr-write-u8 ,producerbuf 0 200)
+               (ptr-write-u8 ,producerbuf 1 201)
+               (ptr-write-u8 ,producerbuf 2 202)
+               (ptr-write-u64 ,producerbox 16 3)
+               (nl_mut_str_finalize_unibyte_write
+                ,producerbuf 3 3 ,finalized14 ,finalizedbuf)
+               (+
+                (if (= (ptr-read-u8 ,producer14 0) 14) 0 1)
+                (if (= (ptr-read-u64 ,producer14 24) 3) 0 2)
+                (if (= (ptr-read-u8 (ptr-read-u64 ,producer14 16) 1) 200)
+                    0 4)
+                (if (= (ptr-read-u8 ,producer15 0) 15) 0 8)
+                (if (= (ptr-read-u8 ,finalized14 0) 14) 0 16)
+                (if (= (ptr-read-u64 ,finalized14 24) 3) 0 32)
+                (if (= (ptr-read-u8 (ptr-read-u64 ,finalized14 16) 2) 202)
+                    0 64))))
             (defun doc200_setup ()
               (seq
                ;; mmap(BASE, 4096, PROT_RW, MAP_FIXED|PRIVATE|ANON, -1, 0)
@@ -233,7 +295,8 @@
                (+ (doc200_predicate_probe)
                   (doc200_gc_probe)
                   (doc200_clone_probe)
-                  (doc200_print_probe)))))))
+                  (doc200_print_probe)
+                  (doc200_producer_probe)))))))
     `(seq
       ,@gc-stubs
       ,@clone-stubs
@@ -246,12 +309,13 @@
       ,arrayp
       ,strptr
       ,strlen
+      ,@producer-forms
       ,@driver-forms
       ,@probe-defs
       (exit (doc200_probe)))))
 
-(ert-deftest nelisp-doc200-unibyte-repr/production-consumers-survive-handbuilt-tags ()
-  "Hand-built tags 14/15 survive predicates, type, GC, clone, and printing."
+(ert-deftest nelisp-doc200-unibyte-repr/production-and-consumers-use-unibyte-tags ()
+  "Production alloc/finalize and hand-built tags survive every representation path."
   (unless (and (eq system-type 'gnu/linux)
                (string-match-p "x86_64\\|amd64" system-configuration))
     (ert-skip "Requires x86_64 Linux for the freestanding AOT executable"))
@@ -275,6 +339,29 @@
          (= (sexp-tag arg) 6)
          (= (sexp-tag arg) 14)
          (= (sexp-tag arg) 15)))))
+
+(ert-deftest nelisp-doc200-unibyte-repr/public-producers-select-unibyte-tags ()
+  "Public raw-string alloc/finalize wrappers select tags 14 and 15."
+  (let ((str
+         (nelisp-doc200-unibyte-repr-test--defun
+          'nl_alloc_unibyte_str_pos
+          nelisp-cc-nlstr-direct-ops--alloc-str-source))
+        (mut
+         (nelisp-doc200-unibyte-repr-test--defun
+          'nl_alloc_unibyte_mut_str_inner
+          nelisp-cc-nlstr-direct-ops--alloc-mut-str-source))
+        (finalize
+         (nelisp-doc200-unibyte-repr-test--defun
+          'nl_mut_str_finalize
+          nelisp-cc-nlstr-direct-ops--mut-str-finalize-source)))
+    (should
+     (nelisp-doc200-unibyte-repr-test--contains-p
+      str '(alloc-bytes (if (= n 0) 1 n) 1)))
+    (should (nelisp-doc200-unibyte-repr-test--contains-p str 14))
+    (should (nelisp-doc200-unibyte-repr-test--contains-p mut 15))
+    (should
+     (nelisp-doc200-unibyte-repr-test--contains-p
+      finalize '(if (= (ptr-read-u8 ptr 0) 15) 14 5)))))
 
 (provide 'nelisp-doc200-unibyte-repr-test)
 ;;; nelisp-doc200-unibyte-repr-test.el ends here

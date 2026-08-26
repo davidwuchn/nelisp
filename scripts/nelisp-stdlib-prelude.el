@@ -914,11 +914,26 @@ from `(defvar X nil)'."
 (defun nelisp--case-letter-p (c)
   (not (and (eq (nelisp--case-up-char c) c) (eq (nelisp--case-down-char c) c))))
 
+(defun nelisp--case-unibyte-string (string upcasep)
+  "Fold ASCII letters in raw-byte STRING and preserve every other byte."
+  (let ((i 0) (n (length string)) (bytes nil))
+    (while (< i n)
+      (let ((c (aref string i)))
+        (setq bytes
+              (cons (if upcasep
+                        (if (and (>= c ?a) (<= c ?z)) (- c 32) c)
+                      (if (and (>= c ?A) (<= c ?Z)) (+ c 32) c))
+                    bytes)))
+      (setq i (1+ i)))
+    (apply #'unibyte-string (nreverse bytes))))
+
 (defun downcase (obj)
   (unless (or (stringp obj)
               (and (integerp obj) (>= obj 0) (<= obj 4194303)))
     (signal 'wrong-type-argument (list 'char-or-string-p obj)))
-  (cond ((stringp obj)
+  (cond ((and (stringp obj) (unibyte-string-p obj))
+         (nelisp--case-unibyte-string obj nil))
+        ((stringp obj)
          (let ((out "") (i 0) (n (length obj)))
            (while (< i n)
              (setq out (concat out (char-to-string (nelisp--case-down-char (aref obj i)))))
@@ -962,7 +977,9 @@ from `(defvar X nil)'."
   (unless (or (stringp obj)
               (and (integerp obj) (>= obj 0) (<= obj 4194303)))
     (signal 'wrong-type-argument (list 'char-or-string-p obj)))
-  (cond ((stringp obj)
+  (cond ((and (stringp obj) (unibyte-string-p obj))
+         (nelisp--case-unibyte-string obj t))
+        ((stringp obj)
          (let ((out "") (i 0) (n (length obj)))
            (while (< i n)
              (let ((c (aref obj i)))
@@ -1727,6 +1744,7 @@ run forever."
 (unless (fboundp 'vconcat)
   (defun vconcat (&rest seqs)
     (dolist (x seqs) (nelisp--check-seq-list x))
+    (nelisp--doc200-check-string-mix seqs)
     (apply #'vector (apply #'append (mapcar (lambda (x) (append x nil)) seqs)))))
 ;; `string-to-number' existed only in lisp/nelisp-stdlib-plist-str.el, which
 ;; the standalone never loads, so the native integer-only parser answered:
@@ -2910,8 +2928,32 @@ path, which asks for a NUMBER first and only then for an integer."
 	   acc))
 	(t (signal 'wrong-type-argument (list 'sequencep seq)))))
 
+(defun nelisp--doc200-raw-high-string-p (string)
+  "Non-nil when unibyte STRING contains a byte at least 128."
+  (and (unibyte-string-p string)
+       (let ((i 0) (n (length string)) (high nil))
+         (while (and (< i n) (not high))
+           (when (>= (aref string i) 128) (setq high t))
+           (setq i (1+ i)))
+         high)))
+
+(defun nelisp--doc200-check-string-mix (sequences)
+  "Signal when SEQUENCES require an unsupported multibyte raw-byte char."
+  (let ((raw-high nil) (multibyte nil) (tail sequences))
+    (while tail
+      (let ((value (car tail)))
+        (when (stringp value)
+          (when (nelisp--doc200-raw-high-string-p value)
+            (setq raw-high t))
+          (when (multibyte-string-p value)
+            (setq multibyte t))))
+      (setq tail (cdr tail)))
+    (when (and raw-high multibyte)
+      (signal 'nelisp-raw-byte-unrepresentable nil))))
+
 (defun append (&rest args)
   "Concatenate sequences ARGS into a fresh proper-list spine.\nNon-final args may be list / vector / string / nil.  The FINAL arg\nis used as the tail (= unchanged, can be any value).  Single-arg\ncall returns the arg unchanged (= no copy)."
+  (nelisp--doc200-check-string-mix args)
   (cond ((null args) nil) ((null (cdr args)) (car args))
 	(t
 	 (let ((cur args) (acc nil) (tail nil))
@@ -6262,38 +6304,9 @@ Rust-min migration (= moved out of build-tool/src/eval/special_forms.rs)."
   (defun set-buffer-multibyte (flag)
     "Answer FLAG, as Emacs does; there is no buffer to change here."
     flag))
-(unless (fboundp 'multibyte-string-p)
-  ;; Every string answered t, so a pure-ASCII string looked multibyte and
-  ;; callers that branch on this took the wrong path silently.
-  (defun multibyte-string-p (obj)
-    (and (stringp obj)
-         (let ((i 0) (n (length obj)) (wide nil))
-           (while (and (< i n) (not wide))
-             (when (> (aref obj i) 127) (setq wide t))
-             (setq i (1+ i)))
-           wide))))
-(unless (fboundp 'string-to-multibyte)
-  (defun string-to-multibyte (s) (nelisp--check-string s) s))
-(unless (fboundp 'string-as-multibyte)
-  (defun string-as-multibyte (s) (nelisp--check-string s) s))
-(unless (fboundp 'unibyte-string-p)
-  (defun unibyte-string-p (_obj) nil))
-(unless (fboundp 'string-as-multibyte)
-  (defun string-as-multibyte (s)
-    "NeLisp stub: identity, but STRINGP is still checked."
-    (nelisp--check-string s)))
-(unless (fboundp 'string-as-unibyte)
-  (defun string-as-unibyte (s)
-    "NeLisp stub: identity (= already UTF-8 bytes); STRINGP is still checked."
-    (nelisp--check-string s)))
-(unless (fboundp 'string-make-multibyte)
-  (defun string-make-multibyte (s)
-    "NeLisp stub: identity, but STRINGP is still checked."
-    (nelisp--check-string s)))
-(unless (fboundp 'string-make-unibyte)
-  (defun string-make-unibyte (s)
-    "NeLisp stub: identity, but STRINGP is still checked."
-    (nelisp--check-string s)))
+;; Doc 200 string representation primitives are native standalone builtins.
+;; Do not install Elisp fallbacks for them here: a fallback binding shadows
+;; the native apply dispatch even though `fboundp' cannot see that dispatch.
 (unless (fboundp 'write-region)
   (defun write-region (start end filename &optional append _visit _lockname _mustbenew)
     (unless (stringp start)
@@ -8176,6 +8189,8 @@ are numbers; `1.' is the integer 1."
 (put 'file-missing 'error-conditions '(file-missing file-error error))
 (put 'setting-constant 'error-conditions '(setting-constant error))
 (put 'user-error 'error-conditions '(user-error error))
+(define-error 'nelisp-raw-byte-unrepresentable
+  "Raw byte cannot appear in a multibyte string (Doc 200 §4)")
 
 ;; `nelisp-unsupported-primitive': a NeLisp-specific (not an Emacs-standard)
 ;; condition for a primitive that exists on this substrate but cannot do its

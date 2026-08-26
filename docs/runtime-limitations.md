@@ -107,6 +107,20 @@ Grouped A–E by impact on C-equivalence.  Each item cites a primary source.
     `--emit-runtime-call-args`).  Regression test:
     `nelisp-cfront-odd-arity-stack-arg-extern-align-e2e`.
 
+## F. Standalone Lisp raw-byte characters
+
+- **Unibyte strings are represented and consumed as raw bytes, but a raw byte
+  128–255 still cannot be represented as a character inside a multibyte
+  string.**  `concat`, `format`, `vconcat`, and `append` signal
+  `nelisp-raw-byte-unrepresentable` when such a conversion would be required;
+  `string-to-multibyte` signals the same condition.  ASCII-only unibyte input
+  remains freely mixable.  This is deliberate: silently treating a raw byte
+  buffer as UTF-8 invents characters and was the pre-Doc-200 behaviour.
+- **`aset` on a standalone unibyte string currently signals instead of
+  mutating.**  Tags 14/15 are rejected before the UTF-8 codepoint mutation
+  layer, preventing byte corruption.  The Emacs 31.1 fixed-width mutation
+  rules are deferred to Doc 200 P3.
+
 ---
 
 ## Out of scope here (packaging / platform reach, not C-equivalence)

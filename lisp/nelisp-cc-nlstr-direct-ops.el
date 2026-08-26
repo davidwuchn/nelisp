@@ -106,7 +106,8 @@ value form using the `ptr-read-u64' grammar op in nested position.")
 ;; ---------------------------------------------------------------------------
 
 (defconst nelisp-cc-nlstr-direct-ops--str-bytes-ptr-source
-  '(defun nl_str_bytes_ptr (sexp)
+  '(seq
+    (defun nl_str_bytes_ptr (sexp)
      ;; sexp: *const Sexp — any string-y variant (Str/Symbol/MutStr).
      ;;
      ;; Sexp::Str (tag=5) / Sexp::Symbol (tag=4):
@@ -128,6 +129,10 @@ value form using the `ptr-read-u64' grammar op in nested position.")
          (if (= (sexp-tag sexp) 4)
              (ptr-read-u64 sexp 16)
            0))))
+    ;; Raw-pointer byte access shared by AOT consumers whose source files are
+    ;; deliberately kept out of the raw-memory kernel inventory.
+    (defun nl_bytes_byte_at (bytes i)
+      (ptr-read-u8 bytes i)))
   "AOT direct-symbol source for `nl_str_bytes_ptr'.
 
 Replaces the Rust `#[no_mangle] pub unsafe extern \"C\" fn nl_str_bytes_ptr'
@@ -173,9 +178,20 @@ lifetime of a Sexp value.  No `let' binding needed.")
           (and (ptr-write-u8 dst k (ptr-read-u8 src k)) (setq k (+ k 1))))
         1))
 
-    ;; Inner Sexp::Str writer.
+    ;; Shared inline-string writer.  TAG is 5 for UTF-8 Str and 14 for
+    ;; raw-byte UnibyteStr; the remaining fields have the same layout.
     ;; bytes-ptr: source, n: logical length, alloc-n: allocated cap,
     ;; result-slot: output, char-buf: newly-allocated char buffer.
+    (defun nl_alloc_str_write_tag
+        (bytes-ptr n alloc-n result-slot char-buf tag)
+      (and
+       (nl_alloc_str_copy_loop bytes-ptr char-buf 0 n)
+       (ptr-write-u8  result-slot 0  tag)
+       (ptr-write-u64 result-slot 8  alloc-n)
+       (ptr-write-u64 result-slot 16 char-buf)
+       (ptr-write-u64 result-slot 24 n)
+       result-slot))
+
     (defun nl_alloc_str_write (bytes-ptr n alloc-n result-slot char-buf)
       (and
        (nl_alloc_str_copy_loop bytes-ptr char-buf 0 n)
@@ -198,6 +214,16 @@ lifetime of a Sexp value.  No `let' binding needed.")
     ;; Returns result-slot.
     (defun nl_alloc_str (bytes-ptr len result-slot)
       (nl_alloc_str_pos bytes-ptr (if (< len 0) 0 len) result-slot))
+
+    ;; Raw-byte counterpart used by standalone conversion builtins.
+    (defun nl_alloc_unibyte_str_pos (bytes-ptr n result-slot)
+      (nl_alloc_str_write_tag
+       bytes-ptr n (if (= n 0) 1 n) result-slot
+       (alloc-bytes (if (= n 0) 1 n) 1) 14))
+
+    (defun nl_alloc_unibyte_str (bytes-ptr len result-slot)
+      (nl_alloc_unibyte_str_pos
+       bytes-ptr (if (< len 0) 0 len) result-slot))
 
     ;; Inner Sexp::Symbol writer (tag=4, identical to Str write modulo tag).
     (defun nl_alloc_symbol_write (bytes-ptr n alloc-n result-slot char-buf)
@@ -447,19 +473,31 @@ helper threads the runtime value through without any `let' binding.")
 
 (defconst nelisp-cc-nlstr-direct-ops--alloc-mut-str-source
   '(seq
-    ;; Innermost writer: all four NlStr fields + Sexp header.
+    ;; Shared boxed-string writer.  TAG is 6 for UTF-8 MutStr and 15 for
+    ;; raw-byte UnibyteMutStr; their NlStr layouts are identical.
     ;; alloc-n:     allocated char-buffer capacity (u64)
     ;; result-slot: *mut Sexp output
     ;; nlstr-box:   fresh 32-byte NlStr allocation
     ;; char-buf:    fresh alloc-n-byte char buffer
-    (defun nl_alloc_mut_str_write (alloc-n result-slot nlstr-box char-buf)
+    (defun nl_alloc_mut_str_write_tag
+        (alloc-n result-slot nlstr-box char-buf tag)
       (and
        (ptr-write-u64 nlstr-box 0  alloc-n)    ; String.cap
        (ptr-write-u64 nlstr-box 8  char-buf)   ; String.ptr
        (ptr-write-u64 nlstr-box 16 0)          ; String.len = 0
        (ptr-write-u64 nlstr-box 24 1)          ; refcount = 1
-       (ptr-write-u8  result-slot 0 6)         ; Sexp tag = MutStr
+       (ptr-write-u8  result-slot 0 tag)
        (ptr-write-u64 result-slot 8 nlstr-box) ; NlStr*
+       result-slot))
+
+    (defun nl_alloc_mut_str_write (alloc-n result-slot nlstr-box char-buf)
+      (and
+       (ptr-write-u64 nlstr-box 0  alloc-n)
+       (ptr-write-u64 nlstr-box 8  char-buf)
+       (ptr-write-u64 nlstr-box 16 0)
+       (ptr-write-u64 nlstr-box 24 1)
+       (ptr-write-u8  result-slot 0 6)
+       (ptr-write-u64 result-slot 8 nlstr-box)
        result-slot))
 
     ;; Given allocated nlstr-box, allocate char-buf and finish.
@@ -480,7 +518,20 @@ helper threads the runtime value through without any `let' binding.")
     ;; result-slot: *mut Sexp — receives Sexp::MutStr.
     ;; Returns result-slot.
     (defun nl_alloc_mut_str (cap result-slot)
-      (nl_alloc_mut_str_pos (if (< cap 0) 0 cap) result-slot)))
+      (nl_alloc_mut_str_pos (if (< cap 0) 0 cap) result-slot))
+
+    (defun nl_alloc_unibyte_mut_str_inner
+        (alloc-n result-slot nlstr-box)
+      (nl_alloc_mut_str_write_tag
+       alloc-n result-slot nlstr-box (alloc-bytes alloc-n 1) 15))
+
+    (defun nl_alloc_unibyte_mut_str_pos (n result-slot)
+      (nl_alloc_unibyte_mut_str_inner
+       (if (= n 0) 1 n) result-slot (alloc-bytes 32 8)))
+
+    (defun nl_alloc_unibyte_mut_str (cap result-slot)
+      (nl_alloc_unibyte_mut_str_pos
+       (if (< cap 0) 0 cap) result-slot)))
   "AOT direct-symbol source for `nl_alloc_mut_str'.
 
 Single `(seq DEFUN ...)' manifest exporting four symbols:
@@ -529,10 +580,13 @@ expectations.  Both use the global allocator, compatible with
           (and (ptr-write-u8 dst k (ptr-read-u8 src k)) (setq k (+ k 1))))
         1))
 
-    ;; Innermost writer: fills in Sexp::Str fields.
+    ;; Innermost writers: the tag-6 builder finalizes through the historical
+    ;; tag-5 producer, while a tag-15 builder uses the layout-identical tag-14
+    ;; writer below.
     ;; str-ptr: *const u8 source data, str-len: byte count,
     ;; alloc-n: allocated cap, result-slot: output, new-buf: fresh allocation.
-    (defun nl_mut_str_finalize_write (str-ptr str-len alloc-n result-slot new-buf)
+    (defun nl_mut_str_finalize_write
+        (str-ptr str-len alloc-n result-slot new-buf)
       (and
        (nl_mut_str_finalize_copy_loop str-ptr new-buf 0 str-len)
        (ptr-write-u8  result-slot 0  5)
@@ -541,25 +595,39 @@ expectations.  Both use the global allocator, compatible with
        (ptr-write-u64 result-slot 24 str-len)
        result-slot))
 
+    (defun nl_mut_str_finalize_unibyte_write
+        (str-ptr str-len alloc-n result-slot new-buf)
+      (and
+       (nl_mut_str_finalize_copy_loop str-ptr new-buf 0 str-len)
+       (ptr-write-u8  result-slot 0  14)
+       (ptr-write-u64 result-slot 8  alloc-n)
+       (ptr-write-u64 result-slot 16 new-buf)
+       (ptr-write-u64 result-slot 24 str-len)
+       result-slot))
+
     ;; Given str-ptr + str-len + alloc-n + result-slot, allocate new-buf.
-    (defun nl_mut_str_finalize_alloc (str-ptr str-len alloc-n result-slot)
-      (nl_mut_str_finalize_write
-       str-ptr str-len alloc-n result-slot
-       (alloc-bytes alloc-n 1)))
+    (defun nl_mut_str_finalize_alloc
+        (str-ptr str-len alloc-n result-slot out-tag)
+      (if (= out-tag 14)
+          (nl_mut_str_finalize_unibyte_write
+           str-ptr str-len alloc-n result-slot (alloc-bytes alloc-n 1))
+        (nl_mut_str_finalize_write
+         str-ptr str-len alloc-n result-slot (alloc-bytes alloc-n 1))))
 
     ;; Given nlstr* + result-slot + str-len (already read), read str-ptr.
-    (defun nl_mut_str_finalize_inner (nlstr result-slot str-len)
+    (defun nl_mut_str_finalize_inner
+        (nlstr result-slot str-len out-tag)
       (nl_mut_str_finalize_alloc
        (ptr-read-u64 nlstr 8)               ; str-ptr = NlStr.value.ptr
        str-len
        (if (= str-len 0) 1 str-len)         ; alloc-n = max(str-len, 1)
-       result-slot))
+       result-slot out-tag))
 
     ;; Given ptr (Sexp*) + result-slot + nlstr (already read from ptr+8).
-    (defun nl_mut_str_finalize_nlstr (ptr result-slot nlstr)
+    (defun nl_mut_str_finalize_nlstr (ptr result-slot nlstr out-tag)
       (nl_mut_str_finalize_inner
        nlstr result-slot
-       (ptr-read-u64 nlstr 16)))             ; str-len = NlStr.value.len
+       (ptr-read-u64 nlstr 16) out-tag))     ; str-len = NlStr.value.len
 
     ;; Public entry: nl_mut_str_finalize(ptr, result_slot).
     ;; ptr:         *const Sexp — source MutStr slot (tag=6).
@@ -568,12 +636,14 @@ expectations.  Both use the global allocator, compatible with
     (defun nl_mut_str_finalize (ptr result-slot)
       (nl_mut_str_finalize_nlstr
        ptr result-slot
-       (ptr-read-u64 ptr 8))))               ; nlstr = NlStr* at [sexp+8]
+       (ptr-read-u64 ptr 8)
+       (if (= (ptr-read-u8 ptr 0) 15) 14 5))))
   "AOT direct-symbol source for `nl_mut_str_finalize'.
 
-Six-entry `(seq DEFUN ...)' manifest:
+Seven-entry `(seq DEFUN ...)' manifest:
 - `nl_mut_str_finalize_copy_loop'  — tail-recursive byte copier.
-- `nl_mut_str_finalize_write'      — Sexp::Str field writer.
+- `nl_mut_str_finalize_write'      — tag-5 Sexp::Str field writer.
+- `nl_mut_str_finalize_unibyte_write' — tag-14 Sexp::UnibyteStr writer.
 - `nl_mut_str_finalize_alloc'      — allocates new char buf.
 - `nl_mut_str_finalize_inner'      — reads str-ptr; threads to alloc.
 - `nl_mut_str_finalize_nlstr'      — reads str-len; threads to inner.

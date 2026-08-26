@@ -45,6 +45,54 @@
 ;;; Code:
 
 (list
+ ;; Doc 200 P2: the standalone must distinguish raw-byte strings from UTF-8
+ ;; strings while keeping ASCII equality representation-independent.  Keep
+ ;; every result derived: returning a raw-byte string here would compare the
+ ;; two printers instead of the string semantics.
+ (equal (unibyte-string 227 129 130) "あ")
+ (append (unibyte-string 200 201 202) nil)
+ (append "あ" nil)
+ (list (multibyte-string-p (unibyte-string 200 201))
+       (multibyte-string-p "abc")
+       (multibyte-string-p "あ"))
+ (equal "abc" (unibyte-string 97 98 99))
+ (let ((u (unibyte-string 200 201 202)))
+   (list (length u) (string-bytes u) (aref u 0) (elt u 1)))
+ (append (concat (unibyte-string 200) "a") nil)
+ (append (substring (unibyte-string 200 201) 0 1) nil)
+ (append (copy-sequence (unibyte-string 200 201)) nil)
+ (append (upcase (unibyte-string 200 97)) nil)
+ (append (downcase (unibyte-string 200 65)) nil)
+ (vconcat (unibyte-string 200 201))
+ (append (format "%s" (unibyte-string 200)) nil)
+ (mapcar #'identity (unibyte-string 200 201))
+ (append (mapconcat (lambda (c) (unibyte-string c))
+                    (unibyte-string 200 201)
+                    (unibyte-string 44))
+         nil)
+ (mapcar (lambda (s) (append s nil))
+         (split-string (concat (unibyte-string 200) ","
+                               (unibyte-string 201))
+                       ","))
+ (string= (unibyte-string 227 129 130) "あ")
+ (= (sxhash-equal (unibyte-string 97 98 99)) (sxhash-equal "abc"))
+ (= (sxhash (unibyte-string 97 98 99)) (sxhash "abc"))
+ (list (multibyte-string-p (substring (unibyte-string 200) 0 1))
+       (multibyte-string-p (copy-sequence (unibyte-string 200)))
+       (multibyte-string-p (upcase (unibyte-string 200 97)))
+       (multibyte-string-p (concat (unibyte-string 200) "a"))
+       (multibyte-string-p (format "%s" (unibyte-string 200))))
+ (append (string-as-multibyte (unibyte-string 227 129 130)) nil)
+ (append (string-as-unibyte "あ") nil)
+ (append (string-to-unibyte "abc") nil)
+ (append (string-make-unibyte "abc") nil)
+ (list (multibyte-string-p
+        (string-as-multibyte (unibyte-string 227 129 130)))
+       (append (string-to-multibyte (unibyte-string 65)) nil)
+       (append (string-make-multibyte (unibyte-string 65)) nil))
+ (condition-case e
+     (string-to-unibyte "あ")
+   (error (list (car e) (cadr e))))
  ;; format
  (format "%s-%d" "x" 7) (format "%S" '(1 . 2)) (format "%5.2f" 1.5)
  (format "%c%%" 65) (format "%-4s|" "ab")
