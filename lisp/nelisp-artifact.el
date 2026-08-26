@@ -1061,6 +1061,12 @@ becomes (:eval FORM) replayed through `nelisp-eval' at load."
    (list :e-type 'rel
          :text (plist-get unit :text)
          :rodata (plist-get unit :rodata)
+         ;; `:data' / `:bss-size' were not forwarded until a unit first
+         ;; carried a writable blob.  Without them the writer emits the
+         ;; symbol and not the bytes, and rejects its own output with
+         ;; "symbol references data but :data is empty".
+         :data (plist-get unit :data)
+         :bss-size (plist-get unit :bss-size)
          :symbols (plist-get unit :symbols)
          :relocs (plist-get unit :relocs)
          :machine (plist-get unit :machine))))
@@ -1072,7 +1078,12 @@ becomes (:eval FORM) replayed through `nelisp-eval' at load."
         :size (plist-get entry :size)
         :arity (plist-get entry :arity)
         :param-class (plist-get entry :param-class)
+        ;; The register class is not the representation.  Recorded so a
+        ;; caller reads how to hand the arguments over instead of
+        ;; inferring it from the extern set, a different question.
+        :param-repr (plist-get entry :param-repr)
         :rt-slot-count (plist-get entry :rt-slot-count)
+        :return-repr (plist-get entry :return-repr)
         :body-offset (plist-get entry :body-offset)))
 
 (defun nelisp-artifact--native-defun-metadata (native symbol)
@@ -1535,6 +1546,7 @@ by hand.  Recorded here and reported in the manifest instead.")
 (defun nelisp-artifact--native-section-plist (obj unit arch symbols compile-report)
   "Return the serialized native section plist for OBJ/UNIT."
   (let* ((text-bytes (plist-get unit :text))
+         (data-bytes (or (plist-get unit :data) ""))
          (bytes (nelisp-artifact--read-binary obj)))
     (list :native-section-version
           nelisp-artifact--native-section-version
@@ -1546,6 +1558,19 @@ by hand.  Recorded here and reported in the manifest instead.")
           :object-base64 (base64-encode-string bytes t)
           :text-size (length text-bytes)
           :text-base64 (base64-encode-string text-bytes t)
+          ;; The writable data section, when the unit has one.  An
+          ;; in-process loader maps `.text' and resolves externs to stubs;
+          ;; a unit that also carries static writable storage -- a symbol
+          ;; literal's cache slot, say -- needs those bytes and the local
+          ;; symbols naming them, which are otherwise reachable only by
+          ;; re-parsing `:object-base64'.  Omitted entirely when empty, so
+          ;; an artifact without one is byte-identical to before.
+          :data-size (length data-bytes)
+          :data-base64 (and (> (length data-bytes) 0)
+                            (base64-encode-string data-bytes t))
+          :data-symbols
+          (seq-filter (lambda (s) (eq (plist-get s :section) 'data))
+                      (plist-get unit :symbols))
           :relocs (plist-get unit :relocs)
           :extern-symbols (plist-get unit :extern-symbols)
           :compile-report compile-report
@@ -1570,9 +1595,15 @@ by hand.  Recorded here and reported in the manifest instead.")
               (let (unit native-section)
                 (setq stage-start (nelisp-artifact--profile-time))
                 (setq unit
-                      (nelisp-aot-compile-to-link-unit
-                       (cons 'seq eligible)
-                       :arch arch :format 'elf))
+                      ;; Entered from the runtime, which hands over Sexps.
+                      ;; The compiler cannot tell that from the source --
+                      ;; the hand-written reader sources reach the same
+                      ;; entry point and are entered natively -- so the
+                      ;; caller says which lane this is.
+                      (let ((nelisp-aot-compiler--runtime-entry-params t))
+                        (nelisp-aot-compile-to-link-unit
+                         (cons 'seq eligible)
+                         :arch arch :format 'elf)))
                 (nelisp-artifact--profile-log
                  "native-required-compile"
                  stage-start
@@ -1624,9 +1655,10 @@ is already native-compatible."
            (native nil))
       (unwind-protect
           (condition-case nil
-              (let ((unit (nelisp-aot-compile-to-link-unit
-                           (cons 'seq defuns)
-                           :arch arch :format 'elf)))
+              (let ((unit (let ((nelisp-aot-compiler--runtime-entry-params t))
+                            (nelisp-aot-compile-to-link-unit
+                             (cons 'seq defuns)
+                             :arch arch :format 'elf))))
                 (nelisp-artifact--write-elf-rel-object obj unit)
                 (setq nelisp-artifact--last-native-compile-report
                       compile-report)
@@ -1708,9 +1740,10 @@ module."
                   (let ((obj (nelisp-artifact--make-temp-path "neln-obj" "o")))
                     (unwind-protect
                         (let* ((unit
-                                (nelisp-aot-compile-to-link-unit
-                                 (cons 'seq (nreverse eligible))
-                                 :arch arch :format 'elf)))
+                                (let ((nelisp-aot-compiler--runtime-entry-params t))
+                                  (nelisp-aot-compile-to-link-unit
+                                   (cons 'seq (nreverse eligible))
+                                   :arch arch :format 'elf))))
                           (nelisp-artifact--write-elf-rel-object obj unit)
                           (nelisp-artifact--native-section-plist
                            obj unit arch (nreverse symbols)
@@ -3101,18 +3134,16 @@ native object, or SYMBOL is not one of its native functions."
                                           (format "--redefine-sym=%s=%s" symbol csym)
                                           obj obj2))
                 (error "objcopy symbol rename failed for %s" symbol))
+              ;; The same generator the fast path uses.  This function
+              ;; carried its own copy of the driver, and so kept handing the
+              ;; compiled body bare `long's after 2441f5ebc made every
+              ;; runtime-entered parameter a value word -- `(* x x)' at 9
+              ;; answered 4, because the body read (9-1)/4 = 2.  d62690849
+              ;; fixed the convention and folded the one other copy it found
+              ;; into the shared generator; this third copy was missed, which
+              ;; is the argument for there being one.
               (with-temp-file csrc
-                (insert "#include <stdlib.h>\n#include <stdio.h>\n")
-                (insert (format "extern long %s(%s);\n" csym
-                                (if (= argc 0) "void"
-                                  (mapconcat (lambda (_) "long") args ","))))
-                (insert "int main(int c,char**v){(void)c;")
-                (insert (format "printf(\"%%ld\\n\",%s(%s));return 0;}\n"
-                                csym
-                                (mapconcat (lambda (i)
-                                             (format "atol(v[%d])" i))
-                                           (number-sequence 1 argc)
-                                           ","))))
+                (insert (nelisp-artifact--native-fast-driver-c csym argc)))
               (unless (eq 0 (call-process cc nil nil nil "-O2" "-o" exe csrc obj2))
                 (error "native link failed for %s" symbol))
               (with-temp-buffer
@@ -3170,6 +3201,24 @@ on the hot path, so use a small deterministic rolling hash there."
              args
              ""))
 
+(defun nelisp-artifact--native-driver-fingerprint (variant argc)
+  "Return a hash of the driver C that VARIANT and ARGC will compile.
+The calling convention lives in that generated source, so hashing it is
+what keeps a cached executable from outliving a change to it.  A written
+-down version token was tried first and is precisely the kind of thing
+that gets forgotten: it has to be bumped by whoever edits the driver, and
+nothing fails when they do not -- the failure lands later, on a machine
+with a warm cache, as a wrong answer rather than as a miss.  Deriving it
+cannot be forgotten, because the thing being hashed is the thing being
+compiled.
+
+The symbol name is a fixed placeholder: it varies per call and is already
+part of the key, so letting it in would only defeat sharing."
+  (nelisp-artifact--small-string-hash
+   (if (equal variant "general")
+       (nelisp-artifact--native-driver-c "nelisp_fp" (list :arity argc))
+     (nelisp-artifact--native-fast-driver-c "nelisp_fp" argc))))
+
 (defun nelisp-artifact--native-exec-cache-key
     (artifact-path symbol argc &optional variant arg-signature)
   "Return a stable cache key for ARTIFACT-PATH, SYMBOL, and ARGC."
@@ -3179,8 +3228,17 @@ on the hot path, so use a small deterministic rolling hash there."
     ;; the benefit of a cached native driver.  Size + mtime + artifact path are
     ;; sufficient to invalidate the private dev-loop executable cache; the
     ;; validating native paths still parse the manifest on fallback/error.
+    ;;
+    ;; The driver is the half the artifact cannot supply.  The cache root is
+    ;; $XDG_CACHE_HOME, shared by every worktree on the machine, and the rest
+    ;; of this key describes the artifact -- so a change to how the driver
+    ;; hands arguments over would leave every warm entry both stale and
+    ;; indistinguishable from a fresh one.  The fingerprint below closes that
+    ;; by hashing the C this key will actually compile.
     (let* ((seed (concat
                   "neln-cache|"
+                  (nelisp-artifact--native-driver-fingerprint variant argc)
+                  "|"
                   (or variant "fast")
                   "|"
                   artifact
@@ -3205,7 +3263,16 @@ on the hot path, so use a small deterministic rolling hash there."
     (nelisp-artifact--native-exec-cache-root))))
 
 (defun nelisp-artifact--native-fast-driver-c (csym argc)
-  "Return the integer ABI fast driver C source for CSYM with ARGC."
+  "Return the integer ABI fast driver C source for CSYM with ARGC.
+Arguments go over as canonical value words, not as bare `long's.  A
+parameter of a runtime-entered defun is a value word -- low bit 1 is the
+immediate integer N encoded as 4N+1, low bit 0 is a Sexp slot address --
+so the compiled body decodes what it is handed.  Passing N raw made it
+read (N-1)/4 instead: `(defun f (x) (+ x 1))' answered 11 for 41, and
+`(defun sq (n) (* n n))' answered 4 for 9.  The general harness reaches
+the same convention from the other side, by boxing into a slot and
+passing its address; an immediate needs no slot and no GC root, which is
+why this path stays a two-line driver."
   (concat
    "#include <stdlib.h>\n#include <stdio.h>\n"
    (format "extern long %s(%s);\n" csym
@@ -3218,7 +3285,10 @@ on the hot path, so use a small deterministic rolling hash there."
              (mapconcat
               (lambda (_)
                 (setq i (1+ i))
-                (format "atol(v[%d])" i))
+                ;; 4N+1, written as multiplication: a left shift of a
+                ;; negative long is not defined by every C standard this
+                ;; driver may be compiled under.
+                (format "(atol(v[%d])*4+1)" i))
               (make-list argc nil)
               ",")))))
 
@@ -3325,18 +3395,11 @@ for diagnostics, symbol checks, and non-simple artifacts."
                                                 symbol csym)
                                         obj obj2)))
               (error "objcopy symbol rename failed for %s" symbol))
+            ;; One driver, one owner.  This used to carry its own copy of
+            ;; the C source, so the argument convention had two places to
+            ;; be right in and only the cached one was updated.
             (with-temp-file csrc
-              (insert "#include <stdlib.h>\n#include <stdio.h>\n")
-              (insert (format "extern long %s(%s);\n" csym
-                              (if (= argc 0) "void"
-                                (mapconcat (lambda (_) "long") args ","))))
-              (insert "int main(int c,char**v){(void)c;")
-              (insert (format "printf(\"%%ld\\n\",%s(%s));return 0;}\n"
-                              csym
-                              (mapconcat (lambda (i)
-                                           (format "atol(v[%d])" i))
-                                         (number-sequence 1 argc)
-                                         ","))))
+              (insert (nelisp-artifact--native-fast-driver-c csym argc)))
             (unless (eq 0
                         (if sh
                             (call-process
@@ -3548,6 +3611,16 @@ implementation."
                         "nl_alloc_mut_str"
                         "nl_mut_str_push_byte"
                         "nl_mut_str_finalize"
+                        ;; Materialising a string literal allocates its bytes
+                        ;; through this rather than inline, so any unit with a
+                        ;; string in it now carries the symbol.  The harness
+                        ;; provides it the same way it provides the others.
+                        "nl_alloc_bytes"
+                        ;; A dispatcher result aliases the shared OUT
+                        ;; slot, so storing one in a local copies it into
+                        ;; a slot of its own first.  Any unit that assigns
+                        ;; a delegated call to a variable carries this.
+                        "nl_sexp_clone_into"
                         "nelisp_aot_builtin_call1"
                         "nelisp_aot_builtin_calln")))
        externs))))
@@ -3683,8 +3756,20 @@ implementation."
      "NelnSexp neln_name_slot;\n"
      "NelnSexp neln_callback_slots[12];\n"
      "\n"
-     "static const void *neln_slot_registry[64];\n"
+     ;; Grown on demand rather than a fixed 64.  The registry is how the
+     ;; harness tells "the callee returned a plain integer" from "the callee
+     ;; returned a Sexp in a slot"; it is bookkeeping, not the answer.  At a
+     ;; fixed 64 -- about 46 usable after the boundary and callback slots --
+     ;; any loop that boxes a value per iteration exhausted it in tens of
+     ;; iterations and the harness then refused to decode its own result, so
+     ;; a tight arithmetic bench could not run at all.  Growing costs a
+     ;; realloc per doubling and removes the ceiling; a failure to grow is
+     ;; still fatal, because a lost slot is a wrong answer wearing the shape
+     ;; of a right one.
+     "static const void **neln_slot_registry = NULL;\n"
      "static size_t neln_slot_registry_len = 0;\n"
+     "static size_t neln_slot_registry_cap = 0;\n"
+     "static int neln_slot_registry_overflowed = 0;\n"
      "\n"
      "static void neln_fail(const char *msg) {\n"
      "  fprintf(stderr, \"neln native harness: %s\\n\", msg);\n"
@@ -3720,9 +3805,35 @@ implementation."
      "  slot->c = (uint64_t)n;\n"
      "}\n"
      "\n"
+     "static int neln_slot_registry_grow(void) {\n"
+     "  size_t want = neln_slot_registry_cap ? neln_slot_registry_cap * 2 : 64;\n"
+     "  const void **grown = (const void **)realloc(\n"
+     "      (void *)neln_slot_registry, want * sizeof(*neln_slot_registry));\n"
+     "  if (!grown) {\n"
+     "    return 0;\n"
+     "  }\n"
+     "  neln_slot_registry = grown;\n"
+     "  neln_slot_registry_cap = want;\n"
+     "  return 1;\n"
+     "}\n"
+     "\n"
      "static void neln_register_slot(const void *ptr) {\n"
-     "  if (neln_slot_registry_len >= (sizeof(neln_slot_registry) / sizeof(neln_slot_registry[0]))) {\n"
-     "    neln_fail(\"slot registry overflow\");\n"
+     "  if (neln_slot_registry_len >= neln_slot_registry_cap && !neln_slot_registry_grow()) {\n"
+     "    neln_fail(\"slot registry could not grow\");\n"
+     "  }\n"
+     "  neln_slot_registry[neln_slot_registry_len++] = ptr;\n"
+     "}\n"
+     "\n"
+     ;; Same, but for slots the compiled code allocates itself rather than
+     ;; the boundary slots this driver pre-registers.  A result Sexp built
+     ;; in one of those is a real Sexp the driver must decode; unregistered
+     ;; it was printed as the raw pointer instead.  Silent when the registry
+     ;; is full: losing the ability to decode a later result is a wrong
+     ;; answer in one case, while failing is a dead harness in every case.
+     "static void neln_register_slot_soft(const void *ptr) {\n"
+     "  if (neln_slot_registry_len >= neln_slot_registry_cap && !neln_slot_registry_grow()) {\n"
+     "    neln_slot_registry_overflowed = 1;\n"
+     "    return;\n"
      "  }\n"
      "  neln_slot_registry[neln_slot_registry_len++] = ptr;\n"
      "}\n"
@@ -3740,6 +3851,7 @@ implementation."
      "static void neln_reset_slots(void) {\n"
      "  size_t i;\n"
      "  neln_slot_registry_len = 0;\n"
+     "  neln_slot_registry_overflowed = 0;\n"
      "  neln_write_nil(&neln_out);\n"
      "  neln_write_nil(&neln_mirror);\n"
      "  neln_write_nil(&neln_frames);\n"
@@ -3826,6 +3938,41 @@ implementation."
      "  result_slot->b = (uint64_t)(uintptr_t)buf;\n"
      "  result_slot->c = (uint64_t)n;\n"
      "  return result_slot;\n"
+     "}\n"
+     "\n"
+     ;; Materialising a string literal allocates its bytes through this
+     ;; before handing them to `nl_alloc_str', so any unit with a string in
+     ;; it references the symbol and the link fails without a definition.
+     ;; Zeroed because a caller may write only part of what it asked for.
+     "void *nl_alloc_bytes(int64_t size, int64_t align) {\n"
+     "  size_t n = (size <= 0) ? 1u : (size_t)size;\n"
+     "  size_t a = (align <= 0) ? 1u : (size_t)align;\n"
+     "  void *p = NULL;\n"
+     "  if (a < sizeof(void *)) {\n"
+     "    a = sizeof(void *);\n"
+     "  }\n"
+     "  if (n % a != 0u) {\n"
+     "    n += a - (n % a);\n"
+     "  }\n"
+     "  if (posix_memalign(&p, a, n) != 0 || !p) {\n"
+     "    neln_fail(\"posix_memalign failed in nl_alloc_bytes\");\n"
+     "  }\n"
+     "  memset(p, 0, n);\n"
+     "  if ((size_t)size == sizeof(NelnSexp)) {\n"
+     "    neln_register_slot_soft(p);\n"
+     "  }\n"
+     "  return p;\n"
+     "}\n"
+     "\n"
+     ;; A dispatcher writes its result into the shared OUT slot, so a
+     ;; local that keeps one has to own a copy before the next call
+     ;; reuses OUT.  The compiler emits this for every such assignment.
+     "void nl_sexp_clone_into(NelnSexp *src, NelnSexp *dst) {\n"
+     "  if (!src || !dst) {\n"
+     "    return;\n"
+     "  }\n"
+     "  *dst = *src;\n"
+     "  neln_register_slot_soft(dst);\n"
      "}\n"
      "\n"
      "NelnSexp *nl_alloc_str(const unsigned char *bytes_ptr, int64_t len, NelnSexp *result_slot) {\n"
@@ -4004,6 +4151,19 @@ implementation."
      "      neln_fail(\"unsupported Sexp result tag\");\n"
      "    }\n"
      "  }\n"
+     ;; An unregistered pointer means one of two things and they are not the
+     ;; same fact.  If the registry never filled, the callee returned a plain
+     ;; integer and printing it is right.  If it DID fill, this is a Sexp the
+     ;; harness stopped tracking, and printing its address is a wrong answer
+     ;; wearing the shape of a right one -- measured 2026-08-19, that is what
+     ;; `native-exec-general-deep-tail-recursion-smoke\' has been reporting.
+     ;; The registry holds 64 slots, ~46 of them free after the boundary and
+     ;; callback slots, and the compiled code registers one per allocation:
+     ;; a loop that boxes a value each iteration outruns it in tens of
+     ;; iterations, not thousands.  Say which one it is.
+     "  if (neln_slot_registry_overflowed) {\n"
+     "    neln_fail(\"slot registry overflowed: a result Sexp could not be decoded. The harness tracks one slot per allocation and holds 64; a loop that allocates per iteration outruns it\");\n"
+     "  }\n"
      "  printf(\"%ld\\n\", (long)((int64_t)(intptr_t)ret));\n"
      "  return 0;\n"
      "}\n"
@@ -4024,8 +4184,13 @@ implementation."
         (let ((kind (nth i arg-kinds)))
           (pcase kind
             ('int
-             (format "    case %d: argv_vals[%d] = strtol(argv[i], NULL, 10); break;\n"
-                     i i))
+             ;; A Sexp, like the string case below.  Parameters arrive
+             ;; boxed now, uniformly, so handing over a bare `long' left
+             ;; the compiled body unwrapping an integer as an address:
+             ;; `(defun nat-nx-sq (n) (* n n))' answered 4 for 9.
+             (format "    case %d: neln_write_int(&argv_string_slots[%d], strtol(argv[i], NULL, 10)); neln_register_slot(&argv_string_slots[%d]); argv_vals[%d] = (long)(intptr_t)&argv_string_slots[%d]; break;
+"
+                     i i i i i))
             ('str
              (format "    case %d: neln_write_str(&argv_string_slots[%d], argv[i]); neln_register_slot(&argv_string_slots[%d]); argv_vals[%d] = (long)(intptr_t)&argv_string_slots[%d]; break;\n"
                      i i

@@ -460,31 +460,100 @@ non-local-exit behaviour are covered by the standalone reader smoke."
     (should (string-match-p "nl_cstr_eq_neln_selftest" source))
     (should (string-match-p "(nl_neln_demo_exec ctx 41)" source))))
 
-(ert-deftest nelisp-standalone-target-reader-neln-demo-bridges-real-helpers ()
-  "The embedded native demo reaches the real helpers through local bridges."
+(ert-deftest nelisp-standalone-target-reader-neln-demo-addresses-real-helpers ()
+  "The embedded native demo points each stub at the real runtime symbol.
+
+It used to route through one bridge defun per extern because `addr-of'
+only resolves an intra-object label.  `data-addr' records a cross-unit
+pc32 the static linker patches against the symbol's section VA, and that
+works for a FUNC symbol too -- checked in both directions, the demo
+returns 42 through the right symbol and takes SIGSEGV through a wrong
+one.  Removing the bridges also removed the one that would have been
+awkward to write: a calln forwarder has to redeclare and pass on every
+stack argument."
   (let* ((nelisp-standalone--target 'linux-x86_64)
          (source (prin1-to-string
                   (nelisp-standalone--reader-neln-demo-source))))
-    (should (string-match-p
-             "(defun nl_neln_demo_alloc_symbol_bridge"
-             source))
-    (should (string-match-p
-             "(extern-call nl_alloc_symbol bytes-ptr len result-slot)"
-             source))
-    (should (string-match-p
-             "(defun nl_neln_demo_call1_bridge"
-             source))
-    (should (string-match-p
-             "(extern-call nelisp_aot_builtin_call1"
-             source))
-    (should (string-match-p
-             "(addr-of nl_neln_demo_alloc_symbol_bridge)"
-             source))
-    (should (string-match-p
-             "(addr-of nl_neln_demo_call1_bridge)"
-             source))
+    (should (string-match-p "(data-addr nelisp_aot_builtin_call1)" source))
+    (should (string-match-p "(data-addr nl_alloc_symbol)" source))
+    ;; No forwarders, and above all no local definition of a runtime
+    ;; symbol -- that would shadow the one the reader links.
+    (should-not (string-match-p "nl_neln_demo_alloc_symbol_bridge" source))
+    (should-not (string-match-p "nl_neln_demo_call1_bridge" source))
     (should-not (string-match-p "(defun nelisp_aot_builtin_call1" source))
     (should-not (string-match-p "(defun nl_alloc_symbol" source))))
+
+(ert-deftest nelisp-standalone-target-reader-neln-demo-stubs-clear-the-text ()
+  "Stub placement and page sizes follow the artifact, not a fixed offset.
+
+The stubs used to sit at a hardcoded 256 bytes, which held only because
+the demo compiled to 122.  Any longer function would have had the stub
+it needs overwrite its own code."
+  (let* ((nelisp-standalone--target 'linux-x86_64)
+         (spec (nelisp-standalone--reader-neln-demo-spec))
+         (text-length (length (plist-get spec :text-bytes)))
+         (stubs (plist-get spec :stub-specs))
+         (code-size (plist-get spec :code-size)))
+    ;; The demo has to be big enough to have caught the old layout.
+    (should (> text-length 256))
+    (should stubs)
+    (dolist (stub stubs)
+      (should (>= (plist-get stub :offset) text-length)))
+    ;; Offsets are distinct and the page holds all of them.
+    (let ((offsets (mapcar (lambda (s) (plist-get s :offset)) stubs)))
+      (should (equal offsets (delete-dups (copy-sequence offsets))))
+      (should (<= (+ (apply #'max offsets)
+                     nelisp-standalone--reader-neln-stub-bytes)
+                  code-size)))
+    (should (zerop (% code-size 4096)))))
+
+(ert-deftest nelisp-standalone-target-reader-native-addr-arm-covers-the-set ()
+  "The symbol-address arm indexes exactly the bridgeable symbol list.
+
+Interpreted code asks for a runtime symbol's address by index, because
+`data-addr' is a compile-time form and the chain of them is fixed when
+the reader is built.  Nothing links the index a caller passes to the
+order of that chain, so inserting a name in the middle of the list would
+silently repoint every later index at a different function -- and a stub
+aimed at the wrong function is a jump, not a diagnosable error."
+  (let* ((arms (nelisp-standalone--reader-native-addr-arms))
+         (arm (car arms))
+         (chain (nth 2 (cdr arm)))
+         (seen nil))
+    (should (equal (mapcar (lambda (a) (cadr (car a))) arms)
+                   '("nelisp--native-symbol-addr" "nelisp--native-env")))
+    (should (equal (car arm) '(:u8 "nelisp--native-symbol-addr")))
+    ;; Walk the if-chain, collecting (INDEX . SYMBOL) in emitted order.
+    (while (and (consp chain) (eq (car chain) 'if))
+      (let ((test (nth 1 chain))
+            (then (nth 2 chain)))
+        (should (eq (car test) '=))
+        (should (eq (car then) 'data-addr))
+        (push (cons (nth 2 test) (symbol-name (nth 1 then))) seen)
+        (setq chain (nth 3 chain))))
+    ;; The chain ends in 0: an out-of-range index is not an address.
+    (should (equal chain 0))
+    (setq seen (nreverse seen))
+    (should (equal (mapcar #'car seen)
+                   (number-sequence
+                    0 (1- (length
+                           nelisp-standalone--reader-neln-bridgeable-symbols)))))
+    (should (equal (mapcar #'cdr seen)
+                   nelisp-standalone--reader-neln-bridgeable-symbols))))
+
+(ert-deftest nelisp-standalone-target-reader-native-addr-is-registered ()
+  "Every loader arm is reachable: its name is installed as a builtin.
+A dispatch arm nothing installs is dead code that still links."
+  (dolist (arm (nelisp-standalone--reader-native-addr-arms))
+    (should (member (cadr (car arm)) nelisp-standalone--reader-builtins))))
+
+(ert-deftest nelisp-standalone-target-reader-neln-demo-externs-are-bridgeable ()
+  "Every extern the demo needs is one the loader can address."
+  (let* ((nelisp-standalone--target 'linux-x86_64)
+         (spec (nelisp-standalone--reader-neln-demo-spec)))
+    (dolist (stub (plist-get spec :stub-specs))
+      (should (member (plist-get stub :name)
+                      nelisp-standalone--reader-neln-bridgeable-symbols)))))
 
 (ert-deftest nelisp-standalone-target-macos-reader-cli-name-is-short ()
   "The macOS user-facing standalone reader is target/nelisp."

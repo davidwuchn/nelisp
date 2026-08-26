@@ -596,6 +596,30 @@ performing the same cleanup the sentinel would do."
                   (accept-process-output proc 0.01 nil t))
         (setq attempts (1- attempts))))))
 
+(defun nelisp-process--settle-buffer-process (buffer)
+  "Drain BUFFER's process and make sure it is no longer live.
+
+`make-process' with `:stderr BUFFER' attaches a pipe process to that
+buffer, and it outlives the child by however long the pipe takes to
+close.  Returning with it still live hands the caller a buffer that
+`kill-buffer' will not close silently: Emacs asks \"has a running
+process; kill it?\", and in batch mode that reads stdin at EOF and
+signals `end-of-file' -- a failure that names neither this function nor
+the process it left behind.
+
+Draining alone is not enough, because a process can be out of output
+and still live."
+  (when (buffer-live-p buffer)
+    (nelisp-process--drain-buffer-process buffer)
+    (let ((proc (get-buffer-process buffer))
+          (attempts 20))
+      (when (processp proc)
+        (while (and (process-live-p proc) (> attempts 0))
+          (accept-process-output proc 0.01 nil t)
+          (setq attempts (1- attempts)))
+        (when (process-live-p proc)
+          (delete-process proc))))))
+
 (defun nelisp-process-wait-for-exit (wrap &optional timeout)
   "Block until WRAP exits or TIMEOUT (seconds, default 5) elapses.
 Returns the exit status or nil on timeout."
@@ -1073,6 +1097,13 @@ exits)."
                     -1)
                    (t
                     (nelisp-process--write-file-destination out-file out-buf)
+                    ;; Settle the stderr process whatever it was pointed at.
+                    ;; This used to run only for `err-scratch', so a caller
+                    ;; that passed its own buffer as ERROR-DEST got it back
+                    ;; with a live process still attached.
+                    (when (and err-target (bufferp err-target)
+                               (not (eq err-target out-buf)))
+                      (nelisp-process--settle-buffer-process err-target))
                     (when err-scratch
                       (nelisp-process--drain-buffer-process err-scratch)
                       (nelisp-process--strip-host-status-line err-scratch))

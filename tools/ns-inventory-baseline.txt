@@ -540,7 +540,11 @@ ns-collision-divergent 127
 # nl-clj notes above concede; renaming them to satisfy file-local prefixes
 # would violate Doc 196's opt-in API decision rather than fix a collision.
 # Measured via `make ns-inventory': exactly 22 new prefix findings.
-ns-prefix-violation 941
+# 941 -> 943 on 2026-08-26 (Doc 142 s6.4 loader): two public entry points,
+# `nelisp-native-load-exec' and `nelisp-native-load-artifact', in a file whose
+# namespace prefix the checker does not recognise as its own.  Same class as
+# the 941 already here -- public API surface, not a defect.
+ns-prefix-violation 943
 # 611 -> 613 on 2026-08-20: `nelisp--check-string'/`--check-symbol' and the
 # other argument-check helpers are referenced from the lisp/ mirrors that
 # carry copies of the functions using them.  This is the kind this file
@@ -639,7 +643,12 @@ ns-prefix-violation 941
 # manifest.el still has only nl-prelude as its cross-package dependency.
 # This is the same shared-core/private-engine shape conceded for nl-clj
 # immediately above.  Measured via `make ns-inventory': exactly 39.
-ns-private-escape 702
+# 702 -> 722 on 2026-08-26 (Doc 142 s6.4 loader): 20 references from
+# test/nelisp-native-load-test.el to `nelisp-native-load--' internals -- the
+# digest helper, the byte reader, the page writer.  A test reaching into the
+# implementation it tests is exactly the conceded, growing debt this line is
+# described as above, not a boundary that was crossed by accident.
+ns-private-escape 722
 ns-unreadable 0
 
 # `pinned-collision KEY' pins every ns-collision and ns-collision-divergent

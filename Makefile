@@ -1,4 +1,4 @@
-.PHONY: unsafe-inventory nl-violation-corpus standalone-reader-recursion-guard-smoke test-jit test-nojit jit-unverified nl-safe-bench nl-check-gate ns-gate ns-inventory parens-check test test-fast test-parallel test-one wasm-smoke wasm-runtime-image-smoke wasm-dtw-skeleton-smoke wasm-dtw-transpile wasm-dtw-compile wasm-dtw-smoke wasm-dtw-site wasm-dtw-site-smoke compile clean all bench bench-aot-tco bench-aot-checked-arith gc-bench actor-bench soak soak-1h soak-full soak-worker \
+.PHONY: actor-bench all aot-differential bench bench-aot-checked-arith bench-aot-tco clean compile gc-bench jit-unverified neln-loader-test nl-check-gate nl-dev-loop nl-safe-bench nl-safe-native-bench nl-violation-corpus ns-gate ns-inventory parens-check soak soak-1h soak-full soak-worker standalone-reader-recursion-guard-smoke test test-fast test-jit test-nojit test-one test-parallel unsafe-inventory wasm-dtw-compile wasm-dtw-site wasm-dtw-site-smoke wasm-dtw-skeleton-smoke wasm-dtw-smoke wasm-dtw-transpile wasm-runtime-image-smoke wasm-smoke \
         sqlite-module sqlite-module-clean \
         release-artifact release-checksum soak-blocker soak-post-ship \
         bench-actual bench-allocator bench-allocator-heavy \
@@ -114,6 +114,13 @@ test-one:
 	  -l ert \
 	  $(addprefix -l ,$(FILE)) \
 	  -f ert-run-tests-batch-and-exit
+
+# Automated development loop.  Detects touched AOT/loader files (or accepts
+# FILES explicitly), selects the focused gates, records output, and writes a
+# diagnostic handoff on either success or failure.
+#   make nl-dev-loop FILES="lisp/nelisp-aot-compiler.el lisp/nelisp-native-load.el"
+nl-dev-loop:
+	@./tools/nl-dev-loop.sh $(if $(FILES),--files "$(FILES)")
 
 wasm-smoke:
 	mkdir -p target/wasm-smoke
@@ -299,6 +306,27 @@ nl-safe-bench:
 	  -L lisp -L src -L bench \
 	  -L packages/nl-prelude/src -L packages/nl-safe/src \
 	  -l bench/nl-safe-bench.el -f nl-safe-bench-run
+
+# Doc 170 section 9 on the path the budget belongs to.  `nl-safe-bench'
+# measures on host Emacs, where the borrow SHAPE alone costs 2.69x before
+# anything is checked, so it can only ever report "over budget".  This
+# compiles both sides to .neln with the dynamic-user-call lowering (which
+# is what closes their extern sets) and runs them through the in-process
+# loader inside the reader.
+nl-safe-native-bench: standalone-reader
+	@mkdir -p target/nl-safe-native-bench
+	NELISP_ARTIFACT_DIR=$(CURDIR)/target/nl-safe-native-bench \
+	  $(EMACS) --batch -Q -L lisp -L src -L scripts \
+	  --eval '(setq load-prefer-newer t)' \
+	  -l nl-safe-native-bench-fixtures \
+	  -f nl-safe-native-bench-fixtures-main
+	@prelude=target/nl-safe-native-bench/prelude.el; \
+	{ echo '(load "$(CURDIR)/lisp/nelisp-native-load.el")'; \
+	  echo '(defvar nl-safe-native-bench-dir "$(CURDIR)/target/nl-safe-native-bench")'; \
+	  echo '(load "$(CURDIR)/bench/nl-safe-native-bench.el")'; \
+	  echo '(nl-safe-native-bench-run)'; \
+	} > "$$prelude"; \
+	./target/nelisp --load "$$prelude"
 
 # Reports how many bodies reached the JIT, and how many of those carried
 # a finding.  The JIT is the one place code arrives that no build step
@@ -2906,6 +2934,69 @@ standalone-reader-realrt-smoke: standalone-reader
 	  echo "[standalone-reader-realrt-smoke] FAIL: exit=$$rc stdout=$$out"; \
 	  exit 1; \
 	fi
+
+# Doc 142 section 6.4: the general in-process loader.  Where
+# `standalone-reader-realrt-smoke' runs ONE function whose bytes and extern
+# addresses were baked into the reader at build time, this compiles a set of
+# artifacts and has the reader read, map and call them at run time through
+# `lisp/nelisp-native-load.el' -- interpreted elisp, no linker, no cc, no
+# subprocess.  Covers both calling conventions, arity 0 through 6, and
+# non-integer values in and out.
+neln-loader-test: standalone-reader
+	@mkdir -p target/neln-loader
+	NELISP_ARTIFACT_DIR=$(CURDIR)/target/neln-loader \
+	  $(EMACS) --batch -Q -L lisp -L src -L scripts \
+	  --eval '(setq load-prefer-newer t)' \
+	  -l nelisp-native-load-fixtures \
+	  -f nelisp-native-load-fixtures-main
+	@prelude=target/neln-loader/prelude.el; \
+	{ echo '(load "$(CURDIR)/lisp/nelisp-native-load.el")'; \
+	  echo '(defvar nelisp-native-load-driver-dir "$(CURDIR)/target/neln-loader")'; \
+	  echo '(load "$(CURDIR)/test/nelisp-native-load-driver.el")'; \
+	} > "$$prelude"; \
+	./target/nelisp --load "$$prelude"
+
+# The loader driver states each expected answer, so it only catches
+# shapes someone thought of first.  This one computes the answer: the
+# same source runs through the interpreter and as native code inside one
+# reader process, and the two are compared.
+aot-differential: standalone-reader
+	@mkdir -p target/aot-differential
+	NELISP_DIFF_DIR=$(CURDIR)/target/aot-differential \
+	  $(EMACS) --batch -Q -L lisp -L src -L scripts \
+	  --eval '(setq load-prefer-newer t)' \
+	  -l nelisp-aot-differential-cases \
+	  -f nelisp-aot-differential-main
+	@echo '(princ "reader-ok\n")' > target/aot-differential/smoke.el; \
+	if ! ./target/nelisp --load target/aot-differential/smoke.el 2>&1 | grep -q reader-ok; then \
+	  echo "[diff] the reader does not run -- every case would 'crash' and say nothing about the cases"; \
+	  echo "[diff] a compiler change can build a binary that dies on startup; check that first"; \
+	  exit 1; \
+	fi
+	@count=$$(cat target/aot-differential/count.txt); size=1; \
+	chunks=$$(( ($$count + $$size - 1) / $$size )); failed=0; \
+	echo "[diff] $$count cases in $$chunks chunks of $$size"; \
+	for chunk in $$(seq 0 $$(($$chunks - 1))); do \
+	  prelude=target/aot-differential/prelude-$$chunk.el; \
+	  { echo '(load "$(CURDIR)/lisp/nelisp-native-load.el")'; \
+	    echo '(load "$(CURDIR)/target/aot-differential/cases.el")'; \
+	    echo '(defvar nelisp-aot-differential-dir "$(CURDIR)/target/aot-differential")'; \
+	    echo "(defvar nelisp-aot-differential-chunk $$chunk)"; \
+	    echo "(defvar nelisp-aot-differential-chunk-size $$size)"; \
+	    echo '(load "$(CURDIR)/test/nelisp-aot-differential-driver.el")'; \
+	  } > "$$prelude"; \
+	  out=$$(./target/nelisp --load "$$prelude" 2>&1); \
+	  printf '%s\n' "$$out"; \
+	  summary=$$(printf '%s\n' "$$out" | grep "^differential chunk $$chunk:"); \
+	  if [ -z "$$summary" ]; then \
+	    died=$$(printf '%s\n' "$$out" | grep '^RUN ' | tail -1); \
+	    echo "[diff] CRASH $${died#RUN } -- the reader died running it"; \
+	    failed=1; \
+	  else \
+	    case "$$summary" in *", 0 wrong,"*) : ;; *) failed=1 ;; esac; \
+	  fi; \
+	done; \
+	test $$failed -eq 0
 
 # Fast focused loop for REPL work.  Builds/relinks target/nelisp with the
 # incremental unit cache, then runs only the REPL smoke used by the full reader

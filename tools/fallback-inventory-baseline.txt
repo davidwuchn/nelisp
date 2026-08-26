@@ -227,7 +227,15 @@ pinned-site bare-handler	nelisp-artifact.el	defun nelisp-artifact--artifact-kind
 pinned-site bare-handler	nelisp-artifact.el	defun nelisp-artifact--collect-el-files-with-find	606ea325a642 1
 pinned-site bare-handler	nelisp-artifact.el	defun nelisp-artifact--collect-neln-artifacts-with-find	e8bfdb4c0bee 1
 pinned-site bare-handler	nelisp-artifact.el	defun nelisp-artifact--make-temp-directory	21d2a979e6d6 1
-pinned-site bare-handler	nelisp-artifact.el	defun nelisp-artifact--native-compile-fast-batch-section	5723f5871964 1
+# Re-pinned 2026-08-26: 5723f5871964 -> 1c936c80e481, count unchanged at 1.
+# The handler itself was edited, which is exactly what a shape digest is for.
+# Doc 166's boxed-param value-word ABI is activated by binding
+# `nelisp-aot-compiler--runtime-entry-params' around the compile call, and
+# that `let' sits INSIDE this `condition-case', so the guarded form changed
+# shape while the guard's own behaviour did not.  Still one bare handler,
+# still swallowing the same compile failure; bare-handler overall stays 38
+# against a baseline of 42.
+pinned-site bare-handler	nelisp-artifact.el	defun nelisp-artifact--native-compile-fast-batch-section	1c936c80e481 1
 pinned-site bare-handler	nelisp-artifact.el	defun nelisp-artifact--read-manifest-for-audit	6d2fdb8cad42 1
 pinned-site bare-handler	nelisp-artifact.el	defun nelisp-artifact--read-manifest-for-load	7ad609d017ca 1
 pinned-site bare-handler	nelisp-artifact.el	defun nelisp-artifact--read-private-item	ad4ce7d9283c 1

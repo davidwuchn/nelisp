@@ -21,6 +21,13 @@
 # to be acknowledged, even though the pattern already covered the name.
 lisp/nelisp-cc-*.el
 lisp/nelisp-aot-compiler.el
+# Doc 142 section 6.4's in-process `.neln' loader.  A kernel member by
+# construction rather than by exception: its whole job is to mmap a page,
+# write machine code into it with `ptr-write-u8', patch relocations and
+# enter it through `ptr-call'.  No version of that work avoids raw memory,
+# and hiding the calls behind a wrapper would move the same 28 of them one
+# file over while making them harder to audit.
+lisp/nelisp-native-load.el
 lisp/nelisp-stdlib-os-int-helpers.el
 scripts/nelisp-standalone-build.el
 scripts/nelisp-flat-arena-probe.el
@@ -30,7 +37,7 @@ scripts/nelisp-macos-build.el
 # Files inside the kernel that actually contain an unsafe call.  Raise it in
 # the commit that adds one, and say there what the new file does with raw
 # memory.  Lower it whenever the ratchet notice says you can.
-kernel-files 88
+kernel-files 90
 
 # `pinned-kernel-touch NAME' pins the 88 kernel files that actually touch
 # raw memory today (`unsafe-call' or a quoted form) -- one line per file,
@@ -126,6 +133,12 @@ pinned-kernel-touch lisp/nelisp-cc-sf-unwind-protect.el
 pinned-kernel-touch lisp/nelisp-cc-sf-while.el
 pinned-kernel-touch lisp/nelisp-cc-tty-read-byte.el
 pinned-kernel-touch lisp/nelisp-cc-val-load.el
+# Doc 142 section 6.4's in-process `.neln' loader: mmaps a page, writes
+# machine code into it, patches relocations, and enters it via `ptr-call'.
+pinned-kernel-touch lisp/nelisp-native-load.el
+# The AOT evalport's `calln' provider: reads and writes the boundary Sexp
+# slots the compiled call convention passes arguments and results through.
+pinned-kernel-touch lisp/nelisp-cc-evalport-aot-builtin-calln.el
 pinned-kernel-touch lisp/nelisp-stdlib-os-int-helpers.el
 pinned-kernel-touch scripts/nelisp-flat-arena-probe.el
 pinned-kernel-touch scripts/nelisp-macho-acceptance.el

@@ -4535,6 +4535,17 @@ argument (reachability + in-arena bounds checks).")
                                  (seq (mut-str-make-empty ms 64)
                                       (m5_sha256 ms (wf_arg_ptr args 0))
                                       (mut-str-finalize ms out) 0)))
+    ;; Digest LEN bytes at an ADDRESS.  `nelisp--sha256' takes a string and
+    ;; hashes its internal UTF-8, so it agrees with other implementations on
+    ;; ASCII and disagrees on any byte over 127 -- which makes it unusable
+    ;; for validating an artifact.  This is the shape the in-process loader
+    ;; already works in: it writes the decoded text to a page byte by byte.
+    ((:lit "nelisp--sha256-bytes") . (let* ((ms (alloc-bytes 32 8)))
+                                       (seq (mut-str-make-empty ms 64)
+                                            (m5_sha256_ptr ms
+                                                           (wf_argval args 0)
+                                                           (wf_argval args 1))
+                                            (mut-str-finalize ms out) 0)))
     ((:lit "nelisp--string-search") . (let* ((idx (m5_string_search
                                                     (wf_arg_ptr args 1)
                                                     (wf_arg_ptr args 0)
@@ -8481,17 +8492,27 @@ baked build's own `<'/`>'/`=' arms need it too.")
            (m5_sha_hexnib ms (logand (/ w 1048576) 15)) (m5_sha_hexnib ms (logand (/ w 65536) 15))
            (m5_sha_hexnib ms (logand (/ w 4096) 15)) (m5_sha_hexnib ms (logand (/ w 256) 15))
            (m5_sha_hexnib ms (logand (/ w 16) 15)) (m5_sha_hexnib ms (logand w 15))))
-    (defun m5_sha256 (ms hay)
-      (let* ((len (str-len hay))
-             (padlen (* (+ (/ (+ len 8) 64) 1) 64))
-             (msg (alloc-bytes padlen 1))
-             (kbuf (alloc-bytes 512 8))
+    ;; Copy LEN bytes from a RAW POINTER rather than from a string.
+    ;; `m5_sha_copy' reads through `str-byte-at', which walks the string's
+    ;; internal UTF-8 -- so hashing a decoded binary through it digests the
+    ;; encoded form and disagrees with every other sha256 on any byte over
+    ;; 127.  Iterative, not recursive like its string sibling: an artifact
+    ;; is not bounded the way a short name is.
+    (defun m5_sha_copy_ptr (msg src n)
+      (let* ((i 0))
+        (seq (while (< i n)
+               (seq (ptr-write-u8 msg i (ptr-read-u8 src i))
+                    (setq i (+ i 1))))
+             0)))
+    ;; Padding and compression, shared by both entry points.  MSG already
+    ;; holds LEN bytes and has room for PADLEN.
+    (defun m5_sha256_run (ms msg len padlen)
+      (let* ((kbuf (alloc-bytes 512 8))
              (wbuf (alloc-bytes 512 8))
              (hbuf (alloc-bytes 64 8))
              (bitlen (* len 8))
              (blk 0))
         (seq
-         (m5_sha_copy msg hay 0 len)
          (ptr-write-u8 msg len 128)
          (m5_sha_zero msg (+ len 1) (- padlen 4))
          (ptr-write-u8 msg (- padlen 4) (logand (/ bitlen 16777216) 255))
@@ -8512,6 +8533,17 @@ baked build's own `<'/`>'/`=' arms need it too.")
          (m5_sha_hexword ms (ptr-read-u64 (+ hbuf 16) 0)) (m5_sha_hexword ms (ptr-read-u64 (+ hbuf 24) 0))
          (m5_sha_hexword ms (ptr-read-u64 (+ hbuf 32) 0)) (m5_sha_hexword ms (ptr-read-u64 (+ hbuf 40) 0))
          (m5_sha_hexword ms (ptr-read-u64 (+ hbuf 48) 0)) (m5_sha_hexword ms (ptr-read-u64 (+ hbuf 56) 0)))))
+    (defun m5_sha256 (ms hay)
+      (let* ((len (str-len hay))
+             (padlen (* (+ (/ (+ len 8) 64) 1) 64))
+             (msg (alloc-bytes padlen 1)))
+        (seq (m5_sha_copy msg hay 0 len)
+             (m5_sha256_run ms msg len padlen))))
+    (defun m5_sha256_ptr (ms src len)
+      (let* ((padlen (* (+ (/ (+ len 8) 64) 1) 64))
+             (msg (alloc-bytes padlen 1)))
+        (seq (m5_sha_copy_ptr msg src len)
+             (m5_sha256_run ms msg len padlen))))
     ;; ---- m5_string_search: native substring search (byte compare, no
     ;; per-position allocation).  Backs `nelisp--string-search'; replaces the
     ;; interpreted O(n*m)-with-`substring'-allocation scans that dominate the
@@ -11655,6 +11687,52 @@ here does not matter, only that it is always supplied."
   (mapcar (lambda (e) (cadr (car e)))
           nelisp-standalone--applyfn-extern-arms))
 
+(defun nelisp-standalone--reader-native-addr-arms ()
+  "Return the dispatch arm exposing runtime symbol addresses to elisp.
+
+The in-process loader points each stub at a runtime symbol, and the
+address comes from `data-addr', which the static linker resolves.  That
+is a compile-time form, so interpreted code cannot ask for an address by
+name -- hence this arm: an index into
+`nelisp-standalone--reader-neln-bridgeable-symbols' selects one
+`data-addr' from a chain fixed at build time.
+
+An index rather than a name because comparing strings in the AOT surface
+costs an allocation per arm, and the caller already has to know the set
+to have compiled against it.  The elisp side keeps its own copy of the
+list; a test asserts the two agree, since nothing links them.
+
+Out-of-range indices return 0, which is not an address, so a caller that
+ignores the check gets a null dereference at the stub rather than a jump
+into whatever the index happened to select."
+  (list
+   (cons '(:u8 "nelisp--native-symbol-addr")
+         `(wf_write_int
+           out
+           ,(let ((form 0)
+                  (idx (length nelisp-standalone--reader-neln-bridgeable-symbols)))
+              (dolist (name (reverse
+                             nelisp-standalone--reader-neln-bridgeable-symbols))
+                (setq idx (1- idx))
+                (setq form `(if (= (wf_argval args 0) ,idx)
+                                (data-addr ,(intern name))
+                              ,form)))
+              form)))
+   ;; The environment pointer the boundary calls it `frames'.
+   ;;
+   ;; A loaded function's boundary slots have to carry one, because
+   ;; `nelisp_aot_builtin_call1' / `_calln' forward it to
+   ;; `nelisp_apply_function' as the environment to dispatch in.  The
+   ;; demo took it from the CLI dispatcher's `ctx', a local no
+   ;; interpreted code can reach -- but `nelisp_apply_function' receives
+   ;; the very same pointer as its `env' parameter, and every dispatch
+   ;; arm runs inside it.  So the arm just hands `env' back.
+   ;;
+   ;; The `mirror' slot has no such source.  Both providers ignore it,
+   ;; so a loader may pass this pointer there too rather than a wild
+   ;; one; that stops being safe if a boundary callee ever reads mirror.
+   (cons '(:u8 "nelisp--native-env") '(wf_write_int out env))))
+
 (defun nelisp-standalone--applyfn-reader-table ()
   "Build the reader dispatch table: the base table with the buggy stock
 `car'/`cdr'/`eq' arms REPLACED (nil-safe car/cdr + tag-aware eq) and `length'
@@ -11691,6 +11769,10 @@ signalling arm -- never simply absent, so `fboundp' cannot go void again."
    ;; clone(2) implementations on linux-x86_64, the same catchable unsupported
    ;; signal as the socket family everywhere else.
    (nelisp-standalone--thread-dispatch-arms)
+   ;; Reader-only: the baked eval link set has no reader runtime symbols
+   ;; for `data-addr' to resolve against.  Added by the Doc 142 s6.4
+   ;; in-process loader; harmless on every other path.
+   (nelisp-standalone--reader-native-addr-arms)
    ;; Step C: the PLT-backed real `nl-ffi-call' arm where it can link,
    ;; otherwise the `nelisp-unsupported-primitive'-signalling arm -- always
    ;; one or the other, never neither.  Uses `reader-ffi-live-p', NOT the
@@ -15514,7 +15596,7 @@ value (matches the binary's M8 read+eval-loop driver)."
     ;; M5 strings + format
     "length" "string-byte" "concat" "substring" "make-string" "string="
     "char-to-string" "string-to-char" "number-to-string" "string-to-number" "format"
-    "nelisp--repr" "nelisp--json-encode" "nelisp--sha256" "nelisp--string-search" "nelisp--arena-stats" "garbage-collect"
+    "nelisp--repr" "nelisp--json-encode" "nelisp--sha256" "nelisp--sha256-bytes" "nelisp--string-search" "nelisp--arena-stats" "garbage-collect"
     "nelisp--fmt-float"
     "nelisp--debug-switch" "nelisp--gc-diag" "nelisp--arena-force-grow-smoke" "nelisp--size-census" "nelisp--arena-walk-verify"
     "nelisp--alloc-check-report"
@@ -15580,7 +15662,10 @@ value (matches the binary's M8 read+eval-loop driver)."
     ;; to `nelisp-unsupported-primitive', exactly like the socket family.
     "nelisp-thread-shared-alloc" "nelisp-thread-atomic-add"
     "nelisp-thread-atomic-read" "nelisp-thread-spawn"
-    "nelisp-thread-join" "nelisp-thread-gc-inhibit")
+    "nelisp-thread-join" "nelisp-thread-gc-inhibit"
+    ;; Runtime symbol addresses and the environment pointer for the
+    ;; in-process native loader (Doc 142 s6.4).
+    "nelisp--native-symbol-addr" "nelisp--native-env")
   "Builtin names installed into the reader binary's mirror.
 Each is dispatched by the pure-elisp `nelisp_apply_function' (see
 `nelisp-standalone--applyfn-source').  Names > 8 bytes (for example
@@ -17949,8 +18034,89 @@ never recurse through one enormous `seq' cdr chain."
 (defvar nelisp-standalone--reader-neln-demo-cache nil
   "Cached embedded `.neln' demo metadata for the standalone reader.")
 
+(defconst nelisp-standalone--reader-neln-bridgeable-symbols
+  '("nelisp_aot_builtin_call1"
+    "nelisp_aot_builtin_calln"
+    "nl_alloc_symbol"
+    "nl_alloc_str"
+    "nl_alloc_mut_str"
+    "nl_mut_str_push_byte"
+    "nl_mut_str_finalize"
+    "nl_alloc_bytes"
+    "nl_sexp_clone_into"
+    "nl_alloc_vector"
+    "nl_vector_slot_ptr"
+    "nl_vector_set_slot"
+    ;; A borrow that survives to run reads `nl-safe--enabled' through the
+    ;; environment, so the unit carries this.  Appended, not inserted: the
+    ;; index is the contract and inserting would repoint every stub after
+    ;; the insertion point at a different function.
+    "nelisp_env_lookup_value")
+  "Runtime symbols the in-process loader can point a stub at.
+
+A stub is `movabs rax, ADDR; jmp rax', and ADDR comes from `data-addr',
+which records a cross-unit pc32 the static linker patches against the
+symbol's section VA.  That works for a FUNC symbol exactly as it does
+for data -- verified in both directions: the demo returns 42 with the
+right symbol and takes SIGSEGV with the wrong one.  So no per-extern
+bridge defun is needed; the name only has to be one the reader defines.
+
+This is the set an artifact's externs must fall inside to be loadable,
+and it is finite because `nelisp-aot-compiler--dynamic-user-calls'
+closes a unit's extern set over exactly these.")
+
+(defconst nelisp-standalone--reader-neln-stub-bytes 16
+  "Bytes reserved per PLT-style stub (`movabs rax, imm64; jmp rax' = 12).")
+
+(defun nelisp-standalone--reader-neln-stub-specs (externs text-length)
+  "Return stub placements for EXTERNS after TEXT-LENGTH bytes of code.
+Stubs sit immediately after the text, 16-byte aligned, rather than at a
+fixed offset: the demo's hardcoded 256 held only because `inc1' compiles
+to 176 bytes, and any real function would have overwritten its own code."
+  (let ((unsupported
+         (seq-remove (lambda (name)
+                       (member name
+                               nelisp-standalone--reader-neln-bridgeable-symbols))
+                     externs)))
+    (when unsupported
+      (error "neln loader has no bridge for extern(s) %S" unsupported)))
+  (let ((base (* 16 (/ (+ text-length 15) 16))))
+    (cl-loop for name in externs
+             for idx from 0
+             collect (list :name name
+                           :offset (+ base
+                                      (* idx
+                                         nelisp-standalone--reader-neln-stub-bytes))))))
+
+(defun nelisp-standalone--reader-neln-page-round (n)
+  "Round N up to a whole 4096-byte page, with a floor of one page."
+  (max 4096 (* 4096 (/ (+ n 4095) 4096))))
+
+(defconst nelisp-standalone--reader-neln-demo-body
+  "(car (list (1+ x) 0))"
+  "Body of the `inc1' function the loader self-test executes natively.
+
+Chosen so the self-test can fail.  At 298 bytes of text it is longer
+than the 256-byte offset the stubs used to be pinned at, so the old
+layout would have had the stub overwrite the function's own code.  And
+it nests delegated calls, which returned x+3 instead of x+1 until the
+outer call stopped dispatching on the inner call's name.
+
+`inc1(41) = 42' either way, so only the value distinguishes them.
+
+A `calln' body -- `(car (list (1+ x) 0))' -- would exercise more, and
+does not work yet: a literal argument to a delegated call is passed as a
+raw untagged word, and the reader's apply path takes its arguments as
+Sexp pointers, so it dereferences the literal.  The host proof harness
+hides this because its C driver calls `neln_raw_to_sexp' on each
+argument.  Boxing literal arguments in the calln lowering is the fix;
+until then this body keeps the self-test honest about what does work.")
+
 (defun nelisp-standalone--reader-neln-demo-build-spec ()
-  "Compile the embedded `(defun inc1 (x) (1+ x))' demo and extract its metadata."
+  "Compile the embedded `inc1' demo and extract its native metadata.
+The demo is one fixed function, but the placement and sizing below are
+derived from it rather than assumed, so the same code services an
+artifact of any size once the bytes come from a file instead of here."
   (require 'nelisp-artifact)
   (let* ((dir (make-temp-file "nelisp-reader-neln-demo-" t))
          (src (expand-file-name "inc1.el" dir))
@@ -17958,7 +18124,8 @@ never recurse through one enormous `seq' cdr chain."
     (unwind-protect
         (progn
           (with-temp-file src
-            (insert "(defun inc1 (x) (1+ x))\n(provide 'inc1)\n"))
+            (insert (format "(defun inc1 (x) %s)\n(provide 'inc1)\n"
+                            nelisp-standalone--reader-neln-demo-body)))
           (nelisp-artifact-compile-file src out nil nil nil nil nil 'neln)
           (let* ((native (plist-get (nelisp-artifact--read-payload out) :native))
                  (defun0 (car (plist-get native :defuns)))
@@ -17970,24 +18137,35 @@ never recurse through one enormous `seq' cdr chain."
                  (trampoline
                   (nelisp-standalone--native-trampoline-bytes defun0))
                  (stub-specs
-                  '((:name "nelisp_aot_builtin_call1"
-                     :bridge nl_neln_demo_call1_bridge
-                     :offset 256)
-                    (:name "nl_alloc_symbol"
-                     :bridge nl_neln_demo_alloc_symbol_bridge
-                     :offset 272))))
+                  (nelisp-standalone--reader-neln-stub-specs
+                   externs (length text-bytes)))
+                 (code-bytes
+                  (+ (if stub-specs
+                         (plist-get (car (last stub-specs)) :offset)
+                       (length text-bytes))
+                     nelisp-standalone--reader-neln-stub-bytes))
+                 (trampoline-bytes (plist-get trampoline :bytes)))
             (unless (equal (plist-get defun0 :name) "inc1")
               (error "embedded neln demo expected inc1, got %S"
                      (plist-get defun0 :name)))
-            (unless (equal (sort (copy-sequence externs) #'string<)
-                           '("nelisp_aot_builtin_call1" "nl_alloc_symbol"))
-              (error "embedded neln demo externs drifted: %S" externs))
+            ;; Each reloc must land inside the text, never in the stub
+            ;; region it points at -- a patch past the end would silently
+            ;; rewrite a stub and the failure would look like a bad call.
+            (dolist (reloc relocs)
+              (let ((offset (plist-get reloc :offset)))
+                (unless (and (>= offset 0)
+                             (<= (+ offset 4) (length text-bytes)))
+                  (error "neln reloc at %d outside %d bytes of text"
+                         offset (length text-bytes)))))
             (list :text-bytes text-bytes
                   :relocs relocs
                   :defun0 defun0
-                  :trampoline-bytes (plist-get trampoline :bytes)
+                  :trampoline-bytes trampoline-bytes
                   :imm64-offsets (plist-get trampoline :imm64-offsets)
                   :stub-specs stub-specs
+                  :code-size (nelisp-standalone--reader-neln-page-round code-bytes)
+                  :trampoline-size (nelisp-standalone--reader-neln-page-round
+                                    (length trampoline-bytes))
                   :body-entry (+ (plist-get defun0 :offset)
                                  (plist-get defun0 :body-offset)))))
       (delete-directory dir t))))
@@ -18011,10 +18189,19 @@ never recurse through one enormous `seq' cdr chain."
            (imm64-offsets (plist-get spec :imm64-offsets))
            (stub-specs (plist-get spec :stub-specs))
            (body-entry (plist-get spec :body-entry))
+           (code-size (plist-get spec :code-size))
+           (trampoline-size (plist-get spec :trampoline-size))
            (stub-template-bytes '(#x48 #xb8 0 0 0 0 0 0 0 0 #xff #xe0))
            (callback-slot-exprs
             (cl-loop for i from 0 below 12
                      collect `(+ slots ,(+ 96 (* i 32)))))
+           ;; out/mirror-copy/frames-copy occupy 0/32/64; the twelve
+           ;; callback slots follow at 96; the boxed argument goes after
+           ;; the last of them.  Spelled out so the page grows with the
+           ;; layout instead of a literal that has to be kept in step.
+           (arg-slot-offset (+ 96 (* 12 32)))
+           (slots-size (nelisp-standalone--reader-neln-page-round
+                        (+ arg-slot-offset 32)))
            (text-writes
             (nelisp-standalone--ptr-write-u8-forms 'codepage text-bytes))
            (stub-writes
@@ -18029,9 +18216,16 @@ never recurse through one enormous `seq' cdr chain."
            (stub-patches
             (mapcar
              (lambda (stub)
+               ;; Address the runtime symbol directly.  `addr-of' is
+               ;; intra-object, which is why this used to go through a
+               ;; per-extern bridge defun; `data-addr' records a cross-unit
+               ;; pc32 the static linker patches against the symbol's
+               ;; section VA, and a FUNC symbol is an address like any
+               ;; other.  Checked in both directions: the right symbol
+               ;; returns 42, a wrong one takes SIGSEGV.
                `(ptr-write-u64 (+ codepage ,(plist-get stub :offset))
                                2
-                               (addr-of ,(plist-get stub :bridge))))
+                               (data-addr ,(intern (plist-get stub :name)))))
              stub-specs))
            (reloc-forms
             (mapcar
@@ -18076,16 +18270,12 @@ never recurse through one enormous `seq' cdr chain."
       (cons
        'seq
        (append
-        '((defun nl_neln_demo_alloc_symbol_bridge (bytes-ptr len result-slot)
-            (seq
-             (extern-call nl_alloc_symbol bytes-ptr len result-slot)
-             result-slot))
-          (defun nl_neln_demo_call1_bridge (mirror frames name arg out scratch)
-            (seq
-             (extern-call nelisp_aot_builtin_call1
-                          mirror frames name arg out scratch)
-             out))
-          (defun nl_neln_demo_zero_slot (slot)
+        ;; No per-extern bridge defuns: `data-addr' reaches the runtime
+        ;; symbols directly, so a stub can be pointed at one without a
+        ;; same-unit forwarder.  That also removes the one shape that
+        ;; would have been painful to write -- a calln forwarder has to
+        ;; redeclare and pass on every stack argument.
+        '((defun nl_neln_demo_zero_slot (slot)
             (seq
              (ptr-write-u64 slot 0 0)
              (ptr-write-u64 (+ slot 8) 0 0)
@@ -18104,14 +18294,19 @@ never recurse through one enormous `seq' cdr chain."
                 (ptr-read-u64 slot 8)
               98)))
         (list
+         ;; Page sizes come from the artifact rather than a fixed 4096.
+         ;; The code page in particular held only because `inc1' compiles
+         ;; to 176 bytes and the stubs were pinned at 256: any function
+         ;; longer than that would have had its own code overwritten by
+         ;; the stub it needs.
          `(defun nl_neln_demo_exec (ctx x)
-            (let ((codepage (syscall-direct 9 0 4096 7 34 -1 0)))
+            (let ((codepage (syscall-direct 9 0 ,code-size 7 34 -1 0)))
               (if (< codepage 4096)
                   90
-                (let ((slots (syscall-direct 9 0 4096 3 34 -1 0)))
+                (let ((slots (syscall-direct 9 0 ,slots-size 3 34 -1 0)))
                   (if (< slots 4096)
                       91
-                    (let ((trampage (syscall-direct 9 0 4096 7 34 -1 0)))
+                    (let ((trampage (syscall-direct 9 0 ,trampoline-size 7 34 -1 0)))
                       (if (< trampage 4096)
                           92
                         (seq
@@ -18122,8 +18317,8 @@ never recurse through one enormous `seq' cdr chain."
                          ,@reloc-forms
                          ,@trampoline-writes
                          ,@imm64-patches
-                         (nl_neln_demo_write_int_slot (+ slots 480) x)
-                         (call-ptr trampage (+ slots 480))
+                         (nl_neln_demo_write_int_slot (+ slots ,arg-slot-offset) x)
+                         (call-ptr trampage (+ slots ,arg-slot-offset))
                          (nl_neln_demo_read_int_slot slots)))))))))))))))
 
 (defun nelisp-standalone--reader-install-builtins-forms ()
@@ -21314,6 +21509,7 @@ correctly."
     ("env-shim-set-op.o"   nelisp-cc-env-shim-set-op             nelisp-cc-env-shim-set-op--source)
     ("env-leaves-frame.o"  nelisp-cc-evalport-env-leaves-frame   nelisp-cc-evalport-env-leaves-frame--source)
     ("aot-builtin-call1.o" nelisp-cc-evalport-aot-builtin-call1  nelisp-cc-evalport-aot-builtin-call1--source)
+    ("aot-builtin-calln.o" nelisp-cc-evalport-aot-builtin-calln  nelisp-cc-evalport-aot-builtin-calln--source)
     ("sf-eval-is-truthy.o" nelisp-cc-eval-is-truthy              nelisp-cc-eval-is-truthy--source)
     ("sf-let-setup.o"      nelisp-cc-evalport-env-leaves-logic   nelisp-cc-evalport-env-leaves-logic--source)
     ("sf-env-set-value.o"  nelisp-cc-evalport-env-leaves-bind    nelisp-cc-evalport-env-leaves-bind--source)
