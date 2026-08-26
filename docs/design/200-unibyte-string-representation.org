@@ -1,0 +1,183 @@
+#+TITLE: Doc 200 — Unibyte strings as a distinct representation
+#+AUTHOR: nelisp / nelisp-emacs
+#+DATE: 2026-08-26
+#+STATUS: DESIGN — not implemented.  Written the day the defect was measured,
+#+STATUS: deliberately NOT folded into v1.0.0: the change touches every code
+#+STATUS: path that asks "is this a string", and a single missed branch is a
+#+STATUS: silent wrong answer.  See §5 for why the timing matters.
+#+OPTIONS: toc:3 num:t
+
+* §0 要旨
+
+NeLisp には unibyte 文字列と multibyte 文字列の区別が **存在しない**。
+すべての文字列は Sexp tag 5（インライン =cap@+8 / ptr@+16 / len@+24=）で、
+種別を記録する場所が無い。
+
+実測（v1.0.0 tip、2026-08-26）:
+
+#+begin_src elisp
+(unibyte-string 227 129 130)   ; "あ" の UTF-8 バイト列
+"あ"
+#+end_src
+
+| 式                            | len | string-bytes | 相互の equal |
+| =(unibyte-string 227 129 130)= |   1 |            3 | =t=          |
+| ="あ"=                         |   1 |            3 | =t=          |
+
+実 Emacs 30.1 では前者が 3 バイトの unibyte、後者が 1 文字の multibyte で
+=equal= は =nil=。**NeLisp では同一オブジェクトになる。**
+
+* §1 症状 — 何が壊れているか
+
+** §1.1 append
+
+#+begin_src elisp
+(append (unibyte-string 200 201 202) nil)
+;; NeLisp : (521 640 0)
+;; Emacs  : (200 201 202)
+
+(append (unibyte-string 127 128 129) nil)
+;; NeLisp : (127)          ← length が 1 を返す（string-bytes は 3）
+;; Emacs  : (127 128 129)
+#+end_src
+
+128 未満のみのバイト列は正しく、**128 以上を含むと壊れる**。
+=nelisp--append-collect= の文字列分岐が =length= / =aref=（文字単位）を
+使っているため。
+
+** §1.2 これは append の欠陥ではない
+
+=append= を =string-bytes= / =string-byte= に直すと、今度は multibyte が
+壊れる（="あ"= が =(227 129 130)= になる）。Emacs の意味論は:
+
+- multibyte 文字列 → **文字**のリスト（="あ"= → =(12354)=）
+- unibyte 文字列 → **バイト**のリスト（=200= → =(200)=）
+
+種別を知らずに正しい答えは出せない。**同じ根が =concat= / =substring= /
+=aref= / =equal= / =sxhash= / printer 全体に及ぶ。**
+
+** §1.3 multibyte-string-p も判定できない
+
+現行実装（=scripts/nelisp-stdlib-prelude.el=）は「127 超の文字を含むか」で
+判定する。unibyte 文字列も高位バイトを持つので =t= を返す。
+
+| 文字列                          | NeLisp | Emacs |
+| =(unibyte-string 200 201)=      | =t=    | =nil= |
+| ="あ"=                          | =t=    | =t=   |
+| ="abc"=                         | =nil=  | =nil= |
+
+* §2 上流の方向 — Emacs 31.1
+
+Emacs 31.1（2026-08-24 リリース）の =etc/NEWS= より、原文:
+
+#+begin_quote
+** String mutation has been restricted further.
+'aset' on unibyte strings now requires the new character to be a single
+byte (0-255).  On multibyte strings the new character and the character
+being replaced must both be ASCII (0-127).
+
+These rules ensure that mutation will never transform a unibyte string
+to multibyte, and that the size of a string in bytes (as reported by
+'string-bytes') never changes.  They also allow strings to be
+represented more efficiently in the future.
+#+end_quote
+
+読むべき点は 3 つ:
+
+1. Emacs は区別を **なくす方向ではなく、境界を厳格化する方向** に進んでいる
+2. 保証したい不変量は「mutation が unibyte → multibyte に変えない」
+3. =allow strings to be represented more efficiently in the future= —
+   **表現変更を予告している**。追随するなら急ぐより方向を合わせる方が良い
+
+NeLisp が区別を持たない限り、この不変量は表現できない。
+
+* §3 選択肢
+
+** §3.1 案 A — 新 tag（tag 14 = UnibyteStr）
+
+Sexp tag は =ptr-read-u8= で読まれ、0〜13 が使用中、**14 以降が空き**。
+
+- 長所: Emacs と同じ意味論。=equal= も正しく =nil= になる。表現として明示的
+- 短所: tag を見る全経路に分岐追加。=stringp= の展開自体が変わる
+
+** §3.2 案 B — cap フィールドに unibyte ビット
+
+文字列の =cap@+8= は実質未使用（GC は =+16=（ptr）のみ参照、clone は 32 バイト
+全体コピーなのでビットは自動伝播する）。
+
+- 長所: tag 経路に触らない
+- 短所: **判定箇所の数は減らない**（§4 参照）。=cap= の意味を変えるので
+  参照箇所の監査が別途必要
+
+** §3.3 案 C — 対処しない
+
+既知の制約として文書化し、=unibyte-string= を使う側が
+=string-bytes= / =string-byte= を使う運用にする。
+
+- 短所: 実 Emacs 非互換が残り、=append= 等が silent wrong answer を返し続ける
+
+* §4 影響範囲（実測 2026-08-26）
+
+Sexp の文字列 tag を判定しているコード行:
+
+| 場所                              | 行数 | 備考                                     |
+| =scripts/nelisp-standalone-build.el= |   23 | GC mark / printer / length / concat / eq / CLI 出力 |
+| =lisp/nelisp-cc-*.el=              |   26 | 19 ファイル。JIT 群 / evalport / sexp-fmt |
+| =lisp/nelisp-aot-compiler.el=      |    3 | =stringp= 述語の展開そのもの              |
+| =src/= / layout / native-load      |    7 |                                          |
+| *合計*                            | *59* | *約 24 ファイル*                          |
+
+=stringp= の展開はこう書かれている:
+
+#+begin_src elisp
+`(or (= (sexp-tag ,arg) ,nelisp-sexp--tag-str)
+     (= (sexp-tag ,arg) ,nelisp-sexp--tag-mut-str))
+#+end_src
+
+案 A / 案 B のどちらでも、これら 59 箇所すべてで「文字列か」と
+「unibyte か」を別々に問う必要がある。**案 B は tag を増やさないだけで、
+判定箇所は減らない。**
+
+具体的に分岐が要る関数群: =stringp= =length= =aref= =aset= =concat=
+=substring= =equal= =sxhash= =prin1= =princ= =format= =upcase= =downcase=
+=secure-hash= =split-string= 正規表現エンジン、GC の mark、
+=nl_sexp_clone_into=、CLI の値出力。
+
+* §5 なぜ v1.0.0 に入れないか
+
+1. **59 箇所のうち 1 つでも漏れれば silent wrong answer になる。** これは
+   このプロジェクトが繰り返し苦しんできた失敗形で、=append= の現状も
+   まさにそれ（エラーを出さず =(521 640 0)= を返す）
+2. **v1.0.0 は 2026-08-26 に 7 job 緑で出荷済み**、同日に Doc 142 s6.4 の
+   ローダ統合（27 ファイル / 6,620 行）も入れた。この上に文字列表現の変更を
+   重ねると、問題が出たときに原因の切り分けができない
+3. **Emacs 31.1 自身が表現変更を予告している**（§2）。上流が動く可能性の
+   ある中で急いで追随すると二度手間になる
+
+* §6 実装したときの Definition of Done
+
+1. =(unibyte-string 227 129 130)= と ="あ"= が =equal= で =nil= を返す
+2. =(append (unibyte-string 200 201 202) nil)= が =(200 201 202)=、
+   =(append "あ" nil)= が =(12354)= を返す（両方とも実 Emacs と一致）
+3. =multibyte-string-p= が実 Emacs と一致（§1.3 の表の 3 ケース）
+4. =aset= が Emacs 31.1 の制約を満たす: unibyte には 0-255 のみ、
+   multibyte には ASCII のみ、=string-bytes= が変化しない
+5. =emacs-parity= が findings=0 を維持（現行 19,995 checks）
+6. =test/nelisp-shadow-differential-cases.el= に raw-byte ケースを追加。
+   ただし比較は派生値のみ（この gate は出力を文字列比較するので、生の
+   バイト列を結果に含めると両側で表示が食い違う。2026-08-26 に実際に
+   踏んだ）
+7. 案 A なら §4 の 59 箇所すべてを歩いた記録を残す。数えられる形で残さないと
+   「全部見た」が検証できない
+
+* §7 参考 — この文書が書かれた経緯
+
+2026-08-26、=base64-decode-string= が文字ではなくバイトを返すよう修正した
+（commit 72205224a）。その回帰テストを =nelisp-shadow-differential-cases.el=
+に書く過程で、移植可能な比較手段を探して =(append DECODED nil)= を試したところ、
+NeLisp が =(521 640 1 1835048 0 0)=、実 Emacs が =(200 201 202 0 1 255)= を
+返した。base64 とは無関係の別欠陥だったため、その場では scope 外として
+テストのコメントに実測値ごと記録し、後日この文書に起こした。
+
+関連: =feedback_nelisp_standalone_utf8_raw_byte_block=（NeLisp の String は
+Rust の UTF-8 で、byte >= 128 が膨張する既知の制約）。
