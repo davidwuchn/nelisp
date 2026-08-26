@@ -15394,13 +15394,21 @@ Parallelism pays off only once per-unit compilation dominates startup
          (out (nelisp-standalone--output-path nil)))
     (pcase nelisp-standalone--target
       ('windows-x86_64
+       ;; `nl_os_write_stderr' (from `nelisp-standalone--eval-bt-extra-unit-
+       ;; source', added 2026-08-24 for the bounded-backtrace printer) calls
+       ;; GetStdHandle/WriteFile on this target; the small eval build's own
+       ;; import list had never grown past the base ExitProcess/VirtualAlloc/
+       ;; VirtualFree set, so this link failed with an unresolved symbol on
+       ;; Windows (untested on that platform at the time of that fix).
        (nelisp-link-units-pe32 out units "_start"
-                               '("ExitProcess" "VirtualAlloc" "VirtualFree")
+                               '("ExitProcess" "VirtualAlloc" "VirtualFree"
+                                 "GetStdHandle" "WriteFile")
                                (list :stack-reserve
                                      nelisp-standalone--windows-stack-reserve)))
       ('windows-aarch64
        (nelisp-link-units-pe32 out units "_start"
-                               '("ExitProcess" "VirtualAlloc" "VirtualFree")
+                               '("ExitProcess" "VirtualAlloc" "VirtualFree"
+                                 "GetStdHandle" "WriteFile")
                                (list :machine 'aarch64
                                      :stack-reserve
                                      nelisp-standalone--windows-stack-reserve)))
