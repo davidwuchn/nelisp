@@ -66,12 +66,28 @@ jobs:
           set -euo pipefail
           clone_related() {
             local repo="$1" dest="$2" ref="$3"
-            if git ls-remote --exit-code --heads "https://github.com/zawatton/${repo}.git" "$ref" >/dev/null 2>&1; then
-              git clone --depth 1 --branch "$ref" "https://github.com/zawatton/${repo}.git" "../${dest}"
-            else
-              echo "::error::required related repo ${repo} has no branch ${ref}; push matching branches for standalone vendor CI"
-              exit 1
+            local url="https://github.com/zawatton/${repo}.git"
+            # A matching branch wins: that is the whole point of this parity
+            # run -- build the sibling at the same feature branch when one
+            # exists.  Falling back to the sibling's OWN default branch when it
+            # does not is what makes the run possible at all: `anvil.el' is on
+            # `master', this repo is on `main', and demanding `main' there
+            # failed every run since the branch rename -- 12 consecutive
+            # failures, none of them about the code being tested.
+            if git ls-remote --exit-code --heads "$url" "$ref" >/dev/null 2>&1; then
+              git clone --depth 1 --branch "$ref" "$url" "../${dest}"
+              return
             fi
+            local fallback
+            fallback="$(git ls-remote --symref "$url" HEAD 2>/dev/null \
+                        | sed -n 's#^ref: refs/heads/\([^\t]*\)\tHEAD$#\1#p')"
+            if [ -n "$fallback" ] && [ "$fallback" != "$ref" ]; then
+              echo "::notice::related repo ${repo} has no branch ${ref}; using its default branch ${fallback}"
+              git clone --depth 1 --branch "$fallback" "$url" "../${dest}"
+              return
+            fi
+            echo "::error::required related repo ${repo} has neither branch ${ref} nor a readable default branch"
+            exit 1
           }
           clone_related nelisp-emacs nelisp-emacs "${NELISP_EMACS_REF:-${RELATED_REF:-main}}"
           clone_related anvil.el anvil.el "${ANVIL_REF:-${RELATED_REF:-main}}"
@@ -119,12 +135,28 @@ jobs:
           set -euo pipefail
           clone_related() {
             local repo="$1" dest="$2" ref="$3"
-            if git ls-remote --exit-code --heads "https://github.com/zawatton/${repo}.git" "$ref" >/dev/null 2>&1; then
-              git clone --depth 1 --branch "$ref" "https://github.com/zawatton/${repo}.git" "../${dest}"
-            else
-              echo "::error::required related repo ${repo} has no branch ${ref}; push matching branches for standalone vendor CI"
-              exit 1
+            local url="https://github.com/zawatton/${repo}.git"
+            # A matching branch wins: that is the whole point of this parity
+            # run -- build the sibling at the same feature branch when one
+            # exists.  Falling back to the sibling's OWN default branch when it
+            # does not is what makes the run possible at all: `anvil.el' is on
+            # `master', this repo is on `main', and demanding `main' there
+            # failed every run since the branch rename -- 12 consecutive
+            # failures, none of them about the code being tested.
+            if git ls-remote --exit-code --heads "$url" "$ref" >/dev/null 2>&1; then
+              git clone --depth 1 --branch "$ref" "$url" "../${dest}"
+              return
             fi
+            local fallback
+            fallback="$(git ls-remote --symref "$url" HEAD 2>/dev/null \
+                        | sed -n 's#^ref: refs/heads/\([^\t]*\)\tHEAD$#\1#p')"
+            if [ -n "$fallback" ] && [ "$fallback" != "$ref" ]; then
+              echo "::notice::related repo ${repo} has no branch ${ref}; using its default branch ${fallback}"
+              git clone --depth 1 --branch "$fallback" "$url" "../${dest}"
+              return
+            fi
+            echo "::error::required related repo ${repo} has neither branch ${ref} nor a readable default branch"
+            exit 1
           }
           clone_related nelisp-emacs nelisp-emacs "${NELISP_EMACS_REF:-${RELATED_REF:-main}}"
           clone_related anvil.el anvil.el "${ANVIL_REF:-${RELATED_REF:-main}}"
@@ -172,12 +204,28 @@ jobs:
           set -euo pipefail
           clone_related() {
             local repo="$1" dest="$2" ref="$3"
-            if git ls-remote --exit-code --heads "https://github.com/zawatton/${repo}.git" "$ref" >/dev/null 2>&1; then
-              git clone --depth 1 --branch "$ref" "https://github.com/zawatton/${repo}.git" "../${dest}"
-            else
-              echo "::error::required related repo ${repo} has no branch ${ref}; push matching branches for standalone vendor CI"
-              exit 1
+            local url="https://github.com/zawatton/${repo}.git"
+            # A matching branch wins: that is the whole point of this parity
+            # run -- build the sibling at the same feature branch when one
+            # exists.  Falling back to the sibling's OWN default branch when it
+            # does not is what makes the run possible at all: `anvil.el' is on
+            # `master', this repo is on `main', and demanding `main' there
+            # failed every run since the branch rename -- 12 consecutive
+            # failures, none of them about the code being tested.
+            if git ls-remote --exit-code --heads "$url" "$ref" >/dev/null 2>&1; then
+              git clone --depth 1 --branch "$ref" "$url" "../${dest}"
+              return
             fi
+            local fallback
+            fallback="$(git ls-remote --symref "$url" HEAD 2>/dev/null \
+                        | sed -n 's#^ref: refs/heads/\([^\t]*\)\tHEAD$#\1#p')"
+            if [ -n "$fallback" ] && [ "$fallback" != "$ref" ]; then
+              echo "::notice::related repo ${repo} has no branch ${ref}; using its default branch ${fallback}"
+              git clone --depth 1 --branch "$fallback" "$url" "../${dest}"
+              return
+            fi
+            echo "::error::required related repo ${repo} has neither branch ${ref} nor a readable default branch"
+            exit 1
           }
           clone_related nelisp-emacs nelisp-emacs "${NELISP_EMACS_REF:-${RELATED_REF:-main}}"
           clone_related anvil.el anvil.el "${ANVIL_REF:-${RELATED_REF:-main}}"
