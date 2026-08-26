@@ -15569,23 +15569,30 @@ other arches need their own stub\=' since it was written."
 ;; rdi = out (32-byte slot); fills it with a Float Sexp = tv_sec + tv_usec*1e-6
 ;; and returns out.  linux-x86_64 only (__NR_gettimeofday=96), matching the
 ;; x86_64-specific reader-float.o; other arches need their own stub.
-(defun nelisp-standalone--float-time-unit-darwin-arm64-text ()
-  "Return the Darwin/AAPCS64 body of `nl_os_float_time'.
+(defun nelisp-standalone--float-time-unit-aarch64-text (syscall-nr svc-imm usec-64-p)
+  "Return an AAPCS64 body of `nl_os_float_time' for one OS.
 
 x0 = the 32-byte Sexp slot; fills it with Float(tv_sec + tv_usec/1e6)
-and returns it in x0.  Darwin `gettimeofday' is BSD syscall 116 through
-`SVC #0x80', the same door every other Darwin syscall in this reader
-goes through.
+and returns it in x0.  SYSCALL-NR is the OS gettimeofday number, SVC-IMM
+the `SVC' immediate its ABI uses, and USEC-64-P says whether tv_usec is
+a full 64-bit field.
 
-Two details that are not interchangeable with the Linux body below:
+The three OS-dependent pieces, and why each is a parameter rather than a
+constant:
 
+- Darwin is BSD 116 through `SVC #0x80'; Linux/arm64 is 169 through
+  `SVC #0'.  Every other syscall in this reader already goes through the
+  matching door for its target.
 - `struct timeval' on arm64 Darwin is `{ int64 tv_sec; int32 tv_usec; }'
-  padded to 16 bytes, so tv_usec is read with a 32-bit LDR.  Reading
+  padded to 16 bytes, so tv_usec is read with a 32-bit LDR -- reading
   eight bytes there would fold the four padding bytes into the count.
-- Only caller-saved registers are touched (x0/x1/x9-x12/x16, d0-d2).
-  The x86_64 body has to push rcx/r11 because `syscall' clobbers them;
-  `SVC' clobbers x0/x1 and nothing else the AOT extern-call model
-  assumes is preserved."
+  On LP64 Linux `suseconds_t' is `long', so the field really is 64-bit
+  and the wider load is the correct one.
+
+Only caller-saved registers are touched (x0/x1/x9-x12/x16, d0-d2).  The
+x86_64 body has to push rcx/r11 because `syscall' clobbers them; `SVC'
+clobbers x0/x1 and nothing else the AOT extern-call model assumes is
+preserved."
   (require 'nelisp-asm-arm64)
   (let ((buf (nelisp-asm-arm64-make-buffer))
         ;; 1e6 as an IEEE-754 double.
@@ -15596,11 +15603,13 @@ Two details that are not interchangeable with the Linux body below:
     (nelisp-asm-arm64-str-imm buf 'xzr 'sp 8)
     (nelisp-asm-arm64-add-imm buf 'x0 'sp 0)       ; x0 = &tv (ADD: SP-capable)
     (nelisp-asm-arm64-mov-imm64 buf 'x1 0)         ; tzp = NULL
-    (nelisp-asm-arm64-mov-imm64 buf 'x16 116)      ; SYS_gettimeofday
-    (nelisp-asm-arm64-svc buf #x80)
+    (nelisp-asm-arm64-mov-imm64 buf 'x16 syscall-nr) ; gettimeofday
+    (nelisp-asm-arm64-svc buf svc-imm)
     (nelisp-asm-arm64-ldr-imm buf 'x9 'sp 0)       ; tv_sec
-    (nelisp-asm-arm64-add-imm buf 'x12 'sp 8)
-    (nelisp-asm-arm64-ldrw-reg-reg buf 'x10 'x12 'xzr) ; tv_usec (32-bit)
+    (if usec-64-p
+        (nelisp-asm-arm64-ldr-imm buf 'x10 'sp 8)  ; tv_usec (64-bit)
+      (nelisp-asm-arm64-add-imm buf 'x12 'sp 8)
+      (nelisp-asm-arm64-ldrw-reg-reg buf 'x10 'x12 'xzr)) ; tv_usec (32-bit)
     (nelisp-asm-arm64-ldr-imm buf 'x0 'sp 16)      ; restore the out slot
     (nelisp-asm-arm64-scvtf-d-from-x buf 'd0 'x9)
     (nelisp-asm-arm64-scvtf-d-from-x buf 'd1 'x10)
@@ -15623,9 +15632,34 @@ Two details that are not interchangeable with the Linux body below:
 (defun nelisp-standalone--float-time-unit ()
   "Return the raw link unit exporting `nl_os_float_time'."
   (let ((text
-         (if (eq nelisp-standalone--target 'macos-aarch64)
-             (nelisp-standalone--float-time-unit-darwin-arm64-text)
-           (apply #'unibyte-string
+         (pcase nelisp-standalone--target
+           ;; Darwin arm64: BSD gettimeofday 116 via SVC #0x80, 32-bit
+           ;; tv_usec.
+           ('macos-aarch64
+            (nelisp-standalone--float-time-unit-aarch64-text 116 #x80 nil))
+           ;; Linux arm64: generic-table gettimeofday 169 via SVC #0,
+           ;; 64-bit tv_usec (LP64 `suseconds_t' is `long').  Emitted and
+           ;; encoding-checked here; never executed on real hardware yet,
+           ;; because no aarch64 Linux host has built this reader.
+           ('linux-aarch64
+            (nelisp-standalone--float-time-unit-aarch64-text 169 0 t))
+           ;; Windows has no syscall this body could make: the x86_64
+           ;; bytes below are `mov eax, 96; syscall', which is the LINUX
+           ;; gettimeofday number handed to the NT kernel.  That was
+           ;; linked into both Windows targets and only ever mattered if
+           ;; someone called `float-time'.  A build-time error is the
+           ;; honest state: `GetSystemTimeAsFileTime' through the
+           ;; kernel32 import table is the answer, and it has not been
+           ;; written.  Chosen over leaving the foreign body in place
+           ;; (2026-08-26): this stops the Windows reader build until
+           ;; that unit exists, which is the point.
+           ((or 'windows-x86_64 'windows-aarch64)
+            (error (concat "standalone: nl_os_float_time has no body for %S"
+                           " -- Windows needs a GetSystemTimeAsFileTime unit;"
+                           " the x86_64 body is a Linux syscall")
+                   nelisp-standalone--target))
+           ('linux-x86_64
+            (apply #'unibyte-string
                      ;; rcx/r11 are saved across the body: the `syscall'
                      ;; instruction clobbers them, and the AOT extern-call model
                      ;; assumes the callee leaves them intact -- so without this
@@ -15656,7 +15690,9 @@ Two details that are not interchangeable with the Linux body below:
                        #x41 #x5b                         ; pop r11
                        #x59                              ; pop rcx
                        #x5b                              ; pop rbx
-                       #xc3)))))                         ; ret
+                       #xc3)))
+           (other
+            (error "standalone: nl_os_float_time has no body for %S" other)))))
     (nelisp-link-unit-make
      (nelisp-standalone--target-object-name "float-time.o")
      (list (cons 'text text))
