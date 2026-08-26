@@ -96,7 +96,7 @@
     ;; tag 6 MutStr holds NlStrRef -> nelisp_nlstr_clone (NOT a deep copy).
     (defun nl_sci_bump (tag box)
       (if (= tag 7)  (nelisp_nlconsbox_clone box)
-        (if (= tag 6)  (nelisp_nlstr_clone box)
+        (if (or (= tag 6) (= tag 15)) (nelisp_nlstr_clone box)
           (if (= tag 8)  (nelisp_nlvector_clone box)
             (if (= tag 9)  (nelisp_nlchartable_clone box)
               (if (= tag 10) (nelisp_nlboolvector_clone box)
@@ -133,7 +133,10 @@
     ;; a refcounted box that does not exist for this tag; this is an
     ;; explicit tag-13 arm instead, matching Str/Symbol's own explicitness.
     (defun nl_sci_dispatch (src dst tag)
-      (if (= tag 5)
+      (if (= tag 14)
+          ;; Immutable raw-byte strings always shallow-alias their buffer.
+          (nl_sci_copy src dst)
+        (if (= tag 5)
           (if (= (ptr-read-u64 268435648 0) 1)
               (nl_sci_copy src dst)
             (nl_alloc_str (ptr-read-u64 src 16) (ptr-read-u64 src 24) dst))
@@ -143,7 +146,7 @@
               (nl_alloc_symbol (ptr-read-u64 src 16) (ptr-read-u64 src 24) dst))
           (if (= tag 13) (nl_sci_copy src dst)
           (if (< tag 4) (nl_sci_copy src dst)
-            (nl_sci_rc src dst tag))))))
+            (nl_sci_rc src dst tag)))))))
 
     ;; Public C-ABI entry: nl_sexp_clone_into(dst, src) = ptr::write(dst,(*src).clone()).
     ;; Doc 135 cutover fix: the param order is (DST SRC) to match the Rust

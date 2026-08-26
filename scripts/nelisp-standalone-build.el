@@ -2383,12 +2383,13 @@ arm64 Linux has no legacy x86 numbering)."
                         (if (= (logand vw 1) 1) 0
                           (if (= (nl_gc_mark_block vw) 0) 0
                             (nl_gc_mark_slot vw))))))
-                (if (= tag 6)
-                    ;; MutStr: NlStr*@sp+8 (ptr@box+8).
+                (if (or (= tag 6) (= tag 15))
+                    ;; MutStr/UnibyteMutStr: NlStr*@sp+8 (ptr@box+8).
                     (let ((box (ptr-read-u64 sp 8)))
                       (if (= (nl_gc_mark_block box) 0) 0
                         (nl_gc_mark_buf (ptr-read-u64 box 8))))
-                  (if (= tag 5) (nl_gc_mark_buf (ptr-read-u64 sp 16))   ; Str
+                  (if (or (= tag 5) (= tag 14))
+                      (nl_gc_mark_buf (ptr-read-u64 sp 16)) ; Str/UnibyteStr
                     (if (= tag 4) (nl_gc_mark_buf (ptr-read-u64 sp 16)) ; Symbol
                       ;; Bignum (Doc 190 Phase A, tag 13): sign@sp+8,
                       ;; limb-ptr@sp+16, limb-count@sp+24 -- the same
@@ -3433,7 +3434,7 @@ arm64 Linux has no legacy x86 numbering)."
                         (if (= (logand vw 1) 1) 0
                           (nl_seq2 (nl_compact_rw_block vw)
                                    (nl_compact_rw_slot vw))))))
-                (if (= tag 6)
+                (if (or (= tag 6) (= tag 15))
                     (let ((old (nl_compact_rw_edge (+ sp 8))))
                       (if (= (nl_compact_rw_block old) 0) 0
                         (nl_seq2 (nl_compact_rw_block (nl_compact_rw_edge (+ old 8))) 0)))
@@ -3442,7 +3443,7 @@ arm64 Linux has no legacy x86 numbering)."
                   ;; and flip the buffer block mark1->mark3 so phase 4 moves it;
                   ;; omitting tag 4 left symbol name buffers mark1 (never moved,
                   ;; their from-space chunk munmap'd) -> dangling ptr / SIGSEGV.
-                  (if (if (= tag 5) 1 (= tag 4))
+                  (if (or (= tag 5) (= tag 14) (= tag 4))
                       (nl_seq2 (nl_compact_rw_block (nl_compact_rw_edge (+ sp 16))) 0)
                     (if (= tag 9) (nl_seq2 (nl_compact_rw_block (nl_compact_rw_edge (+ sp 8))) 0)
                       (if (= tag 10) (nl_seq2 (nl_compact_rw_block (nl_compact_rw_edge (+ sp 8))) 0)
@@ -3508,8 +3509,9 @@ arm64 Linux has no legacy x86 numbering)."
           (if (< b base) 0 (if (< b (+ base size)) 1 0)))))
     (defun nl_compact_pin_src (src)
       (let* ((tg (ptr-read-u8 src 0))
-             (b (if (= tg 5) (ptr-read-u64 src 16)
-                  (if (= tg 6) (ptr-read-u64 (ptr-read-u64 src 8) 8) 0))))
+             (b (if (or (= tg 5) (= tg 14)) (ptr-read-u64 src 16)
+                  (if (or (= tg 6) (= tg 15))
+                      (ptr-read-u64 (ptr-read-u64 src 8) 8) 0))))
         (if (= b 0) (ptr-write-u64 268436392 0 0)
           (if (= (nl_gc_in_arena b) 0) (ptr-write-u64 268436392 0 0)
             (nl_seq2 (ptr-write-u64 268436392 0 b)
@@ -4410,10 +4412,13 @@ argument (reachability + in-arena bounds checks).")
     ((:lit "string-bytes")     . (wf_write_int out (str-len (wf_arg_ptr args 0))))
     ((:lit "string=")          . (if (= (m5_streq (wf_arg_ptr args 0) (wf_arg_ptr args 1)) 1)
                                       (wf_write_t out) (wf_write_nil out)))
-    ((:lit "string-to-char")   . (if (if (= (ptr-read-u64 (wf_arg_ptr args 0) 0) 5) 1 (if (= (ptr-read-u64 (wf_arg_ptr args 0) 0) 6) 1 0))
+    ((:lit "string-to-char")   . (if (if (= (ptr-read-u64 (wf_arg_ptr args 0) 0) 5) 1 (if (= (ptr-read-u64 (wf_arg_ptr args 0) 0) 6) 1 (if (= (ptr-read-u64 (wf_arg_ptr args 0) 0) 14) 1 (if (= (ptr-read-u64 (wf_arg_ptr args 0) 0) 15) 1 0))))
                             (wf_write_int out
                                   (if (= (str-len (wf_arg_ptr args 0)) 0) 0
-                                    (nl_u8_decode (wf_arg_ptr args 0) 0)))
+                                    (if (or (= (ptr-read-u64 (wf_arg_ptr args 0) 0) 14)
+                                            (= (ptr-read-u64 (wf_arg_ptr args 0) 0) 15))
+                                        (str-byte-at (wf_arg_ptr args 0) 0)
+                                      (nl_u8_decode (wf_arg_ptr args 0) 0))))
                           (bf_wrong_type_stringp (wf_arg_ptr args 0))))
     ((:lit "string-to-number") . (wf_write_int out (m5_s2n (wf_arg_ptr args 0))))
     ;; Doc 190 Phase A: accepts tag 13 (Bignum) too, via `m5_push_bignum'.
@@ -6832,12 +6837,12 @@ leave symbols unresolved at link time."
                             (nl_seq2 (nl_fa_field box vw ds span dest cin cout dir)
                               (if (= (nl_gc_mark_block vw) 0) 0
                                 (nl_fa_slot vw ds span dest cin cout dir))))))))
-                (if (= tag 6)
+                (if (or (= tag 6) (= tag 15))
                     (let ((box (ptr-read-u64 sp 8)))
                       (nl_seq2 (nl_fa_field (+ sp 8) box ds span dest cin cout dir)
                         (if (= (nl_gc_mark_block box) 0) 0
                           (nl_fa_field (+ box 8) (ptr-read-u64 box 8) ds span dest cin cout dir))))
-                  (if (= tag 5)
+                  (if (or (= tag 5) (= tag 14))
                       (nl_fa_field (+ sp 16) (ptr-read-u64 sp 16) ds span dest cin cout dir)
                     (if (= tag 4)
                         (nl_fa_field (+ sp 16) (ptr-read-u64 sp 16) ds span dest cin cout dir)
@@ -7400,7 +7405,7 @@ eval applyfn.")
                               (if (= (symbol-eq a b) 1)
                                   0
                                 (setq ok 0))
-                            (if (= ta 5)
+                            (if (or (= ta 5) (= ta 14))
                                 (if (= (str-eq a b) 1)
                                     0
                                   (setq ok 0))
@@ -7457,9 +7462,9 @@ eval applyfn.")
             (logand (ptr-read-u64 key_ptr 8) 2147483647)
           (if (= tag 4)
               (logand (ptr-read-u64 key_ptr 8) 2147483647)
-            (if (= tag 5)
+            (if (or (= tag 5) (= tag 14))
                 (nl_ht_str_hash key_ptr)
-              (if (= tag 6)
+              (if (or (= tag 6) (= tag 15))
                   (nl_ht_str_hash key_ptr)
                 (if (= tag 7)
                     (if (<= depth 0)
@@ -7479,9 +7484,9 @@ eval applyfn.")
                 1
               (if (= tag 4)
                   1
-                (if (= tag 5)
+                (if (or (= tag 5) (= tag 14))
                     1
-                  (if (= tag 6)
+                  (if (or (= tag 6) (= tag 15))
                       1
                     (if (= tag 7)
                         (if (<= depth 0)
@@ -8680,6 +8685,8 @@ baked build's own `<'/`>'/`=' arms need it too.")
          ((= tag 4) (m5_json_symbol ms vptr))
          ((= tag 5) (m5_prin1_string ms vptr))
          ((= tag 6) (m5_prin1_string ms vptr))
+         ((= tag 14) (m5_prin1_unibyte_string ms vptr))
+         ((= tag 15) (m5_prin1_unibyte_string ms vptr))
          ((= tag 7)
           (if (= (m5_json_plist_p vptr) 1)
               (seq (mut-str-push-byte ms 123)
@@ -8707,6 +8714,15 @@ baked build's own `<'/`>'/`=' arms need it too.")
        ((= b 13) (seq (mut-str-push-byte ms 92) (mut-str-push-byte ms 114)))
        ((= b 9) (seq (mut-str-push-byte ms 92) (mut-str-push-byte ms 116)))
        (t (mut-str-push-byte ms b))))
+    (defun m5_prin1_octal_byte (ms b)
+      (seq (mut-str-push-byte ms 92)
+           (mut-str-push-byte ms (+ 48 (/ b 64)))
+           (mut-str-push-byte ms (+ 48 (logand (/ b 8) 7)))
+           (mut-str-push-byte ms (+ 48 (logand b 7)))))
+    (defun m5_prin1_unibyte_byte (ms b)
+      (if (>= b 128)
+          (m5_prin1_octal_byte ms b)
+        (m5_prin1_string_byte ms b)))
     (defun m5_prin1_string_bytes (ms src_ptr i n)
       (if (>= i n)
           1
@@ -8716,6 +8732,16 @@ baked build's own `<'/`>'/`=' arms need it too.")
     (defun m5_prin1_string (ms vptr)
       (seq (mut-str-push-byte ms 34)
            (m5_prin1_string_bytes ms vptr 0 (str-len vptr))
+           (mut-str-push-byte ms 34)))
+    (defun m5_prin1_unibyte_string_bytes (ms src-ptr i n)
+      (if (>= i n)
+          1
+        (seq
+         (m5_prin1_unibyte_byte ms (str-byte-at src-ptr i))
+         (m5_prin1_unibyte_string_bytes ms src-ptr (+ i 1) n))))
+    (defun m5_prin1_unibyte_string (ms vptr)
+      (seq (mut-str-push-byte ms 34)
+           (m5_prin1_unibyte_string_bytes ms vptr 0 (str-len vptr))
            (mut-str-push-byte ms 34)))
     (defun m5_prin1_list_tail (ms node first)
       (let* ((tag (ptr-read-u64 node 0)))
@@ -8838,6 +8864,8 @@ baked build's own `<'/`>'/`=' arms need it too.")
          ((= tag 4) (m5_push_str ms vptr))
          ((= tag 5) (m5_prin1_string ms vptr))
          ((= tag 6) (m5_prin1_string ms vptr))
+         ((= tag 14) (m5_prin1_unibyte_string ms vptr))
+         ((= tag 15) (m5_prin1_unibyte_string ms vptr))
          ((= tag 7) (m5_prin1_cons ms vptr))
          ((= tag 8) (if (= (bf_marker_vec_is vptr 125779835254114 0 6) 1)
                         (m5_prin1_buffer ms vptr)
@@ -8856,9 +8884,11 @@ baked build's own `<'/`>'/`=' arms need it too.")
             (if (= tag 5) (m5_push_str ms vptr)
               (if (= tag 4) (m5_push_str ms vptr)
                 (if (= tag 6) (m5_push_str ms vptr)
+                  (if (= tag 14) (m5_push_str ms vptr)
+                    (if (= tag 15) (m5_push_str ms vptr)
                   ;; tag 0/1/7/8 (nil/t/cons/vector): fall back to full prin1
                   ;; so `format' %s/%S render them instead of emitting nothing.
-                  (m5_prin1 ms vptr))))))))
+                  (m5_prin1 ms vptr))))))))))
     (defun m5_s2n_mag (s i n acc)
       (if (>= i n) acc
         (let* ((c (str-byte-at s i)))
@@ -8958,11 +8988,13 @@ baked build's own `<'/`>'/`=' arms need it too.")
       (if (<= n 0) 0 (seq (nl_u8_encode ms cp) (nl_u8_repeat ms (- n 1) cp))))
     (defun m5_length (p)
       (let* ((tag (ptr-read-u64 p 0)))
+        (if (= tag 14) (str-len p)
+          (if (= tag 15) (str-len p)
         (if (= tag 5) (nl_str_charlen p)
           (if (= tag 6) (nl_str_charlen p)
             (if (= tag 4) (str-len p)
               (if (= tag 7) (m5_list_len p 0)
-                0))))))
+                0))))))))
     ;; `concat' takes SEQUENCES, and a list or vector of characters is one:
     ;; Emacs answers "ab" for (concat '(97 98)) and for (concat [97 98]).
     ;; `m5_emit_value' fell through to prin1 for both tags, so those answered
@@ -8982,7 +9014,7 @@ baked build's own `<'/`>'/`=' arms need it too.")
     (defun m5_concat_first_bad (cur)
       (if (= (ptr-read-u64 cur 0) 7)
           (let* ((a (nl_cons_car_ptr cur)) (tg (ptr-read-u64 a 0)))
-            (if (if (= tg 0) 1 (if (= tg 7) 1 (if (= tg 8) 1 (if (= tg 5) 1 (if (= tg 6) 1 0)))))
+            (if (if (= tg 0) 1 (if (= tg 7) 1 (if (= tg 8) 1 (if (= tg 5) 1 (if (= tg 6) 1 (if (= tg 14) 1 (if (= tg 15) 1 0)))))))
                 (m5_concat_first_bad (nl_cons_cdr_ptr cur))
               a))
         0))
@@ -9044,7 +9076,7 @@ baked build's own `<'/`>'/`=' arms need it too.")
     ;; 0 = fine, 1 = not a sequence, 2 = improper list, 3 = bad element.
     (defun m5_concat_arg_kind (a)
       (let* ((tg (ptr-read-u64 a 0)))
-        (if (if (= tg 0) 1 (if (= tg 7) 1 (if (= tg 8) 1 (if (= tg 5) 1 (if (= tg 6) 1 0)))))
+        (if (if (= tg 0) 1 (if (= tg 7) 1 (if (= tg 8) 1 (if (= tg 5) 1 (if (= tg 6) 1 (if (= tg 14) 1 (if (= tg 15) 1 0)))))))
             (if (= tg 7)
                 (if (= (m5_improper_tail a) 0)
                     (if (= (m5_elem_bad_char a) 0) 0 3)
@@ -9149,13 +9181,15 @@ baked build's own `<'/`>'/`=' arms need it too.")
     ;; a MutStr (tag6) wraps NlStr* @8 with ptr@8/len@16.  nl_alloc_symbol takes
     ;; (bytes-ptr len result-slot).
     (defun bf_str_ptr (sx)
-      (if (= (ptr-read-u64 sx 0) 6)
-          (ptr-read-u64 (ptr-read-u64 sx 8) 8)
-        (ptr-read-u64 sx 16)))
+      (let* ((tag (ptr-read-u64 sx 0)))
+        (if (or (= tag 6) (= tag 15))
+            (ptr-read-u64 (ptr-read-u64 sx 8) 8)
+          (ptr-read-u64 sx 16))))
     (defun bf_str_len (sx)
-      (if (= (ptr-read-u64 sx 0) 6)
-          (ptr-read-u64 (ptr-read-u64 sx 8) 16)
-        (ptr-read-u64 sx 24)))
+      (let* ((tag (ptr-read-u64 sx 0)))
+        (if (or (= tag 6) (= tag 15))
+            (ptr-read-u64 (ptr-read-u64 sx 8) 16)
+          (ptr-read-u64 sx 24))))
     (defun bf_intern (sx out)
       (nl_alloc_symbol (bf_str_ptr sx) (bf_str_len sx) out))
     ;; Doc 163 Phase C: real soft-fail lookup backing elisp `intern-soft''s
@@ -9632,15 +9666,20 @@ baked build's own `<'/`>'/`=' arms need it too.")
             ;; default" char-table semantics rather than an out-of-range error.
             (if (= tg 9)
                 (seq (nl_char_table_get_raw arr idx out) 0)
-              ;; Doc 161: aref on a string returns the CHARACTER (codepoint) at
-              ;; the char index, decoding UTF-8 (tags 5 Str and 6 MutStr).
+              ;; Unibyte strings are character-indexed raw-byte arrays.
+              (if (or (= tg 14) (= tg 15))
+                  (if (if (< idx 0) 1 (if (< idx (str-len arr)) 0 1))
+                      (bf_args_out_of_range arr (wf_arg_ptr args 1))
+                    (wf_write_int out (str-byte-at arr idx)))
+              ;; Doc 161: aref on a multibyte string returns the CHARACTER
+              ;; (codepoint), decoding UTF-8 (tags 5 Str and 6 MutStr).
               (if (if (= tg 5) 1 (if (= tg 6) 1 0))
                   (if (if (< idx 0) 1 (if (< idx (nl_str_charlen arr)) 0 1))
                       (bf_args_out_of_range arr (wf_arg_ptr args 1))
                     (wf_write_int out
                       (nl_u8_decode arr (nl_u8_cidx_byte arr 0 (str-len arr) 0 idx))))
                 ;; Not an array at all: Emacs signals `arrayp' here.
-                (bf_wrong_type_arrayp arr)))))))
+                (bf_wrong_type_arrayp arr))))))))
     ;; Generated Emacs char-table literals are read as vectors shaped like:
     ;;   #^[EXTRA0 EXTRA1 EXTRA2 #^^[1 MIN ...]]
     ;; and sub-char-tables are vectors shaped like:
@@ -9777,7 +9816,7 @@ baked build's own `<'/`>'/`=' arms need it too.")
     ;; wrong argument.
     (defun bf_elt (args out)
       (let* ((seqp (wf_arg_ptr args 0)) (tg (ptr-read-u64 seqp 0)))
-        (if (if (= tg 0) 1 (if (= tg 7) 1 (if (= tg 8) 1 (if (= tg 12) 1 (if (= tg 5) 1 (if (= tg 6) 1 0))))))
+        (if (if (= tg 0) 1 (if (= tg 7) 1 (if (= tg 8) 1 (if (= tg 12) 1 (if (= tg 5) 1 (if (= tg 6) 1 (if (= tg 14) 1 (if (= tg 15) 1 0))))))))
             (if (= (ptr-read-u64 (wf_arg_ptr args 1) 0) 2)
                 (bf_elt_checked args out)
               (if (if (= tg 0) 1 (if (= tg 7) 1 0))
@@ -9800,7 +9839,7 @@ baked build's own `<'/`>'/`=' arms need it too.")
               ;; `elt' takes a SEQUENCE, so a non-sequence is `sequencep' --
               ;; delegating to `bf_aref' named `arrayp', which is the
               ;; predicate for the array-only `aref' and a different claim.
-              (if (if (= tg 8) 1 (if (= tg 12) 1 (if (= tg 5) 1 (if (= tg 6) 1 0))))
+              (if (if (= tg 8) 1 (if (= tg 12) 1 (if (= tg 5) 1 (if (= tg 6) 1 (if (= tg 14) 1 (if (= tg 15) 1 0))))))
                   (bf_aref args out)
                 (bf_wrong_type_sequencep seqp)))))))
     ;; aset ARR IDX VAL: vector slot set (string aset not supported -> 0).
@@ -9903,7 +9942,7 @@ baked build's own `<'/`>'/`=' arms need it too.")
         (seq
          (ptr-write-u64 ebuf 0 491496043109)              ; "error" packed LE
          (nl_alloc_symbol ebuf 5 268435480)               ; TAG slot <- Symbol "error"
-         (if (if (= tg 5) 1 (if (= tg 6) 1 0))
+         (if (if (= tg 5) 1 (if (= tg 6) 1 (if (= tg 14) 1 (if (= tg 15) 1 0))))
              (let* ((ms (alloc-bytes 32 8))
                     (msg (alloc-bytes 32 8))
                     (nil-slot (alloc-bytes 32 8)))
@@ -10180,8 +10219,10 @@ baked build's own `<'/`>'/`=' arms need it too.")
     ;; ordering built on it was silently wrong rather than an error.
     (defun bf_strsym_raw (p)
       (let* ((tg (ptr-read-u64 p 0)))
-        (if (= tg 5) 1 (if (= tg 6) 1 (if (= tg 4) 1
-          (if (= tg 0) 1 (if (= tg 1) 1 0)))))))
+        (if (or (= tg 5) (= tg 6) (= tg 14) (= tg 15)
+                (= tg 4) (= tg 0) (= tg 1))
+            1
+          0)))
     ;; A list search that runs off the end of an IMPROPER list is an error in
     ;; Emacs, naming the WHOLE list: (memq 9 '(1 2 . 3)) signals, it does not
     ;; answer nil.  Answering nil said "not present" about a list that could
@@ -10224,7 +10265,8 @@ baked build's own `<'/`>'/`=' arms need it too.")
         0))
     (defun bf_arrayp_raw (p)
       (let* ((tg (ptr-read-u64 p 0)))
-        (if (= tg 5) 1 (if (= tg 6) 1 (if (= tg 8) 1 0)))))
+        (if (= tg 5) 1 (if (= tg 6) 1 (if (= tg 14) 1
+          (if (= tg 15) 1 (if (= tg 8) 1 0)))))))
     (defun bf_wrong_type_hash_table (offender)
       (let* ((wbuf (alloc-bytes 24 1))
              (cbuf (alloc-bytes 16 1))
@@ -10299,14 +10341,17 @@ baked build's own `<'/`>'/`=' arms need it too.")
          (bf_wrong_type_listp cur))))
     (defun bf_length_checked (p out)
       (let* ((tag (ptr-read-u64 p 0)))
-        (if (= tag 0) (seq (wf_write_int out 0) 0)
-          (if (= tag 7) (bf_length_list p 0 out)
-            (if (= tag 8) (seq (wf_write_int out (vector-len p)) 0)
-              (if (= tag 5) (seq (wf_write_int out (nl_str_charlen p)) 0)
-                (if (= tag 6) (seq (wf_write_int out (nl_str_charlen p)) 0)
-                  (if (= tag 12)
-                      (seq (wf_write_int out (+ (record-slot-count p) 1)) 0)
-                    (bf_wrong_type_sequencep p)))))))))
+        (cond
+         ((= tag 0) (seq (wf_write_int out 0) 0))
+         ((= tag 7) (bf_length_list p 0 out))
+         ((= tag 8) (seq (wf_write_int out (vector-len p)) 0))
+         ((or (= tag 5) (= tag 6))
+          (seq (wf_write_int out (nl_str_charlen p)) 0))
+         ((or (= tag 14) (= tag 15))
+          (seq (wf_write_int out (str-len p)) 0))
+         ((= tag 12)
+          (seq (wf_write_int out (+ (record-slot-count p) 1)) 0))
+         (t (bf_wrong_type_sequencep p)))))
     ;; fboundp/boundp: look up in the env mirror.  env+0 = mirror, env+64 = unbound.
     ;; nelisp_env_lookup_function(mirror, unbound, sym, out_slot) returns 0 if found.
     ;; A name that has only a VARIABLE binding still has a function-cell
@@ -10921,10 +10966,11 @@ baked build's own `<'/`>'/`=' arms need it too.")
     (defun bf_eq2 (a b)
       (let* ((ta (ptr-read-u64 a 0)) (tb (ptr-read-u64 b 0)))
         (if (= ta tb)
-            (if (= ta 2) (if (= (ptr-read-u64 a 8) (ptr-read-u64 b 8)) 1 0)
-              (if (= ta 4) (symbol-eq a b)
-                (if (= ta 0) 1
-                  (if (= ta 1) 1
+            (cond
+             ((= ta 2) (if (= (ptr-read-u64 a 8) (ptr-read-u64 b 8)) 1 0))
+             ((= ta 4) (symbol-eq a b))
+             ((= ta 0) 1)
+             ((= ta 1) 1)
                     ;; Doc 22 A20: Str(5)/MutStr(6) have NO stable pointer
                     ;; identity -- tag 5 is deep-copied on clone (new buffer)
                     ;; and offset 8 is the String length/capacity field, so the
@@ -10932,8 +10978,8 @@ baked build's own `<'/`>'/`=' arms need it too.")
                     ;; eq.  In this value-semantics reader a string IS its value,
                     ;; so compare by content (length + bytes), consistent with
                     ;; the Symbol(4) arm comparing by name.
-                    (if (= ta 5) (m5_streq a b)
-                      (if (= ta 6) (m5_streq a b)
+             ((or (= ta 5) (= ta 6) (= ta 14) (= ta 15))
+              (m5_streq a b))
                         ;; Doc 190 Phase A: Bignum(13) has the same "no
                         ;; stable identity at offset 8" shape as Str/Symbol
                         ;; above -- offset 8 is the SIGN word, not a
@@ -10941,8 +10987,9 @@ baked build's own `<'/`>'/`=' arms need it too.")
                         ;; compare would make most positive bignums
                         ;; mutually eq.  The limb pointer at offset 16 is
                         ;; the real per-allocation identity.
-                        (if (= ta 13) (if (= (ptr-read-u64 a 16) (ptr-read-u64 b 16)) 1 0)
-                          (if (= (ptr-read-u64 a 8) (ptr-read-u64 b 8)) 1 0))))))))
+             ((= ta 13)
+              (if (= (ptr-read-u64 a 16) (ptr-read-u64 b 16)) 1 0))
+             (t (if (= (ptr-read-u64 a 8) (ptr-read-u64 b 8)) 1 0)))
           0)))
     (defun bf_eq (args out)
       (if (= (bf_eq2 (wf_arg_ptr args 0) (wf_arg_ptr args 1)) 1)
@@ -10956,13 +11003,14 @@ baked build's own `<'/`>'/`=' arms need it too.")
     (defun bf_equal2 (a b)
       (let* ((ta (ptr-read-u64 a 0)) (tb (ptr-read-u64 b 0)))
         (if (= ta tb)
-            (if (= ta 5) (m5_streq a b)
-              (if (= ta 6) (m5_streq a b)
-                (if (= ta 7)
-                    (if (= (bf_equal2 (nl_cons_car_ptr a) (nl_cons_car_ptr b)) 1)
-                        (bf_equal2 (nl_cons_cdr_ptr a) (nl_cons_cdr_ptr b)) 0)
-                  (if (= ta 13) (if (= (nl_bignum_cmp_bignum a b) 0) 1 0)
-                    (bf_eq2 a b)))))
+            (cond
+             ((or (= ta 5) (= ta 6) (= ta 14) (= ta 15)) (m5_streq a b))
+             ((= ta 7)
+              (if (= (bf_equal2 (nl_cons_car_ptr a) (nl_cons_car_ptr b)) 1)
+                  (bf_equal2 (nl_cons_cdr_ptr a) (nl_cons_cdr_ptr b))
+                0))
+             ((= ta 13) (if (= (nl_bignum_cmp_bignum a b) 0) 1 0))
+             (t (bf_eq2 a b)))
           0)))
     (defun bf_equal (args out)
       (if (= (bf_equal2 (wf_arg_ptr args 0) (wf_arg_ptr args 1)) 1)
@@ -11094,7 +11142,9 @@ Wave-2 (C) appends bf_ash (shl/sar compose) + bf_str_lt (byte-lexicographic).")
     ((:lit "consp")    . (if (= (ptr-read-u64 (wf_arg_ptr args 0) 0) 7) (wf_write_t out) (wf_write_nil out)))
     ((:lit "atom")     . (if (= (ptr-read-u64 (wf_arg_ptr args 0) 0) 7) (wf_write_nil out) (wf_write_t out)))
     ((:lit "stringp")  . (let* ((tg (ptr-read-u64 (wf_arg_ptr args 0) 0)))
-                           (if (= tg 5) (wf_write_t out) (if (= tg 6) (wf_write_t out) (wf_write_nil out)))))
+                           (if (= tg 5) (wf_write_t out) (if (= tg 6) (wf_write_t out)
+                             (if (= tg 14) (wf_write_t out) (if (= tg 15) (wf_write_t out)
+                               (wf_write_nil out)))))))
     ((:lit "symbolp")  . (let* ((tg (ptr-read-u64 (wf_arg_ptr args 0) 0)))
                            ;; nil and t are also symbols in elisp
                            (if (= tg 4) (wf_write_t out) (if (= tg 0) (wf_write_t out) (if (= tg 1) (wf_write_t out) (wf_write_nil out))))))
@@ -11182,7 +11232,7 @@ Wave-2 (C) appends bf_ash (shl/sar compose) + bf_str_lt (byte-lexicographic).")
     ;; that interned something already interned was almost certainly working
     ;; from a wrong assumption about what it held.
     ((:lit "intern")      . (let* ((a (wf_arg_ptr args 0)) (tg (ptr-read-u64 a 0)))
-                              (if (if (= tg 5) 1 (if (= tg 6) 1 0))
+                              (if (if (= tg 5) 1 (if (= tg 6) 1 (if (= tg 14) 1 (if (= tg 15) 1 0))))
                                   ;; An existing intern is a lookup, not a
                                   ;; mutation.  Only the miss that would insert
                                   ;; into the shared intern table is refused.
@@ -11896,13 +11946,15 @@ extern arms in dynamic builds."
 (defconst nelisp-standalone--fileio-forms-part1
   '(
     (defun nl_bi_strptr (sx)
-      (if (= (ptr-read-u64 sx 0) 6)
-          (ptr-read-u64 (ptr-read-u64 sx 8) 8)
-        (ptr-read-u64 sx 16)))
+      (let* ((tag (ptr-read-u64 sx 0)))
+        (if (or (= tag 6) (= tag 15))
+            (ptr-read-u64 (ptr-read-u64 sx 8) 8)
+          (ptr-read-u64 sx 16))))
     (defun nl_bi_strlen (sx)
-      (if (= (ptr-read-u64 sx 0) 6)
-          (ptr-read-u64 (ptr-read-u64 sx 8) 16)
-        (ptr-read-u64 sx 24)))
+      (let* ((tag (ptr-read-u64 sx 0)))
+        (if (or (= tag 6) (= tag 15))
+            (ptr-read-u64 (ptr-read-u64 sx 8) 16)
+          (ptr-read-u64 sx 24))))
     (defun nl_bi_cpath_loop (src dst i n)
       (if (= i n)
           (nl_seq2 (ptr-write-u8 dst n 0) dst)
@@ -12276,7 +12328,7 @@ extern arms in dynamic builds."
       (let* ((tag (ptr-read-u64 sx 0)))
         (if (= tag 5)
             1
-          (if (= tag 6) 1 0))))))
+          (if (= tag 6) 1 (if (= tag 14) 1 (if (= tag 15) 1 0))))))))
 
 ;; nelisp-standalone--fileio-forms-part1 ends right after
 ;; `nl_bi_process_string_sx_p'; the POSIX-only child-fd redirect/setup
@@ -13219,6 +13271,8 @@ before feat/windows-spawn; Windows targets get a CreateProcessW spawn-model
                 (symbol-eq a b)
               (if (= (sexp-tag a) 5)
                   (str-eq a b)
+                (if (= (sexp-tag a) 14)
+                    (str-eq a b)
                 (if (= (sexp-tag a) 3)
                     (if (= (sexp-int-unwrap a) (sexp-int-unwrap b)) 1 0)
                   (if (= (sexp-tag a) 0)
@@ -13227,7 +13281,7 @@ before feat/windows-spawn; Windows targets get a CreateProcessW spawn-model
                         1
                       (if (= (sexp-payload-ptr a) (sexp-payload-ptr b))
                           1
-                        0)))))))
+                        0))))))))
         0))
     (defun nl_ct_catch_on_match (eqres tag_slot env out _p4 _p5)
       (if (= eqres 1)
@@ -13363,7 +13417,8 @@ from the patched combiner-cons (see `nelisp-standalone--patch-combiner-cons').")
       (if (= (sexp-tag body_ptr) 7)
           (let* ((head_ptr (nl_cons_car_ptr body_ptr))
                  (rest_ptr (nl_cons_cdr_ptr body_ptr)))
-            (if (= (sexp-tag head_ptr) 5)
+            (if (or (= (sexp-tag head_ptr) 5)
+                    (= (sexp-tag head_ptr) 14))
                 (if (= (sexp-tag rest_ptr) 7)
                     (nl_sf_decl_strip_body rest_ptr)
                   body_ptr)
@@ -13693,8 +13748,12 @@ from the patched combiner-cons (see `nelisp-standalone--patch-combiner-cons').")
       ;; on for every `setq'.
       (let* ((mirror-ptr (+ env 0))
              (unbound-ptr (+ env 64)))
-        (if (and (or (= (sexp-tag alias-sym-ptr) 4) (= (sexp-tag alias-sym-ptr) 5))
-                 (or (= (sexp-tag base-sym-ptr) 4) (= (sexp-tag base-sym-ptr) 5)))
+        (if (and (or (= (sexp-tag alias-sym-ptr) 4)
+                     (= (sexp-tag alias-sym-ptr) 5)
+                     (= (sexp-tag alias-sym-ptr) 14))
+                 (or (= (sexp-tag base-sym-ptr) 4)
+                     (= (sexp-tag base-sym-ptr) 5)
+                     (= (sexp-tag base-sym-ptr) 14)))
             (if (= (extern-call nl_thread_mirror_mutation_guard
                                 mirror-ptr alias-sym-ptr)
                    1)
@@ -15238,13 +15297,15 @@ outside it needs; copied rather than the whole block pulled in."
         '(defun nl_os_write_stderr (ptr len)
            (syscall-direct 1 2 ptr len 0 0 0))))
     (defun nl_bi_strptr (sx)
-      (if (= (ptr-read-u64 sx 0) 6)
-          (ptr-read-u64 (ptr-read-u64 sx 8) 8)
-        (ptr-read-u64 sx 16)))
+      (let* ((tag (ptr-read-u64 sx 0)))
+        (if (or (= tag 6) (= tag 15))
+            (ptr-read-u64 (ptr-read-u64 sx 8) 8)
+          (ptr-read-u64 sx 16))))
     (defun nl_bi_strlen (sx)
-      (if (= (ptr-read-u64 sx 0) 6)
-          (ptr-read-u64 (ptr-read-u64 sx 8) 16)
-        (ptr-read-u64 sx 24)))
+      (let* ((tag (ptr-read-u64 sx 0)))
+        (if (or (= tag 6) (= tag 15))
+            (ptr-read-u64 (ptr-read-u64 sx 8) 16)
+          (ptr-read-u64 sx 24))))
     (defun bf_eq2 (a b)
       (let* ((ta (ptr-read-u64 a 0)) (tb (ptr-read-u64 b 0)))
         (if (= ta tb)
@@ -15254,8 +15315,10 @@ outside it needs; copied rather than the whole block pulled in."
                   (if (= ta 1) 1
                     (if (= ta 5) (m5_streq a b)
                       (if (= ta 6) (m5_streq a b)
+                        (if (= ta 14) (m5_streq a b)
+                          (if (= ta 15) (m5_streq a b)
                         (if (= ta 13) (if (= (ptr-read-u64 a 16) (ptr-read-u64 b 16)) 1 0)
-                          (if (= (ptr-read-u64 a 8) (ptr-read-u64 b 8)) 1 0))))))))
+                          (if (= (ptr-read-u64 a 8) (ptr-read-u64 b 8)) 1 0))))))))))
           0)))
     (defun bf_eq (args out)
       (if (= (bf_eq2 (wf_arg_ptr args 0) (wf_arg_ptr args 1)) 1)
@@ -20830,19 +20893,37 @@ correctly."
       (if (< v 0)
           (nl_cli_put_udec fbuf (nl_cli_put_byte fbuf off 45) (- 0 v))
         (nl_cli_put_udec fbuf off v)))
-    (defun nl_cli_put_raw_bytes (src fbuf i n off)
+    (defun nl_cli_put_raw_bytes (src fbuf i n off escape-high)
       (if (= i n)
           off
-        (nl_cli_put_raw_bytes
-         src fbuf (+ i 1) n
-         (nl_cli_put_byte fbuf off (ptr-read-u8 src i)))))
+        (let* ((b (ptr-read-u8 src i)))
+          (nl_cli_put_raw_bytes
+           src fbuf (+ i 1) n
+           (if (if (= escape-high 1) (>= b 128) 0)
+               (nl_cli_put_octal_byte fbuf off b)
+             (nl_cli_put_byte fbuf off b))
+           escape-high))))
+    (defun nl_cli_put_octal_byte (fbuf off b)
+      (nl_cli_put_byte
+       fbuf
+       (nl_cli_put_byte
+        fbuf
+        (nl_cli_put_byte fbuf (nl_cli_put_byte fbuf off 92)
+                         (+ 48 (/ b 64)))
+        (+ 48 (logand (/ b 8) 7)))
+       (+ 48 (logand b 7))))
     (defun nl_cli_put_string_value (fbuf off sx quoted)
       (let* ((off2 (if (= quoted 1) (nl_cli_put_byte fbuf off 34) off))
              (off3 (nl_cli_put_raw_bytes (nl_bi_strptr sx) fbuf 0
-                                         (nl_bi_strlen sx) off2)))
+                                         (nl_bi_strlen sx) off2 0)))
         (if (= quoted 1)
             (nl_cli_put_byte fbuf off3 34)
           off3)))
+    (defun nl_cli_put_unibyte_string_value (fbuf off sx)
+      (let* ((off2 (nl_cli_put_byte fbuf off 34))
+             (off3 (nl_cli_put_raw_bytes
+                    (nl_bi_strptr sx) fbuf 0 (nl_bi_strlen sx) off2 1)))
+        (nl_cli_put_byte fbuf off3 34)))
     (defun nl_cli_put_list_tail (fbuf off node first)
       (let* ((tag (ptr-read-u64 node 0)))
         (if (= tag 7)
@@ -20908,6 +20989,8 @@ correctly."
          ((= tag 4) (nl_cli_put_string_value fbuf off out 0))
          ((= tag 5) (nl_cli_put_string_value fbuf off out 1))
          ((= tag 6) (nl_cli_put_string_value fbuf off out 1))
+         ((= tag 14) (nl_cli_put_unibyte_string_value fbuf off out))
+         ((= tag 15) (nl_cli_put_unibyte_string_value fbuf off out))
          ((= tag 7) (nl_cli_put_list_tail fbuf (nl_cli_put_byte fbuf off 40) out 1))
          ((= tag 8) (nl_cli_put_vector_loop fbuf (nl_cli_put_byte fbuf off 91)
                                             out 0 (vector-len out)))

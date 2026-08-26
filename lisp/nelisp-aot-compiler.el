@@ -5134,7 +5134,9 @@ are deliberately excluded."
               (= (sexp-tag ,arg) ,nelisp-sexp--tag-float)))
         ('stringp
          `(or (= (sexp-tag ,arg) ,nelisp-sexp--tag-str)
-              (= (sexp-tag ,arg) ,nelisp-sexp--tag-mut-str)))
+              (= (sexp-tag ,arg) ,nelisp-sexp--tag-mut-str)
+              (= (sexp-tag ,arg) ,nelisp-sexp-layout-tag-unibyte-str)
+              (= (sexp-tag ,arg) ,nelisp-sexp-layout-tag-unibyte-mut-str)))
         ('vectorp
          `(= (sexp-tag ,arg) ,nelisp-sexp--tag-vector))
         (_ nil)))))
@@ -15875,8 +15877,8 @@ literal expands to ~50 bytes of code, a 20-byte literal to ~210 bytes."
 check against LITERAL_LEN, then byte-loop compare against compile-time
 literal bytes.  Returns i64 0/1 in rax.
 
-Extends `symbol-name-eq' to accept both Sexp::Symbol (tag 4) and
-Sexp::Str (tag 5) inputs.  The tag check emits:
+Extends `symbol-name-eq' to accept Sexp::Symbol (tag 4), Sexp::Str
+(tag 5), and layout-identical Sexp::UnibyteStr (tag 14) inputs.
   movzx rax, byte [rdi]
   cmp rax, 4       ; Symbol?
   jz <bytes-check>
@@ -15897,11 +15899,15 @@ differs (adds one cmp+jnz for the Str arm)."
     (nelisp-asm-x86_64-mov-reg-reg buf 'rdi 'rax)
     ;; Tag check: byte [rdi] == 4 (Symbol) → bytes_check
     ;;            byte [rdi] == 5 (Str)    → bytes_check
-    ;;            anything else             → false_lbl
+    ;;            byte [rdi] == 14 (UnibyteStr) → bytes_check
+    ;;            anything else                 → false_lbl
     (nelisp-asm-x86_64-movzx-reg-byte-mem buf 'rax 'rdi)
     (nelisp-asm-x86_64-cmp-imm32 buf 'rax nelisp-sexp--tag-symbol)
     (nelisp-asm-x86_64-jz-rel32 buf bytes-check-lbl)
     (nelisp-asm-x86_64-cmp-imm32 buf 'rax nelisp-sexp--tag-str)
+    (nelisp-asm-x86_64-jz-rel32 buf bytes-check-lbl)
+    (nelisp-asm-x86_64-cmp-imm32
+     buf 'rax nelisp-sexp-layout-tag-unibyte-str)
     (nelisp-asm-x86_64-jnz-rel32 buf false-lbl)
     (nelisp-asm-x86_64-define-label buf bytes-check-lbl)
     ;; Length check: NlString::len at offset 24 == LITERAL_LEN.
@@ -17318,6 +17324,9 @@ result (zero-extended byte) in x0."
     (nelisp-asm-arm64-cmp-imm buf 'x0 nelisp-sexp--tag-symbol)
     (nelisp-asm-arm64-b-cond buf 'eq bytes-lbl)
     (nelisp-asm-arm64-cmp-imm buf 'x0 nelisp-sexp--tag-str)
+    (nelisp-asm-arm64-b-cond buf 'eq bytes-lbl)
+    (nelisp-asm-arm64-cmp-imm
+     buf 'x0 nelisp-sexp-layout-tag-unibyte-str)
     (nelisp-asm-arm64-b-cond buf 'ne false-lbl)
     (nelisp-asm-arm64-define-label buf bytes-lbl)
     (nelisp-asm-arm64-ldr-imm buf 'x0 'x1 nelisp-string--offset-length)

@@ -111,6 +111,21 @@ doc200-census|lisp/nelisp-cc-jit-length.el|s/(= (sexp-tag arg) 5)/(= (sexp-tag a
 #   exercising the interpreter.
 ert-full|src/nelisp-eval.el|s/^  (nelisp-eval-form form nil))$/  (progn (nelisp-eval-form form nil) nil))/|nelisp-eval always returns nil, corrupting every should that reads its value
 ert-full|tools/ai/nelisp-ai.sh|s/'nelisp-worker-soak-test\\\.el\$'/'.'/|test_files() output gets filtered to nothing regardless of what matched; "no test file matched" must still fail ert-full
+# Doc 200 P1 representation proof.  These rows are scoped by the mutation
+# harness to the hand-built tag-14/tag-15 executable test.  Each injection
+# removes one production consumer arm while leaving the raw layouts intact.
+# Verified 2026-08-26: all six rows printed `went red as it should'; the
+# restored targeted ERT printed `Ran 2 tests, 2 results as expected, 0
+# unexpected', and the complete ert-full mutation verification finished
+# `GATE-COUNT checked=12 findings=0'.  The first clone injection removed the
+# tag-14 fast path but stayed green because the generic rc path still copied
+# the same four words; it was replaced by the lethal tag-15 refcount row.
+ert-full|lisp/nelisp-aot-compiler.el|/(defun nelisp-aot-compiler--aot-direct-tag-predicate-form/,/(defconst nelisp-aot-compiler--aot-builtinn-delegation-symbols/s/(= (sexp-tag ,arg) ,nelisp-sexp-layout-tag-unibyte-str)/(= (sexp-tag ,arg) 140)/|the direct AOT stringp expansion stops accepting tag 14
+ert-full|scripts/nelisp-standalone-build.el|/(defun bf_arrayp_raw/,/(defun bf_wrong_type_hash_table/s/(= tg 14)/(= tg 140)/|arrayp stops accepting a hand-built tag-14 string
+ert-full|lisp/nelisp-cc-jit-type-of.el|/(defun nl_jit_type_of_tag/,/(defun nl_jit_type_of_inner/s/((= tag 14)/((= tag 140)/|type-of stops mapping tag 14 to string
+ert-full|scripts/nelisp-standalone-build.el|/(defun nl_gc_mark_slot/,/(defun nl_gc_poison_fill/s/(or (= tag 5) (= tag 14))/(or (= tag 5) (= tag 140))/|the precise GC marker stops marking a reachable tag-14 byte buffer
+ert-full|lisp/nelisp-cc-sexp-clone-into.el|/(defun nl_sci_bump/,/(defun nl_sci_rc/s/(or (= tag 6) (= tag 15))/(or (= tag 6) (= tag 150))/|the cloner stops refcounting the NlStr box of a hand-built tag-15 string
+ert-full|scripts/nelisp-standalone-build.el|/(defun nl_cli_value_to_buf/,/(defun nl_cli_write_value/s/((= tag 14)/((= tag 140)/|CLI value output stops rendering tag-14 bytes with raw octal escapes
 #
 # 2026-08-22 (this session): doc-claims, added the same session as the
 # Definition of Done it enforces.  Case (i) of its own verification (a

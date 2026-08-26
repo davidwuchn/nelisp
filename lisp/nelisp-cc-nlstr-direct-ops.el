@@ -121,9 +121,9 @@ value form using the `ptr-read-u64' grammar op in nested position.")
      ;; Note: `sexp-tag' is evaluated at most 3 times; it is a pure
      ;; grammar op (single load from [sexp+0]) so repeated evaluation
      ;; is safe and avoids the `let' restriction.
-     (if (= (sexp-tag sexp) 6)
+     (if (or (= (sexp-tag sexp) 6) (= (sexp-tag sexp) 15))
          (ptr-read-u64 (ptr-read-u64 sexp 8) 8)
-       (if (= (sexp-tag sexp) 5)
+       (if (or (= (sexp-tag sexp) 5) (= (sexp-tag sexp) 14))
            (ptr-read-u64 sexp 16)
          (if (= (sexp-tag sexp) 4)
              (ptr-read-u64 sexp 16)

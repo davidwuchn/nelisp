@@ -867,6 +867,8 @@ A dispatch arm nothing installs is dead code that still links."
                      ((= tag 4) (nl_cli_put_string_value fbuf off out 0))
                      ((= tag 5) (nl_cli_put_string_value fbuf off out 1))
                      ((= tag 6) (nl_cli_put_string_value fbuf off out 1))
+                     ((= tag 14) (nl_cli_put_unibyte_string_value fbuf off out))
+                     ((= tag 15) (nl_cli_put_unibyte_string_value fbuf off out))
                      ((= tag 7) (nl_cli_put_list_tail fbuf
                                                        (nl_cli_put_byte fbuf off 40)
                                                        out 1))

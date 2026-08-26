@@ -146,7 +146,8 @@
           0
         (if (= (sexp-tag name-ptr) 4)
             1
-          (if (= (sexp-tag name-ptr) 5) 1 0))))
+          (if (or (= (sexp-tag name-ptr) 5)
+                  (= (sexp-tag name-ptr) 14)) 1 0))))
     (defun nelisp_env_set_value
         (mirror-ptr frames-ptr name-ptr val-ptr scratch-ptr _pad)
       (if (= (nelisp_env_set_value_name_ok name-ptr) 0)

@@ -91,7 +91,9 @@
              0)
           (if (or (= (sexp-tag arg) 4)
                   (= (sexp-tag arg) 5)
-                  (= (sexp-tag arg) 6))
+                  (= (sexp-tag arg) 6)
+                  (= (sexp-tag arg) 14)
+                  (= (sexp-tag arg) 15))
               ;; Str / MutStr / Symbol → walk bytes with ASCII fold
               (and
                (mut-str-make-empty out 0)
