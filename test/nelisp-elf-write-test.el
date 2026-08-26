@@ -1030,15 +1030,35 @@ the multibyte → write-region byte-doubling regression."
               (should (= (logand modes #o111) #o111)))))
       (ignore-errors (delete-file path)))))
 
+(defun nelisp-elf-write-test--best-emit-seconds (path kb attempts)
+  "Fastest of ATTEMPTS emits of a KB-kilobyte ELF to PATH, in seconds.
+
+These are perf ACCEPTANCE gates (Doc 91 §91.d): the claim is that the
+chunk-build path can emit this much, not that a shared CI runner never
+stalls.  A single sample cannot tell those apart.  On 2026-08-26 the
+1 MB gate failed at 7.57 sec on macos-latest/29.4 while the other
+eleven samples in the same CI run -- including the same JIT lane on
+macOS 30.1 and on both Windows lanes -- came in between 0.003 and
+0.009 sec.  The code was fine; that one runner stalled for seven
+seconds, and a 1700x margin was not enough to absorb it because only
+one sample was taken.  Taking the best of a few makes a spurious
+failure require every attempt to stall, while a real regression --
+which slows every attempt -- still trips the bound."
+  (let ((best nil))
+    (dotimes (_ attempts)
+      (let ((elapsed (car (benchmark-run 1
+                            (nelisp-elf-benchmark-write-binary path kb)))))
+        (when (or (null best) (< elapsed best))
+          (setq best elapsed))))
+    best))
+
 (ert-deftest nelisp-elf-write-benchmark-100kb-under-2sec ()
   "100 KB ELF emit completes within 2 sec on the chunk-build path.
 Generous bound — actual is typically < 50 ms — to absorb GC /
 CI variance."
   (let ((path (make-temp-file "nelisp-elf-bench-100kb-")))
     (unwind-protect
-        (let ((elapsed (car (benchmark-run 1
-                              (nelisp-elf-benchmark-write-binary
-                               path 100)))))
+        (let ((elapsed (nelisp-elf-write-test--best-emit-seconds path 100 3)))
           (should (< elapsed 2.0)))
       (ignore-errors (delete-file path)))))
 
@@ -1047,9 +1067,7 @@ CI variance."
 (= Doc 91 §91.d perf acceptance gate)."
   (let ((path (make-temp-file "nelisp-elf-bench-1mb-")))
     (unwind-protect
-        (let ((elapsed (car (benchmark-run 1
-                              (nelisp-elf-benchmark-write-binary
-                               path 1000)))))
+        (let ((elapsed (nelisp-elf-write-test--best-emit-seconds path 1000 3)))
           (should (< elapsed 5.0)))
       (ignore-errors (delete-file path)))))
 

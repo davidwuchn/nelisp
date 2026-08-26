@@ -263,10 +263,17 @@ jobs:
           clone_related nelisp-emacs nelisp-emacs "${NELISP_EMACS_REF:-${RELATED_REF:-main}}"
           clone_related anvil.el anvil.el "${ANVIL_REF:-${RELATED_REF:-main}}"
 
-      - name: Set up Emacs
-        uses: purcell/setup-emacs@v8.0
-        with:
-          version: '30.2'
+      # Not purcell/setup-emacs here, unlike the aarch64 job: that action
+      # builds Emacs from nixpkgs, and Nixpkgs 26.11 dropped x86_64-darwin
+      # ("error: Nixpkgs 26.11 has dropped support for x86_64-darwin"), so
+      # this job could not even install Emacs.  Homebrew still ships an
+      # Intel build.  The version is whatever brew has rather than a pinned
+      # 30.2, so print it -- a parity job that does not say which Emacs it
+      # compared against is reporting half a result.
+      - name: Set up Emacs (Homebrew; nixpkgs no longer supports x86_64-darwin)
+        run: |
+          brew install emacs
+          emacs --version | head -1
 
       - name: Verify macOS Intel standalone parity
         shell: bash
