@@ -43,6 +43,10 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          # gate-mutation's changed-only mode diffs against the merge base,
+          # which a shallow clone does not have.
+          fetch-depth: 0
 
       - name: Set up Emacs (Linux / macOS)
         if: runner.os != 'Windows'
@@ -205,7 +209,31 @@ jobs:
         # runs on both lanes.
         if: runner.os == 'Linux' && matrix.emacs-version == '30.1'
         shell: bash
-        run: bash tools/ai/nelisp-ai.sh check
+        run: |
+          # A full gate-mutation sweep is 2547 seconds -- measured on the
+          # ubuntu/29.4 lane of run 32931012524, where it was 42.5 of this
+          # step's 43.6 minutes.  Almost all of it re-proves rows whose file
+          # nobody touched.
+          #
+          # On the integration branch the full sweep still runs: that is where
+          # the guarantee has to hold, and a row can go stale because the GATE
+          # moved, which no diff of the mutated file would reveal.  Branches
+          # and PRs get the narrowed sweep as a pre-merge signal.
+          if [ "$GITHUB_REF" = refs/heads/main ] || [ "$GITHUB_REF" = refs/heads/master ]; then
+            echo 'gate-mutation: integration branch -- full sweep'
+          else
+            git fetch --quiet origin main 2>/dev/null || git fetch --quiet origin master 2>/dev/null || true
+            for b in origin/main origin/master; do
+              if base=$(git merge-base HEAD "$b" 2>/dev/null); then
+                export NELISP_GATE_MUTATION_BASE="$base"
+                echo "gate-mutation: narrowed against $b ($base)"
+                break
+              fi
+            done
+            # No base found: leave the variable unset so the sweep stays full.
+            # Narrowing against a base we could not read would run zero rows.
+          fi
+          bash tools/ai/nelisp-ai.sh check
 
       # Placed before the ERT suite so a pre-existing test failure does
       # not skip the Mach-O toolchain-acceptance signal.

@@ -87,6 +87,52 @@ if [ -n "$only" ]; then
   [ -z "$rows" ] && { echo "gate-mutation: FAIL (no row for gate '$only')"; exit 1; }
   echo "gate-mutation: restricted to gate '$only'"
 fi
+# Changed-only selection.  A full sweep is 2547 seconds -- measured on the
+# ubuntu/29.4 lane of run 32931012524, where it was 42.5 of check-tier's
+# 43.6 minutes, i.e. essentially the whole tier.  Most of that proves rows
+# whose file nobody touched.
+#
+# `NELISP_GATE_MUTATION_BASE=<ref>' restricts the sweep to rows whose
+# mutated file differs from <ref>.  This is a PRE-MERGE signal, not a
+# replacement for the sweep: a row can also stop working because the GATE
+# moved rather than the mutated file, and no diff of the mutated file will
+# show that.  So the harness itself, the row table, the Makefile that
+# dispatches the gates, and the tier runner all force the full sweep when
+# they change -- and CI still runs the whole thing on the integration
+# branch, where the guarantee has to hold.
+base=${NELISP_GATE_MUTATION_BASE:-}
+if [ -n "$base" ]; then
+  if ! changed=$(git diff --name-only "$base" 2>/dev/null); then
+    echo "gate-mutation: FAIL (cannot diff against '$base'; refusing to"
+    echo "  narrow the sweep on a base I could not read -- that would run"
+    echo "  zero rows and report success)"
+    exit 1
+  fi
+  forces_full=0
+  for f in $changed; do
+    case "$f" in
+      tools/nelisp-gate-mutation.sh|tools/gate-mutations.txt|Makefile|tools/ai/nelisp-ai.sh)
+        forces_full=1 ;;
+    esac
+  done
+  if [ "$forces_full" = 1 ]; then
+    echo "gate-mutation: full sweep (the harness, the row table, or the gate"
+    echo "  dispatch changed, so every row's verdict is back in question)"
+  else
+    rows=$(printf '%s\n' "$rows" | awk -F'|' -v c="$(printf '%s\n' "$changed" | tr '\n' ' ')" '
+      { if (index(" " c " ", " " $2 " ")) print }')
+    if [ -z "$rows" ]; then
+      # Not `checked=0': in this tree that reads as "the gate died".  A
+      # reasoned skip is a different outcome and says so, the same way
+      # every other gate here reports one.
+      echo "GATE-SKIP changed-only against '$base': no mutated file was touched"
+      echo "gate-mutation: SKIP (no row's file changed since $base)"
+      exit 0
+    fi
+    echo "gate-mutation: changed-only against '$base' ($(printf '%s\n' "$rows" | wc -l) of $(printf '%s\n' "$(grep -v '^#' tools/gate-mutations.txt | grep -v '^[[:space:]]*$')" | wc -l) rows)"
+  fi
+fi
+
 pat=${NELISP_GATE_MUTATION_GREP:-}
 if [ -n "$pat" ]; then
   rows=$(printf '%s\n' "$rows" | grep -F "$pat")
@@ -95,6 +141,19 @@ if [ -n "$pat" ]; then
 fi
 
 [ -z "$rows" ] && { echo "gate-mutation: FAIL (no mutations defined)"; exit 1; }
+# Show the selection and stop.  Inspecting which rows a filter picks used
+# to mean starting a sweep and killing it, which is how an injected defect
+# once got left in the tree -- the harness restores the file at the END of
+# a row, so a kill mid-row keeps the mutation.  This exits before any row
+# is touched.
+if [ -n "${NELISP_GATE_MUTATION_LIST_ONLY:-}" ]; then
+  printf '%s\n' "$rows" | awk -F'|' '{printf "  %-46s %s\n", $1, $2}'
+  printf 'gate-mutation: %s row(s) selected (list-only; nothing was injected)\n' \
+    "$(printf '%s\n' "$rows" | wc -l | tr -d ' ')"
+  exit 0
+fi
+
+
 total=0; bad=0
 while IFS='|' read -r gate file expr what; do
   [ -z "${gate:-}" ] && continue
