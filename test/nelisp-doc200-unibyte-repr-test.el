@@ -36,11 +36,20 @@
 (require 'nelisp-sexp-layout)
 (require 'nelisp-standalone-build)
 (require 'nelisp-cc-sexp-clone-into)
+(require 'nelisp-cc-evalport-nonenv-mut-str-set-cp)
+(require 'nelisp-cc-jit-mut-str-set-codepoint)
 (require 'nelisp-cc-jit-type-of)
 (require 'nelisp-cc-nlstr-direct-ops)
 
 (defconst nelisp-doc200-unibyte-repr-test--page #x30000000
   "Fixed scratch page used only by the freestanding representation probe.")
+
+(defconst nelisp-doc200-unibyte-repr-test--repo-root
+  (let* ((this (or load-file-name buffer-file-name))
+         (test-dir (and this (file-name-directory this))))
+    (and test-dir
+         (file-name-directory (directory-file-name test-dir))))
+  "Repository root used to locate the already-built standalone binary.")
 
 (defun nelisp-doc200-unibyte-repr-test--forms (source)
   "Return SOURCE's top-level forms, accepting a `(seq ...)' or a list."
@@ -73,7 +82,213 @@
            (or (nelisp-doc200-unibyte-repr-test--contains-p
                 (car tree) needle)
                (nelisp-doc200-unibyte-repr-test--contains-p
-                (cdr tree) needle)))))
+               (cdr tree) needle)))))
+
+(defun nelisp-doc200-unibyte-repr-test--m5-defun (name)
+  "Return production M5 helper defun NAME."
+  (nelisp-doc200-unibyte-repr-test--defun
+   name nelisp-standalone--applyfn-m5-helpers))
+
+(defun nelisp-doc200-unibyte-repr-test--bf-defun (name)
+  "Return production standalone builtin helper defun NAME."
+  (nelisp-doc200-unibyte-repr-test--defun
+   name nelisp-standalone--applyfn-bf-helpers))
+
+(defun nelisp-doc200-unibyte-repr-test--eval-standalone (expression)
+  "Evaluate EXPRESSION with the prepared standalone binary and return stdout."
+  (let ((binary (expand-file-name
+                 "target/nelisp"
+                 nelisp-doc200-unibyte-repr-test--repo-root)))
+    (unless (file-executable-p binary)
+      (ert-skip "target/nelisp is not built; standalone-reader-test owns it"))
+    (with-temp-buffer
+      (let ((rc (call-process binary nil t nil "--eval" expression)))
+        (unless (= rc 0)
+          (ert-fail
+           (format "standalone Doc 200 expression failed: rc=%S stdout=%S"
+                   rc (buffer-string))))
+        (buffer-string)))))
+
+(defun nelisp-doc200-unibyte-repr-test--eval-standalone-error (expression)
+  "Evaluate EXPRESSION and return (EXIT-CODE STDERR) for a failing read."
+  (let ((binary (expand-file-name
+                 "target/nelisp"
+                 nelisp-doc200-unibyte-repr-test--repo-root))
+        (stderr-file (make-temp-file "nelisp-doc200-reader-stderr-")))
+    (unless (file-executable-p binary)
+      (ert-skip "target/nelisp is not built; standalone-reader-test owns it"))
+    (unwind-protect
+        (with-temp-buffer
+          (let ((rc (call-process binary nil (list t stderr-file) nil
+                                  "--eval" expression)))
+            (with-temp-buffer
+              (insert-file-contents stderr-file)
+              (list rc (buffer-string)))))
+      (when (file-exists-p stderr-file)
+        (delete-file stderr-file)))))
+
+(defun nelisp-doc200-unibyte-repr-test--mutation-probe-source ()
+  "Return a freestanding proof of fixed-width `aset' on all string tags."
+  (let* ((base nelisp-doc200-unibyte-repr-test--page)
+         (slot14 (+ base 32))
+         (slot15 (+ base 64))
+         (slot5 (+ base 96))
+         (slot6 (+ base 128))
+         (box15 (+ base 160))
+         (box6 (+ base 192))
+         (buf14 (+ base 224))
+         (buf15 (+ base 240))
+         (buf5 (+ base 256))
+         (buf6 (+ base 272))
+         (val255 (+ base 320))
+         (val0 (+ base 352))
+         (val98 (+ base 384))
+         (val99 (+ base 416))
+         (val12354 (+ base 448))
+         (val97 (+ base 480))
+         (out (+ base 512))
+         (bf-layout-forms
+          (mapcar #'nelisp-doc200-unibyte-repr-test--bf-defun
+                  '(bf_str_ptr bf_str_len)))
+         (m5-forms
+          (mapcar #'nelisp-doc200-unibyte-repr-test--m5-defun
+                  '(nl_u8_clen_at nl_str_charlen nl_u8_cidx_byte)))
+         (bf-aset-forms
+          (mapcar #'nelisp-doc200-unibyte-repr-test--bf-defun
+                  '(bf_aset_string_write bf_aset_unibyte_string
+                    bf_aset_multibyte_string))))
+    `(seq
+      ;; The signal helpers are made numeric in this probe so forbidden
+      ;; writes can be asserted without needing the interpreter's catch
+      ;; machinery.  The production helpers themselves are used unchanged.
+      (defun wf_dirty () 1)
+      (defun wf_copy32 (dst src)
+        (seq
+         (ptr-write-u64 dst 0 (ptr-read-u64 src 0))
+         (ptr-write-u64 dst 8 (ptr-read-u64 src 8))
+         (ptr-write-u64 dst 16 (ptr-read-u64 src 16))
+         (ptr-write-u64 dst 24 (ptr-read-u64 src 24))
+         1))
+      (defun bf_wrong_type_integerp (_offender) 2)
+      (defun bf_args_out_of_range (_arr _idx) 3)
+      (defun bf_args_out_of_range_byte (_offender) 4)
+      (defun bf_aset_fixed_width_rejected (_out) 5)
+      ,@bf-layout-forms
+      (defun m5_strlen (src) (bf_str_len src))
+      (defun m5_byte_at (src i) (ptr-read-u8 (bf_str_ptr src) i))
+      ,@m5-forms
+      ,@bf-aset-forms
+      (defun doc200_write_int (slot value)
+        (seq (ptr-write-u64 slot 0 2) (ptr-write-u64 slot 8 value) 0))
+      (defun doc200_aset_setup ()
+        (seq
+         ;; mmap(BASE, 4096, PROT_RW, MAP_FIXED|PRIVATE|ANON, -1, 0)
+         (syscall-direct 9 ,base 4096 3 50 -1 0)
+         ;; Inline UnibyteStr and boxed UnibyteMutStr, one raw byte each.
+         (ptr-write-u64 ,slot14 0 14)
+         (ptr-write-u64 ,slot14 8 1)
+         (ptr-write-u64 ,slot14 16 ,buf14)
+         (ptr-write-u64 ,slot14 24 1)
+         (ptr-write-u8 ,buf14 0 200)
+         (ptr-write-u64 ,slot15 0 15)
+         (ptr-write-u64 ,slot15 8 ,box15)
+         (ptr-write-u64 ,box15 0 1)
+         (ptr-write-u64 ,box15 8 ,buf15)
+         (ptr-write-u64 ,box15 16 1)
+         (ptr-write-u64 ,box15 24 1)
+         (ptr-write-u8 ,buf15 0 201)
+         ;; Inline Str and boxed MutStr each hold "a\u3042" (four UTF-8 bytes,
+         ;; two characters).  Only replacing the leading ASCII character is
+         ;; permitted by the Emacs 31.1 fixed-width rule.
+         (ptr-write-u64 ,slot5 0 5)
+         (ptr-write-u64 ,slot5 8 4)
+         (ptr-write-u64 ,slot5 16 ,buf5)
+         (ptr-write-u64 ,slot5 24 4)
+         (ptr-write-u64 ,slot6 0 6)
+         (ptr-write-u64 ,slot6 8 ,box6)
+         (ptr-write-u64 ,box6 0 4)
+         (ptr-write-u64 ,box6 8 ,buf6)
+         (ptr-write-u64 ,box6 16 4)
+         (ptr-write-u64 ,box6 24 1)
+         (ptr-write-u8 ,buf5 0 97)
+         (ptr-write-u8 ,buf5 1 227)
+         (ptr-write-u8 ,buf5 2 129)
+         (ptr-write-u8 ,buf5 3 130)
+         (ptr-write-u8 ,buf6 0 97)
+         (ptr-write-u8 ,buf6 1 227)
+         (ptr-write-u8 ,buf6 2 129)
+         (ptr-write-u8 ,buf6 3 130)
+         (doc200_write_int ,val255 255)
+         (doc200_write_int ,val0 0)
+         (doc200_write_int ,val98 98)
+         (doc200_write_int ,val99 99)
+         (doc200_write_int ,val12354 12354)
+         (doc200_write_int ,val97 97)
+         0))
+      (defun doc200_aset_allowed_probe ()
+        (let* ((r14 (bf_aset_unibyte_string ,slot14 0 ,val0 ,val255 ,out))
+               (r15 (bf_aset_unibyte_string ,slot15 0 ,val0 ,val0 ,out))
+               (r5 (bf_aset_multibyte_string ,slot5 0 ,val0 ,val98 ,out))
+               (r6 (bf_aset_multibyte_string ,slot6 0 ,val0 ,val99 ,out)))
+          (+
+           (if (= r14 0) 0 1)
+           (if (= (ptr-read-u8 ,slot14 0) 14) 0 1)
+           (if (= (ptr-read-u64 ,slot14 24) 1) 0 1)
+           (if (= (ptr-read-u8 ,buf14 0) 255) 0 1)
+           (if (= r15 0) 0 1)
+           (if (= (ptr-read-u8 ,slot15 0) 15) 0 1)
+           (if (= (ptr-read-u64 ,box15 16) 1) 0 1)
+           (if (= (ptr-read-u8 ,buf15 0) 0) 0 1)
+           (if (= r5 0) 0 1)
+           (if (= (ptr-read-u8 ,slot5 0) 5) 0 1)
+           (if (= (ptr-read-u64 ,slot5 24) 4) 0 1)
+           (if (= (ptr-read-u8 ,buf5 0) 98) 0 1)
+           (if (= r6 0) 0 1)
+           (if (= (ptr-read-u8 ,slot6 0) 6) 0 1)
+           (if (= (ptr-read-u64 ,box6 16) 4) 0 1)
+           (if (= (ptr-read-u8 ,buf6 0) 99) 0 1))))
+      (defun doc200_aset_rejected_probe ()
+        ;; Exact first parity divergence: replacing the non-ASCII character in
+        ;; "a\u3042" with ASCII must signal under 31.1.  Host Emacs 30.1 permits
+        ;; `(aset (copy-sequence "\u3042") 0 ?a)' and returns "a".
+        ;; Exact second divergence: replacing ASCII with a non-ASCII character
+        ;; must signal under 31.1.  Host Emacs 30.1 permits `(aset
+        ;; (copy-sequence "ab") 0 ?\u3042)' and returns "\u3042b".
+        (let* ((bad 0))
+          (if (= (bf_aset_unibyte_string
+                  ,slot14 0 ,val0 ,val12354 ,out)
+                 4)
+              nil (setq bad (+ bad 1)))
+          (if (= (ptr-read-u8 ,slot14 0) 14) nil (setq bad (+ bad 1)))
+          (if (= (ptr-read-u64 ,slot14 24) 1) nil (setq bad (+ bad 1)))
+          (if (= (ptr-read-u8 ,buf14 0) 255) nil (setq bad (+ bad 1)))
+          (if (= (bf_aset_unibyte_string
+                  ,slot15 0 ,val0 ,val12354 ,out)
+                 4)
+              nil (setq bad (+ bad 1)))
+          (if (= (ptr-read-u8 ,slot15 0) 15) nil (setq bad (+ bad 1)))
+          (if (= (ptr-read-u64 ,box15 16) 1) nil (setq bad (+ bad 1)))
+          (if (= (ptr-read-u8 ,buf15 0) 0) nil (setq bad (+ bad 1)))
+          (if (= (bf_aset_multibyte_string ,slot5 1 ,val0 ,val97 ,out)
+                 5)
+              nil (setq bad (+ bad 1)))
+          (if (= (ptr-read-u8 ,slot5 0) 5) nil (setq bad (+ bad 1)))
+          (if (= (ptr-read-u64 ,slot5 24) 4) nil (setq bad (+ bad 1)))
+          (if (= (ptr-read-u8 ,buf5 1) 227) nil (setq bad (+ bad 1)))
+          (if (= (bf_aset_multibyte_string
+                  ,slot6 0 ,val0 ,val12354 ,out)
+                 5)
+              nil (setq bad (+ bad 1)))
+          (if (= (ptr-read-u8 ,slot6 0) 6) nil (setq bad (+ bad 1)))
+          (if (= (ptr-read-u64 ,box6 16) 4) nil (setq bad (+ bad 1)))
+          (if (= (ptr-read-u8 ,buf6 0) 99) nil (setq bad (+ bad 1)))
+          bad))
+      (defun doc200_aset_probe ()
+        (seq (doc200_aset_setup)
+             (if (= (doc200_aset_allowed_probe) 0)
+                 (doc200_aset_rejected_probe)
+               1)))
+      (exit (doc200_aset_probe)))))
 
 (defun nelisp-doc200-unibyte-repr-test--probe-source ()
   "Return the freestanding AOT source for the tag-14/tag-15 consumer probe."
@@ -362,6 +577,101 @@
     (should
      (nelisp-doc200-unibyte-repr-test--contains-p
       finalize '(if (= (ptr-read-u8 ptr 0) 15) 14 5)))))
+
+(ert-deftest nelisp-doc200-unibyte-repr/aset-preserves-exact-tag-and-byte-length ()
+  "Fixed-width mutation preserves tags 5/6/14/15 and their byte lengths."
+  (unless (and (eq system-type 'gnu/linux)
+               (string-match-p "x86_64\\|amd64" system-configuration))
+    (ert-skip "Requires x86_64 Linux for the freestanding AOT executable"))
+  (let ((path (make-temp-file "nelisp-doc200-aset-")))
+    (unwind-protect
+        (progn
+          (nelisp-aot-compile-sexp
+           (nelisp-doc200-unibyte-repr-test--mutation-probe-source) path)
+          (should (file-executable-p path))
+          (should (= (call-process path nil nil nil) 0)))
+      (when (file-exists-p path)
+        (delete-file path)))))
+
+(ert-deftest nelisp-doc200-unibyte-repr/jit-aset-enforces-the-same-rule ()
+  "The non-standalone mutable-string path admits tag 15 and stays fixed-width."
+  (let ((jit (nelisp-doc200-unibyte-repr-test--defun
+              'nl_jit_mut_str_set_codepoint
+              nelisp-cc-jit-mut-str-set-codepoint--source))
+        (raw (nelisp-doc200-unibyte-repr-test--defun
+              'nl_mut_str_set_codepoint_raw
+              nelisp-cc-evalport-nonenv-mut-str-set-cp--source)))
+    (should
+     (nelisp-doc200-unibyte-repr-test--contains-p
+      jit '(or (= (sexp-tag arg) 6) (= (sexp-tag arg) 15))))
+    (should
+     (nelisp-doc200-unibyte-repr-test--contains-p
+      raw '(nl_msscp_unibyte_write arg idx val-cp)))
+    (should
+     (nelisp-doc200-unibyte-repr-test--contains-p
+      raw '(nl_msscp_multibyte_write arg idx val-cp)))
+    (should
+     (nelisp-doc200-unibyte-repr-test--contains-p
+      nelisp-cc-evalport-nonenv-mut-str-set-cp--source
+      '(if (> val-cp 255) 1 0)))
+    (should
+     (nelisp-doc200-unibyte-repr-test--contains-p
+      nelisp-cc-evalport-nonenv-mut-str-set-cp--source
+      '(if (> val-cp 127) 1 0)))
+    (should
+     (nelisp-doc200-unibyte-repr-test--contains-p
+      nelisp-cc-evalport-nonenv-mut-str-set-cp--source
+      '(nelisp_ptr_write_u8 data byte-idx val-cp)))))
+
+(ert-deftest nelisp-doc200-unibyte-repr/aset-rejects-nonascii-replaced-char ()
+  "Adopt the Emacs 31.1 old-character restriction, deliberately unlike 30.1."
+  ;; Measured host Emacs 30.1 value: the same mutation returns "a".  It is
+  ;; intentionally absent from the host-version-pinned parity corpus.
+  (should
+   (equal
+    (nelisp-doc200-unibyte-repr-test--eval-standalone
+     "(let* ((s (copy-sequence \"\u3042\")) (tag0 (unibyte-string-p s)) (n0 (string-bytes s)) (r (condition-case nil (progn (aset s 0 ?a) 'no-signal) (error 'signalled)))) (list r tag0 (unibyte-string-p s) n0 (string-bytes s) (append s nil)))")
+    "(signalled nil nil 3 3 (12354))\n")))
+
+(ert-deftest nelisp-doc200-unibyte-repr/aset-rejects-nonascii-new-char ()
+  "Adopt the Emacs 31.1 new-character restriction, deliberately unlike 30.1."
+  ;; Measured host Emacs 30.1 value: the same mutation returns "\u3042b".  The
+  ;; derived result stays in ERT rather than the 30.1 parity corpus.
+  (should
+   (equal
+    (nelisp-doc200-unibyte-repr-test--eval-standalone
+     "(let* ((s (copy-sequence \"ab\")) (tag0 (unibyte-string-p s)) (n0 (string-bytes s)) (r (condition-case nil (progn (aset s 0 ?\u3042) 'no-signal) (error 'signalled)))) (list r tag0 (unibyte-string-p s) n0 (string-bytes s) (append s nil)))")
+    "(signalled t t 2 2 (97 98))\n")))
+
+(ert-deftest nelisp-doc200-unibyte-repr/aset-allows-fixed-width-writes ()
+  "Allow a byte in unibyte storage and ASCII-for-ASCII in multibyte storage."
+  (should
+   (equal
+    (nelisp-doc200-unibyte-repr-test--eval-standalone
+     "(list (let* ((s (copy-sequence (unibyte-string 200))) (tag0 (unibyte-string-p s)) (n0 (string-bytes s)) (r (aset s 0 255))) (list r tag0 (unibyte-string-p s) n0 (string-bytes s) (aref s 0))) (let* ((s (copy-sequence \"a\u3042\")) (tag0 (unibyte-string-p s)) (n0 (string-bytes s)) (r (aset s 0 ?b))) (list r tag0 (unibyte-string-p s) n0 (string-bytes s) (append s nil))))")
+    "((255 t t 1 1 255) (98 nil nil 4 4 (98 12354)))\n")))
+
+(ert-deftest nelisp-doc200-unibyte-repr/reader-numeric-escapes-produce-tag14 ()
+  "Octal/hex escapes decode, and high-byte literals retain unibyte identity."
+  (should
+   (equal
+    (nelisp-doc200-unibyte-repr-test--eval-standalone
+     (concat
+      "(list (append \"\\310\" nil) (append \"\\x41\" nil)"
+      " (append \"\\101\" nil) (append \"\\12\" nil)"
+      " (append \"\\1\" nil)"
+      " (multibyte-string-p \"\\310\")"
+      " (string-bytes \"\\310\") (unibyte-string-p \"\\310\"))"))
+    "((200) (65) (65) (10) (1) nil 1 t)\n")))
+
+(ert-deftest nelisp-doc200-unibyte-repr/reader-rejects-raw-multibyte-mixtures ()
+  "A raw byte and a multibyte character cannot share a literal in either order."
+  (dolist (source '("\"\\310あ\"" "\"あ\\310\""))
+    (pcase-let ((`(,rc ,stderr)
+                 (nelisp-doc200-unibyte-repr-test--eval-standalone-error
+                  source)))
+      (should (= rc 1))
+      (should (string-match-p "nelisp-raw-byte-unrepresentable" stderr)))))
 
 (provide 'nelisp-doc200-unibyte-repr-test)
 ;;; nelisp-doc200-unibyte-repr-test.el ends here

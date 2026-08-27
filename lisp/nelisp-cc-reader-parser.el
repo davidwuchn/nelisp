@@ -188,6 +188,24 @@
          (atomic-fetch-add 268435544 1)
          -1)))
 
+    (defun nelisp_reader_p_stash_raw_byte_unrepresentable ()
+      (let* ((tag-buf (alloc-bytes 32 1)))
+        (seq
+         ;; "nelisp-raw-byte-unrepresentable" (31 bytes), the same condition
+         ;; used by concat/format/string-to-multibyte in the runtime.
+         (ptr-write-u64 tag-buf 0 8227355735268025710)
+         (ptr-write-u64 (+ tag-buf 8) 0 3271148769041545057)
+         (ptr-write-u64 (+ tag-buf 16) 0 8315178114073390709)
+         (ptr-write-u64 (+ tag-buf 24) 0 28548142445391461)
+         (nl_alloc_symbol tag-buf 31 268435480)
+         (ptr-write-u64 268435512 0 0)
+         (ptr-write-u64 (+ 268435512 8) 0 0)
+         (ptr-write-u64 (+ 268435512 16) 0 0)
+         (ptr-write-u64 (+ 268435512 24) 0 0)
+         (ptr-write-u64 268435472 0 1)
+         (atomic-fetch-add 268435544 1)
+         -1)))
+
     ;; ===========================================================
     ;; ASCII digit predicate.
     ;; ===========================================================
@@ -252,10 +270,16 @@
        (ptr-read-u64 src-str-slot 24)))
 
     (defun nelisp_reader_p_copy_str (dest-slot src-str-slot)
-      (sexp-write-str
-       dest-slot
-       (ptr-read-u64 src-str-slot 16)
-       (ptr-read-u64 src-str-slot 24)))
+      (let* ((written
+              (sexp-write-str
+               dest-slot
+               (ptr-read-u64 src-str-slot 16)
+               (ptr-read-u64 src-str-slot 24))))
+        (if (= (ptr-read-u8 src-str-slot 0) 14)
+            (nelisp_reader_p_prog2
+             (ptr-write-u8 dest-slot 0 14)
+             written)
+          written)))
 
     ;; ===========================================================
     ;; Hex-digit decoder.  Returns 0..15 for `0'..`9'/`a'..`f'/`A'..`F',
@@ -675,6 +699,8 @@
        ((= (nelisp_reader_p_depth_ok_p depth 0) 0)
         (nelisp_reader_p_stash_excessive_nesting
          (nelisp_reader_p_max_depth) 0))
+       ((= kind -2)
+        (nelisp_reader_p_stash_raw_byte_unrepresentable))
        ;; LParen
        ((= kind 1)
         (nelisp_reader_p_parse_list_step
@@ -804,6 +830,7 @@
        ;; EOF / stray RBracket / error: parse error.
        ((= kind 0) -1)
        ((= kind 4) -1)
+       ((= kind -2) (nelisp_reader_p_stash_raw_byte_unrepresentable))
        ((< kind 0) -1)
        (t
         (and (= (nelisp_reader_p_dispatch
@@ -1088,6 +1115,7 @@
        ((= kind 0) -1)
        ((= kind 2) -1)
        ((= kind 10) -1)
+       ((= kind -2) (nelisp_reader_p_stash_raw_byte_unrepresentable))
        ((< kind 0) -1)
        ;; Otherwise parse one item into car[d], recurse for tail at
        ;; cdr[d], cons-make-with-clone into list-slot.

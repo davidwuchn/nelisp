@@ -48,15 +48,25 @@ Escaping \\n as well made every printed string containing a newline differ
 from Emacs, which `make emacs-parity' caught the first time a case had one.
 Char comparisons use raw integer codepoints (34 / 92) to sidestep any
 difference in how `?\\X' literals get parsed by the bundled reader vs the
-host."
+host.  For a tag-14/15 unibyte string, Doc 200 additionally requires every
+byte >= 128 to print as octal, never as a raw byte mistaken for UTF-8."
   (let ((chunks (cons nil nil))
         (i 0)
-        (n (length s)))
+        (n (length s))
+        (unibyte (and (fboundp 'unibyte-string-p)
+                      (unibyte-string-p s))))
     (while (< i n)
       (let ((c (aref s i)))
         (cond
          ((= c 34) (nelisp--prn-chunks-add chunks "\\\"")) ; ?\"
          ((= c 92) (nelisp--prn-chunks-add chunks "\\\\")) ; ?\\
+         ((and unibyte (>= c 128))
+          (nelisp--prn-chunks-add
+           chunks
+           (concat "\\"
+                   (char-to-string (+ 48 (/ c 64)))
+                   (char-to-string (+ 48 (logand (/ c 8) 7)))
+                   (char-to-string (+ 48 (logand c 7))))))
          (t        (nelisp--prn-chunks-add chunks (char-to-string c)))))
       (setq i (1+ i)))
     (nelisp--prn-chunks-string chunks)))

@@ -132,7 +132,12 @@ value form using the `ptr-read-u64' grammar op in nested position.")
     ;; Raw-pointer byte access shared by AOT consumers whose source files are
     ;; deliberately kept out of the raw-memory kernel inventory.
     (defun nl_bytes_byte_at (bytes i)
-      (ptr-read-u8 bytes i)))
+      (ptr-read-u8 bytes i))
+    ;; The reader's scratch builder is already an owning MutStr.  Numeric
+    ;; escapes only change its representation flag; the boxed NlStr layout and
+    ;; byte buffer remain untouched.
+    (defun nl_mut_str_mark_unibyte (sexp)
+      (and (ptr-write-u8 sexp 0 15) sexp)))
   "AOT direct-symbol source for `nl_str_bytes_ptr'.
 
 Replaces the Rust `#[no_mangle] pub unsafe extern \"C\" fn nl_str_bytes_ptr'

@@ -431,5 +431,38 @@
 # reason).  The four docs/design-* branches are additive doc-only and
 # touch nothing that links in.  `binary-size-ratchet' passes against
 # this exact pin.
-size 7867128
+# Raised 2026-08-27 (Doc 200, unibyte strings as Sexp tags 14/15),
+# 7867128 -> 8143256.  Read the split before reading the number: most of
+# this raise is not Doc 200's.
+#
+#   v1.0.1 (cba351348), clean worktree, `make standalone-reader'  8099488
+#   this branch, same procedure                                   8143256
+#   Doc 200's own growth                                          +43768 (+0.54%)
+#
+# The pin was ALREADY stale at v1.0.1: 8099488 is 232360 over the 7867128
+# above and 75018 over its 2% ceiling, so `binary-size-ratchet' was red on
+# the released tag before this work began.  It is a binary-tier gate and
+# does not run in the check tier, which is how it went unremarked.  This
+# raise absorbs that, and says so rather than folding it silently into a
+# Doc 200 number.
+#
+# Doc 200's own +43768 is: the tag-14/15 arms added to ~120 tag-dispatch
+# sites (the ledger's count, tools/nelisp-doc200-tag-sites.txt); native
+# unibyte producers and the length/aref/concat/substring/equal/sxhash
+# accessors that have to tell a byte from a character; `aset''s Emacs 31.1
+# fixed-width rules in the standalone, AOT and JIT paths; three-digit octal
+# printing; and the reader's numeric-escape lexer (`lisp/nelisp-cc-reader-
+# lexer.el', +156 lines, AOT-compiled into the binary).  All of it links in;
+# none of it is a duplicated unit or an unstripped section.
+#
+# MEASUREMENT NOTE, because it cost a wrong conclusion here first: this
+# number is a COLD build -- a fresh `git worktree' with no target/ at all.
+# A warm tree in this repository measures about 69744 bytes LOWER for the
+# same commit (8073512 vs 8143256 on this branch; the same offset appears
+# at v1.0.1).  Three repeat cold builds at v1.0.1 were byte-identical, so
+# the build itself is deterministic and the offset is the tree, not noise.
+# CI checks out clean, so the cold number is the one this gate should be
+# pinned against.  Do not compare a warm local build to this line.
+#
+size 8143256
 slack-pct 2

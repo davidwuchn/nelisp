@@ -162,7 +162,7 @@ runtime prerequisite, only a text read)."
              nlsp--eval-file))
     result))
 
-(defconst nlsp--extra-names '(nl-ffi-call)
+(defconst nlsp--extra-names '(nl-ffi-call unibyte-string-p)
   "Names outside both automatic sources above, added by hand because neither
 source can ever see them -- not a general escape hatch, one entry per name
 with its own reason here.
@@ -197,7 +197,14 @@ Measured 2026-08-23: this gap is exactly why the presence sweep never
 caught `nl-ffi-call' reading void on the owner's real-machine probe (both
 a Windows PE and a WSL Debian Linux ELF build) even though `fboundp'
 already answers correctly on the fallback-carrying tree -- the name was
-simply never in the corpus to begin with.")
+simply never in the corpus to begin with.
+
+`unibyte-string-p' (Doc 200 P3, 2026-08-27) is installed directly by
+`nelisp-standalone--reader-install-builtins-forms'.  Phase 2 moved it out of
+the prelude stub set, and it is deliberately absent from
+`nelisp--primitive-symbols', so the automatic union silently dropped it.
+Stock Emacs 30.1 has no such function, making this standalone-only presence
+row the legitimate test surface instead of the host parity corpus.")
 
 (defun nlsp--surface-names ()
   "The definable-name surface: sorted, duplicate-free union of the prelude's

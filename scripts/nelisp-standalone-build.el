@@ -9993,39 +9993,64 @@ baked build's own `<'/`>'/`=' arms need it too.")
               (if (if (= tg 8) 1 (if (= tg 12) 1 (if (= tg 5) 1 (if (= tg 6) 1 (if (= tg 14) 1 (if (= tg 15) 1 0))))))
                   (bf_aref args out)
                 (bf_wrong_type_sequencep seqp)))))))
-    ;; aset ARR IDX VAL: vector slot set (string aset not supported -> 0).
-    ;; Writes VAL (possibly a box) into a PRE-EXISTING vector -> persistent
-    ;; escape -> bump the mutation epoch (NO-ESCAPE gate).
+    ;; Doc 200 P3: string mutation is fixed-width.  Resolve the payload through
+    ;; `bf_str_ptr' for EVERY tag: tag 15 is boxed and reading arr+16 directly
+    ;; treats an NlStr box word as a byte pointer (measured SIGSEGV in P1).
+    (defun bf_aset_string_write (arr byte-idx val out)
+      (seq
+       (wf_dirty)
+       (ptr-write-u8 (bf_str_ptr arr) byte-idx (ptr-read-u64 val 8))
+       (wf_copy32 out val)
+       0))
+    (defun bf_aset_unibyte_string (arr idx idx-slot val out)
+      (if (= (ptr-read-u64 val 0) 2)
+          (if (if (< idx 0) 1 (if (< idx (bf_str_len arr)) 0 1))
+              (bf_args_out_of_range arr idx-slot)
+            (let* ((cp (ptr-read-u64 val 8)))
+              (if (if (< cp 0) 1 (if (> cp 255) 1 0))
+                  (bf_args_out_of_range_byte val)
+                (bf_aset_string_write arr idx val out))))
+        (bf_wrong_type_integerp val)))
+    (defun bf_aset_multibyte_string (arr idx idx-slot val out)
+      (if (= (ptr-read-u64 val 0) 2)
+          (if (if (< idx 0) 1 (if (< idx (nl_str_charlen arr)) 0 1))
+              (bf_args_out_of_range arr idx-slot)
+            (let* ((cp (ptr-read-u64 val 8))
+                   (byte-idx (nl_u8_cidx_byte arr 0 (bf_str_len arr) 0 idx)))
+              ;; Both sides must be ASCII.  This is stricter than the 30.1
+              ;; host used by `emacs-parity', deliberately matching 31.1.
+              (if (if (< cp 0) 1
+                    (if (> cp 127) 1
+                      (if (>= (m5_byte_at arr byte-idx) 128) 1 0)))
+                  (bf_aset_fixed_width_rejected out)
+                (bf_aset_string_write arr byte-idx val out))))
+        (bf_wrong_type_integerp val)))
+    ;; aset ARR IDX VAL: vector/string/record/char-table mutation.
+    ;; Writes into a PRE-EXISTING container -> persistent escape -> bump the
+    ;; mutation epoch (NO-ESCAPE gate).  Validate IDX before reading payload@8;
+    ;; the old code treated any Sexp's second word as an index.
     (defun bf_aset (args out)
+      (if (= (ptr-read-u64 (wf_arg_ptr args 1) 0) 2)
+          (bf_aset_checked args out)
+        (bf_wrong_type_fixnump (wf_arg_ptr args 1))))
+    (defun bf_aset_checked (args out)
       (let* ((arr (wf_arg_ptr args 0))
              (idx (ptr-read-u64 (wf_arg_ptr args 1) 8))
              (val (wf_arg_ptr args 2)))
         (if (= (ptr-read-u64 arr 0) 8)
             (seq (wf_dirty) (vector-slot-set arr idx val)
                  (wf_copy32 out val) 0)
-          ;; Doc 22 A4: Str(5)/MutStr(6) in-place single-byte write.  The stock
-          ;; arm was a silent no-op (strings looked immutable).  Mirrors bf_aref's
-          ;; byte-indexed string model (char index == byte index; ASCII).  Safe
-          ;; only when the target owns its buffer -- callers must `copy-sequence'
-          ;; a literal first (now a real deep copy, Doc 22 A4 prelude half);
-          ;; direct aset on a literal is undefined, as in host Emacs.  Str(5)
-          ;; data ptr @16; MutStr(6) NlStr* @8 -> buffer @ +8.
-          ;; Doc 200 P2: do not route raw-byte layouts through the UTF-8
-          ;; mutation path.  P3 owns the final Emacs 31.1 restrictions; until
-          ;; then a loud signal is safer than changing byte count or decoding
-          ;; a tag-15 NlStr box as an inline string.
+          ;; Doc 200 P3: unibyte values are exactly one byte.  Multibyte
+          ;; replacement is permitted only when both old and new characters
+          ;; are ASCII, so neither the tag nor byte length can change.
           (if (or (= (ptr-read-u64 arr 0) 14)
                   (= (ptr-read-u64 arr 0) 15))
-              (bf_unibyte_aset_deferred out)
-            (if (= (ptr-read-u64 arr 0) 5)
-              (seq (wf_dirty)
-                   (ptr-write-u8 (ptr-read-u64 arr 16) idx (ptr-read-u64 val 8))
-                   (wf_copy32 out val) 0)
-            (if (= (ptr-read-u64 arr 0) 6)
-                (seq (wf_dirty)
-                     (ptr-write-u8 (ptr-read-u64 (ptr-read-u64 arr 8) 8) idx
-                                   (ptr-read-u64 val 8))
-                     (wf_copy32 out val) 0)
+              (bf_aset_unibyte_string
+               arr idx (wf_arg_ptr args 1) val out)
+            (if (if (= (ptr-read-u64 arr 0) 5) 1
+                  (if (= (ptr-read-u64 arr 0) 6) 1 0))
+                (bf_aset_multibyte_string
+                 arr idx (wf_arg_ptr args 1) val out)
               ;; Doc 156: Record(12) in-place slot write, mirroring bf_aref's
               ;; tag-12 read (aref 0 = type tag, aref k>0 = data slot k-1).  The
               ;; stock else-arm was a silent no-op, so `(setf (struct-slot r) v)'
@@ -10048,7 +10073,7 @@ baked build's own `<'/`>'/`=' arms need it too.")
                 ;; like `vector-slot-set'/`record-slot-set'.
                 (if (= (ptr-read-u64 arr 0) 9)
                     (seq (wf_dirty) (nl_char_table_set_raw arr idx val out) 0)
-                  (seq (wf_copy32 out val) 0)))))))))
+                  (seq (wf_copy32 out val) 0))))))))
     ;; signal/error: NON-CRASHING.  Stash (sym . data) into the catch/throw
     ;; region + set the throw flag, then return rc=1 so the rc!=0 propagation
     ;; unwinds the native stack like an error.
@@ -10147,20 +10172,18 @@ baked build's own `<'/`>'/`=' arms need it too.")
          (nelisp_cons_construct idx nil-slot tail)
          (nelisp_cons_construct fmt tail head)
          (bf_error head out))))
-    (defun bf_unibyte_aset_deferred (out)
-      (let* ((mbuf (alloc-bytes 56 1))
+    (defun bf_aset_fixed_width_rejected (out)
+      (let* ((mbuf (alloc-bytes 40 1))
              (msg (alloc-bytes 32 8))
              (nil-slot (alloc-bytes 32 8))
              (head (alloc-bytes 32 8)))
         (seq
-         (ptr-write-u64 mbuf 0 2336927441834308449)
-         (ptr-write-u64 (+ mbuf 8) 0 2334400046552411765)
-         (ptr-write-u64 (+ mbuf 16) 0 2338326355448591475)
-         (ptr-write-u64 (+ mbuf 24) 0 8243107278629139305)
-         (ptr-write-u64 (+ mbuf 32) 0 4909046138384180594)
-         (ptr-write-u64 (+ mbuf 40) 0 5773667705846522735)
-         (ptr-write-u64 (+ mbuf 48) 0 51)
-         (nl_alloc_str mbuf 49 msg)
+         (ptr-write-u64 mbuf 0 8028077692528456545)       ; "aset vio"
+         (ptr-write-u64 (+ mbuf 8) 0 7594793501602373996) ; "lates fi"
+         (ptr-write-u64 (+ mbuf 16) 0 8386944366654285176); "xed-widt"
+         (ptr-write-u64 (+ mbuf 24) 0 7453010373645639784); "h string"
+         (ptr-write-u64 (+ mbuf 32) 0 435611333152)       ; " rule"
+         (nl_alloc_str mbuf 37 msg)
          (wf_write_nil nil-slot)
          (nelisp_cons_construct msg nil-slot head)
          (bf_error head out))))
@@ -15769,11 +15792,17 @@ Parallelism pays off only once per-unit compilation dominates startup
 ;;   make standalone-reader-test   # build, run, assert eval(NELISP_SRC)
 ;; ===================================================================
 
+(defconst nelisp-standalone--reader-mut-str-len-source
+  '(defun nl_mut_str_len (ptr)
+     (ptr-read-u64 (ptr-read-u64 ptr 8) 16))
+  "Reader-local source for the boxed MutStr byte-length dependency.")
+
 (defconst nelisp-standalone--reader-extra-manifest
   '(("reader-lexer.o"     nelisp-cc-reader-lexer                 nelisp-cc-reader-lexer--source)
     ("reader-parser.o"    nelisp-cc-reader-parser                nelisp-cc-reader-parser--source)
     ("str-to-float.o"     nelisp-cc-evalport-str-to-float        nelisp-cc-evalport-str-to-float--source)
     ("mut-str-push.o"     nelisp-cc-evalport-nonenv-mut-str-push nelisp-cc-evalport-nonenv-mut-str-push--source)
+    ("mut-str-len.o"      nelisp-standalone-build                nelisp-standalone--reader-mut-str-len-source)
     ("alloc-mut-str.o"    nelisp-cc-nlstr-direct-ops             nelisp-cc-nlstr-direct-ops--alloc-mut-str-source)
     ("mut-str-finalize.o" nelisp-cc-nlstr-direct-ops             nelisp-cc-nlstr-direct-ops--mut-str-finalize-source)
     ("ptr-read-u8.o"      nelisp-cc-atomic-raw-mem               nelisp-cc-atomic-raw-mem--read-u8-source)
@@ -23485,6 +23514,7 @@ loader when it is absent."
                                  nelisp-standalone--reader-stage3-rootstack-smoke
                                  nelisp-standalone--reader-frame-stack-pop-desync-smoke
                                  nelisp-standalone--reader-bounded-backtrace-smoke
+                                 nelisp-standalone--reader-doc200-mutation-smoke
                                  nelisp-standalone--reader-socket-smoke
                                  nelisp-standalone--reader-ipv6-socket-smoke))
                   (funcall smoke)
@@ -23528,6 +23558,125 @@ loader when it is absent."
      (message "[standalone-reader] FAIL: malformed-input smoke: %s"
               (error-message-string err))
      (kill-emacs 1))))
+
+(defun nelisp-standalone--reader-doc200-mutation-smoke ()
+  "Assert Doc 200 mutation, printing, presence, and reader literals."
+  (let ((source
+         (concat
+          "(list "
+          " (list (unibyte-string-p (unibyte-string 200))"
+          "       (unibyte-string-p \"abc\"))"
+          " (let* ((s (copy-sequence (unibyte-string 200)))"
+          "         (r0 (multibyte-string-p s)) (b0 (string-bytes s)))"
+          "   (aset s 0 255)"
+          "   (list (aref s 0) r0 (multibyte-string-p s) b0"
+          "         (string-bytes s) (append s nil)))"
+          " (let* ((s (copy-sequence \"aあ\"))"
+          "         (r0 (multibyte-string-p s)) (b0 (string-bytes s)))"
+          "   (aset s 0 ?b)"
+          "   (list (aref s 0) r0 (multibyte-string-p s) b0"
+          "         (string-bytes s) (append s nil)))"
+          " (let* ((s (copy-sequence \"あ\"))"
+          "         (r0 (multibyte-string-p s)) (b0 (string-bytes s))"
+          "         (result (condition-case nil (aset s 0 ?a)"
+          "                   (error 'signalled))))"
+          "   (list result r0 (multibyte-string-p s) b0"
+          "         (string-bytes s) (append s nil)))"
+          " (let* ((s (copy-sequence \"ab\"))"
+          "         (r0 (multibyte-string-p s)) (b0 (string-bytes s))"
+          "         (result (condition-case nil (aset s 0 ?あ)"
+          "                   (error 'signalled))))"
+          "   (list result r0 (multibyte-string-p s) b0"
+          "         (string-bytes s) (append s nil))))"))
+        (expected
+         (concat
+          "((t nil) (255 nil nil 1 1 (255)) (98 t t 4 4 (98 12354)) "
+          "(signalled t t 3 3 (12354)) "
+          "(signalled nil nil 2 2 (97 98)))\n"))
+        (actual nil)
+        (native-printer nil)
+        (elisp-printers nil)
+        (reader-literals nil)
+        (rc nil))
+    (with-temp-buffer
+      (setq rc (call-process nelisp-standalone--reader-out nil t nil
+                             "--eval" source))
+      (setq actual (buffer-string)))
+    (unless (and (= rc 0) (equal actual expected))
+      (error "Doc 200 mutation/presence exit=%S stdout=%S expected=%S"
+             rc actual expected))
+    ;; The CLI's `nelisp--repr' is native; `prin1-to-string' and format %S
+    ;; share the prelude printer.  Check both explicitly because their nested
+    ;; backslash escaping has historically differed.
+    (with-temp-buffer
+      (setq rc (call-process nelisp-standalone--reader-out nil t nil
+                             "--eval" "(unibyte-string 200 201)"))
+      (setq native-printer (buffer-string)))
+    (unless (and (= rc 0)
+                 (equal native-printer
+                        (concat "\"" "\\" "310" "\\" "311" "\"\n")))
+      (error "Doc 200 native printer exit=%S stdout=%S" rc native-printer))
+    (with-temp-buffer
+      (setq rc
+            (call-process
+             nelisp-standalone--reader-out nil t nil "--eval"
+             (concat
+              "(list (append (prin1-to-string (unibyte-string 200 201)) nil)"
+              " (append (format \"%S\" (unibyte-string 200 201)) nil))")))
+      (setq elisp-printers (buffer-string)))
+    (unless
+        (and (= rc 0)
+             (equal
+              elisp-printers
+              (concat
+               "((34 92 51 49 48 92 51 49 49 34) "
+               "(34 92 51 49 48 92 51 49 49 34))\n")))
+      (error "Doc 200 prin1/format printers exit=%S stdout=%S"
+             rc elisp-printers))
+    (with-temp-buffer
+      (setq rc
+            (call-process
+             nelisp-standalone--reader-out nil t nil "--eval"
+             (concat
+              "(list (append \"\\310\" nil) (append \"\\x41\" nil)"
+              " (append \"\\101\" nil) (append \"\\12\" nil)"
+              " (append \"\\1\" nil)"
+              " (list (multibyte-string-p \"\\310\")"
+              "       (string-bytes \"\\310\")"
+              "       (unibyte-string-p \"\\310\"))"
+              " (append \"\\xC8\" nil) (append \"\\777\" nil)"
+              " (append \"\\8\" nil) (append \"\\n\" nil))")))
+      (setq reader-literals (buffer-string)))
+    (unless
+        (and (= rc 0)
+             (equal
+              reader-literals
+              (concat
+               "((200) (65) (65) (10) (1) (nil 1 t) "
+               "(200) (511) (56) (10))\n")))
+      (error "Doc 200 numeric reader literals exit=%S stdout=%S"
+             rc reader-literals))
+    (dolist (mixed (list "\"\\310あ\"" "\"あ\\310\""))
+      (let ((stderr-file (make-temp-file "nelisp-doc200-reader-stderr-"))
+            (stderr-text nil))
+        (unwind-protect
+            (progn
+              (with-temp-buffer
+                (setq rc
+                      (call-process nelisp-standalone--reader-out nil
+                                    (list t stderr-file) nil
+                                    "--eval" mixed)))
+              (with-temp-buffer
+                (insert-file-contents stderr-file)
+                (setq stderr-text (buffer-string)))
+              (unless
+                  (and (= rc 1)
+                       (string-match-p
+                        "nelisp-raw-byte-unrepresentable" stderr-text))
+                (error "Doc 200 mixed reader literal %S exit=%S stderr=%S"
+                       mixed rc stderr-text)))
+          (when (file-exists-p stderr-file)
+            (delete-file stderr-file)))))))
 
 (defun nelisp-standalone--reader-cli-smoke ()
   "Assert the short CLI supports help/eval/load and readable printed values."
