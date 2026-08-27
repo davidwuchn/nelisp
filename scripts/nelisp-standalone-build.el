@@ -7448,17 +7448,20 @@ eval applyfn.")
                    (seq
                     (setq ta (ptr-read-u64 a 0))
                     (setq tb (ptr-read-u64 b 0))
-                    (if (= ta tb)
-                        (if (= ta 2)
-                            (if (= (ptr-read-u64 a 8) (ptr-read-u64 b 8))
+                    (if (or (= ta tb)
+                            (and (= (m5_string_tag_p ta) 1)
+                                 (= (m5_string_tag_p tb) 1)))
+                        (if (and (= (m5_string_tag_p ta) 1)
+                                 (= (m5_string_tag_p tb) 1))
+                            (if (= (m5_streq a b) 1)
                                 0
                               (setq ok 0))
-                          (if (= ta 4)
-                              (if (= (symbol-eq a b) 1)
+                          (if (= ta 2)
+                              (if (= (ptr-read-u64 a 8) (ptr-read-u64 b 8))
                                   0
                                 (setq ok 0))
-                            (if (or (= ta 5) (= ta 14))
-                                (if (= (str-eq a b) 1)
+                            (if (= ta 4)
+                                (if (= (symbol-eq a b) 1)
                                     0
                                   (setq ok 0))
                               (if (= ta 7)
@@ -19541,7 +19544,13 @@ section banner comment just above for why, and
                 (n (nl_os_read_file_handle fd buf maxbytes)))
            (if (< n 0)
                (nl_socket_signal_error n)
-             (seq (nl_alloc_str buf n out) 0))))
+             ;; Doc 200: what comes off a socket is bytes, so say so.  This
+             ;; wrapped the bytes in a tag-5 Str before there was any way to
+             ;; express "these are bytes", and the comment above carried the
+             ;; byte-clean intent that the tag could not.  A tag-14 unibyte
+             ;; string states it, and matches what `insert-file-contents'
+             ;; already produces for the same reason.
+             (seq (nl_alloc_unibyte_str buf n out) 0))))
       ;; nelisp-socket-close FD -> nil.  shutdown(2) SHUT_RDWR=2 is
       ;; best-effort (ENOTCONN on an already-idle socket is harmless and
       ;; ignored, matching common practice) followed by `nl_os_close_handle'
@@ -25447,8 +25456,18 @@ too, not only a standalone probe nobody re-runs."
                "      (nelisp-socket-close lfd)\n"
                "      (nl-write-file \"/dev/stdout\"\n"
                "        (format \"ROUNDTRIP=%S\\n\"\n"
+               ;; Doc 200: `nelisp-socket-recv' answers the BYTES that came
+               ;; off the wire (a tag-14 unibyte string), not a decoded
+               ;; character string -- a socket carries arbitrary bytes and
+               ;; cannot promise well-formed UTF-8, so labelling them tag-5
+               ;; would be the exact lie Doc 200 removes.  `msg'/`reply' here
+               ;; are character strings, so the round-trip assertion compares
+               ;; the bytes that were sent, via `string-as-unibyte', rather
+               ;; than comparing a byte read against a character literal.
+               ;; Before Doc 200 those two happened to be the same object.
                "                (if (if (integerp sent) (if (integerp sent2)\n"
-               "                        (if (equal got msg) (equal got2 reply) nil) nil) nil)\n"
+               "                        (if (equal got (string-as-unibyte msg))\n"
+               "                            (equal got2 (string-as-unibyte reply)) nil) nil) nil)\n"
                "                    \"OK\" (list sent got sent2 got2)))))\n"
                "  (error (nl-write-file \"/dev/stdout\" (format \"ROUNDTRIP=ERR:%S\\n\" err))))\n"
                "(condition-case err\n"
@@ -25561,8 +25580,18 @@ pattern, this file's sibling).
                "      (nelisp-socket-close lfd)\n"
                "      (nl-write-file \"/dev/stdout\"\n"
                "        (format \"IPV6-ROUNDTRIP=%S\\n\"\n"
+               ;; Doc 200: `nelisp-socket-recv' answers the BYTES that came
+               ;; off the wire (a tag-14 unibyte string), not a decoded
+               ;; character string -- a socket carries arbitrary bytes and
+               ;; cannot promise well-formed UTF-8, so labelling them tag-5
+               ;; would be the exact lie Doc 200 removes.  `msg'/`reply' here
+               ;; are character strings, so the round-trip assertion compares
+               ;; the bytes that were sent, via `string-as-unibyte', rather
+               ;; than comparing a byte read against a character literal.
+               ;; Before Doc 200 those two happened to be the same object.
                "                (if (if (integerp sent) (if (integerp sent2)\n"
-               "                        (if (equal got msg) (equal got2 reply) nil) nil) nil)\n"
+               "                        (if (equal got (string-as-unibyte msg))\n"
+               "                            (equal got2 (string-as-unibyte reply)) nil) nil) nil)\n"
                "                    \"OK\" (list sent got sent2 got2)))))\n"
                "  (error (nl-write-file \"/dev/stdout\" (format \"IPV6-ROUNDTRIP=ERR:%S\\n\" err))))\n"
                ;; Part 2: IPv4 round trip, SAME process, right after --

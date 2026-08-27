@@ -221,8 +221,12 @@ while IFS='|' read -r gate file expr what; do
   # mutated source ran the OLD binary and reported PASS.
   # Doc 199's `nelisp-thread-standalone-smoke' has the same conditional
   # prerequisite and mutates native-unit source, so it must rebuild both the
-  # injected and restored binary for the same reason.
+  # injected and restored binary for the same reason.  `ert-full' rows that
+  # mutate the standalone build script also rebuild: Doc 200's cross-tag key
+  # test executes target/nelisp, so a stale fixed binary would make the new
+  # outer-tag-gate mutation read as green.
   if [ "$gate" = "emacs-parity" ] || \
+     [ "$gate:$file" = "ert-full:scripts/nelisp-standalone-build.el" ] || \
      [ "$gate" = "standalone-reader-buffer-smoke" ] || \
      [ "$gate" = "nelisp-thread-standalone-smoke" ] || \
      [ "$gate" = "nelisp-thread-allocating-standalone-smoke" ] || \
@@ -266,6 +270,7 @@ while IFS='|' read -r gate file expr what; do
     # dressed as "could not be asked".
     cp "$backup" "$file"
     if [ "$gate" = "emacs-parity" ] || \
+       [ "$gate:$file" = "ert-full:scripts/nelisp-standalone-build.el" ] || \
        [ "$gate" = "nelisp-thread-standalone-smoke" ] || \
        [ "$gate" = "nelisp-thread-allocating-standalone-smoke" ] || \
        [ "$gate" = "nelisp-thread-mirror-guard-standalone-smoke" ] || \
@@ -293,6 +298,7 @@ while IFS='|' read -r gate file expr what; do
   fi
   cp "$backup" "$file"; rm -f "$backup"
   if [ "$gate" = "emacs-parity" ] || \
+     [ "$gate:$file" = "ert-full:scripts/nelisp-standalone-build.el" ] || \
      [ "$gate" = "nelisp-thread-standalone-smoke" ] || \
      [ "$gate" = "nelisp-thread-allocating-standalone-smoke" ] || \
      [ "$gate" = "nelisp-thread-mirror-guard-standalone-smoke" ] || \

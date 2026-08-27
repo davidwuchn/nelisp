@@ -651,6 +651,14 @@
      "(list (let* ((s (copy-sequence (unibyte-string 200))) (tag0 (unibyte-string-p s)) (n0 (string-bytes s)) (r (aset s 0 255))) (list r tag0 (unibyte-string-p s) n0 (string-bytes s) (aref s 0))) (let* ((s (copy-sequence \"a\u3042\")) (tag0 (unibyte-string-p s)) (n0 (string-bytes s)) (r (aset s 0 ?b))) (list r tag0 (unibyte-string-p s) n0 (string-bytes s) (append s nil))))")
     "((255 t t 1 1 255) (98 nil nil 4 4 (98 12354)))\n")))
 
+(ert-deftest nelisp-doc200-unibyte-repr/ascii-unibyte-keys-match-literals ()
+  "Use `equal' string semantics for alist and member lookup across tags 5/14."
+  (should
+   (equal
+    (nelisp-doc200-unibyte-repr-test--eval-standalone
+     "(let* ((u (unibyte-string 97 98 99)) (lit \"abc\") (utbl (list (cons u 'from-unibyte))) (ltbl (list (cons lit 'from-literal)))) (list (cdr (assoc lit utbl)) (cdr (assoc u ltbl)) (if (member lit (list u)) t nil) (if (member u (list lit)) t nil)))")
+    "(from-unibyte from-literal t t)\n")))
+
 (ert-deftest nelisp-doc200-unibyte-repr/reader-numeric-escapes-produce-tag14 ()
   "Octal/hex escapes decode, and high-byte literals retain unibyte identity."
   (should
