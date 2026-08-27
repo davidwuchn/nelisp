@@ -1,5 +1,43 @@
 # NeLisp Release Notes
 
+## v1.1.0 — 2026-08-27
+
+Full notes: [`release/v1.1.0/RELEASE.md`](release/v1.1.0/RELEASE.md).
+
+Closes v1.0.1's own known issue. Unibyte strings are now a distinct
+representation -- Sexp tags 14 and 15 -- so a raw byte and a character are told
+apart everywhere it matters.
+
+- **`(append (unibyte-string 200 201 202) nil)` answers `(200 201 202)`.** It
+  answered `(521 640 0)`. `equal`, `length`, `aref`, `concat`, `substring`,
+  `upcase`, `multibyte-string-p` and the printer all agree with stock Emacs
+  30.1 now; the measured before/after table is in the full notes.
+- **`equal` compares characters, then bytes, then content** -- as Emacs does,
+  never the multibyte flag. `(equal "abc" (unibyte-string 97 98 99))` stays
+  `t`; a tag-identity rule would have broken it.
+- **`aset` follows Emacs 31.1's fixed-width rules.** The Sexp tag and
+  `string-bytes` are asserted invariant under mutation.
+- **The reader implements `\NNN` and `\xNN`.** A separate, older defect:
+  `"\310"` had been the three-character string `"310"` and `"\x1b["` had been
+  `"x1b["`, silently. Zero files in the tree used them, which is why it
+  survived.
+- **Two tests had been passing for the wrong reason**, and implementing the
+  reader escapes is what exposed them. One compared received bytes against a
+  literal that both sides had been misreading identically; fixing the literal
+  made the comparison real, and it failed because `nelisp-socket-recv` was
+  labelling bytes off a wire as UTF-8. It answers a unibyte string now.
+- **A countable audit, not an asserted one.** `make doc200-census` enumerates
+  every site that tests or writes the string tag and fails when one appears or
+  vanishes. v1.0.1's notes estimated 59 such lines by grep; the structural
+  census finds 119, in a 174-row ledger. Six mutation rows, one per consumer
+  arm including the GC marker's, all go red.
+
+Not done, and recorded as not done: raw-byte characters (`#x3FFF00 + B`) have
+no representation here, so mixing a non-ASCII unibyte string into a multibyte
+context signals rather than inventing a character; `\N{U+XXXX}` is
+unimplemented; and `aset` diverges from the 30.1 parity host, which is laxer
+than 31.1.
+
 ## v1.0.1 — 2026-08-26
 
 Full notes: [`release/v1.0.1/RELEASE.md`](release/v1.0.1/RELEASE.md).
