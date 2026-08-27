@@ -22,7 +22,40 @@ rebuild_checked() {
 # broken one on every `gate-mutation' run.  Scratch it into a throwaway
 # directory instead; nothing else reads this one.
 mutation_gate_dir="$(mktemp -d)"
-trap 'rm -rf "$mutation_gate_dir"' EXIT
+
+# A row is inject -> run -> restore, and until this trap existed the restore
+# only happened on the paths that reach it.  Kill the sweep between the
+# `sed -i' and the restore and the injected defect stays in the working tree,
+# where the next thing to read that file believes it.  That has happened
+# repeatedly: an accept4 syscall number left at 289, a network process left
+# reporting `closed' instead of `open' -- the latter surviving long enough to
+# be mistaken for a regression in an unrelated change and costing half an hour
+# to attribute.  One of those leftovers was staged, so `git diff' did not show
+# it either.
+#
+# The row's backup is a `mktemp' file that outlives a kill, so its existence
+# is the signal: if it is still there when the shell leaves, the row did not
+# reach its own restore and this puts the file back.  No restore site needs to
+# cooperate -- they each `rm -f' the backup, which makes this a no-op.
+mutation_active_file=""
+mutation_active_backup=""
+mutation_cleanup() {
+  if [ -n "${mutation_active_backup:-}" ] && [ -f "$mutation_active_backup" ]; then
+    if cp "$mutation_active_backup" "$mutation_active_file" 2>/dev/null; then
+      printf 'gate-mutation: restored %s (left mid-row)\n' "$mutation_active_file" >&2
+    else
+      printf 'gate-mutation: COULD NOT RESTORE %s -- the injection is still in the tree; %s holds the original\n' \
+        "$mutation_active_file" "$mutation_active_backup" >&2
+    fi
+    rm -f "$mutation_active_backup"
+  fi
+  mutation_active_file=""; mutation_active_backup=""
+  rm -rf "$mutation_gate_dir"
+}
+trap 'mutation_cleanup' EXIT
+trap 'mutation_cleanup; exit 130' INT
+trap 'mutation_cleanup; exit 143' TERM
+trap 'mutation_cleanup; exit 129' HUP
 
 # Run the gate for the current row, on whatever content `$file' currently
 # holds, capturing its combined output to `$2'.  `ert-full' is not a raw
@@ -197,6 +230,8 @@ while IFS='|' read -r gate file expr what; do
   total=$((total+1))
   backup="$(mktemp)"
   cp "$file" "$backup" || { echo "gate-mutation: FAIL (cannot back up $file)"; exit 1; }
+  # Arm the interrupt-restore for this row before the file is touched.
+  mutation_active_file="$file"; mutation_active_backup="$backup"
   sed -i "$expr" "$file"
   if cmp -s "$file" "$backup"; then
     echo "  $gate: SED MATCHED NOTHING -- the injection is stale ($what)"
