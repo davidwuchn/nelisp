@@ -477,9 +477,9 @@ nl-clj-async-standalone-smoke|packages/nl-clj/src/nl-clj-async.el|s/^  (if (eq (
 # 2026-08-26: the tarball was built as v1.0.1 and the installer, whose
 # default is a self-contained copy, still said v0.6.0.  Reproduce that
 # exact drift and require the gate to catch it.
-version-consistency|release/stage-d-v3.0/install-v3.sh|s/RELEASE_VERSION:-v1\.0\.1/RELEASE_VERSION:-v0.6.0/|installer default left behind at the previous release version
+version-consistency|release/stage-d-v3.0/install-v3.sh|s/RELEASE_VERSION:-v[0-9][0-9.]*/RELEASE_VERSION:-v0.0.0/|installer default left behind at a stale release version
 # The Windows half of the same drift: install-v3.ps1 and the two tarball
 # scripts were self-consistent at v0.6.0 while the POSIX side had moved to
 # v1.0.1, so CI shipped v0.6.0-labelled tarballs for a v1.0.1 release and
 # nothing complained.  Found on 2026-08-26 by the macOS lane, not by CI.
-version-consistency|release/stage-d-v3.0/install-v3.ps1|s/\[string\]\$Version = "v1\.0\.1"/[string]$Version = "v0.6.0"/|windows installer default left behind at the previous release version
+version-consistency|release/stage-d-v3.0/install-v3.ps1|s/\[string\]\$Version = "v[0-9][0-9.]*"/[string]$Version = "v0.0.0"/|windows installer default left behind at a stale release version
