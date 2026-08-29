@@ -28,8 +28,23 @@
 # 5,208 bytes of correct output.  The synthetic workload here is still what the
 # gate runs, because it is seconds rather than minutes and it isolates one
 # construct per case; the real load is the evidence that the set is no longer
-# a toy.  It remains NOT a claim that the conservative scan is removable --
-# nothing here has measured what else it still covers.
+# a toy.  It remains NOT a claim that the conservative scan is removable, and
+# that has now been measured rather than left open.  A build with SCAN_FLAG
+# (@268436464) initialised to 0 instead of 1 -- the scan off for every path,
+# not just this gate's switch-28 cases -- run against the standalone tiers:
+#
+#   PASS   emacs-parity, binary-size-ratchet, selfhost, midform-gc-bounded,
+#          chunk-growth, parallel-compile, and all 43 cases here
+#   FAIL   standalone-reader-test: `compile-elisp-artifact --kind elc' dies
+#          with `file-missing: #<object>' -- a clobbered Sexp where a filename
+#          belongs, which is this defect's signature
+#   FAIL   standalone-reader-ffi-unsupported-smoke, 1 of the 41 smokes:
+#          expected `nl-ffi-call', got nothing
+#
+# So two paths still depend on the scan: artifact compilation and the FFI
+# surface.  Closing the nine walkers was necessary and is not sufficient.  They
+# are named here so the next attempt starts from a failing command rather than
+# from another survey.
 #
 # WHERE THE BOUNDARY ACTUALLY IS, measured 2026-08-29 while trying to widen
 # this workload.  The failing construct is three lines, and it is a binding
