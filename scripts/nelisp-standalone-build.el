@@ -2229,6 +2229,20 @@ arm64 Linux has no legacy x86 numbering)."
             0))))
     ;; Mark the char buffer of a string (raw byte block, no Sexp children).
     (defun nl_gc_mark_buf (ptr) (nl_seq2 (nl_gc_mark_block ptr) 0))
+    ;; ELEMENT CAPACITY of the block whose object pointer is PTR: the payload
+    ;; (BLOCK_TOTAL minus the 8-byte header) divided by STRIDE.  An allocator
+    ;; block is the authority on how many elements a buffer can hold, and a
+    ;; live Vec never has len > cap, so clamping a walk to this number cannot
+    ;; truncate a real object -- `nl_ct_grow_entries' allocates exactly
+    ;; `new_cap * 40' and `nl_gc_mark_vec_slots''s buffers exactly `len * 8'.
+    ;; Returns 0 when the header cannot describe even one element, or when the
+    ;; block it claims does not end inside the arena (a junk BASE whose
+    ;; header word is not a header at all).
+    (defun nl_gc_block_elem_cap (ptr stride)
+      (let ((bt (nl_hdr_bt (- ptr 8))))
+        (if (< bt 16) 0
+          (if (= (nl_gc_in_arena (+ ptr (- bt 9))) 0) 0
+            (/ (- bt 8) stride)))))
     ;; Mark every slot of a `len'-element buffer starting at data_ptr.
     ;; Doc 147 Phase 2: each slot is now an 8-byte tagged WORD (stride 8,
     ;; was a 32B inline Sexp).  Per-slot WORD-aware mark, mirroring the
@@ -2248,10 +2262,17 @@ arm64 Linux has no legacy x86 numbering)."
     ;; faults BEFORE any per-slot guard.  Skip the whole buffer when
     ;; DATA_PTR is not in-arena (a real vector/record always has an
     ;; in-arena alloc'd buffer; len==0 -> data_ptr may be null -> skip).
+    ;; LEN gets the same clamp as `nl_gc_mark_char_table_slots': a garbage
+    ;; tag-8/12 pool slot names a block that is not an NlVector/NlRecord, so
+    ;; the `len' field read out of it is an arbitrary word.  The in-arena
+    ;; guard on DATA_PTR above stops a junk BASE; it does nothing about a
+    ;; junk LEN walking off the end of a real one.
     (defun nl_gc_mark_vec_slots (data_ptr i len)
       (if (= (nl_gc_in_arena data_ptr) 0) 0
-        (let ((k i))
-          (while (< k len)
+        (let* ((cap (nl_gc_block_elem_cap data_ptr 8))
+               (n (if (< len cap) len cap))
+               (k i))
+          (while (< k n)
             (nl_seq2
              (let ((vw (ptr-read-u64 (+ data_ptr (* k 8)) 0)))
                (if (= (logand vw 1) 1) 0
@@ -2324,17 +2345,33 @@ arm64 Linux has no legacy x86 numbering)."
     ;; char-table buffer.  Entries use STRIDE=40/OFF=8 ({i64 key,Sexp});
     ;; extras use STRIDE=32/OFF=0.  The buffer membership guard precedes every
     ;; dereference, matching `nl_gc_mark_vec_slots''s defensive contract.
+    ;; LEN is NOT trusted.  A tag-9 slot in an uninitialised parse-pool cell
+    ;; reaches here with `entries_len' read out of a block that is not a
+    ;; char-table box, i.e. an arbitrary 64-bit word.  Measured 2026-08-29:
+    ;; len came back as 0x7fffacd2d6f0 (a pointer) against a 40-byte entries
+    ;; block, and this loop walked 31,478,841 slots -- 1.26 GB -- past the end
+    ;; of the arena before SIGSEGV in `nl_gc_mark_slot'.  Clamp the walk to
+    ;; what the buffer's own block can hold.
     (defun nl_gc_mark_char_table_slots (base i len stride off)
       (if (= (nl_gc_in_arena base) 0) 0
-        (let ((k i))
-          (while (< k len)
+        (let* ((cap (nl_gc_block_elem_cap base stride))
+               (n (if (< len cap) len cap))
+               (k i))
+          (while (< k n)
             (nl_seq2 (nl_gc_mark_slot (+ base (+ off (* k stride))))
                      (setq k (+ k 1))))
           0)))
     ;; Mark a tag-9 box and every owned edge.  `nl_gc_mark_block' is the cycle
     ;; guard for parent/default graphs, so a parent cycle terminates safely.
+    ;; `nl_gc_mark_block' proves only that BOX is an unmarked in-arena block;
+    ;; it does not prove the block is the 128-byte NlCharTable `nl_char_table_
+    ;; alloc' lays out.  Reading +64..+112 out of a smaller block is how a
+    ;; garbage tag-9 pool slot produced a pointer-valued `entries_len' (see
+    ;; `nl_gc_mark_char_table_slots').  Require the real size first; a block
+    ;; too small to be a char-table box owns no char-table edges.
     (defun nl_gc_mark_char_table_box (box)
       (if (= (nl_gc_mark_block box) 0) 0
+       (if (< (nl_hdr_bt (- box 8)) 136) 0
         (let* ((entries (ptr-read-u64 (+ box 64) 0))
                (entries_len (ptr-read-u64 (+ box 80) 0))
                (parent (ptr-read-u64 (+ box 88) 0))
@@ -2347,7 +2384,7 @@ arm64 Linux has no legacy x86 numbering)."
            (nl_gc_mark_char_table_slots entries 0 entries_len 40 8)
            (if (= parent 0) 0 (nl_gc_mark_char_table_box parent))
            (nl_gc_mark_buf extra)
-           (nl_gc_mark_char_table_slots extra 0 extra_len 32 0)))))
+           (nl_gc_mark_char_table_slots extra 0 extra_len 32 0))))))
     (defun nl_gc_mark_bool_vector_box (box)
       (if (= (nl_gc_mark_block box) 0) 0
         (nl_gc_mark_buf (ptr-read-u64 (+ box 8) 0))))
@@ -3669,10 +3706,32 @@ arm64 Linux has no legacy x86 numbering)."
           (nl_seq2 (nl_gc_mark_mirror_buckets (+ env 0))
            (nl_seq2 (nl_gc_mark_recorded_slot (+ env 32))  ; frame stack
                     (nl_gc_mark_recorded_slot (+ env 64)))))))) ; unbound marker
+    ;; POOL is THIS frame's parse pool; the cap word @268436448 belongs to the
+    ;; load that is running NOW.  Nested loads size their pools from their own
+    ;; source length (`bf_load_readable' / `bf_eval_source_string'), so an
+    ;; outer frame's pool was walked with an inner load's cap: too large and
+    ;; the walk ran off the pool into unrelated live blocks (the mark pass only
+    ;; over-retains, but `nl_compact_rw_pool' / `nl_fa_pool' WRITE rewritten
+    ;; pointer edges through the same shape); too small and the tail of a live
+    ;; pool went unmarked.  The 2026-06-11 nested-cap restore fixed only the
+    ;; after-return face of this; while nested, the caps still disagreed.
+    ;; The pool block itself is the exact per-frame answer: both allocators
+    ;; request exactly `cap * 32' bytes.  Cap 0 is kept as the form-boundary
+    ;; "stale slots are not roots" mode flag `nl_gc_collect_form_boundary'
+    ;; installs, so honour it before consulting the block.
+    ;; POOL 0 answers 0 without touching memory: `nl_gc_eval_ctx_push' records
+    ;; evaluator frames with pool 0, and `nl_fa_frame_at' passes a frame's pool
+    ;; word here as an ARGUMENT -- i.e. before `nl_fa_pool's own `base = 0'
+    ;; guard runs -- so a bare `nl_hdr_bt (- 0 8)' would read address -8.
+    (defun nl_gc_pool_cap_of (pool)
+      (if (= pool 0) 0
+        (let ((c (nl_gc_block_elem_cap pool 32)))
+          (if (= c 0) (nl_gc_pool_cap) c))))
     (defun nl_gc_mark_recorded_pool (pool)
       (if (= pool 0) 0
         (nl_seq2 (nl_gc_mark_block pool)
-                 (nl_gc_mark_pool pool (nl_gc_pool_cap)))))
+                 (if (= (nl_gc_pool_cap) 0) 0
+                   (nl_gc_mark_pool pool (nl_gc_pool_cap_of pool))))))
     (defun nl_gc_mark_recorded_frame (env result out pool src cursor bsym)
       (nl_seq2 (nl_gc_mark_recorded_env env)
        (nl_seq2 (nl_gc_mark_recorded_slot result) ; executing form / subform
@@ -6955,7 +7014,13 @@ leave symbols unresolved at link time."
        (nl_fa_recorded_env (ptr-read-u64 base 0) ds span dest cin cout dir)
        (nl_seq2 (nl_fa_recorded_slot (ptr-read-u64 base 8) ds span dest cin cout dir)
         (nl_seq2 (nl_fa_recorded_slot (ptr-read-u64 base 16) ds span dest cin cout dir)
-         (nl_seq2 (nl_fa_pool (ptr-read-u64 base 24) (nl_gc_pool_cap) ds span dest cin cout dir)
+         ;; Per-frame pool cap, not the global cap word -- see
+         ;; `nl_gc_mark_recorded_pool'.  This arm REWRITES pointer edges, so
+         ;; walking a frame's pool with another load's larger cap rebases
+         ;; words that belong to unrelated live blocks.
+         (nl_seq2 (nl_fa_pool (ptr-read-u64 base 24)
+                              (nl_gc_pool_cap_of (ptr-read-u64 base 24))
+                              ds span dest cin cout dir)
           (nl_seq2 (nl_fa_recorded_slot (ptr-read-u64 base 32) ds span dest cin cout dir)
            (nl_seq2 (nl_fa_recorded_slot (ptr-read-u64 base 40) ds span dest cin cout dir)
                     (nl_fa_recorded_slot (ptr-read-u64 base 48) ds span dest cin cout dir))))))))

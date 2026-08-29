@@ -1392,6 +1392,112 @@ scratch chunks have their cursor reset."
              0))
         nelisp-standalone--gc-source)))))
 
+(ert-deftest nelisp-standalone-target-gc-slot-walks-are-bounded-by-the-block ()
+  "Sexp-slot walkers clamp LEN to what the buffer's own block can hold.
+
+Measured 2026-08-29: an uninitialised reader parse-pool slot presented as
+tag 9, so `nl_gc_mark_char_table_box' read `entries_len' out of a block
+that was not a char-table box and got back 0x7fffacd2d6f0 -- a pointer.
+`nl_gc_mark_char_table_slots' believed it and walked 31,478,841 slots,
+1.26 GB, past the end of the arena, dying in `nl_gc_mark_slot' on an
+address 0x18 beyond the last mapped byte.  The allocator block header is
+the authority on how many elements a buffer holds, and a live Vec never
+has len > cap, so clamping to it cannot truncate a real object."
+  (cl-labels ((tree-member-p
+               (needle tree)
+               (cond
+                ((equal needle tree) t)
+                ((consp tree)
+                 (or (tree-member-p needle (car tree))
+                     (tree-member-p needle (cdr tree)))))))
+    ;; The shared capacity helper: payload bytes / STRIDE, refusing a block
+    ;; whose claimed end is not itself in the arena.
+    (should (tree-member-p
+             '(defun nl_gc_block_elem_cap (ptr stride)
+                (let ((bt (nl_hdr_bt (- ptr 8))))
+                  (if (< bt 16) 0
+                    (if (= (nl_gc_in_arena (+ ptr (- bt 9))) 0) 0
+                      (/ (- bt 8) stride)))))
+             nelisp-standalone--gc-source))
+    ;; Both slot walkers take the clamp.
+    (should (tree-member-p '(cap (nl_gc_block_elem_cap base stride))
+                           nelisp-standalone--gc-source))
+    (should (tree-member-p '(cap (nl_gc_block_elem_cap data_ptr 8))
+                           nelisp-standalone--gc-source))
+    (should (tree-member-p '(n (if (< len cap) len cap))
+                           nelisp-standalone--gc-source))
+    ;; A tag-9 box is only read at char-table offsets when the block is
+    ;; actually big enough to be one (`nl_char_table_alloc' takes 128 bytes,
+    ;; so BLOCK_TOTAL is 136).
+    (should (tree-member-p '(< (nl_hdr_bt (- box 8)) 136)
+                           nelisp-standalone--gc-source))
+    ;; And the unbounded shapes are gone.  These two `should-not's fail if
+    ;; either walker goes back to trusting LEN.
+    (should-not (tree-member-p
+                 '(defun nl_gc_mark_char_table_slots (base i len stride off)
+                    (if (= (nl_gc_in_arena base) 0) 0
+                      (let ((k i))
+                        (while (< k len)
+                          (nl_seq2 (nl_gc_mark_slot (+ base (+ off (* k stride))))
+                                   (setq k (+ k 1))))
+                        0)))
+                 nelisp-standalone--gc-source))
+    (should-not (tree-member-p
+                 '(defun nl_gc_mark_vec_slots (data_ptr i len)
+                    (if (= (nl_gc_in_arena data_ptr) 0) 0
+                      (let ((k i))
+                        (while (< k len)
+                          (nl_seq2
+                           (let ((vw (ptr-read-u64 (+ data_ptr (* k 8)) 0)))
+                             (if (= (logand vw 1) 1) 0
+                               (if (= (nl_gc_mark_block vw) 0) 0
+                                 (nl_gc_mark_slot vw))))
+                           (setq k (+ k 1))))
+                        0)))
+                 nelisp-standalone--gc-source))))
+
+(ert-deftest nelisp-standalone-target-recorded-pool-uses-its-own-cap ()
+  "A recorded frame's parse pool is walked with ITS cap, not the global word.
+
+The cap word @268436448 names the pool of the load running now.  Nested
+loads size their pools from their own source length, so an outer frame's
+pool was walked with an inner load's cap: too large and the walk ran into
+unrelated live blocks (`nl_fa_pool' REWRITES pointer edges through the
+same shape), too small and a live pool's tail went unmarked.  The
+2026-06-11 nested-cap restore fixed only the after-return face of this.
+Measured 2026-08-29 over ten process layouts: 0/10 runs of anvil's
+standalone MCP fast handshake completed before this change, 20/20 after."
+  (cl-labels ((tree-member-p
+               (needle tree)
+               (cond
+                ((equal needle tree) t)
+                ((consp tree)
+                 (or (tree-member-p needle (car tree))
+                     (tree-member-p needle (cdr tree)))))))
+    (should (tree-member-p
+             '(defun nl_gc_pool_cap_of (pool)
+                (if (= pool 0) 0
+                  (let ((c (nl_gc_block_elem_cap pool 32)))
+                    (if (= c 0) (nl_gc_pool_cap) c))))
+             nelisp-standalone--gc-source))
+    ;; Cap 0 stays the form-boundary "stale slots are not roots" mode flag.
+    (should (tree-member-p
+             '(defun nl_gc_mark_recorded_pool (pool)
+                (if (= pool 0) 0
+                  (nl_seq2 (nl_gc_mark_block pool)
+                           (if (= (nl_gc_pool_cap) 0) 0
+                             (nl_gc_mark_pool pool (nl_gc_pool_cap_of pool))))))
+             nelisp-standalone--gc-source))
+    ;; The rewriting arm takes the same per-frame cap.
+    (should (tree-member-p '(nl_gc_pool_cap_of (ptr-read-u64 base 24))
+                           nelisp-standalone--applyfn-fa-file-helpers))
+    (should-not (tree-member-p
+                 '(defun nl_gc_mark_recorded_pool (pool)
+                    (if (= pool 0) 0
+                      (nl_seq2 (nl_gc_mark_block pool)
+                               (nl_gc_mark_pool pool (nl_gc_pool_cap)))))
+                 nelisp-standalone--gc-source))))
+
 (ert-deftest nelisp-standalone-target-arena-adds-target-chunk-allocator ()
   "Doc 140 Stage 4 adds target-specific non-fixed chunk allocation."
   (cl-labels ((tree-member-p
