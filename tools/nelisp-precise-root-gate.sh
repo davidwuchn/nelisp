@@ -87,18 +87,23 @@
 # collecting form is part of the case, not a detail, which is why cases 7 below
 # run all of them.
 #
-# STILL OPEN, measured on the binary that passes everything below:
+# ONE CASE REMAINS OPEN, measured on the binary that passes everything below:
 #
-#   ((lambda () (progn 1 (f))))                       ; SIGSEGV
-#   (defun g (n) (if (< n 1) (f) (g (- n 1)))) (g 3)  ; SIGSEGV
-#   (let ((a (f))) (let ((b (f))) (+ a b)))           ; rc=1, void-variable: (b)
+#   ((lambda () (progn 1 (f))))                       ; SIGSEGV, 5/5 layouts
 #
-# The first is a COMBINATION: a bare lambda whose body is a `progn'.
-# `((lambda () (f)))' and `((lambda () 1 (f)))' both pass, and every `progn'
-# case below passes, so neither construct alone accounts for it.  Closing
-# `progn' moved it from a silent wrong answer (47829904) to a crash -- worse to
-# look at, better to find.  The other two are undiagnosed.  All three fail at
-# the parent commit too.
+# It is a COMBINATION, not either construct: `((lambda () (f)))',
+# `((lambda () 1 (f)))' and every `progn' row below all pass.  Two things
+# separate it from the nine that were closed.  It does NOT move with process
+# layout -- identical at five environment-padding sizes, where the original
+# defect flipped between segfault, Lisp error and success.  And its backtrace
+# is a wild jump rather than a call chain (`#0 0x...b09959 in ?? ()' with
+# garbage frames under it), where every one of the nine was diagnosable from a
+# single gdb frame.  Both say it is a different mechanism, not a tenth walker.
+#
+# Two cases that used to be listed here beside it -- a recursive `defun' and a
+# `let' nested in a `let' -- turned out to be the SAME defect after all.
+# Closing `if' and the `let' body fixed them with nothing aimed at either, and
+# they are cases 10 below now.
 #
 # Widening this gate means closing them the same way, with each construct's
 # three-line case added below as it goes green.
@@ -342,6 +347,18 @@ run_binding_case cc-handler-first-form \
   '(nelisp--write-stderr-line (number-to-string (condition-case nil (error "x") (error (f) 5))))' 5
 run_binding_case cc-protected-form-collects \
   '(nelisp--write-stderr-line (number-to-string (condition-case nil (f) (error 0))))' 7
+
+# 10. Two cases the header used to list as open, closed as a side effect of the
+#     `if' and `let'-body fixes rather than by anything aimed at them.  Held
+#     here because nothing else in the set covers a recursive call or a `let'
+#     nested in a `let', and because while they failed they looked like a
+#     different class -- one segfaulted, the other quietly lost a binding.
+#     5/5 across the layout sweep each.
+run_binding_case recursive-defun-collects \
+  '(defun g (n) (if (< n 1) (f) (g (- n 1))))
+(nelisp--write-stderr-line (number-to-string (g 3)))' 7
+run_binding_case nested-let-both-collect \
+  '(nelisp--write-stderr-line (number-to-string (let ((a (f))) (let ((b (f))) (+ a b)))))' 14
 
 if [ "$FINDINGS" -ne 0 ]; then
   echo "precise-root-coverage: FAIL ($FINDINGS finding(s))"
