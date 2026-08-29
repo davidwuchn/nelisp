@@ -13675,23 +13675,24 @@ before feat/windows-spawn; Windows targets get a CreateProcessW spawn-model
       (if (= (ptr-read-u64 268435472 0) 2)
           (nl_ct_catch_check_tag tag_slot env out eqres_slot 0 0)
         1))
-    (defun nl_ct_catch_body_step (rc body_rest tag_slot env out eqres_slot)
+    ;; The body list's cdr is taken AFTER the body form's own eval, not before:
+    ;; a one-form body ends in Nil, `nl_cons_cdr_ptr' materialises an unrooted
+    ;; view for it, and a collection inside the body frees that view under the
+    ;; walker.  Same shape as the nine walkers closed earlier on this branch.
+    (defun nl_ct_catch_body_step (rc body tag_slot env out eqres_slot)
       (if (= rc 0)
-          (nl_ct_catch_body body_rest tag_slot env out eqres_slot 0)
+          (nl_ct_catch_body
+           (extern-call nl_cons_cdr_ptr body) tag_slot env out eqres_slot 0)
         (nl_ct_catch_caught rc tag_slot env out eqres_slot 0)))
-    (defun nl_ct_catch_body_eval (car body_rest tag_slot env out eqres_slot)
+    (defun nl_ct_catch_body_eval (car body tag_slot env out eqres_slot)
       (nl_ct_catch_body_step
        (extern-call nelisp_eval_call car env out)
-       body_rest tag_slot env out eqres_slot))
-    (defun nl_ct_catch_body_cdr (body_rest body tag_slot env out eqres_slot)
-      (nl_ct_catch_body_eval
-       (extern-call nl_cons_car_ptr body)
-       body_rest tag_slot env out eqres_slot))
+       body tag_slot env out eqres_slot))
     (defun nl_ct_catch_body (body tag_slot env out eqres_slot _p5)
       (if (= (sexp-tag body) 0)
           0
-        (nl_ct_catch_body_cdr
-         (extern-call nl_cons_cdr_ptr body)
+        (nl_ct_catch_body_eval
+         (extern-call nl_cons_car_ptr body)
          body tag_slot env out eqres_slot)))
     (defun nl_ct_catch_after_tag (rc body tag_slot env out eqres_slot)
       (if (= rc 0)
@@ -13705,12 +13706,25 @@ before feat/windows-spawn; Windows targets get a CreateProcessW spawn-model
       (nl_ct_catch_got_body
        (extern-call nl_cons_cdr_ptr args)
        tag_form env out tag_slot eqres_slot))
+    ;; TAG_SLOT holds the evaluated catch tag for the whole body evaluation, so
+    ;; it has to be a GC root.  As an `alloc-bytes' scratch a collection inside
+    ;; the body freed it, `nl_ct_tag_eq' then compared a `throw' against a
+    ;; blanked slot and answered no-match, and the throw escaped its own
+    ;; `catch' as `no-catch' -- no crash, just a wrong answer.
+    (defun nl_sf_catch_run (args env out tag_slot eqres_slot root_mark)
+      (nl_ct_root_finish
+       env root_mark
+       (nl_ct_catch_got_tag_form
+        (nl_cons_car_ptr args) args env out tag_slot eqres_slot)))
+    (defun nl_ct_root_finish (env root_mark status)
+      (seq (nl_root_release env root_mark) status))
+    (defun nl_sf_catch_slots (args env out root_mark tag_slot)
+      (nl_sf_catch_run args env out tag_slot (alloc-bytes 32 8) root_mark))
+    (defun nl_sf_catch_mark (args env out root_mark)
+      (nl_sf_catch_slots args env out root_mark (nl_root_reserve env)))
     (defun nl_sf_catch (args env out _pad)
       (if (= (sexp-tag args) 7)
-          (let* ((tag_slot (alloc-bytes 32 8)) (eqres_slot (alloc-bytes 32 8)))
-            (nl_ct_catch_got_tag_form
-             (extern-call nl_cons_car_ptr args)
-             args env out tag_slot eqres_slot))
+          (nl_sf_catch_mark args env out (nl_root_mark env))
         1)))
   "M6 catch/throw special-form impls.  nl_sf_catch/nl_sf_throw are dispatched
 from the patched combiner-cons (see `nelisp-standalone--patch-combiner-cons').")
@@ -14964,7 +14978,7 @@ computed expansion into `nl_mxcache_store' before evaluating it.")
                  (nl_cons_macro_apply_eval
                   form_ptr func_slot tail_ptr env out))
               (nl_eval_inner_cons_eval_args
-               tail_ptr env out root_mark func_slot (alloc-bytes 32 8))))
+               tail_ptr env out root_mark func_slot (nl_root_reserve env))))
         (nl_cons_root_finish
          env root_mark (nl_cons_stash_void_function env head_ptr))))
     (defun nl_eval_inner_cons_symbol_slot
@@ -14986,7 +15000,7 @@ computed expansion into `nl_mxcache_store' before evaluating it.")
         (rc_eval tail_ptr env out root_mark func_slot)
       (if (= rc_eval 0)
           (nl_eval_inner_cons_eval_args
-           tail_ptr env out root_mark func_slot (alloc-bytes 32 8))
+           tail_ptr env out root_mark func_slot (nl_root_reserve env))
         (nl_cons_root_finish env root_mark 1)))
     (defun nl_eval_inner_cons_callable_slot
         (head_ptr tail_ptr env out root_mark func_slot)
@@ -22879,7 +22893,7 @@ always return 0, so `signal' flows to the builtin applyfn (bf_signal) instead of
       (if (= rc_init 0)
           (nl_apply_do_apply_append
            prefix_slot (nl_apply_list_last_cdr rest_args)
-           env out root_mark func_slot (alloc-bytes 32 8))
+           env out root_mark func_slot (nl_root_reserve env))
         (nl_apply_root_finish env root_mark 1)))
     (defun nl_apply_do_apply_list
         (rest_args env out root_mark func_slot prefix_slot)
@@ -22896,7 +22910,7 @@ always return 0, so `signal' flows to the builtin applyfn (bf_signal) instead of
              (if (= (sexp-tag args_list_ptr) 7)
                  (nl_cons_cdr_ptr args_list_ptr)
                args_list_ptr)
-             env out root_mark func_slot (alloc-bytes 32 8)))
+             env out root_mark func_slot (nl_root_reserve env)))
         (nl_apply_root_finish
          env root_mark (nl_cons_stash_void_function env arg0_ptr))))
     (defun nl_apply_do_apply_resolve
@@ -25370,9 +25384,12 @@ the saved stack top instead of leaking a root entry."
     ;; equals `after' here, so nothing about what the smoke exists to catch has
     ;; changed.  Only the `--eval' entry point shows the shift; the file entry
     ;; point reads 3 either way, which is why `make standalone' caught this and
-    ;; ert-full and the reader smokes did not.
+    ;; ert-full and the reader smokes did not.  It moved again, 4 -> 6, when the
+    ;; builtin argument list and the `catch' tag became roots as well; the same
+    ;; two measurements were repeated and held (equal before/after, and 2000
+    ;; nested `let's leaving the depth exactly where they found it).
     (unless (equal (cl-subseq value 0 10)
-                   '(200000 3 2 11 22 33 44 55 4 4))
+                   '(200000 3 2 11 22 33 44 55 6 6))
       (error "stage3 rootstack smoke result/depth mismatch: %S" value))
     (unless (= (nth 8 value) (nth 9 value))
       (error "stage3 rootstack smoke leaked a root entry: before=%S after=%S"

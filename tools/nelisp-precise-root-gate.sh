@@ -375,6 +375,16 @@ run_binding_case recursive-defun-collects \
 run_binding_case nested-let-both-collect \
   '(nelisp--write-stderr-line (number-to-string (let ((a (f))) (let ((b (f))) (+ a b)))))' 14
 
+# 11. `catch' bodies.  Two defects met here: the body walker took its cdr
+#     before the eval like the nine before it, and TAG_SLOT -- which holds the
+#     evaluated tag for the whole body -- was an `alloc-bytes' scratch, so a
+#     collection in the body blanked the tag and a `throw' stopped matching its
+#     own `catch'.  At the parent commit the first row answered 47827728.
+run_binding_case catch-body-collects \
+  '(nelisp--write-stderr-line (number-to-string (catch (quote tg) 1 (f))))' 7
+run_binding_case catch-body-single-form \
+  '(nelisp--write-stderr-line (number-to-string (catch (quote tg) (f))))' 7
+
 if [ "$FINDINGS" -ne 0 ]; then
   echo "precise-root-coverage: FAIL ($FINDINGS finding(s))"
   exit 1
