@@ -320,6 +320,25 @@ run_binding_case letstar-body-first-form \
 run_binding_case letstar-binding-and-body \
   '(nelisp--write-stderr-line (number-to-string (let* ((a (f)) (b (+ a 1))) 3 (f))))' 7
 
+# 9. `while' bodies and `condition-case' handler bodies -- the last two walkers
+#    the survey found.  At the parent commit the `while' rows SEGFAULTED and the
+#    handler rows answered 47832200 / 47832464, while the not-last positions and
+#    the condition and the protected form were all already correct.
+run_binding_case while-body-last-form \
+  '(nelisp--write-stderr-line (number-to-string (let ((n 0) (a 0)) (while (< n 2) (setq n (+ n 1)) (setq a (f))) a)))' 7
+run_binding_case while-body-first-form \
+  '(nelisp--write-stderr-line (number-to-string (let ((n 0) (a 0)) (while (< n 3) (setq a (+ a (f))) (setq n (+ n 1))) a)))' 21
+run_binding_case while-condition-collects \
+  '(nelisp--write-stderr-line (number-to-string (let ((n 0)) (while (< n (f)) (setq n (+ n 8))) n)))' 8
+run_binding_case cc-handler-single-form \
+  '(nelisp--write-stderr-line (number-to-string (condition-case nil (error "x") (error (f)))))' 7
+run_binding_case cc-handler-last-form \
+  '(nelisp--write-stderr-line (number-to-string (condition-case nil (error "x") (error 1 (f)))))' 7
+run_binding_case cc-handler-first-form \
+  '(nelisp--write-stderr-line (number-to-string (condition-case nil (error "x") (error (f) 5))))' 5
+run_binding_case cc-protected-form-collects \
+  '(nelisp--write-stderr-line (number-to-string (condition-case nil (f) (error 0))))' 7
+
 if [ "$FINDINGS" -ne 0 ]; then
   echo "precise-root-coverage: FAIL ($FINDINGS finding(s))"
   exit 1
