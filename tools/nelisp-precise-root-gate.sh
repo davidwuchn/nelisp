@@ -33,7 +33,8 @@
 #
 #     (nelisp--debug-switch 28)
 #     (defun f () (garbage-collect) 7)
-#     (setq a (f))            ; rc=1;  (let ((x (f))) x) and let* likewise
+#     (setq a (f))            ; was rc=1; FIXED, and case 4 below holds it
+#     (let ((x (f))) x)       ; rc=1 still, and let* likewise
 #
 # Bare `(f)', `(if (f) 1 2)', `(+ 1 (f))', `(list (f) 2)', `(progn (f) 1)',
 # `(cons (f) nil)', a `while' body and a nested `(defun g () (f)) (g)' all
@@ -52,8 +53,15 @@
 # alone was tried and measured: it does NOT make the three lines pass, so the
 # hole is elsewhere in the same chain and was not shipped on a guess.
 #
-# Widening this gate means closing that, construct by construct, with each
-# construct's three-line case added below as it goes green.
+# `setq' is closed: `nl_sf_setq' no longer takes `cdr(val-cdr)' before the
+# eval, so the materialised view never exists across a collection (rooting it
+# would have worked too; not creating it is cheaper and cannot be forgotten).
+# `let' / `let*' remain -- `nl_let_parse_val' has the same shape.  Rooting
+# `let''s `val_slot' alone was tried and measured NOT to fix it, so the hole is
+# elsewhere in that chain.
+#
+# Widening this gate means closing them the same way, with each construct's
+# three-line case added below as it goes green.
 #
 # It also pins the precondition for walking less of the reader parse pool than
 # its whole capacity: with the pool slot walk suppressed (switch 26) the same
@@ -153,6 +161,38 @@ run_case no-conservative-scan "(nelisp--debug-switch 28)" 1
 #    cannot be what makes that true.
 run_case no-conservative-scan-no-pool-walk \
   "(nelisp--debug-switch 28)(nelisp--debug-switch 26)" 1
+
+# 4. `setq' collecting inside its own value expression.  This was rc=1 until
+#    `nl_sf_setq' stopped taking the cdr before the eval; it needs no loop and
+#    no collection budget, because the `garbage-collect' is the whole case.
+run_binding_case() {  # $1 = label, $2 = body, $3 = expected stderr word
+  local label="$1" body="$2" want="$3"
+  local src="$TMP_DIR/$label.el" err="$TMP_DIR/$label.err" rc=0
+  {
+    echo '(nelisp--debug-switch 28)'
+    echo '(defun f () (garbage-collect) 7)'
+    echo "$body"
+  } > "$src"
+  CHECKED=$((CHECKED + 1))
+  "$NELISP" "$src" >/dev/null 2>"$err" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "precise_root_fail label=$label reason=nonzero-exit rc=$rc $(tr '\n' ' ' <"$err")" >&2
+    FINDINGS=$((FINDINGS + 1))
+    return 0
+  fi
+  if ! grep -q "^$want\$" "$err"; then
+    echo "precise_root_fail label=$label reason=missing-marker want=$want got=$(tr '\n' ' ' <"$err")" >&2
+    FINDINGS=$((FINDINGS + 1))
+    return 0
+  fi
+  echo "precise_root_result label=$label marker=$want"
+}
+run_binding_case setq-collects-in-value \
+  '(setq a (f))
+(nelisp--write-stderr-line (number-to-string a))' 7
+run_binding_case setq-multi-pair \
+  '(setq p 1 q 2 r 3)
+(nelisp--write-stderr-line (number-to-string (+ p q r)))' 6
 
 if [ "$FINDINGS" -ne 0 ]; then
   echo "precise-root-coverage: FAIL ($FINDINGS finding(s))"

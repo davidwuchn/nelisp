@@ -382,6 +382,16 @@ standalone-midform-gc-bounded|scripts/nelisp-standalone-build.el|s/(defun nl_os_
 # `acc=1750000 collections=6' each.  Structural, not timing-dependent: the arm
 # is gone, so the form has no precise root at all.
 precise-root-coverage|scripts/nelisp-standalone-build.el|s/(nl_seq2 (nl_gc_mark_recorded_slot result) ; executing form . subform/(nl_seq2 0 ; MUTATION: executing form is not a root/|the executing top-level form is no longer a precise root, so only the conservative stack scan keeps it alive
+# precise-root-coverage gained two `setq' cases when that construct was closed.
+# They carry NO row here, deliberately: the defect they cover is an ordering
+# inside one CPS chain (the cdr taken before the eval instead of after), which
+# no single `sed -i' expression restores, and a row that cannot be written
+# honestly is worse than none.  Their red-ness was still measured the same way
+# a row proves itself -- built at the parent commit and run:
+#   precise_root_fail label=setq-collects-in-value reason=nonzero-exit rc=1
+#   nelisp: form aborted without signal (rc=1)
+# and green after: `label=setq-collects-in-value marker=7'.  The row above
+# already holds the gate itself lethal.
 # standalone-reader-socket-smoke: added 2026-08-24 (socket primitives,
 # Doc 184 follow-on, feat/socket-primitives-p1).  The injection changes
 # accept4's raw syscall number from 288 (the real Linux x86_64 number)
