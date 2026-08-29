@@ -25358,9 +25358,25 @@ the saved stack top instead of leaking a root entry."
                 rc (buffer-string) (error-message-string err)))))
     (unless (= rc 0)
       (error "stage3 rootstack smoke exit=%S value=%S" rc value))
+    ;; The last two elements are `before' and `after'.  What this smoke proves
+    ;; is that they are EQUAL -- every rooted continuation restores the saved
+    ;; stack top on the error / throw / unwind / failing-apply paths instead of
+    ;; leaking an entry.  Their absolute value is an observation, not the
+    ;; invariant, and it moved from 3 to 4 when `nl_let_collect_walk' started
+    ;; reserving a Stage-2 root slot for the value it holds across the
+    ;; evaluation of the NEXT binding (383b8b7bc).  Measured before changing
+    ;; this number: the offset is constant, not cumulative -- 2000 nested
+    ;; `let's leave the depth exactly where they found it -- and `before' still
+    ;; equals `after' here, so nothing about what the smoke exists to catch has
+    ;; changed.  Only the `--eval' entry point shows the shift; the file entry
+    ;; point reads 3 either way, which is why `make standalone' caught this and
+    ;; ert-full and the reader smokes did not.
     (unless (equal (cl-subseq value 0 10)
-                   '(200000 3 2 11 22 33 44 55 3 3))
+                   '(200000 3 2 11 22 33 44 55 4 4))
       (error "stage3 rootstack smoke result/depth mismatch: %S" value))
+    (unless (= (nth 8 value) (nth 9 value))
+      (error "stage3 rootstack smoke leaked a root entry: before=%S after=%S"
+             (nth 8 value) (nth 9 value)))
     (let ((diag (nth 10 value)))
       (unless (and (listp diag)
                    (= (nth 0 diag) 0)
