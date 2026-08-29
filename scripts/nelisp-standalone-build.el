@@ -13615,12 +13615,23 @@ before feat/windows-spawn; Windows targets get a CreateProcessW spawn-model
       (nl_ct_throw_got_cdr1
        (extern-call nl_cons_cdr_ptr args)
        tag_form env out tag_slot val_slot))
+    ;; TAG_SLOT holds the EVALUATED tag while the value form is evaluated, and
+    ;; that evaluation can collect.  As an `alloc-bytes' scratch the tag came
+    ;; back blanked, `nl_ct_copy32' stashed a nil tag, and the throw missed its
+    ;; own `catch': `(catch 'tg (throw 'tg (f)))' answered `no-catch: (0 7)'.
+    ;; Rooted for the whole of `nl_sf_throw'; VAL_SLOT is written by the eval
+    ;; and read immediately after, so it needs no root of its own.
+    (defun nl_sf_throw_run (args env out tag_slot val_slot root_mark)
+      (nl_ct_root_finish
+       env root_mark
+       (nl_ct_throw_got_tag_form
+        (nl_cons_car_ptr args) args env out tag_slot val_slot)))
+    (defun nl_sf_throw_mark (args env out root_mark)
+      (nl_sf_throw_run args env out (nl_root_reserve env)
+                       (alloc-bytes 32 8) root_mark))
     (defun nl_sf_throw (args env out _pad)
       (if (= (sexp-tag args) 7)
-          (let* ((tag_slot (alloc-bytes 32 8)) (val_slot (alloc-bytes 32 8)))
-            (nl_ct_throw_got_tag_form
-             (extern-call nl_cons_car_ptr args)
-             args env out tag_slot val_slot))
+          (nl_sf_throw_mark args env out (nl_root_mark env))
         1))
     ;;================= CATCH =================
     ;; Generic `eq' tag-match helper.  `nl_ct_catch_check_tag' used to reuse

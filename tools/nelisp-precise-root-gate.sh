@@ -385,6 +385,29 @@ run_binding_case catch-body-collects \
 run_binding_case catch-body-single-form \
   '(nelisp--write-stderr-line (number-to-string (catch (quote tg) (f))))' 7
 
+# 12. `throw'.  Its TAG_SLOT holds the EVALUATED tag while the VALUE form is
+#     evaluated, and that evaluation collects, so the tag came back blanked and
+#     the throw missed its own `catch' -- `no-catch: (0 7)', a wrong answer
+#     rather than a crash.  The value form's own car is now taken after the tag
+#     eval for the same reason `progn' and the rest were changed.
+run_binding_case throw-value-collects \
+  '(nelisp--write-stderr-line (number-to-string (catch (quote tg) (throw (quote tg) (f)))))' 7
+run_binding_case throw-inside-progn \
+  '(nelisp--write-stderr-line (number-to-string (catch (quote tg) (progn 1 (throw (quote tg) (f))))))' 7
+run_binding_case throw-past-inner-catch \
+  '(nelisp--write-stderr-line (number-to-string (catch (quote a) (catch (quote b) (throw (quote a) (f))))))' 7
+run_binding_case throw-literal-value \
+  '(nelisp--write-stderr-line (number-to-string (catch (quote tg) (throw (quote tg) 5))))' 5
+
+# 13. The combination that was the last one standing: a bare lambda whose body
+#     is a `progn'.  It answered 47829904 at first, then segfaulted once
+#     `progn' was closed, and neither construct alone accounted for it -- it
+#     needed the builtin arg list and the catch/throw tags rooted as well.
+run_binding_case lambda-wrapping-progn \
+  '(nelisp--write-stderr-line (number-to-string ((lambda () (progn 1 (f))))))' 7
+run_binding_case unwind-protect-body-collects \
+  '(nelisp--write-stderr-line (number-to-string (unwind-protect (f) 1)))' 7
+
 if [ "$FINDINGS" -ne 0 ]; then
   echo "precise-root-coverage: FAIL ($FINDINGS finding(s))"
   exit 1
