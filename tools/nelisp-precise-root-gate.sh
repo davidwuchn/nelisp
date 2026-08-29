@@ -20,12 +20,16 @@
 # deletion is an immediate SIGSEGV -- see the `precise-root-coverage' rows in
 # tools/gate-mutations.txt.
 #
-# SCOPE, stated because it is narrow on purpose.  The precise surface is NOT
-# sufficient for real programs: the same anvil module load that this gate's
-# workload stands in for segfaults in under a second with the scan off, on a
-# clean tree.  This gate therefore pins precise-root soundness for a bounded
-# synthetic workload only.  It is not a claim that the conservative scan is
-# removable.
+# SCOPE.  This used to say the precise surface was NOT sufficient for real
+# programs, because the anvil module load segfaulted in under a second with the
+# scan off.  That is no longer true.  After the nine walkers below were closed,
+# that same load runs to completion with the scan off -- 2/2 clean at 141 s for
+# the plain path, and 3/3 at 186 s serving the MCP fast handshake with all
+# 5,208 bytes of correct output.  The synthetic workload here is still what the
+# gate runs, because it is seconds rather than minutes and it isolates one
+# construct per case; the real load is the evidence that the set is no longer
+# a toy.  It remains NOT a claim that the conservative scan is removable --
+# nothing here has measured what else it still covers.
 #
 # WHERE THE BOUNDARY ACTUALLY IS, measured 2026-08-29 while trying to widen
 # this workload.  The failing construct is three lines, and it is a binding
