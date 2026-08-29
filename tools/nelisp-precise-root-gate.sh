@@ -27,6 +27,34 @@
 # synthetic workload only.  It is not a claim that the conservative scan is
 # removable.
 #
+# WHERE THE BOUNDARY ACTUALLY IS, measured 2026-08-29 while trying to widen
+# this workload.  The failing construct is three lines, and it is a binding
+# form collecting inside its own value expression:
+#
+#     (nelisp--debug-switch 28)
+#     (defun f () (garbage-collect) 7)
+#     (setq a (f))            ; rc=1;  (let ((x (f))) x) and let* likewise
+#
+# Bare `(f)', `(if (f) 1 2)', `(+ 1 (f))', `(list (f) 2)', `(progn (f) 1)',
+# `(cons (f) nil)', a `while' body and a nested `(defun g () (f)) (g)' all
+# pass.  So the gap under the scan is not general -- it is the binding forms.
+# It is also not mid-form-collector-specific: the same three lines fail with
+# the collector disarmed (switch 6), because the collection here is an
+# explicit `garbage-collect', which is what `anvil-runtime-shell--compat-load'
+# calls after every file it loads.
+#
+# The structural cause is that `nl_cons_car_ptr' MATERIALISES a fresh 32-byte
+# box for an immediate car (lisp/nelisp-cc-jit-cons-car-ptr.el) and hands back
+# a raw pointer to it; nothing roots that box, and its own comment counts ~302
+# consumer sites.  The mechanism to fix it already exists and is already used
+# by `nl_eval_inner_cons': `nl_root_mark' / `nl_root_reserve' /
+# `nl_root_release' (lisp/nelisp-cc-rootstack.el).  Rooting `let''s `val_slot'
+# alone was tried and measured: it does NOT make the three lines pass, so the
+# hole is elsewhere in the same chain and was not shipped on a guess.
+#
+# Widening this gate means closing that, construct by construct, with each
+# construct's three-line case added below as it goes green.
+#
 # It also pins the precondition for walking less of the reader parse pool than
 # its whole capacity: with the pool slot walk suppressed (switch 26) the same
 # workload must be byte-identical.  Measured 2026-08-29, the pool arm reaches
