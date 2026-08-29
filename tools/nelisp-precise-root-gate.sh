@@ -41,10 +41,25 @@
 #   FAIL   standalone-reader-ffi-unsupported-smoke, 1 of the 41 smokes:
 #          expected `nl-ffi-call', got nothing
 #
-# So two paths still depend on the scan: artifact compilation and the FFI
-# surface.  Closing the nine walkers was necessary and is not sufficient.  They
-# are named here so the next attempt starts from a failing command rather than
-# from another survey.
+# Those two were artifact compilation and the FFI surface, and they are closed:
+# the arg list needed rooting (`require' loses its own feature symbol while
+# loading a file), the root stack needed a bound (it had none, and rooting one
+# more slot per call walked it out of its region), and `catch' / `throw' each
+# needed their tag rooted across the form they evaluate.  Re-run with the same
+# scan-off build afterwards:
+#
+#   PASS   standalone-reader-test, all 41 reader smokes, selfhost, and every
+#          case here -- the whole standalone tier, with the conservative
+#          native-stack scan disabled at the driver
+#   PASS   anvil's own module load serving the MCP fast handshake: exit 0 in
+#          178 s with all 5,208 bytes of correct output
+#
+# The precise recorded-root surface now carries every workload this repository
+# can point at.  That is still not a decision to remove the scan -- it is belt
+# and braces for whatever no gate here exercises, and the cost of keeping it is
+# a stack walk per collection -- but "the precise arms are not sufficient" has
+# stopped being true, and any future claim that they are not should come with a
+# failing command the way these did.
 #
 # WHERE THE BOUNDARY ACTUALLY IS, measured 2026-08-29 while trying to widen
 # this workload.  The failing construct is three lines, and it is a binding
