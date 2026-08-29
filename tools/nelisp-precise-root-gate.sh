@@ -63,19 +63,33 @@
 # which evaluates the NEXT binding, so that one needed `nl_root_reserve'.  The
 # cdr reorder alone was measured insufficient there.
 #
-# STILL OPEN, measured on the same binary that passes cases 5-8, and NOT `let'
-# defects despite the shape of the cases:
+# The LAMBDA BODY walker was the third instance and is closed the same way:
+# `nl_ali_body' took the body list's cdr before evaluating the body form and
+# carried it across.  `nl_ali_body_cdr' is gone; the cdr is taken in
+# `nl_ali_body_step' after the eval returns.  That is what makes a `let',
+# a `while' or an argument reference inside a function body work at all.
 #
-#   (let ((a (f))) (let ((b (f))) (+ a b)))    ; rc=1, void-variable: (b)
-#   (defun g () (let ((a (f)) (b (f))) (+ a b)))  (+ (g) (g))   ; SIGSEGV
+# READ THE FAILURE MODE BEFORE TRUSTING AN rc.  At the parent commit these
+# returned WRONG VALUES rather than crashing:
+#   (defun g () (f)) (g)            -> 47832544   instead of 7
+#   (defun g (x) (+ x (f))) (g 1)   -> 7          instead of 8
+#   ((lambda () (f)))               -> 47828840   instead of 7
+# so every case below asserts the VALUE, not just exit status.  A gate here
+# that only checked rc would have called all three green.
 #
-# The second one dies in `nl_ali_body_cdr' / `nl_ali_body_eval' -- the LAMBDA
-# BODY walker takes the body list's cdr and carries it across the body form's
-# own eval.  Same materialised-view shape as `setq' and `let', different
-# construct, and it is what makes any `let' inside a function body fail.  The
-# first is a different symptom entirely (a binding goes missing, nothing
-# crashes) and has not been diagnosed.  Both fail on the parent commit too, so
-# neither is a regression from closing `let'.
+# STILL OPEN, measured on the binary that passes everything below:
+#
+#   (progn 1 (f))                                  ; 47826800 instead of 7
+#   (defun g (n) (if (< n 1) (f) (g (- n 1)))) (g 3)  ; SIGSEGV
+#   (let ((a (f))) (let ((b (f))) (+ a b)))        ; rc=1, void-variable: (b)
+#
+# The first is the FOURTH instance of the same shape: `nl_sf_progn_get_cdr'
+# takes the cdr before `nl_sf_progn_body_step' evaluates, and a `progn' whose
+# LAST form collects has a Nil cdr.  It was missed twice by construct surveys
+# that only tried `(progn (f) 1)', where the collecting form is not last and
+# the cdr is a real cons -- the position of the collecting form is part of the
+# case, not a detail.  The other two are undiagnosed.  All three fail at the
+# parent commit too.
 #
 # Widening this gate means closing them the same way, with each construct's
 # three-line case added below as it goes green.
@@ -229,6 +243,30 @@ run_binding_case letstar-dependent-binding \
   '(nelisp--write-stderr-line (number-to-string (let* ((a (f)) (b (+ a 1))) (+ a b))))' 15
 run_binding_case let-three-collecting-bindings \
   '(nelisp--write-stderr-line (number-to-string (let ((a (f)) (b (f)) (c (f))) (+ a (+ b c)))))' 21
+
+# 6. Collections inside a FUNCTION BODY.  These are the lambda-body walker's
+#    cases.  Three of them answered a wrong value rather than failing at the
+#    parent commit, which is why the marker is checked and not just the exit
+#    status.  Note the `defun' and the call are separate top-level forms on
+#    purpose: wrapping them in a `progn' instead exercises `nl_sf_progn', which
+#    still has this defect, and would make these cases fail for a reason that
+#    has nothing to do with what they are here to hold.
+run_binding_case body-one-form \
+  '(defun g () (f))
+(nelisp--write-stderr-line (number-to-string (g)))' 7
+run_binding_case body-with-argument \
+  '(defun g (x) (+ x (f)))
+(nelisp--write-stderr-line (number-to-string (g 1)))' 8
+run_binding_case body-let-called-twice \
+  '(defun g () (let ((a (f)) (b (f))) (+ a b)))
+(nelisp--write-stderr-line (number-to-string (+ (g) (g))))' 28
+run_binding_case body-while-loop \
+  '(defun g () (let ((n 0) (a 0)) (while (< n 3) (setq a (+ a (f))) (setq n (+ n 1))) a))
+(nelisp--write-stderr-line (number-to-string (g)))' 21
+run_binding_case bare-lambda-body \
+  '(nelisp--write-stderr-line (number-to-string ((lambda () (f)))))' 7
+run_binding_case bare-lambda-with-argument \
+  '(nelisp--write-stderr-line (number-to-string ((lambda (x) (+ x (f))) 1)))' 8
 
 if [ "$FINDINGS" -ne 0 ]; then
   echo "precise-root-coverage: FAIL ($FINDINGS finding(s))"
