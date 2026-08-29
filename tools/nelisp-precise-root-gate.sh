@@ -34,7 +34,7 @@
 #     (nelisp--debug-switch 28)
 #     (defun f () (garbage-collect) 7)
 #     (setq a (f))            ; was rc=1; FIXED, and case 4 below holds it
-#     (let ((x (f))) x)       ; rc=1 still, and let* likewise
+#     (let ((x (f))) x)       ; was rc=1; FIXED, and case 5 below holds it
 #
 # Bare `(f)', `(if (f) 1 2)', `(+ 1 (f))', `(list (f) 2)', `(progn (f) 1)',
 # `(cons (f) nil)', a `while' body and a nested `(defun g () (f)) (g)' all
@@ -56,9 +56,26 @@
 # `setq' is closed: `nl_sf_setq' no longer takes `cdr(val-cdr)' before the
 # eval, so the materialised view never exists across a collection (rooting it
 # would have worked too; not creating it is cheaper and cannot be forgotten).
-# `let' / `let*' remain -- `nl_let_parse_val' has the same shape.  Rooting
-# `let''s `val_slot' alone was tried and measured NOT to fix it, so the hole is
-# elsewhere in that chain.
+#
+# `let' / `let*' are closed at top level the same way -- both walkers stopped
+# taking the binding list's cdr before the value eval -- plus one rooted slot:
+# `nl_let_collect_walk' also holds its `val_slot' across its own recursion,
+# which evaluates the NEXT binding, so that one needed `nl_root_reserve'.  The
+# cdr reorder alone was measured insufficient there.
+#
+# STILL OPEN, measured on the same binary that passes cases 5-8, and NOT `let'
+# defects despite the shape of the cases:
+#
+#   (let ((a (f))) (let ((b (f))) (+ a b)))    ; rc=1, void-variable: (b)
+#   (defun g () (let ((a (f)) (b (f))) (+ a b)))  (+ (g) (g))   ; SIGSEGV
+#
+# The second one dies in `nl_ali_body_cdr' / `nl_ali_body_eval' -- the LAMBDA
+# BODY walker takes the body list's cdr and carries it across the body form's
+# own eval.  Same materialised-view shape as `setq' and `let', different
+# construct, and it is what makes any `let' inside a function body fail.  The
+# first is a different symptom entirely (a binding goes missing, nothing
+# crashes) and has not been diagnosed.  Both fail on the parent commit too, so
+# neither is a regression from closing `let'.
 #
 # Widening this gate means closing them the same way, with each construct's
 # three-line case added below as it goes green.
@@ -193,6 +210,25 @@ run_binding_case setq-collects-in-value \
 run_binding_case setq-multi-pair \
   '(setq p 1 q 2 r 3)
 (nelisp--write-stderr-line (number-to-string (+ p q r)))' 6
+
+# 5. `let' / `let*' collecting inside a binding's value expression.  The
+#    multi-binding rows matter as much as the single one: `nl_let_collect_walk'
+#    holds its value slot across the recursion that evaluates the NEXT binding,
+#    which is a second hazard the one-binding case never reaches.
+run_binding_case let-collects-in-binding \
+  '(nelisp--write-stderr-line (number-to-string (let ((x (f))) x)))' 7
+run_binding_case letstar-collects-in-binding \
+  '(nelisp--write-stderr-line (number-to-string (let* ((x (f))) x)))' 7
+run_binding_case let-two-collecting-bindings \
+  '(nelisp--write-stderr-line (number-to-string (let ((a (f)) (b (f))) (+ a b))))' 14
+# letstar-dependent-binding was already green at the parent commit -- only its
+# first binding collects, and `let*' binds each one before the next is
+# evaluated, so nothing lives across the collection.  Kept anyway: it is the
+# case that would notice if the reorder broke sequential binding order.
+run_binding_case letstar-dependent-binding \
+  '(nelisp--write-stderr-line (number-to-string (let* ((a (f)) (b (+ a 1))) (+ a b))))' 15
+run_binding_case let-three-collecting-bindings \
+  '(nelisp--write-stderr-line (number-to-string (let ((a (f)) (b (f)) (c (f))) (+ a (+ b c)))))' 21
 
 if [ "$FINDINGS" -ne 0 ]; then
   echo "precise-root-coverage: FAIL ($FINDINGS finding(s))"
