@@ -522,6 +522,35 @@ nl-resource-standalone-smoke: $(if $(wildcard target/nelisp target/nelisp.exe),,
 # Same conditional-build pattern as the nl-condition/nl-safe smokes
 # above.
 # Runnable-host guard: see `nl-condition-standalone-smoke' above.
+.PHONY: precise-root-coverage
+# Precise root coverage for the mid-form collector.  Runs with the
+# conservative native-stack scan off, which is the only configuration where a
+# missing precise root arm is observable at all -- see the script's header and
+# the `precise-root-coverage' rows in tools/gate-mutations.txt.
+#
+# The prerequisite is UNCONDITIONAL, matching standalone-midform-gc-bounded and
+# unlike the `$(wildcard target/nelisp ...)' smokes: this gate's mutation row
+# injects into scripts/nelisp-standalone-build.el, i.e. into the source the
+# binary is generated from, so a target that reuses an existing target/nelisp
+# tests the pre-injection build and reports GREEN with the defect in front of
+# it.  That is exactly the UNREACHABLE failure mode tools/gate-mutations.txt
+# warns about, and this target hit it on its first run.
+precise-root-coverage: standalone-reader
+	@NELISP_STANDALONE_TARGET=$(STANDALONE_GATE_TARGET) $(EMACS) --batch -Q -L lisp -L src -L scripts -l nelisp-standalone-build \
+	  --eval '(kill-emacs (if (nelisp-standalone--target-runnable-on-host-p) 0 3))' \
+	  >/dev/null 2>&1; \
+	host_rc=$$?; \
+	if [ "$$host_rc" = 3 ]; then \
+	  echo "GATE-SKIP target $(STANDALONE_GATE_TARGET) cannot run on this host"; \
+	  echo "GATE-COUNT checked=0 findings=0"; \
+	  exit 0; \
+	fi; \
+	if [ "$$host_rc" != 0 ]; then \
+	  echo "precise-root-coverage: target runnable predicate failed"; \
+	  exit "$$host_rc"; \
+	fi; \
+	bash tools/nelisp-precise-root-gate.sh
+
 standalone-reader-buffer-smoke: $(if $(wildcard target/nelisp target/nelisp.exe),,standalone-reader)
 	@NELISP_STANDALONE_TARGET=$(STANDALONE_GATE_TARGET) $(EMACS) --batch -Q -L lisp -L src -L scripts -l nelisp-standalone-build \
 	  --eval '(kill-emacs (if (nelisp-standalone--target-runnable-on-host-p) 0 3))' \

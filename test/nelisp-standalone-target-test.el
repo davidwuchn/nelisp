@@ -1480,13 +1480,16 @@ standalone MCP fast handshake completed before this change, 20/20 after."
                   (let ((c (nl_gc_block_elem_cap pool 32)))
                     (if (= c 0) (nl_gc_pool_cap) c))))
              nelisp-standalone--gc-source))
-    ;; Cap 0 stays the form-boundary "stale slots are not roots" mode flag.
+    ;; Cap 0 stays the form-boundary "stale slots are not roots" mode flag, and
+    ;; `nl_gc_diag'+56 suppresses the slot walk for one mark pass -- the switch
+    ;; `precise-root-coverage' uses to run the workload without this arm.
     (should (tree-member-p
              '(defun nl_gc_mark_recorded_pool (pool)
                 (if (= pool 0) 0
                   (nl_seq2 (nl_gc_mark_block pool)
-                           (if (= (nl_gc_pool_cap) 0) 0
-                             (nl_gc_mark_pool pool (nl_gc_pool_cap_of pool))))))
+                           (if (= (ptr-read-u64 (data-addr nl_gc_diag) 56) 1) 0
+                             (if (= (nl_gc_pool_cap) 0) 0
+                               (nl_gc_mark_pool pool (nl_gc_pool_cap_of pool)))))))
              nelisp-standalone--gc-source))
     ;; The rewriting arm takes the same per-frame cap.
     (should (tree-member-p '(nl_gc_pool_cap_of (ptr-read-u64 base 24))

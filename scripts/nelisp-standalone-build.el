@@ -3727,11 +3727,20 @@ arm64 Linux has no legacy x86 numbering)."
       (if (= pool 0) 0
         (let ((c (nl_gc_block_elem_cap pool 32)))
           (if (= c 0) (nl_gc_pool_cap) c))))
+    ;; `nl_gc_diag'+56 suppresses the SLOT walk (the block stays pinned) for
+    ;; one mark pass.  `bf_pool_root_coverage' runs the root walk twice, once
+    ;; each way, and compares the reachable sets: it is the only reader of this
+    ;; flag, it is zero-initialised, and nothing in a collection path writes it.
+    ;; The invariant it exists to police is that this arm contributes no roots
+    ;; of its own -- every node the pool holds is also reached through the
+    ;; recorded frame's `result'.  That is what makes it safe to walk less of
+    ;; the pool than its whole capacity.
     (defun nl_gc_mark_recorded_pool (pool)
       (if (= pool 0) 0
         (nl_seq2 (nl_gc_mark_block pool)
-                 (if (= (nl_gc_pool_cap) 0) 0
-                   (nl_gc_mark_pool pool (nl_gc_pool_cap_of pool))))))
+                 (if (= (ptr-read-u64 (data-addr nl_gc_diag) 56) 1) 0
+                   (if (= (nl_gc_pool_cap) 0) 0
+                     (nl_gc_mark_pool pool (nl_gc_pool_cap_of pool)))))))
     (defun nl_gc_mark_recorded_frame (env result out pool src cursor bsym)
       (nl_seq2 (nl_gc_mark_recorded_env env)
        (nl_seq2 (nl_gc_mark_recorded_slot result) ; executing form / subform
@@ -4673,6 +4682,7 @@ argument (reachability + in-arena bounds checks).")
     ((:lit "nelisp--arena-walk-verify") . (bf_arena_walk_verify out))
     ((:lit "nelisp--arena-dump-copy-verify") . (bf_arena_dump_copy_verify out))
     ((:lit "nelisp--arena-mark-reach-verify") . (bf_arena_mark_reach_verify out))
+    ((:lit "nelisp--pool-root-coverage") . (bf_pool_root_coverage out))
     ((:lit "nelisp--arena-swizzle-verify") . (bf_arena_swizzle_verify out))
     ((:lit "nelisp--arena-load-relocate-verify") . (bf_arena_load_relocate_verify out))
     ((:lit "nelisp--arena-image-root-verify") . (bf_arena_image_root_verify out))
@@ -5339,7 +5349,26 @@ leave symbols unresolved at link time."
                  0)
               (if (= (wf_argval args 0) 25)
                   (nl_seq2 (ptr-write-u64 (data-addr nl_alloc_diag) 0 0) 0)
-                0))))))
+                ;; 26/27: suppress / restore the recorded-frame parse-pool SLOT
+                ;; walk (the pool block itself stays pinned either way).  26 is
+                ;; how `standalone-pool-walk-redundancy' asks for the
+                ;; configuration the gate exists to police: everything the pool
+                ;; holds must still be reachable without it.
+                (if (= (wf_argval args 0) 26)
+                    (nl_seq2 (ptr-write-u64 (data-addr nl_gc_diag) 56 1) 0)
+                  (if (= (wf_argval args 0) 27)
+                      (nl_seq2 (ptr-write-u64 (data-addr nl_gc_diag) 56 0) 0)
+                    ;; 28/29: turn the conservative native-stack scan
+                    ;; (SCAN_FLAG @268436464, driver sets it at boot) off and
+                    ;; back on.  With it off, only the precise recorded-root
+                    ;; arms keep an in-flight value alive, which is the
+                    ;; configuration that can tell whether a given arm is
+                    ;; load-bearing or merely redundant with the scan.
+                    (if (= (wf_argval args 0) 28)
+                        (nl_seq2 (ptr-write-u64 268436464 0 0) 0)
+                      (if (= (wf_argval args 0) 29)
+                          (nl_seq2 (ptr-write-u64 268436464 0 1) 0)
+                        0))))))))))
     (defun bf_debug_switch (args out)
       (seq
         (if (= (wf_argval args 0) 1) (ptr-write-u64 (data-addr nl_gc_diag) 32 1)
@@ -7469,6 +7498,46 @@ the same way `nelisp_eval_call' already reaches into `reader-gc.o'."
          (wf_write_nil nil-slot)
          (wf_cons_int (ptr-read-u64 total 0) nil-slot s1)
          (wf_cons_int (ptr-read-u64 reach 0) s1 out)
+         0)))
+    ;; POOL ROOT COVERAGE.  Mark from the recorded roots twice -- once with the
+    ;; recorded-frame parse-pool slot walk on, once with it off -- and answer
+    ;; (WITH WITHOUT), the reachable block count each way.  Same "mark, count,
+    ;; clear, never sweep" mechanics as `bf_arena_mark_reach_verify' above, run
+    ;; back to back on an unchanged heap, so the only difference between the
+    ;; two numbers is that one arm.
+    ;;
+    ;; WITH == WITHOUT says the pool arm reaches nothing the rest of the root
+    ;; set does not already reach.  WITH > WITHOUT names the number of live
+    ;; blocks that only the pool keeps alive, and is the signal that walking
+    ;; less than the pool's whole capacity would free something live.
+    ;;
+    ;; The scratch slots are allocated BEFORE either pass so both passes see
+    ;; the same heap.  They are not roots, so they raise `total' equally in
+    ;; both and never appear in either `reach'.
+    (defun bf_prc_pass (reach total)
+      (seq
+       (ptr-write-u64 reach 0 0)
+       (ptr-write-u64 total 0 0)
+       (ptr-write-u64 (data-addr nl_gc_loop_ctx) 24 1)
+       (nl_gc_mark_recorded_contexts)
+       (nl_gc_mark_rootstack)
+       (nl_gc_mark_symentry)
+       (ptr-write-u64 (data-addr nl_gc_loop_ctx) 24 0)
+       (bf_arena_mr_chunks (ptr-read-u64 268436160 0) reach total)
+       0))
+    (defun bf_pool_root_coverage (out)
+      (let* ((r1 (alloc-bytes 8 8)) (t1 (alloc-bytes 8 8))
+             (r2 (alloc-bytes 8 8)) (t2 (alloc-bytes 8 8))
+             (nil-slot (alloc-bytes 32 8)) (s1 (alloc-bytes 32 8)))
+        (seq
+         (ptr-write-u64 (data-addr nl_gc_diag) 56 0)
+         (bf_prc_pass r1 t1)
+         (ptr-write-u64 (data-addr nl_gc_diag) 56 1)
+         (bf_prc_pass r2 t2)
+         (ptr-write-u64 (data-addr nl_gc_diag) 56 0)
+         (wf_write_nil nil-slot)
+         (wf_cons_int (ptr-read-u64 r2 0) nil-slot s1)
+         (wf_cons_int (ptr-read-u64 r1 0) s1 out)
          0))))
   "Reader-only arena size-census + mark-reach diagnostics (call
 `nl_gc_bt_ok'/`nl_gc_chunk_end'/`nl_gc_mark_recorded_contexts'/
@@ -16201,7 +16270,7 @@ value (matches the binary's M8 read+eval-loop driver)."
     "nelisp--fmt-float"
     "nelisp--debug-switch" "nelisp--gc-diag" "nelisp--arena-force-grow-smoke" "nelisp--size-census" "nelisp--arena-walk-verify"
     "nelisp--alloc-check-report"
-    "nelisp--arena-dump-copy-verify" "nelisp--arena-mark-reach-verify" "nelisp--arena-swizzle-verify"
+    "nelisp--arena-dump-copy-verify" "nelisp--arena-mark-reach-verify" "nelisp--pool-root-coverage" "nelisp--arena-swizzle-verify"
     "nelisp--arena-load-relocate-verify" "nelisp--arena-image-root-verify"
     "nelisp--arena-dump-table-verify"
     "nelisp--arena-dump-image-to-file" "nelisp--arena-dump-image-stream" "nelisp--arena-load-image-from-file"

@@ -369,6 +369,19 @@ standalone-reader-bounded-backtrace-smoke|scripts/nelisp-standalone-build.el|s/(
 # and restored binaries because this row changes generated native code, not
 # the host-side checker.
 standalone-midform-gc-bounded|scripts/nelisp-standalone-build.el|s/(defun nl_os_empty_chunk_reclaim_p () 1)/(defun nl_os_empty_chunk_reclaim_p () 0)/|Linux sweep stops releasing proven-empty growth chunks, restoring linear default-loop RSS growth
+# precise-root-coverage: the row this gate was built around.  Deleting the
+# executing form's own root arm is the defect shape any change to the recorded
+# root set risks, and in the SHIPPED configuration it is invisible: measured
+# 2026-08-29, with the arm gone the reader-smoke suite (41 smokes) and the full
+# anvil module load are both still green, because the conservative native-stack
+# scan holds the form up.  With the scan off the same binary dies immediately.
+# RED prints: `precise_root_fail label=no-conservative-scan reason=nonzero-exit
+# rc=139' and `... label=no-conservative-scan-no-pool-walk ... rc=139', with
+# `label=shipped acc=1750000' still passing above them -- that contrast is the
+# point of the row.  GREEN prints three `precise_root_result' lines,
+# `acc=1750000 collections=6' each.  Structural, not timing-dependent: the arm
+# is gone, so the form has no precise root at all.
+precise-root-coverage|scripts/nelisp-standalone-build.el|s/(nl_seq2 (nl_gc_mark_recorded_slot result) ; executing form . subform/(nl_seq2 0 ; MUTATION: executing form is not a root/|the executing top-level form is no longer a precise root, so only the conservative stack scan keeps it alive
 # standalone-reader-socket-smoke: added 2026-08-24 (socket primitives,
 # Doc 184 follow-on, feat/socket-primitives-p1).  The injection changes
 # accept4's raw syscall number from 288 (the real Linux x86_64 number)
