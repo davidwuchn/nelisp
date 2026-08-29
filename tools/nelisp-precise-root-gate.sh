@@ -290,6 +290,36 @@ run_binding_case progn-three-forms \
 run_binding_case progn-nested \
   '(nelisp--write-stderr-line (number-to-string (progn 1 (progn 2 (f)))))' 7
 
+# 8. The remaining walkers with an implicit body: `if's else branch and the
+#    `let' / `let*' BODY (their BINDINGS were a separate fix).  Same shape,
+#    found by the same position sweep, and at the parent commit the LAST-form
+#    rows answered 47829128 / 47829384 / 47832584 / 47832200 while the
+#    middle-and-first rows were already correct.
+run_binding_case if-else-last-form \
+  '(nelisp--write-stderr-line (number-to-string (if nil 1 (f))))' 7
+run_binding_case if-else-three-forms \
+  '(nelisp--write-stderr-line (number-to-string (if nil 1 2 (f))))' 7
+run_binding_case if-else-middle-form \
+  '(nelisp--write-stderr-line (number-to-string (if nil 1 (f) 3)))' 3
+run_binding_case if-then-branch \
+  '(nelisp--write-stderr-line (number-to-string (if 1 (f) 2)))' 7
+run_binding_case if-test-collects \
+  '(nelisp--write-stderr-line (number-to-string (if (f) 1 2)))' 1
+run_binding_case if-nested-else \
+  '(nelisp--write-stderr-line (number-to-string (if nil 1 (if nil 2 (f)))))' 7
+run_binding_case let-body-last-form \
+  '(nelisp--write-stderr-line (number-to-string (let ((a 1)) 2 (f))))' 7
+run_binding_case let-body-first-form \
+  '(nelisp--write-stderr-line (number-to-string (let ((a 1)) (f) 5)))' 5
+run_binding_case let-binding-and-body \
+  '(nelisp--write-stderr-line (number-to-string (let ((a (f))) 2 (f))))' 7
+run_binding_case letstar-body-last-form \
+  '(nelisp--write-stderr-line (number-to-string (let* ((a 1)) 2 (f))))' 7
+run_binding_case letstar-body-first-form \
+  '(nelisp--write-stderr-line (number-to-string (let* ((a 1)) (f) 5)))' 5
+run_binding_case letstar-binding-and-body \
+  '(nelisp--write-stderr-line (number-to-string (let* ((a (f)) (b (+ a 1))) 3 (f))))' 7
+
 if [ "$FINDINGS" -ne 0 ]; then
   echo "precise-root-coverage: FAIL ($FINDINGS finding(s))"
   exit 1
