@@ -77,19 +77,24 @@
 # so every case below asserts the VALUE, not just exit status.  A gate here
 # that only checked rc would have called all three green.
 #
+# `progn' was the FOURTH instance and is closed the same way.  It was missed
+# twice by construct surveys that only tried `(progn (f) 1)', where the
+# collecting form is not last and the cdr is a real cons -- the POSITION of the
+# collecting form is part of the case, not a detail, which is why cases 7 below
+# run all of them.
+#
 # STILL OPEN, measured on the binary that passes everything below:
 #
-#   (progn 1 (f))                                  ; 47826800 instead of 7
+#   ((lambda () (progn 1 (f))))                       ; SIGSEGV
 #   (defun g (n) (if (< n 1) (f) (g (- n 1)))) (g 3)  ; SIGSEGV
-#   (let ((a (f))) (let ((b (f))) (+ a b)))        ; rc=1, void-variable: (b)
+#   (let ((a (f))) (let ((b (f))) (+ a b)))           ; rc=1, void-variable: (b)
 #
-# The first is the FOURTH instance of the same shape: `nl_sf_progn_get_cdr'
-# takes the cdr before `nl_sf_progn_body_step' evaluates, and a `progn' whose
-# LAST form collects has a Nil cdr.  It was missed twice by construct surveys
-# that only tried `(progn (f) 1)', where the collecting form is not last and
-# the cdr is a real cons -- the position of the collecting form is part of the
-# case, not a detail.  The other two are undiagnosed.  All three fail at the
-# parent commit too.
+# The first is a COMBINATION: a bare lambda whose body is a `progn'.
+# `((lambda () (f)))' and `((lambda () 1 (f)))' both pass, and every `progn'
+# case below passes, so neither construct alone accounts for it.  Closing
+# `progn' moved it from a silent wrong answer (47829904) to a crash -- worse to
+# look at, better to find.  The other two are undiagnosed.  All three fail at
+# the parent commit too.
 #
 # Widening this gate means closing them the same way, with each construct's
 # three-line case added below as it goes green.
@@ -267,6 +272,23 @@ run_binding_case bare-lambda-body \
   '(nelisp--write-stderr-line (number-to-string ((lambda () (f)))))' 7
 run_binding_case bare-lambda-with-argument \
   '(nelisp--write-stderr-line (number-to-string ((lambda (x) (+ x (f))) 1)))' 8
+
+# 7. `progn', with the collecting form in every position.  At the parent commit
+#    the LAST-position rows answered 47826568 / 47826824 / 47827088 / 47827672
+#    and the others were already correct -- the whole point of running all of
+#    them.
+run_binding_case progn-only-form \
+  '(nelisp--write-stderr-line (number-to-string (progn (f))))' 7
+run_binding_case progn-last-form \
+  '(nelisp--write-stderr-line (number-to-string (progn 1 (f))))' 7
+run_binding_case progn-first-form \
+  '(nelisp--write-stderr-line (number-to-string (progn (f) 5)))' 5
+run_binding_case progn-middle-form \
+  '(nelisp--write-stderr-line (number-to-string (progn 1 (f) 5)))' 5
+run_binding_case progn-three-forms \
+  '(nelisp--write-stderr-line (number-to-string (progn 1 2 (f))))' 7
+run_binding_case progn-nested \
+  '(nelisp--write-stderr-line (number-to-string (progn 1 (progn 2 (f)))))' 7
 
 if [ "$FINDINGS" -ne 0 ]; then
   echo "precise-root-coverage: FAIL ($FINDINGS finding(s))"
