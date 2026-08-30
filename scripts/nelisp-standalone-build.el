@@ -16387,7 +16387,12 @@ dispatch arm in `nelisp-standalone--applyfn-dispatch-table'.")
                     ;; nl_os_float_time (raw hand-assembled unit, this file's
                     ;; own `nelisp-standalone--float-time-unit-windows-x86_64'):
                     ;; FILETIME source for `float-time'/`round'/etc.
-                    "GetSystemTimeAsFileTime"))
+                    "GetSystemTimeAsFileTime"
+                    ;; `nl_os_win_access' (this file's
+                    ;; `nelisp-standalone--os-syscall-xlat-forms' windows
+                    ;; case): backs `nelisp--syscall-path-int' access(2)
+                    ;; F_OK checks, i.e. `file-exists-p' and friends.
+                    "GetFileAttributesW"))
         (cons "SHELL32.dll" (list "CommandLineToArgvW")))
   "PE imports needed by the Windows-native standalone reader.")
 
@@ -19117,6 +19122,45 @@ boundary (Doc 151 Phase B):
        (defun nl_os_utimes_path (cpath buf) (syscall-direct 235 cpath buf 0 0 0 0))
        (defun nl_os_statx_path (cpath flags buf) (syscall-direct 332 (- 0 100) cpath flags 4095 buf 0))
        (defun nl_os_nanosleep (ts) (syscall-direct 35 ts 0 0 0 0 0))))
+    ((or 'windows-x86_64 'windows-aarch64)
+     ;; windows: every path-syscall builtin was an unconditional -ENOSYS
+     ;; stub (Doc 151 §B) until this fix -- `nelisp--syscall-stat'
+     ;; (scripts/nelisp-stdlib-prelude.el) falls back to
+     ;; `nelisp--syscall-path-int' access(2)-style existence checks
+     ;; (NR=21, F_OK), so `file-exists-p'/`file-directory-p'/
+     ;; `file-regular-p'/`file-readable-p'/`executable-find' silently
+     ;; always answered "absent" on every windows-native standalone
+     ;; build.  Found chasing a v1.1.1 nelisp-skk-ime load-time
+     ;; regression: `executable-find' walked every PATH entry, `access'
+     ;; always failed, and the caller never learned the difference
+     ;; between "checked and missing" and "could not check at all".
+     ;; `GetFileAttributesW' (imported alongside the other KERNEL32
+     ;; calls, see `nelisp-standalone--windows-reader-imports') answers
+     ;; the same yes/no `access(F_OK)' answers this repo's fileio
+     ;; builtins already reduce every mode bit to.  `nl_win_utf8_wcs_dup'
+     ;; (this same target's `nelisp-standalone--reader-os-base-forms',
+     ;; appended into the same source list by
+     ;; `nelisp-standalone--reader-os-source-forms') builds the UTF-16
+     ;; path GetFileAttributesW requires.  Only NR=21 (access, F_OK) is
+     ;; wired; every other path syscall (unlink/mkdir/stat-buf/readdir/
+     ;; ...) stays an ENOSYS stub, unchanged from before this fix, and
+     ;; is not this fix's scope.
+     `((defun nl_os_win_access (cpath)
+         (let* ((wpath (nl_win_utf8_wcs_dup cpath))
+                (attrs (extern-call GetFileAttributesW wpath)))
+           (if (or (= attrs 4294967295) (= attrs -1)) (- 0 2) 0)))
+       (defun nl_os_syscall_path (_nr _cpath) (- 0 38))
+       (defun nl_os_syscall_path_int (nr cpath iarg)
+         (if (= nr 21) (nl_os_win_access cpath) (- 0 38)))
+       (defun nl_os_syscall_path2 (_nr _c1 _c2) (- 0 38))
+       (defun nl_os_stat_path (_cpath _buf) (- 0 38))
+       (defun nl_os_lstat_path (_cpath _buf) (- 0 38))
+       (defun nl_os_readlink_path (_cpath _buf _cap) (- 0 38))
+       (defun nl_os_open_dir (_cpath) (- 0 38))
+       (defun nl_os_getdents64 (_fd _dbuf _cap) (- 0 38))
+       (defun nl_os_utimes_path (_cpath _buf) (- 0 38))
+       (defun nl_os_statx_path (_cpath _flags _buf) (- 0 38))
+       (defun nl_os_nanosleep (_ts) (- 0 38))))
     (_
      `((defun nl_os_syscall_path (_nr _cpath) (- 0 38))
        (defun nl_os_syscall_path_int (_nr _cpath _iarg) (- 0 38))
