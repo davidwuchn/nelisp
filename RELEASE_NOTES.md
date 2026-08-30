@@ -1,5 +1,35 @@
 # NeLisp Release Notes
 
+## v1.1.1 — 2026-08-30
+
+Full notes: [`release/v1.1.1/RELEASE.md`](release/v1.1.1/RELEASE.md).
+
+A garbage-collection release: fourteen precise-root defects in the standalone
+runtime, all of two shapes, plus the missing bound that had to be fixed first.
+
+- **The layout-dependent crash is gone.** anvil's standalone MCP server produced
+  correct output and then died -- SIGSEGV or `form aborted without signal`,
+  decided by memory layout.  Cause: `nl_gc_mark_recorded_pool` walked each
+  recorded frame's parse pool with a global capacity word naming a different
+  load.  Amplifier: `nl_gc_mark_char_table_slots` believed the length it found
+  there and walked 1.26 GB past the arena.
+- **Eleven walkers stopped carrying a materialised cdr across an eval.**
+  `setq`, `let` bindings and bodies, `let*`, `if`'s else branch, `while`,
+  `progn`, lambda bodies, `condition-case` handlers, `catch` and `throw`.
+  Position decides: `(progn (f) 1)` was always correct, `(progn 1 (f))`
+  answered 47826824.
+- **Four live values stopped living in unrooted scratch** -- `let`'s value slot,
+  the builtin argument list, and the `catch` / `throw` tags.  A blanked tag
+  makes a `throw` walk past its own `catch` and report `no-catch`.
+- **`nl_root_reserve_slot` has a bound.** It bumped through a fixed
+  131072-entry region with none, writing past it under deep recursion.
+- **New gate:** `make precise-root-coverage`, 51 configurations run with the
+  conservative native-stack scan off, asserting values -- most of these defects
+  answered wrongly rather than crashing.
+
+With that scan disabled, the whole standalone tier and anvil's own module load
+now pass; before, the load segfaulted in under a second.  The scan stays on.
+
 ## v1.1.0 — 2026-08-27
 
 Full notes: [`release/v1.1.0/RELEASE.md`](release/v1.1.0/RELEASE.md).
