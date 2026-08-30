@@ -1,10 +1,13 @@
 #+TITLE: Doc 201 — Windows-native standalone: two silent fileio/PATH defects found chasing a v1.1.1 load-time slowdown, and where the remaining cost lives
 #+AUTHOR: Claude (investigation + fix), zawatton (direction)
 #+DATE: 2026-08-30
-#+STATUS: PARTIAL — §1 and §2 are fixed and manually verified against a
-#+STATUS: reproduction script (not yet promoted to a Makefile gate); §3 is
-#+STATUS: diagnosis only, no fix, scoped as future work for whoever picks
-#+STATUS: this up next.
+#+STATUS: PARTIAL — §1, §2 and §5's two fixes are fixed and manually
+#+STATUS: verified against a reproduction script (not yet promoted to a
+#+STATUS: Makefile gate); §3's general "per-primitive-call overhead"
+#+STATUS: framing turned out to be a false lead for THIS file's load time
+#+STATUS: (see §5) — the real cost was two specific, fixable call sites,
+#+STATUS: not a general evaluator problem. §3's own microbenchmark numbers
+#+STATUS: stand as a separate, smaller, still-unaddressed cost.
 
 * §0 Context
 
@@ -164,7 +167,7 @@ defcustoms can now actually detect an installed `kakasi`/`python`/`look`
 on a windows-native standalone build, instead of silently always
 answering "not installed" regardless of the host.
 
-* §3 What is left: per-primitive-call overhead in the interpreter itself (NOT FIXED, diagnosis only)
+* §3 What is left: per-primitive-call overhead in the interpreter itself (partly a false lead — see §5)
 
 After §1 and §2, `skk-vars.el` still takes ~18.9s to load. Breaking that
 down (`D:/Cowork/Notes/dev/nelisp/perf-scale-probe.el`, measuring wall
@@ -288,13 +291,120 @@ runtime).
    `FindFirstFileW` implementations rather than leaving them as `-ENOSYS`
    stubs indefinently — §2 deliberately left them alone because this
    migration did not need them, not because they are hard.
-3. §3's per-call allocation rate is the actual remaining path to
-   `skk-vars.el` loading in low single-digit seconds (matching the
-   documented v1.0.x 4.9s cold start) instead of ~19s. It is also, on the
-   evidence gathered here, a cost every standalone workload pays on every
-   form it evaluates — worth scoping as its own doc once someone profiles
-   `nelisp_apply_function`'s dispatch path directly rather than by
-   sampling.
+3. UPDATE (§5): §3's per-call allocation rate was NOT the actual remaining
+   path to `skk-vars.el`'s slow load — see §5. `nelisp_apply_function`'s
+   dispatch path is still worth a closer look for the ~0.15-0.4ms/call
+   baseline §3 measured (a real, if smaller, cost every standalone
+   workload pays on every form), but it is no longer this file's headline
+   number.
+3a. `split-string` itself is still slow for any caller passing a literal
+   (non-regexp) separator on a large string — §5 fixed only the one
+   `executable-find` call site, not `nlre-split-string` generally. Worth
+   its own fix (detect a separator with no regexp metacharacters and take
+   `nelisp--split-on-char`'s fast path) if another workload hits it.
+3b. K=500-573 of `skk-vars.el` (73 forms) showed an unexplained ~15s jump
+   in one measurement pass and ~4-5s in a cleaner repeat — noisy, not
+   re-isolated. Worth a clean re-measurement (§5's `perf-scale-probe.el`,
+   now checked into this session's untracked scratch files under
+   `dev/nelisp/`) before assuming it is fully explained by the two
+   `executable-find` calls in that range.
+
+* §5 Two real fixes found and landed (2026-08-30 follow-up session)
+
+This session picked up the cold-start hand-off this doc's §3/§4 left
+behind. Both hunches in §4 turned out to be dead ends *for this file's
+number*; the actual dominant costs were two specific, ordinary bugs,
+found by direct instrumentation rather than gdb sampling (gdb
+breakpoint-hit counting turned out to be prohibitively slow on this
+Windows machine — one `(dotimes (_ 1000) nil)` run under a Python-callback
+breakpoint did not finish in 5+ minutes; abandoned in favor of the
+`nl_alloc_diag` counters already in the runtime, read directly via
+`(nelisp--debug-switch 24)` + `ptr-read-u64` at the counter's own symtab
+address — no gdb needed).
+
+** §5.1 `nl_sf_defvar` / `nl_sf_defconst`: AST synthesis on every call
+
+Every `(defvar NAME VALUE)` and `(defconst NAME VALUE)` was implemented
+by synthesising `(if (boundp (quote NAME)) nil (set (quote NAME) VALUE))`
+(defvar) or `(set (quote NAME) VALUE)` (defconst) as a FRESH cons tree on
+every single call — interning up to 5 new symbols (`if`/`boundp`/`set`/
+`quote` x2) and building up to 9 cons cells, then re-entering the
+interpreter via `nelisp_eval_call` on the synthetic form. Since
+`defcustom` is a plain macro expanding to `defvar`
+(`nelisp-stdlib-prelude.el`), every one of `skk-vars.el`'s 573 top-level
+forms paid this. Measured via `nl_alloc_diag`: 500 independent top-level
+`defvar` forms cost 814,379 `nl_alloc_bytes_uncheck` calls before the
+fix, 32,405 after (~25x fewer).
+
+Fixed (`dev/nelisp` commit `10db3d18`) by calling `nelisp_mirror_is_bound`
+/ `nl_env_set_value` directly — the same allocation-free primitives
+`bf_boundp` / `bf_set` already use — instead of building and evaluating a
+synthetic form.
+
+This fix is real, independently verified (boundp-gated single-eval
+semantics, defconst's unconditional overwrite, `nelisp-session-smoke.el`,
+3x `repro-skkvars-real.el` with no SIGSEGV), and worth keeping — but it
+turned out NOT to be this file's dominant cost. K-value scaling
+(`perf-scale-probe.el`) showed the "flat" K=50-275 region it speeds up
+was already ~1.0-1.1s total, of which ~0.9s is bare process-startup
+overhead (measured directly: `(princ "x")` alone costs ~0.9s on this
+machine) — there was little left in that region for this fix to remove
+from the *observed* wall-clock number, even though the allocation count
+it removes is real and large.
+
+** §5.2 `executable-find`'s PATH split runs the full regexp engine (the actual dominant cost)
+
+`executable-find` split `PATH` via `split-string`, which — contrary to
+this doc's own §1/§3 assumption that `split-string` resolves to the
+simple `nelisp--split-on-char` walk in `nelisp-stdlib-prelude.el` —
+actually resolves to `nlre-split-string`
+(`lisp/nelisp-stdlib-regexp.el`): a THIRD, unguarded `defun split-string`
+(`scripts/nelisp-standalone-build.el`, embedded as a code-generation
+string literal, loaded without an `(unless (fboundp ...))` guard) that
+runs the separator through the full regexp engine and retries a match at
+every position from the current split point. Confirmed by calling each
+candidate implementation directly on the real ~2.3KB, 59-entry Windows
+`PATH`:
+
+| implementation | elapsed |
+|---|---|
+| `nelisp--split-on-char` (prelude, direct call) | 0.42s |
+| my own copy of the same body, as a plain `defun` | 0.40s |
+| `split-string` (as actually bound = `nlre-split-string`) | 3.22-3.42s |
+
+PATH's separator is always a single literal byte (`;` or `:`), never a
+regexp — the regexp engine buys nothing here and costs ~8x. Three real
+`executable-find` calls occur loading `skk-vars.el`
+(`skk-annotation-python-program`, `skk-use-kakasi`,
+`skk-kakasi-command` — the "kakasi" one is actually TWO adjacent
+`defcustom` forms at vendor/ddskk/skk-vars.el lines 3859/3864, not one;
+§3's K-value table only caught the first as a single jump), each paying
+this cost once.
+
+Fixed (`dev/nelisp` commit `70cd5852`) by having `executable-find` call
+`nelisp--split-on-char` directly instead of `split-string`. Does NOT fix
+`split-string`/`nlre-split-string` generally — any other caller passing
+a literal separator on a large string still pays the regexp-engine cost;
+this is scoped to the one call site this hand-off's workload actually
+hits.
+
+** §5.3 Measured effect and verification
+
+`repro-skkvars-real.el` (`dev/nelisp-v11-ime-verify`, this doc's §5
+minimal repro): **22.5-23.5s -> 9.5-9.7s**, stable across repeated runs
+(~2.4x, meets the hand-off's "at least 2x" bar; short of the "low
+single digits" stretch goal). DDSKK's full engine load
+(`dev/nelisp-skk-ime/test/nelisp-session-smoke.el`, more files than
+`skk-vars.el` alone) still reports `ddskk-nelisp-session-smoke-ok`.
+`check-call-overhead.el`'s six basic-op microbenchmarks are unchanged
+(neither fix touches that path — confirms §5.1/§5.2 are targeted fixes,
+not accidental evaluator-wide changes). 3x repeated
+`repro-skkvars-real.el` with no SIGSEGV — v1.1.1's precise-root-marking
+GC fix (this doc's original motivation) is unaffected by either change.
+
+Not yet done: promoting either fix's repro to a Makefile gate (§4 item
+1's ask, still open); the TSF-host E2E cold-start re-measurement the
+original hand-off flagged as a follow-up once "much faster" landed.
 4. nelisp-skk-ime's own migration (compat-layer stubs for defvar/defcustom/
    defface gaps between v1.1.1 and vendor/ddskk, unrelated to this doc)
    is tracked separately in that project's own memory
