@@ -419,9 +419,60 @@ smoke`, dev/nelisp commit `7a331637`, folded into
 `STANDALONE_READER_SMOKES`, `tools/gate-mutations.txt` row added and
 verified by hand). Not yet done: promoting §5.1's `defvar`/`defconst`
 fix, or §1/§2's own `path-separator`/`file-exists-p` repro (still
-outside this repo, `dev/nelisp-v11-ime-verify/`), to a gate; the
-TSF-host E2E cold-start re-measurement the original hand-off flagged as
-a follow-up once "much faster" landed.
+outside this repo, `dev/nelisp-v11-ime-verify/`), to a gate.
+
+** §5.4 TSF-host E2E re-measurement: still red, and why
+
+Ran the real production path (`dev/nelisp-skk-ime`'s
+`windows/test/engine_e2e_test.cpp` via `ddskk-engine-e2e-test.exe`, named
+pipe to `ddskk-engine-host.exe`, real TSF client code, not a shortcut)
+against the fixed `target/nelisp.exe`. Still fails, now at `assert(state)`
+line 143 (the 10-second `client.SendKey(key, 10000)` budget itself
+elapses with no reply) rather than the `assert(elapsed <
+std::chrono::seconds(10))` at line 148 the original hand-off's repro
+command described — a different assert, same underlying cause, not a new
+defect: `SendKey`'s pipe request has a fixed 10s timeout, and the engine
+host's *first* `SendKey` has to finish loading the FULL DDSKK engine (not
+just `skk-vars.el`) before it can answer at all.
+
+This is the gap between what §5.1-§5.3 measured and what the E2E test
+needs: `nelisp-session-smoke.el` (DDSKK's full engine load — `skk-vars.el`
++ `skk-macs.el` + `skk-emacs.el` + `skk.el` + the rest, not `skk-vars.el`
+alone) still takes **~23-24s** end to end, well over the E2E harness's
+fixed 10s per-request budget. `skk-vars.el` alone dropping to ~9.5-9.7s
+(§5.3) was necessary but not sufficient — it is roughly 40% of the full
+load, not the whole of it. Reproduced twice, both crashing with the same
+assert; the first attempt additionally orphaned
+`ddskk-engine-host.exe`/`nelisp.exe` (killed manually, see §5's own repro
+warning about this exact trap) when the harness itself was interrupted
+rather than left to finish or assert on its own.
+
+A quick per-file breakdown (timing each `load` call in
+`nelisp-session-smoke.el`'s own sequence) found `skk.el` alone costs
+**~7.4-7.5s** — nearly as much as `skk-vars.el` — while `skk-macs.el` and
+`skk-emacs.el` are negligible (~0.02s each). `skk.el` has zero
+`defvar`/`defcustom` forms (§5.1 does not apply) and only one
+`executable-find` call (already covered by §5.2's fix). One specific
+hunch was checked and ruled out: `dev/nelisp-skk-ime`'s own
+`engine/skk-nelisp-compat.el` implements `define-key` as a plain
+`assoc`-scan alist keymap (`O(n)` per insert), which looked like a
+plausible `O(n^2)` culprit for a file that builds several minor-mode
+keymaps at load time — but instrumenting the real load counted only 290
+`define-key` calls total, far too few for that shape to be the ~7.4s
+cost. What IS costing the other ~7.4s in `skk.el` was not identified
+this session — this is `dev/nelisp-skk-ime` compat-layer or `skk.el`
+content this doc's own repo (`dev/nelisp`) cannot diagnose further
+without the same K-value-scaling approach §3/§5 used on `skk-vars.el`,
+applied to `skk.el` instead. Flagged here rather than pursued, since it
+may not be a `dev/nelisp`-core defect at all.
+
+Per the original hand-off's own instruction: this is NOT "fixed by
+raising the timeout in the committed test" territory — a real fix needs
+either the full-engine load brought under the E2E harness's 10s budget
+(profile the other ~15s the same way §5 profiled `skk-vars.el`) or the
+harness's own budget re-examined as a product decision (separate from
+this doc's scope, flagged back per the original hand-off's §6 closing
+note).
 4. nelisp-skk-ime's own migration (compat-layer stubs for defvar/defcustom/
    defface gaps between v1.1.1 and vendor/ddskk, unrelated to this doc)
    is tracked separately in that project's own memory
