@@ -1,0 +1,302 @@
+#+TITLE: Doc 201 — Windows-native standalone: two silent fileio/PATH defects found chasing a v1.1.1 load-time slowdown, and where the remaining cost lives
+#+AUTHOR: Claude (investigation + fix), zawatton (direction)
+#+DATE: 2026-08-30
+#+STATUS: PARTIAL — §1 and §2 are fixed and manually verified against a
+#+STATUS: reproduction script (not yet promoted to a Makefile gate); §3 is
+#+STATUS: diagnosis only, no fix, scoped as future work for whoever picks
+#+STATUS: this up next.
+
+* §0 Context
+
+nelisp-skk-ime (a Windows TSF IME whose engine process is `nelisp.exe
+--load engine/ddskk-engine-stdio.el`) was being migrated from NeLisp
+v1.1.0 to v1.1.1 to pick up the precise-root-marking fixes in that release
+(RELEASE.md: "the precise root surface now carries the whole standalone
+tier"), which closed a GC bug this project had spent several sessions
+diagnosing under v1.1.0 (a live Vector swept and its freed metadata later
+dereferenced — see this repo's own Doc-155-class marking-gap fixes,
+`gc: ...` commits between v1.1.0 and v1.1.1).
+
+v1.1.1 does fix that: the same repro (`vendor/ddskk/skk-vars.el`, 573
+top-level forms, loaded standalone) went from a deterministic 5/5 SIGSEGV
+under v1.1.0 to a clean 3/3 completion under v1.1.1. But the completion
+took 60-67 seconds, against this project's own measured v1.0.x cold-start
+baseline of 4.9s (`docs/windows-ime-architecture.md` in the nelisp-skk-ime
+tree). That gap sent this investigation looking for a v1.1.1 GC
+regression. There wasn't one (§3 shows the same interpreter is exactly as
+slow on v1.1.0 for primitives that have nothing to do with GC). What was
+actually found were two independent, pre-existing gaps in this repo's
+Windows-native standalone target, both silent (no error, no crash — just
+a wrong or absent answer), both apparently unexercised by any existing
+gate on this target.
+
+Reproduction (kept out of tree, safe to rebuild):
+`D:/Cowork/Notes/dev/nelisp-v11-ime-verify/repro-skkvars-real.el` loads
+`vendor/ddskk/skk-vars.el` standalone with no DDSKK engine, no TSF host,
+no C++ — `(load compat.el) (provide 'skk) (load skk-vars.el)`. Every
+timing number below is `time ./target/nelisp.exe --load
+repro-skkvars-real.el < /dev/null`, this repo's own `target/nelisp.exe`
+(`NELISP_STANDALONE_TARGET=windows-x86_64`), on the same Windows host,
+three runs each, GC noise excluded (all runs completed, none crashed).
+
+* §1 `path-separator` was ":" unconditionally, including on windows-nt (FIXED)
+
+`scripts/nelisp-stdlib-prelude.el` and its byte-identical
+`packages/nelisp-process/src/nelisp-process.el` copy (`make ns-gate`
+polices the two staying identical) both had:
+
+#+BEGIN_SRC elisp
+(unless (boundp 'path-separator)
+  (defconst path-separator ":"))
+#+END_SRC
+
+defined *before* `system-type` even existed in the prelude's load order
+(line 237 of a 22,000+-line file; `system-type` first becomes bound at
+line ~6900). On windows-nt, `getenv "PATH"` correctly answers a real
+Windows path list (`C:\Users\...;C:\Program Files\...;...`, verified
+directly: `(princ (getenv "PATH"))` under this runtime prints exactly
+that). `executable-find` (scripts/nelisp-stdlib-prelude.el) splits that
+string on `path-separator`. Splitting a drive-letter path list on ":"
+shreds every entry at its own drive-letter colon — "C:\Users\kuroz\bin"
+becomes "C" and "\Users\kuroz\bin;C" and so on — turning a 59-entry PATH
+into well over a hundred garbage fragments, most beginning with a bare
+"\..." that `file-exists-p` still dutifully checks.
+
+`vendor/ddskk/skk-vars.el` calls `executable-find` five times at load
+time (`python` once, `kakasi` twice, `look` twice, none of them installed
+on this host, so every one of the ~100+ garbage fragments per call was
+checked and missed).
+
+** Fix
+
+Moved the `defconst` to right after `system-type`'s own definition in
+`scripts/nelisp-stdlib-prelude.el`, and made both copies compute the same
+value defensively (`(and (boundp 'system-type) (eq system-type
+'windows-nt))`, safe even if `nelisp-process.el` is loaded standalone
+before `system-type` exists):
+
+#+BEGIN_SRC elisp
+(unless (boundp 'path-separator)
+  (defconst path-separator
+    (if (and (boundp 'system-type) (eq system-type 'windows-nt)) ";" ":")))
+#+END_SRC
+
+** Measured effect
+
+| | before | after |
+|---|---|---|
+| full `skk-vars.el` load, `time`, 3 runs | 60-67s (this fix only) | 18.7-19.0s |
+
+3.5x. `path-separator` reads `;` and `PATH` splits into the correct 59
+entries (verified directly post-fix).
+
+* §2 Every windows-native path-syscall builtin was an unconditional -ENOSYS stub (FIXED, narrow scope)
+
+`nelisp-standalone--os-syscall-xlat-forms` (Doc 151 §B, "macos/windows:
+return -ENOSYS(-38) stubs") deliberately stubs every path-syscall builtin
+(`nl_os_syscall_path[_int|2]`, `nl_os_stat_path`, `nl_os_lstat_path`,
+`nl_os_open_dir`, `nl_os_getdents64`, `nl_os_utimes_path`,
+`nl_os_statx_path`, `nl_os_nanosleep`) on windows-x86_64/windows-aarch64,
+because the shared fileio unit used to fire raw Linux x86_64 syscall
+numbers straight through, and misfiring an arbitrary Linux syscall number
+on Windows is worse than refusing. That decision was correct and Doc 151
+documents it as a known follow-up ("既知の残課題"), not an oversight —
+this doc is that follow-up, for the one call this migration actually
+needed.
+
+`file-exists-p` (scripts/nelisp-stdlib-prelude.el) does not go through
+`nl_os_stat_path` at all — it goes through
+`nelisp--syscall-stat`, which is itself a pure-elisp `access(2)`-trichotomy
+fallback over `nelisp--syscall-path-int` (NR=21) built specifically
+because the Rust `bi_syscall_stat` shim hangs on the standalone reader
+(see that function's own commentary). On windows-x86_64,
+`nelisp--syscall-path-int` reduces to `nl_os_syscall_path_int`, which was
+the `-ENOSYS` stub above. Directly verified before this fix:
+`(file-exists-p "C:\WINDOWS")` (a directory that unquestionably exists on
+every Windows host) answered `nil`. `executable-find` could therefore
+never find anything, on any target, ever — not slow, categorically
+incapable, silently.
+
+** Fix
+
+Added a `windows-x86_64`/`windows-aarch64` case to
+`nelisp-standalone--os-syscall-xlat-forms` that wires *only* NR=21
+(`access`, `F_OK`) through `GetFileAttributesW` (imported via
+`nelisp-standalone--windows-reader-imports`, alongside the other
+KERNEL32 calls already there), using the existing
+`nl_win_utf8_wcs_dup` UTF-8→UTF-16 helper
+(`nelisp-standalone--reader-os-base-forms`, appended into the same
+source list by `nelisp-standalone--reader-os-source-forms`, so it is
+already linked into every windows-native standalone build):
+
+#+BEGIN_SRC elisp
+(defun nl_os_win_access (cpath)
+  (let* ((wpath (nl_win_utf8_wcs_dup cpath))
+         (attrs (extern-call GetFileAttributesW wpath)))
+    (if (or (= attrs 4294967295) (= attrs -1)) (- 0 2) 0)))
+(defun nl_os_syscall_path_int (nr cpath iarg)
+  (if (= nr 21) (nl_os_win_access cpath) (- 0 38)))
+#+END_SRC
+
+Every other path syscall on this target is *unchanged* — still an
+`-ENOSYS` stub. This fix's scope is exactly `file-exists-p` /
+`file-directory-p` / `file-regular-p` / `file-readable-p` /
+`executable-find`, because that is what `nelisp--syscall-stat`'s
+`access`-only fallback reduces to. `file-attributes` (size/mtime, via
+`nelisp--syscall-stat-field` → `nl_os_stat_path`) and directory listing
+(`nelisp--syscall-readdir-names` → `nl_os_open_dir`/`nl_os_getdents64`)
+remain unimplemented on this target — a real `struct stat` shim (mode/
+size/mtime via `GetFileInformationByHandleEx` or similar) and a directory
+enumerator (`FindFirstFileW`/`FindNextFileW`) are natural, separate
+follow-ups; scoping this fix to the one builtin the migration actually
+needed keeps the diff reviewable.
+
+** Measured effect
+
+`(file-exists-p "C:\WINDOWS")` now answers `t`; `(file-exists-p
+"C:\NoSuchDir12345")` still answers `nil`. Wall-clock effect on the full
+`skk-vars.el` load was *not* measurable (18.7-19.0s before and after,
+within run-to-run noise) — `executable-find` was already fast when it
+was unconditionally wrong; making it correct did not make it faster. The
+value of this fix is correctness, not speed: `vendor/ddskk`'s
+`skk-use-kakasi`/`skk-annotation-python-program`/`skk-look-command`
+defcustoms can now actually detect an installed `kakasi`/`python`/`look`
+on a windows-native standalone build, instead of silently always
+answering "not installed" regardless of the host.
+
+* §3 What is left: per-primitive-call overhead in the interpreter itself (NOT FIXED, diagnosis only)
+
+After §1 and §2, `skk-vars.el` still takes ~18.9s to load. Breaking that
+down (`D:/Cowork/Notes/dev/nelisp/perf-scale-probe.el`, measuring wall
+time to load a K-form prefix of the real file for increasing K):
+
+| K (forms) | elapsed |
+|---|---|
+| 50-275 | ~1.1-1.5s (flat) |
+| 278 | 6.41s (jumps here) |
+| 280-420 | ~6.3-7.8s (flat) |
+| 425 | 14.68s (jumps here) |
+| 425-573 | ~14.5-19.0s (flat) |
+
+Both jumps land exactly on `executable-find` calls in
+`vendor/ddskk/skk-vars.el` (form #278 = line 2812,
+`skk-annotation-python-program`'s `(executable-find "python")`; the
+second jump spans the `kakasi` pair at lines 3859/3864). Each
+`executable-find` call costs several seconds *even with §1 and §2 both
+fixed and PATH correctly split into 59 real entries*. Isolated
+(`D:/Cowork/Notes/dev/nelisp/check-execfind-parts.el`, one cold call):
+
+| step | elapsed |
+|---|---|
+| `split-string` on the 59-entry PATH | 3.31s |
+| 59x `expand-file-name` | 1.27s |
+| 59x `expand-file-name` + `file-exists-p` | 2.40s |
+| `executable-find "python"` (whole call) | 4.73s |
+
+`file-exists-p` itself is fast in isolation (~0.4-0.7ms/call,
+`D:/Cowork/Notes/dev/nelisp/check-file-exists-perf.el`) and its cost does
+not depend on which byte offset is checked. The 3.3s inside
+`split-string` (`nelisp--split-on-char` in
+scripts/nelisp-stdlib-prelude.el: a plain `(aref string idx)` /
+`(substring string start idx)` scan, nothing algorithmically wrong with
+it) is the real puzzle: that is one call, walking a ~1500-2000 byte
+string once.
+
+Chased one level further with a battery of isolated microbenchmarks
+(`D:/Cowork/Notes/dev/nelisp/check-call-overhead.el`,
+`check-string-tag.el`, `check-string-tag2.el`, `check-loop-only.el`, all
+under `dev/nelisp/`, safe to delete or keep as future repro material):
+
+- `(aref string idx)` costs the *same* ~0.3-0.4ms whether `idx` is 0 or
+  1999 in a 2000-char string — ruling out an O(idx) UTF-8
+  codepoint-decode re-walk (the tag-5/tag-6 `aref` arm in
+  `scripts/nelisp-standalone-build.el`'s `bf_aref_checked` does re-walk
+  from byte 0 every call via `nl_u8_cidx_byte`, which *would* be O(idx),
+  but `getenv "PATH"` and `make-string` both come back
+  `multibyte-string-p` nil, and the flat-regardless-of-position timing
+  confirms they are not taking that arm).
+- Every basic primitive measured costs about the same, ~0.15-0.36ms per
+  call, regardless of which one: `(+ 1 1)`, `(aref VECTOR 0)`, `(aref
+  STRING 0)`, `(car CONS)`, a zero-arg user-defined function call, `(setq
+  x (1+ x))`. This is *not* a defect in any one of those primitives; it
+  reads as roughly constant per-call overhead in the evaluator itself.
+- **This overhead is identical on v1.1.0 and v1.1.1** — the same six
+  microbenchmarks were run against `dev/nelisp-v11-ime-verify/target/
+  nelisp.exe` (the v1.1.0 tag) and every number matched v1.1.1's to
+  three significant figures. v1.1.1's GC-correctness fixes did not slow
+  the interpreter down; v1.1.0 was never actually finishing this
+  workload (it SIGSEGV'd first), so there was never a valid "v1.1.0 was
+  faster" comparison to begin with. Framing this as a v1.1.1 regression
+  during the investigation was a wrong turn worth recording so the next
+  person doesn't re-walk it.
+- Sampling `nelisp.exe`'s main thread with gdb during a tight
+  `(dotimes (_ 200000) (+ 1 1))` loop
+  (`D:/Cowork/Notes/dev/nelisp/sample-profile2.sh`, gdb attach + `p/x
+  $pc` every ~0.3-3s, resolved against a captured symtab dump) found
+  roughly 40% of non-attach-noise samples inside allocation/GC machinery
+  — `nl_alloc_bytes_uncheck`, `nl_freelist_take`, `nl_hdr_bt`/
+  `nl_hdr_mark`/`nl_hdr_set_mark`, `nl_gc_sweep_step`, `nl_gc_free_block`,
+  `nl_gc_in_arena`, `nl_alloc_zero_fill` — for a loop body that never
+  allocates a boxed value at the Lisp level. A follow-up hit-counting run
+  (`D:/Cowork/Notes/dev/nelisp/gdb-count-allocs.gdb`) counted
+  `nl_alloc_bytes_uncheck` hits directly: **14,305 calls for 1,000
+  iterations of `(+ 1 1)`** — roughly 14 heap allocations per trivial
+  arithmetic operation.
+
+** Reading
+
+The interpreter appears to allocate fresh heap objects (32-byte Sexp
+slots, eval-context scratch, or both) on essentially every form
+evaluation, not just where a Lisp-level value is actually boxed. That
+allocation rate is what is driving both the flat ~0.2-0.4ms/call
+baseline (§3 opening table) and the GC sweep activity visible in the
+sampling profile — not a bug in any single builtin, but a property of
+how the evaluator itself is calling into the allocator. This is
+consistent with, and does not contradict, Doc 199's own framing of
+`nl_gc_loop_ctx`/precise-root work as being about *correctness* under
+collection, not about *reducing* how often collection has reason to run.
+
+** Why this is out of scope for this doc's fix
+
+Identifying which specific call in the evaluator's dispatch path
+(`nelisp_apply_function`, `nl_apply_special`, `nl_gc_eval_ctx_push`, the
+`wf_arg*`/`args`-packing convention that shows up throughout
+scripts/nelisp-standalone-build.el, or some combination) is responsible,
+and whether it can be removed or made conditional without touching the
+precise-root-marking correctness Doc 199/the v1.1.1 GC fixes depend on,
+is an interpreter-architecture question, not a one-function fix like §1
+or §2. It needs someone reading `nelisp_apply_function`'s dispatch loop
+and the `EvalCtx` construction path end to end, ideally with a real
+sampling profiler run over a much larger sample count than the ~60
+gdb-attach samples this investigation collected (each `gdb -p` attach/
+detach cycle costs ~0.3-3s of its own overhead here, dominating the
+sample budget for anything shorter than several dozen seconds of target
+runtime).
+
+* §4 Recommended next steps
+
+1. Promote §1 and §2's manual repro
+   (`dev/nelisp-v11-ime-verify/repro-skkvars-real.el`, or a version
+   committed into this repo's own `test/`) to a real gate: a
+   windows-x86_64 standalone smoke that loads a real-world file exercising
+   `executable-find` and asserts both the wall-clock bound and the
+   correct `file-exists-p` answer. Neither defect was caught by any
+   existing gate before this investigation.
+2. If Windows-native standalone fileio is going to see more use (this
+   migration is not the only consumer plausible), give `nl_os_stat_path`/
+   `nl_os_open_dir`/`nl_os_getdents64` real `GetFileInformationByHandleEx`/
+   `FindFirstFileW` implementations rather than leaving them as `-ENOSYS`
+   stubs indefinently — §2 deliberately left them alone because this
+   migration did not need them, not because they are hard.
+3. §3's per-call allocation rate is the actual remaining path to
+   `skk-vars.el` loading in low single-digit seconds (matching the
+   documented v1.0.x 4.9s cold start) instead of ~19s. It is also, on the
+   evidence gathered here, a cost every standalone workload pays on every
+   form it evaluates — worth scoping as its own doc once someone profiles
+   `nelisp_apply_function`'s dispatch path directly rather than by
+   sampling.
+4. nelisp-skk-ime's own migration (compat-layer stubs for defvar/defcustom/
+   defface gaps between v1.1.1 and vendor/ddskk, unrelated to this doc)
+   is tracked separately in that project's own memory
+   (`project_nelisp_skk_ime_v110_migration_status`); this doc covers only
+   the NeLisp-core defects the migration's investigation surfaced.
