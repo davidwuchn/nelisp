@@ -331,6 +331,7 @@ cmd_extras() {
              nelisp-thread-mirror-guard-standalone-smoke \
              nelisp-thread-percpu-roots-smoke \
              standalone-reader-buffer-smoke \
+             precise-root-coverage \
              nl-actor-standalone-smoke; do
         printf '\n=== %s ===\n' "$g"
         ( cmd_gate "$g" -- make "$g" ) || failures=$((failures + 1))
