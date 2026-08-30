@@ -1,8 +1,10 @@
 # NeLisp v1.1.1
 
-A garbage-collection release.  Fourteen defects in the standalone runtime's
-precise root set, all of the same two shapes, plus the missing bound that had
-to be fixed before any of them could be.
+Two collections of defects, both about a value being read back as the wrong
+kind of thing.  Fourteen in the standalone runtime's precise root set, all of
+the same two shapes, plus the missing bound that had to be fixed before any of
+them could be -- and four in the AOT compiler, where a raw machine word crossed
+a defun boundary that expects a Sexp pointer.
 
 ## The bug that started it
 
@@ -86,6 +88,44 @@ outright changes nothing observable: the whole reader-smoke suite stays green
 with `nl_gc_mark_recorded_frame`'s `result` arm removed.  Its mutation row in
 `tools/gate-mutations.txt` is that deletion.
 
+## The AOT compiler: raw words crossing a value-word boundary
+
+A separate defect family, found by chasing the one gate this release's GC work
+did not turn green.  In the lane where user `.el` modules are compiled to
+native code, every parameter arrives as a Sexp pointer -- the type is not known
+statically, so making all of them Sexps is what removes the question -- and the
+body reads one back with the immediate-aware unwrap.  Nothing converted the
+values going the other way, so a raw word got dereferenced by the callee:
+
+    (defun g (a b) (if (>= a b) 111 222))
+    (defun f (x) (g 0 x))        ; SIGSEGV: the callee loads [0+8]
+
+Nine lines reproduce it.  The same hole in three more places:
+
+- **Call arguments.**  `(g 0)`, `(g (+ x 1))` and `(g (str-len s))` all handed
+  over a raw word.  Now boxed, including under an `if` in argument position --
+  `(add-bit8 mask (if (= (logand bits 1) 0) 0 1))` hides its raw leaves one
+  level down.
+- **String primitive operands.**  `str-byte-at`, `mut-str-push-byte` and four
+  more took an index or count straight from a parameter and used it as a raw
+  offset.  Not one of that family went through `--ir-as-raw-i64`.
+- **Returns.**  A defun answering `(+ mask bit)` gave its caller an integer to
+  follow as an address.  Tail positions are now normalised, per branch, because
+  a body is routinely mixed: `add-bit8` answers its parameter on two arms and a
+  raw sum on the third.
+- **The declaration.**  Having made calls return Sexp pointers, the `call` node
+  now says so.  Without that `--ir-repr` answers `unknown`, `--ir-as-raw-i64`
+  declines to unwrap, and `(+ (find-byte text 9 pos) 1)` adds one to a pointer
+  -- a mask that came out 0 instead of 10 while exiting 0.
+
+That last one is why the new test compares against the same source interpreted
+by Emacs instead of a written-down constant.  Half of these answered wrongly
+rather than crashing, and an exit-status assertion calls that a pass.
+
+`nelisp-nelix-native-hot-gate` goes from failing its fourth case to 6/6.  Its
+fifth case ran 113 s and then took SIGSEGV; it now returns the right string in
+1.4 s.
+
 ## Fixed
 
 - Layout-dependent SIGSEGV / `form aborted without signal` on the standalone
@@ -96,8 +136,18 @@ with `nl_gc_mark_recorded_frame`'s `result` arm removed.  Its mutation row in
 - `require` losing its own feature symbol while loading a file, surfacing as
   `file-missing: #<object>` from `compile-elisp-artifact`.
 - Unbounded write past `nl_rootstack_region` under deep recursion.
+- AOT: `(g 0)` / `(g (+ x 1))` / `(g (str-len s))` crashing or answering
+  wrongly when `g` is another defun in the same module.
+- AOT: `str-byte-at` and the rest of the string grammar reading a Sexp pointer
+  as a byte offset.
 
 ## Known issues
+
+`and` / `or` chains are still left in whatever representation their operands
+produced.  That is deliberate: their value doubles as their truth, and a boxed
+zero is a non-null pointer, so boxing one would make a false answer read as
+true.  Nothing measured depends on such a chain's value crossing a boundary;
+if something does, the fix is a representation-aware truth test, not boxing.
 
 None outstanding from v1.1.0's list.  The conservative native-stack scan is
 still enabled and still unmeasured for the paths no gate covers.

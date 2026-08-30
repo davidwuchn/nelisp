@@ -4,8 +4,10 @@
 
 Full notes: [`release/v1.1.1/RELEASE.md`](release/v1.1.1/RELEASE.md).
 
-A garbage-collection release: fourteen precise-root defects in the standalone
-runtime, all of two shapes, plus the missing bound that had to be fixed first.
+Fourteen precise-root defects in the standalone runtime, all of two shapes,
+plus the missing bound that had to be fixed first -- and four in the AOT
+compiler, where a raw machine word crossed a defun boundary that expects a
+Sexp pointer.
 
 - **The layout-dependent crash is gone.** anvil's standalone MCP server produced
   correct output and then died -- SIGSEGV or `form aborted without signal`,
@@ -26,6 +28,14 @@ runtime, all of two shapes, plus the missing bound that had to be fixed first.
 - **New gate:** `make precise-root-coverage`, 51 configurations run with the
   conservative native-stack scan off, asserting values -- most of these defects
   answered wrongly rather than crashing.
+- **AOT: raw words stopped crossing a value-word boundary.** In the lane where
+  user `.el` modules compile to native code every parameter arrives as a Sexp
+  pointer, but nothing converted the values going the other way: `(g 0)` had
+  the callee load `[0+8]`.  Call arguments, the string grammar's index and
+  count operands, defun returns, and the `call` node's own declared
+  representation were all missing their conversion.  `(defun f (x) (g 0 x))`
+  in nine lines reproduced it; `nelisp-nelix-native-hot-gate` goes from failing
+  its fourth case to 6/6.
 
 With that scan disabled, the whole standalone tier and anvil's own module load
 now pass; before, the load segfaulted in under a second.  The scan stays on.
