@@ -231,15 +231,9 @@ a negative, and signalling there turned a limit into a failure."
   (defun bool-vector (&rest args)
     "Bool vectors are plain vectors of t/nil in this runtime (Doc 22)."
     (apply #'vector (mapcar (lambda (x) (and x t)) args))))
-;; Byte-identical to the packages/nelisp-process copy so `make ns-gate'
-;; polices the two.  It has to be here as well: the standalone does not load
-;; that package, so the variable was void.
-(unless (boundp 'path-separator)
-  (defconst path-separator ":"))
-;; Emacs 30 defines `path-separator' as a FUNCTION as well as a variable,
-;; and `(path-separator)' answers ":".
-(unless (fboundp 'path-separator)
-  (defun path-separator () path-separator))
+;; `path-separator' moved below `system-type' (Doc: it needs to know the
+;; target OS to pick ";" on windows-nt vs ":" elsewhere -- see the
+;; defconst there for the fix and why this used to be a fixed ":").
 (unless (fboundp 'bool-vector-p)
   (defun bool-vector-p (_x)
     "Always nil: bool vectors are plain vectors here (Doc 22)."
@@ -6902,6 +6896,28 @@ this file was committed).")
     (cond ((= nelisp--os-code 1) 'darwin)
           ((= nelisp--os-code 2) 'windows-nt)
           (t 'gnu/linux))))
+;; Byte-identical to the packages/nelisp-process copy so `make ns-gate'
+;; polices the two.  It has to be here as well: the standalone does not load
+;; that package, so the variable was void.
+;;
+;; Bug (found chasing a v1.1.1 nelisp-skk-ime regression): this used to be a
+;; fixed ":" regardless of target OS.  On windows-nt, `getenv "PATH"' answers
+;; a real Windows path list ("C:\...;C:\...;..."), and `executable-find'
+;; splits it on `path-separator'.  Splitting a drive-letter path on ":"
+;; shreds every entry at its own drive-letter colon ("C:\Users\...;C" then
+;; "\Program Files\...;C" and so on), so a 59-entry PATH became well over a
+;; hundred garbage fragments, most starting with a bare "\..." that
+;; `file-exists-p' still dutifully stats.  Each miss on this host costs on
+;; the order of 100 ms, so `(executable-find "python")' alone -- one call
+;; among the five vendor/ddskk makes at load time -- cost several seconds,
+;; and the fix landed only after chasing what looked like a GC regression.
+(unless (boundp 'path-separator)
+  (defconst path-separator
+    (if (and (boundp 'system-type) (eq system-type 'windows-nt)) ";" ":")))
+;; Emacs 30 defines `path-separator' as a FUNCTION as well as a variable,
+;; and `(path-separator)' answers ":".
+(unless (fboundp 'path-separator)
+  (defun path-separator () path-separator))
 (defvar system-configuration
   (let ((nelisp--os-code (nelisp--target-os-code))
         (nelisp--arch-code (nelisp--target-arch-code)))
