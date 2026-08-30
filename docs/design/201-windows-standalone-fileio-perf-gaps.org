@@ -1,12 +1,14 @@
 #+TITLE: Doc 201 — Windows-native standalone: two silent fileio/PATH defects found chasing a v1.1.1 load-time slowdown, and where the remaining cost lives
 #+AUTHOR: Claude (investigation + fix), zawatton (direction)
 #+DATE: 2026-08-30
-#+STATUS: PARTIAL — §1, §2 and §5's two fixes are fixed and manually
-#+STATUS: verified against a reproduction script (not yet promoted to a
-#+STATUS: Makefile gate); §3's general "per-primitive-call overhead"
-#+STATUS: framing turned out to be a false lead for THIS file's load time
-#+STATUS: (see §5) — the real cost was two specific, fixable call sites,
-#+STATUS: not a general evaluator problem. §3's own microbenchmark numbers
+#+STATUS: PARTIAL — §1, §2 and §5's two fixes are fixed, manually
+#+STATUS: verified against a reproduction script, and one of the two
+#+STATUS: (§5.2's split-string regexp-engine defect) now has a Makefile
+#+STATUS: gate (`standalone-reader-splitstring-perf-smoke`); §1/§2's own
+#+STATUS: repro is still not promoted. §3's general "per-primitive-call
+#+STATUS: overhead" framing turned out to be a false lead for THIS file's
+#+STATUS: load time (see §5) — the real cost was two specific, fixable
+#+STATUS: call sites, not a general evaluator problem. §3's own microbenchmark numbers
 #+STATUS: stand as a separate, smaller, still-unaddressed cost.
 
 * §0 Context
@@ -278,13 +280,15 @@ runtime).
 
 * §4 Recommended next steps
 
-1. Promote §1 and §2's manual repro
-   (`dev/nelisp-v11-ime-verify/repro-skkvars-real.el`, or a version
-   committed into this repo's own `test/`) to a real gate: a
-   windows-x86_64 standalone smoke that loads a real-world file exercising
-   `executable-find` and asserts both the wall-clock bound and the
-   correct `file-exists-p` answer. Neither defect was caught by any
-   existing gate before this investigation.
+1. PARTLY DONE (dev/nelisp commit `7a331637`): added
+   `standalone-reader-splitstring-perf-smoke` (folded into
+   `STANDALONE_READER_SMOKES`) asserting the wall-clock bound the §5.2
+   regexp-engine `split-string` defect violated by ~8x, plus its
+   `tools/gate-mutations.txt` row. NOT done: promoting §1/§2's own
+   `path-separator`/`file-exists-p` repro, or the full
+   `repro-skkvars-real.el` load, to a gate -- that repro still lives
+   outside this repo (`dev/nelisp-v11-ime-verify/`) and was not ported
+   in this follow-up.
 2. If Windows-native standalone fileio is going to see more use (this
    migration is not the only consumer plausible), give `nl_os_stat_path`/
    `nl_os_open_dir`/`nl_os_getdents64` real `GetFileInformationByHandleEx`/
@@ -297,17 +301,25 @@ runtime).
    baseline §3 measured (a real, if smaller, cost every standalone
    workload pays on every form), but it is no longer this file's headline
    number.
-3a. `split-string` itself is still slow for any caller passing a literal
-   (non-regexp) separator on a large string — §5 fixed only the one
-   `executable-find` call site, not `nlre-split-string` generally. Worth
-   its own fix (detect a separator with no regexp metacharacters and take
-   `nelisp--split-on-char`'s fast path) if another workload hits it.
-3b. K=500-573 of `skk-vars.el` (73 forms) showed an unexplained ~15s jump
-   in one measurement pass and ~4-5s in a cleaner repeat — noisy, not
-   re-isolated. Worth a clean re-measurement (§5's `perf-scale-probe.el`,
-   now checked into this session's untracked scratch files under
-   `dev/nelisp/`) before assuming it is fully explained by the two
-   `executable-find` calls in that range.
+3a. DONE (dev/nelisp commit `2d433761`): `nlre-split-string` now takes a
+   `nelisp--split-on-char` fast path for any single-byte separator that
+   is not a regexp metacharacter, so every `split-string` caller
+   benefits, not just `executable-find`. Verified with an 11-case
+   correctness parity script against the old regexp-path output
+   (including confirming "." as a real regexp separator still matches
+   any char, not a literal dot). Measured 3.2-3.4s -> 0.42s for a plain
+   `split-string` call on the same PATH, independent of
+   `executable-find`'s own fix. No further `repro-skkvars-real.el`
+   wall-clock change (~9.5-10.8s before and after) since
+   `executable-find` was already the only `split-string` caller on this
+   file's load path.
+3b. RE-MEASURED, RESOLVED AS NOISE: a clean re-run of K=420-465 in
+   5-form steps (no other process running) showed the two
+   `executable-find` calls landing as expected around K=425/426 (3.5s ->
+   8.0s -> 8.7s) and then a flat ~7.9-9.9s all the way to K=573 — no
+   further jump. The earlier ~15s reading at K=500-573 was contention
+   from a concurrently running background task in this session, not a
+   real cost in the interpreter; no separate defect here.
 
 * §5 Two real fixes found and landed (2026-08-30 follow-up session)
 
@@ -402,9 +414,14 @@ not accidental evaluator-wide changes). 3x repeated
 `repro-skkvars-real.el` with no SIGSEGV — v1.1.1's precise-root-marking
 GC fix (this doc's original motivation) is unaffected by either change.
 
-Not yet done: promoting either fix's repro to a Makefile gate (§4 item
-1's ask, still open); the TSF-host E2E cold-start re-measurement the
-original hand-off flagged as a follow-up once "much faster" landed.
+§5.2's fix now has a Makefile gate (`standalone-reader-splitstring-perf-
+smoke`, dev/nelisp commit `7a331637`, folded into
+`STANDALONE_READER_SMOKES`, `tools/gate-mutations.txt` row added and
+verified by hand). Not yet done: promoting §5.1's `defvar`/`defconst`
+fix, or §1/§2's own `path-separator`/`file-exists-p` repro (still
+outside this repo, `dev/nelisp-v11-ime-verify/`), to a gate; the
+TSF-host E2E cold-start re-measurement the original hand-off flagged as
+a follow-up once "much faster" landed.
 4. nelisp-skk-ime's own migration (compat-layer stubs for defvar/defcustom/
    defface gaps between v1.1.1 and vendor/ddskk, unrelated to this doc)
    is tracked separately in that project's own memory
