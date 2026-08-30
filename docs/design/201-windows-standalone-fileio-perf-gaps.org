@@ -459,12 +459,48 @@ hunch was checked and ruled out: `dev/nelisp-skk-ime`'s own
 plausible `O(n^2)` culprit for a file that builds several minor-mode
 keymaps at load time — but instrumenting the real load counted only 290
 `define-key` calls total, far too few for that shape to be the ~7.4s
-cost. What IS costing the other ~7.4s in `skk.el` was not identified
-this session — this is `dev/nelisp-skk-ime` compat-layer or `skk.el`
-content this doc's own repo (`dev/nelisp`) cannot diagnose further
-without the same K-value-scaling approach §3/§5 used on `skk-vars.el`,
-applied to `skk.el` instead. Flagged here rather than pursued, since it
-may not be a `dev/nelisp`-core defect at all.
+cost.
+
+UPDATE: found via the same K-value-scaling method §3/§5 used on
+`skk-vars.el`, applied to `skk.el` (229 top-level forms, portable probe
+`perf-scale-probe-skkel.el`, paths derived from the probe's own location
+plus `NELISP_SKK_IME_DIR`, no machine-specific absolute path). The jump
+is NOT spread across `skk.el`'s 191 `defun`/`defmacro` bodies —
+K=10..191 is flat at ~17-19s. It lands entirely on ONE form, K=5, an
+`eval-and-compile` block (`skk.el` lines 73-99) requiring seven
+`vendor/ddskk` files not in `nelisp-session-smoke.el`'s own explicit
+`load` sequence: `skk-tankan`, `skk-cdb`, `skk-vars`/`skk-macs`/
+`skk-emacs` (no-ops here, already provided), `skk-cursor`, `skk-version`,
+`skk-cus`, `ccc`, `skk-comp`. Timing each individually:
+`skk-tankan.el` (3385 lines, a kanji-lookup data table, 6
+`defconst`/`defvar` forms) costs 3.3s; `ccc.el` (317 lines) costs 0.5s;
+the rest (`skk-cdb`, `skk-cursor`, `skk-cus`, `skk-comp`, all under 350
+lines) are negligible (0.006-0.016s each) — except `skk-version.el`,
+which is 72 lines and costs **1.9s**.
+
+`skk-version.el`'s entire cost is one form: `(dolist (p load-path)
+(string-match "ddskk-[0-9]+\\.[0-9]+" p))`, checking `load-path` (42
+entries here, 2146 chars total, an ordinary size) for a MELPA-style
+install path — never true on this standalone target, since `load-path`
+has no such entry, but every entry is still checked. Isolated: this
+42-call loop alone costs **2.47s**, ~59ms per `string-match` call on a
+~51-character average string against a small (`[0-9]+` twice) pattern.
+`nelisp-stdlib-regexp.el`'s own header describes it as "a backtracking
+matcher... implemented WITHOUT lexical closures" — i.e. a REGEXP ENGINE
+WRITTEN IN PLAIN INTERPRETED ELISP, not an AOT-compiled native dispatch
+path like the arithmetic/list primitives `nelisp_apply_function`
+handles. Doc 201 §3's original "~0.15-0.4ms per basic op" per-call
+overhead, paid many times over per character/position inside a
+backtracking match, is a highly plausible explanation for 59ms/call —
+consistent with, not contradicting, §3's own numbers. This was NOT
+fixed this session: it is a different class of cost from §5.1/§5.2 (an
+architectural one — the regexp engine's own implementation strategy —
+rather than one call site doing unnecessary work) and is left as this
+doc's most concrete lead yet on §3's still-open "per-primitive-call
+overhead" question. `skk-tankan.el`'s 3.3s was not broken down further
+this session; it may be legitimate data-table construction cost (six
+large `defconst`/`defvar` forms) rather than a defect, but was not
+distinguished from the same per-form overhead until checked.
 
 Per the original hand-off's own instruction: this is NOT "fixed by
 raising the timeout in the committed test" territory — a real fix needs
