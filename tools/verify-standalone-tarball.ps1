@@ -2,7 +2,7 @@
 
 [CmdletBinding()]
 param(
-    [string]$Version = "v1.1.1",
+    [string]$Version = "v1.1.2",
     [string]$Target = "windows-x86_64"
 )
 
