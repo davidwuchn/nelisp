@@ -2229,6 +2229,20 @@ arm64 Linux has no legacy x86 numbering)."
             0))))
     ;; Mark the char buffer of a string (raw byte block, no Sexp children).
     (defun nl_gc_mark_buf (ptr) (nl_seq2 (nl_gc_mark_block ptr) 0))
+    ;; ELEMENT CAPACITY of the block whose object pointer is PTR: the payload
+    ;; (BLOCK_TOTAL minus the 8-byte header) divided by STRIDE.  An allocator
+    ;; block is the authority on how many elements a buffer can hold, and a
+    ;; live Vec never has len > cap, so clamping a walk to this number cannot
+    ;; truncate a real object -- `nl_ct_grow_entries' allocates exactly
+    ;; `new_cap * 40' and `nl_gc_mark_vec_slots''s buffers exactly `len * 8'.
+    ;; Returns 0 when the header cannot describe even one element, or when the
+    ;; block it claims does not end inside the arena (a junk BASE whose
+    ;; header word is not a header at all).
+    (defun nl_gc_block_elem_cap (ptr stride)
+      (let ((bt (nl_hdr_bt (- ptr 8))))
+        (if (< bt 16) 0
+          (if (= (nl_gc_in_arena (+ ptr (- bt 9))) 0) 0
+            (/ (- bt 8) stride)))))
     ;; Mark every slot of a `len'-element buffer starting at data_ptr.
     ;; Doc 147 Phase 2: each slot is now an 8-byte tagged WORD (stride 8,
     ;; was a 32B inline Sexp).  Per-slot WORD-aware mark, mirroring the
@@ -2248,10 +2262,17 @@ arm64 Linux has no legacy x86 numbering)."
     ;; faults BEFORE any per-slot guard.  Skip the whole buffer when
     ;; DATA_PTR is not in-arena (a real vector/record always has an
     ;; in-arena alloc'd buffer; len==0 -> data_ptr may be null -> skip).
+    ;; LEN gets the same clamp as `nl_gc_mark_char_table_slots': a garbage
+    ;; tag-8/12 pool slot names a block that is not an NlVector/NlRecord, so
+    ;; the `len' field read out of it is an arbitrary word.  The in-arena
+    ;; guard on DATA_PTR above stops a junk BASE; it does nothing about a
+    ;; junk LEN walking off the end of a real one.
     (defun nl_gc_mark_vec_slots (data_ptr i len)
       (if (= (nl_gc_in_arena data_ptr) 0) 0
-        (let ((k i))
-          (while (< k len)
+        (let* ((cap (nl_gc_block_elem_cap data_ptr 8))
+               (n (if (< len cap) len cap))
+               (k i))
+          (while (< k n)
             (nl_seq2
              (let ((vw (ptr-read-u64 (+ data_ptr (* k 8)) 0)))
                (if (= (logand vw 1) 1) 0
@@ -2324,17 +2345,33 @@ arm64 Linux has no legacy x86 numbering)."
     ;; char-table buffer.  Entries use STRIDE=40/OFF=8 ({i64 key,Sexp});
     ;; extras use STRIDE=32/OFF=0.  The buffer membership guard precedes every
     ;; dereference, matching `nl_gc_mark_vec_slots''s defensive contract.
+    ;; LEN is NOT trusted.  A tag-9 slot in an uninitialised parse-pool cell
+    ;; reaches here with `entries_len' read out of a block that is not a
+    ;; char-table box, i.e. an arbitrary 64-bit word.  Measured 2026-08-29:
+    ;; len came back as 0x7fffacd2d6f0 (a pointer) against a 40-byte entries
+    ;; block, and this loop walked 31,478,841 slots -- 1.26 GB -- past the end
+    ;; of the arena before SIGSEGV in `nl_gc_mark_slot'.  Clamp the walk to
+    ;; what the buffer's own block can hold.
     (defun nl_gc_mark_char_table_slots (base i len stride off)
       (if (= (nl_gc_in_arena base) 0) 0
-        (let ((k i))
-          (while (< k len)
+        (let* ((cap (nl_gc_block_elem_cap base stride))
+               (n (if (< len cap) len cap))
+               (k i))
+          (while (< k n)
             (nl_seq2 (nl_gc_mark_slot (+ base (+ off (* k stride))))
                      (setq k (+ k 1))))
           0)))
     ;; Mark a tag-9 box and every owned edge.  `nl_gc_mark_block' is the cycle
     ;; guard for parent/default graphs, so a parent cycle terminates safely.
+    ;; `nl_gc_mark_block' proves only that BOX is an unmarked in-arena block;
+    ;; it does not prove the block is the 128-byte NlCharTable `nl_char_table_
+    ;; alloc' lays out.  Reading +64..+112 out of a smaller block is how a
+    ;; garbage tag-9 pool slot produced a pointer-valued `entries_len' (see
+    ;; `nl_gc_mark_char_table_slots').  Require the real size first; a block
+    ;; too small to be a char-table box owns no char-table edges.
     (defun nl_gc_mark_char_table_box (box)
       (if (= (nl_gc_mark_block box) 0) 0
+       (if (< (nl_hdr_bt (- box 8)) 136) 0
         (let* ((entries (ptr-read-u64 (+ box 64) 0))
                (entries_len (ptr-read-u64 (+ box 80) 0))
                (parent (ptr-read-u64 (+ box 88) 0))
@@ -2347,7 +2384,7 @@ arm64 Linux has no legacy x86 numbering)."
            (nl_gc_mark_char_table_slots entries 0 entries_len 40 8)
            (if (= parent 0) 0 (nl_gc_mark_char_table_box parent))
            (nl_gc_mark_buf extra)
-           (nl_gc_mark_char_table_slots extra 0 extra_len 32 0)))))
+           (nl_gc_mark_char_table_slots extra 0 extra_len 32 0))))))
     (defun nl_gc_mark_bool_vector_box (box)
       (if (= (nl_gc_mark_block box) 0) 0
         (nl_gc_mark_buf (ptr-read-u64 (+ box 8) 0))))
@@ -3669,10 +3706,41 @@ arm64 Linux has no legacy x86 numbering)."
           (nl_seq2 (nl_gc_mark_mirror_buckets (+ env 0))
            (nl_seq2 (nl_gc_mark_recorded_slot (+ env 32))  ; frame stack
                     (nl_gc_mark_recorded_slot (+ env 64)))))))) ; unbound marker
+    ;; POOL is THIS frame's parse pool; the cap word @268436448 belongs to the
+    ;; load that is running NOW.  Nested loads size their pools from their own
+    ;; source length (`bf_load_readable' / `bf_eval_source_string'), so an
+    ;; outer frame's pool was walked with an inner load's cap: too large and
+    ;; the walk ran off the pool into unrelated live blocks (the mark pass only
+    ;; over-retains, but `nl_compact_rw_pool' / `nl_fa_pool' WRITE rewritten
+    ;; pointer edges through the same shape); too small and the tail of a live
+    ;; pool went unmarked.  The 2026-06-11 nested-cap restore fixed only the
+    ;; after-return face of this; while nested, the caps still disagreed.
+    ;; The pool block itself is the exact per-frame answer: both allocators
+    ;; request exactly `cap * 32' bytes.  Cap 0 is kept as the form-boundary
+    ;; "stale slots are not roots" mode flag `nl_gc_collect_form_boundary'
+    ;; installs, so honour it before consulting the block.
+    ;; POOL 0 answers 0 without touching memory: `nl_gc_eval_ctx_push' records
+    ;; evaluator frames with pool 0, and `nl_fa_frame_at' passes a frame's pool
+    ;; word here as an ARGUMENT -- i.e. before `nl_fa_pool's own `base = 0'
+    ;; guard runs -- so a bare `nl_hdr_bt (- 0 8)' would read address -8.
+    (defun nl_gc_pool_cap_of (pool)
+      (if (= pool 0) 0
+        (let ((c (nl_gc_block_elem_cap pool 32)))
+          (if (= c 0) (nl_gc_pool_cap) c))))
+    ;; `nl_gc_diag'+56 suppresses the SLOT walk (the block stays pinned) for
+    ;; one mark pass.  `bf_pool_root_coverage' runs the root walk twice, once
+    ;; each way, and compares the reachable sets: it is the only reader of this
+    ;; flag, it is zero-initialised, and nothing in a collection path writes it.
+    ;; The invariant it exists to police is that this arm contributes no roots
+    ;; of its own -- every node the pool holds is also reached through the
+    ;; recorded frame's `result'.  That is what makes it safe to walk less of
+    ;; the pool than its whole capacity.
     (defun nl_gc_mark_recorded_pool (pool)
       (if (= pool 0) 0
         (nl_seq2 (nl_gc_mark_block pool)
-                 (nl_gc_mark_pool pool (nl_gc_pool_cap)))))
+                 (if (= (ptr-read-u64 (data-addr nl_gc_diag) 56) 1) 0
+                   (if (= (nl_gc_pool_cap) 0) 0
+                     (nl_gc_mark_pool pool (nl_gc_pool_cap_of pool)))))))
     (defun nl_gc_mark_recorded_frame (env result out pool src cursor bsym)
       (nl_seq2 (nl_gc_mark_recorded_env env)
        (nl_seq2 (nl_gc_mark_recorded_slot result) ; executing form / subform
@@ -4614,6 +4682,7 @@ argument (reachability + in-arena bounds checks).")
     ((:lit "nelisp--arena-walk-verify") . (bf_arena_walk_verify out))
     ((:lit "nelisp--arena-dump-copy-verify") . (bf_arena_dump_copy_verify out))
     ((:lit "nelisp--arena-mark-reach-verify") . (bf_arena_mark_reach_verify out))
+    ((:lit "nelisp--pool-root-coverage") . (bf_pool_root_coverage out))
     ((:lit "nelisp--arena-swizzle-verify") . (bf_arena_swizzle_verify out))
     ((:lit "nelisp--arena-load-relocate-verify") . (bf_arena_load_relocate_verify out))
     ((:lit "nelisp--arena-image-root-verify") . (bf_arena_image_root_verify out))
@@ -5280,7 +5349,26 @@ leave symbols unresolved at link time."
                  0)
               (if (= (wf_argval args 0) 25)
                   (nl_seq2 (ptr-write-u64 (data-addr nl_alloc_diag) 0 0) 0)
-                0))))))
+                ;; 26/27: suppress / restore the recorded-frame parse-pool SLOT
+                ;; walk (the pool block itself stays pinned either way).  26 is
+                ;; how `standalone-pool-walk-redundancy' asks for the
+                ;; configuration the gate exists to police: everything the pool
+                ;; holds must still be reachable without it.
+                (if (= (wf_argval args 0) 26)
+                    (nl_seq2 (ptr-write-u64 (data-addr nl_gc_diag) 56 1) 0)
+                  (if (= (wf_argval args 0) 27)
+                      (nl_seq2 (ptr-write-u64 (data-addr nl_gc_diag) 56 0) 0)
+                    ;; 28/29: turn the conservative native-stack scan
+                    ;; (SCAN_FLAG @268436464, driver sets it at boot) off and
+                    ;; back on.  With it off, only the precise recorded-root
+                    ;; arms keep an in-flight value alive, which is the
+                    ;; configuration that can tell whether a given arm is
+                    ;; load-bearing or merely redundant with the scan.
+                    (if (= (wf_argval args 0) 28)
+                        (nl_seq2 (ptr-write-u64 268436464 0 0) 0)
+                      (if (= (wf_argval args 0) 29)
+                          (nl_seq2 (ptr-write-u64 268436464 0 1) 0)
+                        0))))))))))
     (defun bf_debug_switch (args out)
       (seq
         (if (= (wf_argval args 0) 1) (ptr-write-u64 (data-addr nl_gc_diag) 32 1)
@@ -6955,7 +7043,13 @@ leave symbols unresolved at link time."
        (nl_fa_recorded_env (ptr-read-u64 base 0) ds span dest cin cout dir)
        (nl_seq2 (nl_fa_recorded_slot (ptr-read-u64 base 8) ds span dest cin cout dir)
         (nl_seq2 (nl_fa_recorded_slot (ptr-read-u64 base 16) ds span dest cin cout dir)
-         (nl_seq2 (nl_fa_pool (ptr-read-u64 base 24) (nl_gc_pool_cap) ds span dest cin cout dir)
+         ;; Per-frame pool cap, not the global cap word -- see
+         ;; `nl_gc_mark_recorded_pool'.  This arm REWRITES pointer edges, so
+         ;; walking a frame's pool with another load's larger cap rebases
+         ;; words that belong to unrelated live blocks.
+         (nl_seq2 (nl_fa_pool (ptr-read-u64 base 24)
+                              (nl_gc_pool_cap_of (ptr-read-u64 base 24))
+                              ds span dest cin cout dir)
           (nl_seq2 (nl_fa_recorded_slot (ptr-read-u64 base 32) ds span dest cin cout dir)
            (nl_seq2 (nl_fa_recorded_slot (ptr-read-u64 base 40) ds span dest cin cout dir)
                     (nl_fa_recorded_slot (ptr-read-u64 base 48) ds span dest cin cout dir))))))))
@@ -7404,6 +7498,46 @@ the same way `nelisp_eval_call' already reaches into `reader-gc.o'."
          (wf_write_nil nil-slot)
          (wf_cons_int (ptr-read-u64 total 0) nil-slot s1)
          (wf_cons_int (ptr-read-u64 reach 0) s1 out)
+         0)))
+    ;; POOL ROOT COVERAGE.  Mark from the recorded roots twice -- once with the
+    ;; recorded-frame parse-pool slot walk on, once with it off -- and answer
+    ;; (WITH WITHOUT), the reachable block count each way.  Same "mark, count,
+    ;; clear, never sweep" mechanics as `bf_arena_mark_reach_verify' above, run
+    ;; back to back on an unchanged heap, so the only difference between the
+    ;; two numbers is that one arm.
+    ;;
+    ;; WITH == WITHOUT says the pool arm reaches nothing the rest of the root
+    ;; set does not already reach.  WITH > WITHOUT names the number of live
+    ;; blocks that only the pool keeps alive, and is the signal that walking
+    ;; less than the pool's whole capacity would free something live.
+    ;;
+    ;; The scratch slots are allocated BEFORE either pass so both passes see
+    ;; the same heap.  They are not roots, so they raise `total' equally in
+    ;; both and never appear in either `reach'.
+    (defun bf_prc_pass (reach total)
+      (seq
+       (ptr-write-u64 reach 0 0)
+       (ptr-write-u64 total 0 0)
+       (ptr-write-u64 (data-addr nl_gc_loop_ctx) 24 1)
+       (nl_gc_mark_recorded_contexts)
+       (nl_gc_mark_rootstack)
+       (nl_gc_mark_symentry)
+       (ptr-write-u64 (data-addr nl_gc_loop_ctx) 24 0)
+       (bf_arena_mr_chunks (ptr-read-u64 268436160 0) reach total)
+       0))
+    (defun bf_pool_root_coverage (out)
+      (let* ((r1 (alloc-bytes 8 8)) (t1 (alloc-bytes 8 8))
+             (r2 (alloc-bytes 8 8)) (t2 (alloc-bytes 8 8))
+             (nil-slot (alloc-bytes 32 8)) (s1 (alloc-bytes 32 8)))
+        (seq
+         (ptr-write-u64 (data-addr nl_gc_diag) 56 0)
+         (bf_prc_pass r1 t1)
+         (ptr-write-u64 (data-addr nl_gc_diag) 56 1)
+         (bf_prc_pass r2 t2)
+         (ptr-write-u64 (data-addr nl_gc_diag) 56 0)
+         (wf_write_nil nil-slot)
+         (wf_cons_int (ptr-read-u64 r2 0) nil-slot s1)
+         (wf_cons_int (ptr-read-u64 r1 0) s1 out)
          0))))
   "Reader-only arena size-census + mark-reach diagnostics (call
 `nl_gc_bt_ok'/`nl_gc_chunk_end'/`nl_gc_mark_recorded_contexts'/
@@ -13481,12 +13615,23 @@ before feat/windows-spawn; Windows targets get a CreateProcessW spawn-model
       (nl_ct_throw_got_cdr1
        (extern-call nl_cons_cdr_ptr args)
        tag_form env out tag_slot val_slot))
+    ;; TAG_SLOT holds the EVALUATED tag while the value form is evaluated, and
+    ;; that evaluation can collect.  As an `alloc-bytes' scratch the tag came
+    ;; back blanked, `nl_ct_copy32' stashed a nil tag, and the throw missed its
+    ;; own `catch': `(catch 'tg (throw 'tg (f)))' answered `no-catch: (0 7)'.
+    ;; Rooted for the whole of `nl_sf_throw'; VAL_SLOT is written by the eval
+    ;; and read immediately after, so it needs no root of its own.
+    (defun nl_sf_throw_run (args env out tag_slot val_slot root_mark)
+      (nl_ct_root_finish
+       env root_mark
+       (nl_ct_throw_got_tag_form
+        (nl_cons_car_ptr args) args env out tag_slot val_slot)))
+    (defun nl_sf_throw_mark (args env out root_mark)
+      (nl_sf_throw_run args env out (nl_root_reserve env)
+                       (alloc-bytes 32 8) root_mark))
     (defun nl_sf_throw (args env out _pad)
       (if (= (sexp-tag args) 7)
-          (let* ((tag_slot (alloc-bytes 32 8)) (val_slot (alloc-bytes 32 8)))
-            (nl_ct_throw_got_tag_form
-             (extern-call nl_cons_car_ptr args)
-             args env out tag_slot val_slot))
+          (nl_sf_throw_mark args env out (nl_root_mark env))
         1))
     ;;================= CATCH =================
     ;; Generic `eq' tag-match helper.  `nl_ct_catch_check_tag' used to reuse
@@ -13541,23 +13686,24 @@ before feat/windows-spawn; Windows targets get a CreateProcessW spawn-model
       (if (= (ptr-read-u64 268435472 0) 2)
           (nl_ct_catch_check_tag tag_slot env out eqres_slot 0 0)
         1))
-    (defun nl_ct_catch_body_step (rc body_rest tag_slot env out eqres_slot)
+    ;; The body list's cdr is taken AFTER the body form's own eval, not before:
+    ;; a one-form body ends in Nil, `nl_cons_cdr_ptr' materialises an unrooted
+    ;; view for it, and a collection inside the body frees that view under the
+    ;; walker.  Same shape as the nine walkers closed earlier on this branch.
+    (defun nl_ct_catch_body_step (rc body tag_slot env out eqres_slot)
       (if (= rc 0)
-          (nl_ct_catch_body body_rest tag_slot env out eqres_slot 0)
+          (nl_ct_catch_body
+           (extern-call nl_cons_cdr_ptr body) tag_slot env out eqres_slot 0)
         (nl_ct_catch_caught rc tag_slot env out eqres_slot 0)))
-    (defun nl_ct_catch_body_eval (car body_rest tag_slot env out eqres_slot)
+    (defun nl_ct_catch_body_eval (car body tag_slot env out eqres_slot)
       (nl_ct_catch_body_step
        (extern-call nelisp_eval_call car env out)
-       body_rest tag_slot env out eqres_slot))
-    (defun nl_ct_catch_body_cdr (body_rest body tag_slot env out eqres_slot)
-      (nl_ct_catch_body_eval
-       (extern-call nl_cons_car_ptr body)
-       body_rest tag_slot env out eqres_slot))
+       body tag_slot env out eqres_slot))
     (defun nl_ct_catch_body (body tag_slot env out eqres_slot _p5)
       (if (= (sexp-tag body) 0)
           0
-        (nl_ct_catch_body_cdr
-         (extern-call nl_cons_cdr_ptr body)
+        (nl_ct_catch_body_eval
+         (extern-call nl_cons_car_ptr body)
          body tag_slot env out eqres_slot)))
     (defun nl_ct_catch_after_tag (rc body tag_slot env out eqres_slot)
       (if (= rc 0)
@@ -13571,12 +13717,25 @@ before feat/windows-spawn; Windows targets get a CreateProcessW spawn-model
       (nl_ct_catch_got_body
        (extern-call nl_cons_cdr_ptr args)
        tag_form env out tag_slot eqres_slot))
+    ;; TAG_SLOT holds the evaluated catch tag for the whole body evaluation, so
+    ;; it has to be a GC root.  As an `alloc-bytes' scratch a collection inside
+    ;; the body freed it, `nl_ct_tag_eq' then compared a `throw' against a
+    ;; blanked slot and answered no-match, and the throw escaped its own
+    ;; `catch' as `no-catch' -- no crash, just a wrong answer.
+    (defun nl_sf_catch_run (args env out tag_slot eqres_slot root_mark)
+      (nl_ct_root_finish
+       env root_mark
+       (nl_ct_catch_got_tag_form
+        (nl_cons_car_ptr args) args env out tag_slot eqres_slot)))
+    (defun nl_ct_root_finish (env root_mark status)
+      (seq (nl_root_release env root_mark) status))
+    (defun nl_sf_catch_slots (args env out root_mark tag_slot)
+      (nl_sf_catch_run args env out tag_slot (alloc-bytes 32 8) root_mark))
+    (defun nl_sf_catch_mark (args env out root_mark)
+      (nl_sf_catch_slots args env out root_mark (nl_root_reserve env)))
     (defun nl_sf_catch (args env out _pad)
       (if (= (sexp-tag args) 7)
-          (let* ((tag_slot (alloc-bytes 32 8)) (eqres_slot (alloc-bytes 32 8)))
-            (nl_ct_catch_got_tag_form
-             (extern-call nl_cons_car_ptr args)
-             args env out tag_slot eqres_slot))
+          (nl_sf_catch_mark args env out (nl_root_mark env))
         1)))
   "M6 catch/throw special-form impls.  nl_sf_catch/nl_sf_throw are dispatched
 from the patched combiner-cons (see `nelisp-standalone--patch-combiner-cons').")
@@ -14830,7 +14989,7 @@ computed expansion into `nl_mxcache_store' before evaluating it.")
                  (nl_cons_macro_apply_eval
                   form_ptr func_slot tail_ptr env out))
               (nl_eval_inner_cons_eval_args
-               tail_ptr env out root_mark func_slot (alloc-bytes 32 8))))
+               tail_ptr env out root_mark func_slot (nl_root_reserve env))))
         (nl_cons_root_finish
          env root_mark (nl_cons_stash_void_function env head_ptr))))
     (defun nl_eval_inner_cons_symbol_slot
@@ -14852,7 +15011,7 @@ computed expansion into `nl_mxcache_store' before evaluating it.")
         (rc_eval tail_ptr env out root_mark func_slot)
       (if (= rc_eval 0)
           (nl_eval_inner_cons_eval_args
-           tail_ptr env out root_mark func_slot (alloc-bytes 32 8))
+           tail_ptr env out root_mark func_slot (nl_root_reserve env))
         (nl_cons_root_finish env root_mark 1)))
     (defun nl_eval_inner_cons_callable_slot
         (head_ptr tail_ptr env out root_mark func_slot)
@@ -16136,7 +16295,7 @@ value (matches the binary's M8 read+eval-loop driver)."
     "nelisp--fmt-float"
     "nelisp--debug-switch" "nelisp--gc-diag" "nelisp--arena-force-grow-smoke" "nelisp--size-census" "nelisp--arena-walk-verify"
     "nelisp--alloc-check-report"
-    "nelisp--arena-dump-copy-verify" "nelisp--arena-mark-reach-verify" "nelisp--arena-swizzle-verify"
+    "nelisp--arena-dump-copy-verify" "nelisp--arena-mark-reach-verify" "nelisp--pool-root-coverage" "nelisp--arena-swizzle-verify"
     "nelisp--arena-load-relocate-verify" "nelisp--arena-image-root-verify"
     "nelisp--arena-dump-table-verify"
     "nelisp--arena-dump-image-to-file" "nelisp--arena-dump-image-stream" "nelisp--arena-load-image-from-file"
@@ -22745,7 +22904,7 @@ always return 0, so `signal' flows to the builtin applyfn (bf_signal) instead of
       (if (= rc_init 0)
           (nl_apply_do_apply_append
            prefix_slot (nl_apply_list_last_cdr rest_args)
-           env out root_mark func_slot (alloc-bytes 32 8))
+           env out root_mark func_slot (nl_root_reserve env))
         (nl_apply_root_finish env root_mark 1)))
     (defun nl_apply_do_apply_list
         (rest_args env out root_mark func_slot prefix_slot)
@@ -22762,7 +22921,7 @@ always return 0, so `signal' flows to the builtin applyfn (bf_signal) instead of
              (if (= (sexp-tag args_list_ptr) 7)
                  (nl_cons_cdr_ptr args_list_ptr)
                args_list_ptr)
-             env out root_mark func_slot (alloc-bytes 32 8)))
+             env out root_mark func_slot (nl_root_reserve env)))
         (nl_apply_root_finish
          env root_mark (nl_cons_stash_void_function env arg0_ptr))))
     (defun nl_apply_do_apply_resolve
@@ -25224,9 +25383,28 @@ the saved stack top instead of leaking a root entry."
                 rc (buffer-string) (error-message-string err)))))
     (unless (= rc 0)
       (error "stage3 rootstack smoke exit=%S value=%S" rc value))
+    ;; The last two elements are `before' and `after'.  What this smoke proves
+    ;; is that they are EQUAL -- every rooted continuation restores the saved
+    ;; stack top on the error / throw / unwind / failing-apply paths instead of
+    ;; leaking an entry.  Their absolute value is an observation, not the
+    ;; invariant, and it moved from 3 to 4 when `nl_let_collect_walk' started
+    ;; reserving a Stage-2 root slot for the value it holds across the
+    ;; evaluation of the NEXT binding (383b8b7bc).  Measured before changing
+    ;; this number: the offset is constant, not cumulative -- 2000 nested
+    ;; `let's leave the depth exactly where they found it -- and `before' still
+    ;; equals `after' here, so nothing about what the smoke exists to catch has
+    ;; changed.  Only the `--eval' entry point shows the shift; the file entry
+    ;; point reads 3 either way, which is why `make standalone' caught this and
+    ;; ert-full and the reader smokes did not.  It moved again, 4 -> 6, when the
+    ;; builtin argument list and the `catch' tag became roots as well; the same
+    ;; two measurements were repeated and held (equal before/after, and 2000
+    ;; nested `let's leaving the depth exactly where they found it).
     (unless (equal (cl-subseq value 0 10)
-                   '(200000 3 2 11 22 33 44 55 3 3))
+                   '(200000 3 2 11 22 33 44 55 6 6))
       (error "stage3 rootstack smoke result/depth mismatch: %S" value))
+    (unless (= (nth 8 value) (nth 9 value))
+      (error "stage3 rootstack smoke leaked a root entry: before=%S after=%S"
+             (nth 8 value) (nth 9 value)))
     (let ((diag (nth 10 value)))
       (unless (and (listp diag)
                    (= (nth 0 diag) 0)

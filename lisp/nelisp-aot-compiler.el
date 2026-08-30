@@ -403,6 +403,44 @@ Nothing in the source distinguishes the two lanes.  Both reach
 1541 defuns look like object mode and that flag cannot answer this.
 The caller knows and the compiler does not, so the caller says.")
 
+(defvar nelisp-aot-compiler--internally-called-names nil
+  "Names this unit's own defun bodies call.
+
+Narrows where `--as-sexp-ptr-form' normalises a return.  The conversion
+is needed so a SAME-UNIT caller gets a value word back; it is wrong for a
+defun only ever entered from outside, because the fast native-exec tier's
+contract is Sexp pointers in and a raw integer out.  `(defun nat-nx-sq
+(x) (* x x))' normalised unconditionally stopped linking at all -- the
+boxed return referenced `nl_alloc_bytes', which that driver does not
+provide -- and would have printed an address if it had.")
+
+(defun nelisp-aot-compiler--internally-called-defun-names (source)
+  "Return the subset of SOURCE's defun names that SOURCE's bodies call.
+
+Self-recursion counts: a tail call is a same-unit call like any other."
+  (let ((defined nil) (called nil))
+    (nelisp-aot-compiler--walk-source
+     source
+     (lambda (form)
+       (when (and (consp form) (eq (car form) 'defun) (symbolp (nth 1 form)))
+         (push (nth 1 form) defined))))
+    (nelisp-aot-compiler--walk-source
+     source
+     (lambda (form)
+       (when (and (consp form) (symbolp (car form))
+                  (memq (car form) defined)
+                  (not (memq (car form) called)))
+         (push (car form) called))))
+    called))
+
+(defun nelisp-aot-compiler--walk-source (form fn)
+  "Call FN on FORM and every sub-form, tolerating improper lists."
+  (funcall fn form)
+  (let ((tail form))
+    (while (consp tail)
+      (nelisp-aot-compiler--walk-source (car tail) fn)
+      (setq tail (cdr tail)))))
+
 (defvar nelisp-aot-compiler--dynamic-user-calls nil
   "Non-nil lowers otherwise-unresolvable user calls through the
 `nelisp_aot_builtin_calln' dispatcher instead of emitting a plt32
@@ -5553,6 +5591,123 @@ avoids treating arbitrary native pointers as tagged integers."
              (seq (sexp-int-make ,slot ,form) ,slot)))
       form)))
 
+(defconst nelisp-aot-compiler--raw-i64-producing-heads
+  '(;; Arithmetic and comparison.
+    + - * / mod logior logand logxor shl sar shr < > <= >= = /=
+    ;; Doc 122 §122.D string grammar.  Each of these lowers to a plain
+    ;; machine integer -- `str-len' is a field read, `str-byte-at' a
+    ;; `movzbq' -- and none of them yields a Sexp slot.
+    str-len str-byte-at str-eq str-char-count str-is-alphanumeric-at
+    mut-str-len)
+  "Grammar heads whose value is a raw machine integer, not a Sexp pointer.
+
+Consulted where a raw value would otherwise be handed to something that
+reads it back as a value word.  Kept as one list because the same answer
+is wanted in more than one place and a second hand-written copy is how
+these two representations drift apart again.")
+
+(defun nelisp-aot-compiler--as-sexp-ptr-leaf (form fenv)
+  "Return FORM in the representation this unit's defuns take arguments in.
+
+In the runtime-entered lane every parameter arrives as a Sexp pointer
+\(see `nelisp-aot-compiler--runtime-entry-params'), and the body reads it
+back with the immediate-aware `sexp-int-unwrap'.  A caller that hands
+over a raw machine word therefore has the callee dereference it: a
+literal `0' takes the low-bit test's pointer arm and loads `[0+8]'.
+
+`(progn 1 (f))'-style position does not enter into it -- what decides is
+whether the argument EXPRESSION produced a raw word.  `(g x)' passing a
+parameter straight through was always correct; `(g 0)' and `(g (+ x 1))'
+were not, and both segfaulted on the first call.
+
+Boxing is what the same-lane dispatcher path already does for the same
+reason, so this reuses it rather than introducing a second convention.
+Low-bit-tagged immediates would be cheaper and both readers already
+decode them, but nothing produces them today and the generated C harness
+does not decode them at all -- an immediate reaching a builtin through
+`nelisp_aot_builtin_calln' would be read as a pointer.  Keeping every
+value word a real slot pointer holds that invariant.
+
+Outside the runtime-entered lane FORM is returned unchanged: the reader's
+defuns are entered by native code with raw machine words, and boxing
+`nl_os_stat_path''s path pointer would break it."
+  (if (not nelisp-aot-compiler--runtime-entry-params)
+      form
+    (let ((boxed (nelisp-aot-compiler--aot-dispatcher-arg-form form fenv)))
+      (if (not (eq boxed form))
+          boxed
+        ;; `--aot-dispatcher-arg-form' answers for frame references,
+        ;; source arithmetic and integer literals.  It does not answer
+        ;; for the string grammar, whose reads are raw machine integers
+        ;; too: `(g (str-len s))' handed the callee a length to
+        ;; dereference exactly as `(g 0)' handed it a zero.
+        (if (and (consp form)
+                 (memq (car form)
+                       nelisp-aot-compiler--raw-i64-producing-heads))
+            (let ((slot (nelisp-aot-compiler--gensym "aot-user-call-box")))
+              `(let ((,slot (alloc-bytes 32 8)))
+                 (seq (sexp-int-make ,slot ,form) ,slot)))
+          form)))))
+
+(defun nelisp-aot-compiler--as-sexp-ptr-form (form fenv)
+  "Return FORM with every value-producing position left as a Sexp pointer.
+
+Used at both ends of the runtime-entered lane's boundary -- a call
+argument and a defun's return are the same question, and `merge-mask8'
+asks it in argument position: `(add-bit8 mask (if (= (logand bits 1) 0)
+0 1))' has raw literals under an `if', which a non-recursive conversion
+walks straight past.
+
+Completes the runtime-entered lane's boundary rule.  Parameters arrive as
+Sexp pointers and callers now hand arguments over the same way, so a
+defun that RETURNS a raw machine word puts the caller straight back where
+it started: `(add-bit8 mask (first-field-id-bit text i))' had the callee
+dereference a bit value of 0.
+
+The conversion has to reach the tail positions rather than wrap the body,
+because a body is routinely mixed -- `add-bit8' answers its parameter
+`mask' on two arms and the raw `(+ mask bit)' on the third, and boxing
+the whole `if' would box the parameter a second time.
+
+Anything that is not one of the forms recursed into here is treated as a
+leaf, and a leaf is converted only when it is known to produce a raw
+word.  An unclassified leaf keeps the legacy path: `unknown' is a third
+representation in this compiler, not a synonym for raw, and boxing one
+that is really a pointer loses the object."
+  (cond
+   ((not (consp form))
+    (nelisp-aot-compiler--as-sexp-ptr-leaf form fenv))
+   ((eq (car form) 'progn)
+    (if (cdr form)
+        (append (butlast form)
+                (list (nelisp-aot-compiler--as-sexp-ptr-form
+                       (car (last form)) fenv)))
+      form))
+   ((memq (car form) '(let let*))
+    (if (cddr form)
+        (append (butlast form)
+                (list (nelisp-aot-compiler--as-sexp-ptr-form
+                       (car (last form)) fenv)))
+      form))
+   ((eq (car form) 'if)
+    (append (list 'if (nth 1 form)
+                  (nelisp-aot-compiler--as-sexp-ptr-form
+                   (nth 2 form) fenv))
+            (mapcar (lambda (f)
+                      (nelisp-aot-compiler--as-sexp-ptr-form f fenv))
+                    (nthcdr 3 form))))
+   ((eq (car form) 'cond)
+    (cons 'cond
+          (mapcar
+           (lambda (clause)
+             (if (and (consp clause) (cdr clause))
+                 (append (butlast clause)
+                         (list (nelisp-aot-compiler--as-sexp-ptr-form
+                                (car (last clause)) fenv)))
+               clause))
+           (cdr form))))
+   (t (nelisp-aot-compiler--as-sexp-ptr-leaf form fenv))))
+
 (defun nelisp-aot-compiler--parse-aot-builtinn-call
     (sexp env fenv defuns)
   "Lower a direct vararg builtin call SEXP through the AOT dispatcher."
@@ -10489,8 +10644,9 @@ functions `((NAME . ARITY) ...)'."
     (nelisp-aot-compiler--make-ir 'str-byte-at
           :ptr (nelisp-aot-compiler--parse-value
                 (nth 1 sexp) env fenv defuns)
-          :idx (nelisp-aot-compiler--parse-value
-                (nth 2 sexp) env fenv defuns)))
+          :idx (nelisp-aot-compiler--ir-as-raw-i64
+                (nelisp-aot-compiler--parse-value
+                 (nth 2 sexp) env fenv defuns))))
    ((and (consp sexp) (eq (car sexp) 'str-eq))
     (unless (= (length sexp) 3)
       (signal 'nelisp-aot-compiler-error
@@ -10677,8 +10833,9 @@ functions `((NAME . ARITY) ...)'."
     (nelisp-aot-compiler--make-ir 'mut-str-make-empty
           :slot (nelisp-aot-compiler--parse-value
                  (nth 1 sexp) env fenv defuns)
-          :cap (nelisp-aot-compiler--parse-value
-                (nth 2 sexp) env fenv defuns)))
+          :cap (nelisp-aot-compiler--ir-as-raw-i64
+                (nelisp-aot-compiler--parse-value
+                 (nth 2 sexp) env fenv defuns))))
    ;; `(mut-str-push-byte PTR BYTE)' — append a single byte (low 8
    ;; bits of BYTE) to the MutStr at PTR (= `*mut Sexp' slot
    ;; carrying `Sexp::MutStr').  Returns rax = 1 sentinel so the op
@@ -10690,8 +10847,9 @@ functions `((NAME . ARITY) ...)'."
     (nelisp-aot-compiler--make-ir 'mut-str-push-byte
           :ptr (nelisp-aot-compiler--parse-value
                 (nth 1 sexp) env fenv defuns)
-          :byte (nelisp-aot-compiler--parse-value
-                 (nth 2 sexp) env fenv defuns)))
+          :byte (nelisp-aot-compiler--ir-as-raw-i64
+                 (nelisp-aot-compiler--parse-value
+                  (nth 2 sexp) env fenv defuns))))
    ;; `(mut-str-push-codepoint PTR CP)' — UTF-8 encode CP into 1-4
    ;; bytes and append.  Out-of-range / surrogate codepoints clamp
    ;; to U+FFFD inside the Rust extern.  Returns rax = 1 sentinel.
@@ -10702,8 +10860,9 @@ functions `((NAME . ARITY) ...)'."
     (nelisp-aot-compiler--make-ir 'mut-str-push-codepoint
           :ptr (nelisp-aot-compiler--parse-value
                 (nth 1 sexp) env fenv defuns)
-          :cp (nelisp-aot-compiler--parse-value
-               (nth 2 sexp) env fenv defuns)))
+          :cp (nelisp-aot-compiler--ir-as-raw-i64
+               (nelisp-aot-compiler--parse-value
+                (nth 2 sexp) env fenv defuns))))
    ;; `(mut-str-len PTR)' — current byte length of the MutStr at
    ;; PTR.  Returns the i64 length in rax (= `String::len').
    ((and (consp sexp) (eq (car sexp) 'mut-str-len))
@@ -10754,8 +10913,9 @@ functions `((NAME . ARITY) ...)'."
     (nelisp-aot-compiler--make-ir 'str-codepoint-at
           :ptr (nelisp-aot-compiler--parse-value
                 (nth 1 sexp) env fenv defuns)
-          :idx (nelisp-aot-compiler--parse-value
-                (nth 2 sexp) env fenv defuns)
+          :idx (nelisp-aot-compiler--ir-as-raw-i64
+                (nelisp-aot-compiler--parse-value
+                 (nth 2 sexp) env fenv defuns))
           :cp-slot (nelisp-aot-compiler--parse-value
                     (nth 3 sexp) env fenv defuns)
           :width-slot (nelisp-aot-compiler--parse-value
@@ -10772,8 +10932,9 @@ functions `((NAME . ARITY) ...)'."
     (nelisp-aot-compiler--make-ir 'str-is-alphanumeric-at
           :ptr (nelisp-aot-compiler--parse-value
                 (nth 1 sexp) env fenv defuns)
-          :idx (nelisp-aot-compiler--parse-value
-                (nth 2 sexp) env fenv defuns)))
+          :idx (nelisp-aot-compiler--ir-as-raw-i64
+                (nelisp-aot-compiler--parse-value
+                 (nth 2 sexp) env fenv defuns))))
    ;; Doc 122 §122.E — Atomic + raw memory primitives.
    ;; ------------------------------------------------
    ;; `(atomic-fetch-add PTR DELTA)' — SeqCst atomic fetch-and-add on
@@ -11358,10 +11519,20 @@ functions `((NAME . ARITY) ...)'."
                    (call-node
                     (nelisp-aot-compiler--make-ir 'call
                           :name name
+              ;; `--sexp-ptr-return-form' made every defun in this lane
+              ;; hand a Sexp pointer back, so say so.  Without it `--ir-repr'
+              ;; answers `unknown' for a call and `--ir-as-raw-i64' declines
+              ;; to unwrap: `(+ (find-byte text 9 pos) 1)' then added 1 to a
+              ;; pointer and the mask came out 0 instead of 10.
+              :repr (and nelisp-aot-compiler--runtime-entry-params
+                        (memq name nelisp-aot-compiler--internally-called-names)
+                        'sexp-ptr)
                           :args (mapcar
                                  (lambda (a)
                                    (nelisp-aot-compiler--parse-value
-                                    a env fenv defuns))
+                                    (nelisp-aot-compiler--as-sexp-ptr-form
+                                     a fenv)
+                                    env fenv defuns))
                                  (append fixed-args (list scratch))))))
               (nelisp-aot-compiler--make-ir 'value-seq
                     :forms (list list-node call-node))))
@@ -11375,9 +11546,19 @@ functions `((NAME . ARITY) ...)'."
                           :expected arity :got (length args)))))
         (nelisp-aot-compiler--make-ir 'call
               :name name
+              ;; `--sexp-ptr-return-form' made every defun in this lane
+              ;; hand a Sexp pointer back, so say so.  Without it `--ir-repr'
+              ;; answers `unknown' for a call and `--ir-as-raw-i64' declines
+              ;; to unwrap: `(+ (find-byte text 9 pos) 1)' then added 1 to a
+              ;; pointer and the mask came out 0 instead of 10.
+              :repr (and nelisp-aot-compiler--runtime-entry-params
+                        (memq name nelisp-aot-compiler--internally-called-names)
+                        'sexp-ptr)
               :args (mapcar (lambda (a)
                               (nelisp-aot-compiler--parse-value
-                               a env fenv defuns))
+                               (nelisp-aot-compiler--as-sexp-ptr-form
+                                a fenv)
+                               env fenv defuns))
                             (append args
                                     (make-list (- arity (length args))
                                                0)))))))
@@ -11856,10 +12037,19 @@ Returns one of:
              ;; The slot counter is a mutable cons cell; the final value
              ;; gives us `rt-slot-count = (car cell) - arity'.
              (rt-slot-cell (list (+ arity hidden-boundary-count)))
+             ;; Same lane, other end: a defun whose parameters are Sexp
+             ;; pointers must hand a Sexp pointer back, or its caller has
+             ;; a raw word to dereference.
+             (return-body (if (and param-repr
+                                   (memq name
+                                         nelisp-aot-compiler--internally-called-names))
+                              (nelisp-aot-compiler--as-sexp-ptr-form
+                               body parse-fenv)
+                            body))
              (body-ir (let ((nelisp-aot-compiler--next-rt-let-slot
                              rt-slot-cell))
                         (nelisp-aot-compiler--parse-value
-                         body env parse-fenv defuns)))
+                         return-body env parse-fenv defuns)))
              (_ (when nelisp-aot-compiler--repr-audit
                   (nelisp-aot-compiler--repr-audit-walk body-ir)))
              (rt-slot-count (- (car rt-slot-cell) arity))
@@ -20420,6 +20610,9 @@ register budgeting while ELF/Mach-O keep SysV."
          (empty-source-p
           (equal (plist-get extracted :source)
                  '(seq)))
+         (nelisp-aot-compiler--internally-called-names
+          (and nelisp-aot-compiler--runtime-entry-params
+               (nelisp-aot-compiler--internally-called-defun-names source)))
          (ir (unless empty-source-p
                (nelisp-aot-compiler--parse source nil)))
          (collected (and ir (nelisp-aot-compiler--collect-strings ir)))

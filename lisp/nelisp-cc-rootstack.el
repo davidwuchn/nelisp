@@ -242,14 +242,27 @@
                 (data-addr nl_rootstack_region))
              5)))
     ;; Reserve one 32-byte slot at top, zero it, bump top, return slot addr.
+    ;; END of the fixed region: 131072 entries * 32 bytes.  The bump below had
+    ;; no bound at all, so a deep enough recursion walked `top' straight out of
+    ;; `nl_rootstack_region' and kept writing into whatever bss follows it --
+    ;; a silent out-of-bounds write that surfaces as a SIGSEGV somewhere else
+    ;; entirely.  Doc 152 Stage 3 rooting costs root-depth 3N+6 per non-tail
+    ;; recursion, so the ceiling is reachable, and any future arm that roots
+    ;; one more slot per call lowers the recursion depth at which it is hit.
+    ;; Answering 0 here lets `nl_root_reserve_at' fall back to an ordinary
+    ;; scratch: that slot is then unrooted, which is exactly what every caller
+    ;; had before Stage 3, rather than memory corruption.
+    (defun nl_rootstack_end ()
+      (+ (data-addr nl_rootstack_region) 4194304))
     (defun nl_root_reserve_slot (slot)
       (if (= slot 0) 0
+        (if (> (+ slot 32) (nl_rootstack_end)) 0
           (seq (ptr-write-u64 slot 0 0)
                (ptr-write-u64 (+ slot 8) 0 0)
                (ptr-write-u64 (+ slot 16) 0 0)
                (ptr-write-u64 (+ slot 24) 0 0)
                (ptr-write-u64 (data-addr nl_rootstack_top) 0 (+ slot 32))
-               slot)))
+               slot))))
     (defun nl_root_reserve_private (env entry slot)
       (if (= slot 0) 0
         (seq
@@ -260,14 +273,23 @@
          (ptr-write-u64 env 120 (+ slot 32))
          (nl_thread_registry_store_top entry (+ slot 32))
          slot)))
+    ;; A full region answers an ordinary scratch slot instead of 0: every
+    ;; caller writes through the returned pointer immediately, so 0 would be a
+    ;; null store.  The fallback slot is not a GC root -- the caller is back to
+    ;; pre-Stage-3 behaviour for that one value -- which is a bounded loss of
+    ;; precision at a recursion depth that already had none.
+    (defun nl_root_reserve_or_scratch (slot)
+      (if (= slot 0) (alloc-bytes 32 8) slot))
     (defun nl_root_reserve_at (env entry)
       (if (= entry 0)
           (seq
            (if (= (ptr-read-u64 (data-addr nl_rootstack_top) 0) 0)
                (nl_rootstack_init) 0)
-           (nl_root_reserve_slot
-            (ptr-read-u64 (data-addr nl_rootstack_top) 0)))
-        (nl_root_reserve_private env entry (ptr-read-u64 env 120))))
+           (nl_root_reserve_or_scratch
+            (nl_root_reserve_slot
+             (ptr-read-u64 (data-addr nl_rootstack_top) 0))))
+        (nl_root_reserve_or_scratch
+         (nl_root_reserve_private env entry (ptr-read-u64 env 120)))))
     (defun nl_root_reserve (env)
       (nl_root_reserve_at env (nl_thread_registry_find env)))
     (defun nl_root_release_at (env entry marker)

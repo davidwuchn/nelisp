@@ -541,6 +541,17 @@ wasm-dtw-skeleton-smoke
 nelisp-runtime-image-cache-gate
 nelisp-source-command-substrate-gate
 standalone-chunk-growth-test
+# precise-root-coverage (2026-08-29): the mid-form collector marks from the
+# precise recorded-frame arms AND a conservative native-stack scan, and the
+# scan is broad enough to hide the deletion of a precise arm entirely -- the
+# whole reader-smoke suite stays green with `nl_gc_mark_recorded_frame's
+# `result' arm removed.  This gate runs a collection-driving workload with the
+# scan off, where that same deletion is an immediate SIGSEGV, and additionally
+# pins that suppressing the parse-pool slot walk changes nothing.  Its scope is
+# one synthetic workload on purpose: the precise surface does NOT carry a real
+# module load (the anvil bootstrap segfaults in under a second with the scan
+# off, on a clean tree), so this is not a claim that the scan is removable.
+precise-root-coverage
 # Doc 152 Stage 4c: armed loop GC must plateau after warm-up, actually unmap
 # at least one growth chunk, and survive a poison-on-free 500k soundness run.
 standalone-midform-gc-bounded
