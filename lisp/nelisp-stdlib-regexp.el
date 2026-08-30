@@ -503,9 +503,32 @@ Sets `nlre--match-data' (and host match-data when available via set-match-data).
 
 ;; ---- regexp-dependent string helpers (built on nlre-string-match) ----
 
+;; PERF (cold-start hand-off follow-up, 2026-08-30): a SEPARATORS of
+;; exactly one byte, none of them an Emacs-regexp metacharacter, can never
+;; behave differently split literally vs. through the regexp engine below
+;; -- there is nothing for `nlre-string-match' to buy over a plain
+;; byte-compare. Measured directly: splitting a real ~2.3KB, 59-entry
+;; Windows PATH on ";" cost 3.2-3.4s through the regexp engine vs 0.4s via
+;; `nelisp--split-on-char' (scripts/nelisp-stdlib-prelude.el) -- an 8x
+;; difference for identical output. `executable-find' was fixed to call
+;; `nelisp--split-on-char' directly (dev/nelisp commit 70cd5852); this
+;; extends the same fast path to every OTHER caller of `split-string'/
+;; `nlre-split-string' with a single-byte literal separator, since a
+;; caller other than `executable-find' hitting this same cost was flagged
+;; as a known follow-up in that commit and in docs/design/201 §5.2.
+(defconst nlre--split-single-byte-metachars '(?. ?* ?+ ?\? ?\[ ?\] ?^ ?$ ?\\)
+  "Emacs-regexp metacharacters that make a would-be one-byte SEPARATOR to
+`nlre-split-string' unsafe to treat as a plain literal byte.")
+
 (defun nlre-split-string (string &optional separators omit-nulls)
   "Like `split-string'.  Default SEPARATORS = whitespace run, which also
 implies OMIT-NULLS and leading/trailing trim (matching GNU Emacs)."
+  (if (and separators (= (length separators) 1)
+           (not (memq (aref separators 0) nlre--split-single-byte-metachars)))
+      (nelisp--split-on-char string (aref separators 0) omit-nulls)
+    (nlre-split-string--regexp-path string separators omit-nulls)))
+
+(defun nlre-split-string--regexp-path (string separators omit-nulls)
   (let* ((default (null separators))
          (sep (or separators "[ \f\t\n\r\v]+"))
          (omit (if default t omit-nulls))
