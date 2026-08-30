@@ -506,3 +506,21 @@ version-consistency|release/stage-d-v3.0/install-v3.sh|s/RELEASE_VERSION:-v[0-9]
 # v1.0.1, so CI shipped v0.6.0-labelled tarballs for a v1.0.1 release and
 # nothing complained.  Found on 2026-08-26 by the macOS lane, not by CI.
 version-consistency|release/stage-d-v3.0/install-v3.ps1|s/\[string\]\$Version = "v[0-9][0-9.]*"/[string]$Version = "v0.0.0"/|windows installer default left behind at a stale release version
+# Doc 201 §5.2/§4 item 1 (cold-start hand-off, 2026-08-30): the
+# literal-separator fast path `nlre-split-string' added over the old
+# always-regexp-engine `split-string' behavior.  Disabling the fast-path
+# guard forces every split-string call back through `nlre-string-match',
+# which was measured at 3.2-3.4s for a single real PATH split vs 0.4s
+# fast-path -- the new `standalone-reader-splitstring-perf-smoke' gate
+# exists to catch exactly this regression.  Verified BY HAND (inject via
+# Edit, `make standalone-reader`, run the gate, restore, rebuild, run the
+# gate again): RED at elapsed=2.707s pass=nil with this injection, GREEN
+# at elapsed=0.369s pass=t restored.  NOT yet proven through `make
+# gate-mutation-verify GATE=standalone-reader-splitstring-perf-smoke'
+# itself -- that run did not respect NELISP_GATE_MUTATION_ONLY and swept
+# unrelated rows (one, standalone-midform-gc-bounded, was killed mid-row
+# and left its own injection in scripts/nelisp-standalone-build.el,
+# restored via `git checkout`), taking 20+ minutes before being aborted.
+# Root cause not diagnosed; re-run `gate-mutation-verify` on this row
+# before trusting it as the row's own proof.
+standalone-reader-splitstring-perf-smoke|lisp/nelisp-stdlib-regexp.el|s/(if (and separators/(if (and nil separators/|disables the literal-separator fast path, forcing every split-string call through the slow regexp engine

@@ -1057,6 +1057,7 @@ STANDALONE_READER_SMOKES = \
   standalone-reader-repl-smoke \
   standalone-reader-require-provide-smoke \
   standalone-reader-shadow-smoke \
+  standalone-reader-splitstring-perf-smoke \
   standalone-reader-tls-smoke
 
 # Every one of the 34 sub-targets below ultimately execs the SAME
@@ -1274,6 +1275,38 @@ standalone-reader-elt-smoke: $(if $(wildcard target/nelisp target/nelisp.exe),,s
 	done; \
 	if [ "$$fail" -ne 0 ]; then exit 1; fi; \
 	echo "[elt-smoke] PASS"
+
+# Doc 201 §4 item 1 / §5.2: asserts the WALL-CLOCK bound the regexp-engine
+# `split-string' defect (fixed dev/nelisp commit `70cd5852', general fast
+# path in `2d433761') violated by ~8x on a real PATH split. Measures
+# `split-string' itself on a synthetic ~60-entry, ~2KB literal-separator
+# PATH -- not the full `executable-find' (whose own `expand-file-name'/
+# `file-exists-p' loop costs ~1.8-2.5s independent of this defect on this
+# machine, which would swamp an ~8x split-string regression's margin) --
+# so this gate isolates the one thing it exists to catch. A synthetic
+# PATH (not the host's real one, which varies by machine/CI) keeps the
+# gate deterministic. 1.0s is a loose bound -- the fixed path measured
+# ~0.03-0.1s in-process here, the pre-fix regexp-engine path measured
+# 3.2-3.4s wall clock for one split alone.
+standalone-reader-splitstring-perf-smoke: $(if $(wildcard target/nelisp target/nelisp.exe),,standalone-reader)
+	@bin=./target/nelisp; \
+	case "$(NELISP_STANDALONE_TARGET)$$NELISP_STANDALONE_TARGET" in \
+	  windows*) bin=./target/nelisp.exe;; \
+	esac; \
+	mkdir -p target; \
+	printf '%s\n' \
+	  '(let* ((n 60) (path (format "/fake/nelisp-perf-smoke/dir-0")))' \
+	  '  (let ((i 1)) (while (< i n) (setq path (concat path ";" (format "/fake/nelisp-perf-smoke/dir-%d" i))) (setq i (1+ i))))' \
+	  '  (let* ((t0 (float-time))' \
+	  '         (dirs (split-string path ";"))' \
+	  '         (elapsed (- (float-time) t0)))' \
+	  '    (princ (format "n-dirs=%d elapsed=%.3f pass=%S\n" (length dirs) elapsed (and (= (length dirs) n) (< elapsed 1.0))))))' \
+	  > target/standalone-reader-splitstring-perf-smoke.el; \
+	out="$$($$bin --load target/standalone-reader-splitstring-perf-smoke.el 2>&1)"; \
+	case "$$out" in \
+	  *"pass=t"*) echo "[splitstring-perf-smoke] PASS: $$out";; \
+	  *) echo "[splitstring-perf-smoke] FAIL: $$out (expected pass=t -- split-string may have regressed to the regexp-engine path)"; exit 1;; \
+	esac
 
 # A name the standalone provides natively AND the prelude redefines
 # unconditionally has two implementations, and which one runs depends on
