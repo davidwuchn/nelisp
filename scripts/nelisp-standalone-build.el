@@ -13913,103 +13913,64 @@ from the patched combiner-cons (see `nelisp-standalone--patch-combiner-cons').")
 
 (defconst nelisp-standalone--sf-defconst
   '(defun nl_sf_defconst (args env out _pad)
-     ;; (defconst NAME VALUE [DOC]) -> evaluate (set (quote NAME) VALUE), return NAME.
+     ;; (defconst NAME VALUE [DOC]) -> evaluate VALUE, set NAME to it
+     ;; unconditionally, return NAME.
+     ;;
+     ;; PERF (cold-start hand-off, 2026-08-30): same fix as `nl_sf_defvar'
+     ;; above -- the previous body synthesised `(set (quote NAME) VALUE)' as
+     ;; a fresh cons tree (2 interned symbols, 5 cons cells) and re-entered
+     ;; the interpreter on it for EVERY call.  `set' itself
+     ;; (`bf_set') is allocation-free, calling `nl_env_set_value' directly;
+     ;; this now does the same.
      (if (= (sexp-tag args) 7)
          (let* ((name_ptr (nl_cons_car_ptr args))
                 (rest_ptr (nl_cons_cdr_ptr args)))
            (if (= (sexp-tag rest_ptr) 7)
                (let* ((val_ptr (nl_cons_car_ptr rest_ptr))
-                      (sbuf (alloc-bytes 8 1)) (set_sym (alloc-bytes 32 8))
-                      (qbuf (alloc-bytes 8 1)) (quote_sym (alloc-bytes 32 8))
-                      (name_clone (alloc-bytes 32 8))
-                      (val_clone (alloc-bytes 32 8))
-                      (nil1 (alloc-bytes 32 8)) (nil2 (alloc-bytes 32 8))
-                      (name_list (alloc-bytes 32 8))
-                      (quote_form (alloc-bytes 32 8))
-                      (val_list (alloc-bytes 32 8))
-                      (args_list (alloc-bytes 32 8))
-                      (form (alloc-bytes 32 8))
-                      (scratch (alloc-bytes 32 8)))
-                 (seq
-                  (ptr-write-u64 sbuf 0 7628147)      (nl_alloc_symbol sbuf 3 set_sym)
-                  (ptr-write-u64 qbuf 0 435745158513) (nl_alloc_symbol qbuf 5 quote_sym)
-                  (nl_sexp_clone_into name_ptr name_clone)
-                  (nl_sexp_clone_into val_ptr val_clone)
-                  (nl_cons_write_nil nil1) (nl_cons_write_nil nil2)
-                  ;; (quote NAME)
-                  (nelisp_cons_construct name_clone nil1 name_list)
-                  (nelisp_cons_construct quote_sym name_list quote_form)
-                  ;; (set (quote NAME) VALUE)
-                  (nelisp_cons_construct val_clone nil2 val_list)
-                  (nelisp_cons_construct quote_form val_list args_list)
-                  (nelisp_cons_construct set_sym args_list form)
-                  (let* ((rc (nelisp_eval_call form env scratch)))
-                    (if (= rc 0) (seq (nl_sexp_clone_into name_ptr out) 0) rc))))
+                      (val_slot (alloc-bytes 32 8))
+                      (rc (nelisp_eval_call val_ptr env val_slot)))
+                 (if (= rc 0)
+                     (seq (nl_env_set_value env name_ptr val_slot)
+                          (nl_sexp_clone_into name_ptr out) 0)
+                   rc))
              ;; no VALUE: just yield NAME
              (seq (nl_sexp_clone_into name_ptr out) 0)))
        1)))
 
 (defconst nelisp-standalone--sf-defvar
   '(defun nl_sf_defvar (args env out _pad)
-     ;; (defvar NAME [VALUE [DOC]]).  With VALUE: evaluate
-     ;; (if (boundp (quote NAME)) nil (set (quote NAME) VALUE)).  Without: declare
-     ;; only.  Either way return NAME.
+     ;; (defvar NAME [VALUE [DOC]]).  With VALUE: if NAME is already bound,
+     ;; yield NAME unchanged; otherwise evaluate VALUE and set NAME to it,
+     ;; then yield NAME.  Without VALUE: declare only, yield NAME.
+     ;;
+     ;; PERF (cold-start hand-off, 2026-08-30): the previous body synthesised
+     ;; `(if (boundp (quote NAME)) nil (set (quote NAME) VALUE))' as a fresh
+     ;; cons tree and re-entered the interpreter on it -- interning 5 new
+     ;; symbols (if/boundp/set/quote x2) and building 9 cons cells on EVERY
+     ;; call, since `defcustom' is a plain macro to `defvar'
+     ;; (nelisp-stdlib-prelude.el).  Measured directly via the nl_alloc_diag
+     ;; bucket/bump counters (`(nelisp--debug-switch 24)'): ~1600
+     ;; nl_alloc_bytes_uncheck calls per top-level `defvar' form on a
+     ;; synthetic 500-form load, dwarfing the ~14 calls/op measured for a
+     ;; bare `(+ 1 1)'.  `boundp'/`set' themselves are allocation-free
+     ;; (`bf_boundp'/`bf_set' above call `nelisp_mirror_is_bound'/
+     ;; `nl_env_set_value' directly) -- this now does the same, skipping the
+     ;; AST synthesis and recursive eval entirely.  Same observable
+     ;; semantics: VALUE is evaluated (and may itself allocate/signal)
+     ;; exactly when NAME was unbound, never otherwise.
      (if (= (sexp-tag args) 7)
          (let* ((name_ptr (nl_cons_car_ptr args))
                 (rest_ptr (nl_cons_cdr_ptr args)))
            (if (= (sexp-tag rest_ptr) 7)
-               (let* ((val_ptr (nl_cons_car_ptr rest_ptr))
-                      (ibuf (alloc-bytes 8 1)) (if_sym (alloc-bytes 32 8))
-                      (bbuf (alloc-bytes 8 1)) (boundp_sym (alloc-bytes 32 8))
-                      (sbuf (alloc-bytes 8 1)) (set_sym (alloc-bytes 32 8))
-                      (qbuf1 (alloc-bytes 8 1)) (quote_sym1 (alloc-bytes 32 8))
-                      (qbuf2 (alloc-bytes 8 1)) (quote_sym2 (alloc-bytes 32 8))
-                      (name_clone1 (alloc-bytes 32 8))
-                      (name_clone2 (alloc-bytes 32 8))
-                      (val_clone (alloc-bytes 32 8))
-                      (niln1 (alloc-bytes 32 8)) (niln2 (alloc-bytes 32 8))
-                      (niln3 (alloc-bytes 32 8)) (niln4 (alloc-bytes 32 8))
-                      (nil_then (alloc-bytes 32 8))
-                      (qn1_inner (alloc-bytes 32 8)) (qn1 (alloc-bytes 32 8))
-                      (bp_inner (alloc-bytes 32 8)) (bp_form (alloc-bytes 32 8))
-                      (qn2_inner (alloc-bytes 32 8)) (qn2 (alloc-bytes 32 8))
-                      (val_list (alloc-bytes 32 8)) (set_args (alloc-bytes 32 8))
-                      (set_form (alloc-bytes 32 8))
-                      (e1 (alloc-bytes 32 8)) (e2 (alloc-bytes 32 8))
-                      (e3 (alloc-bytes 32 8)) (form (alloc-bytes 32 8))
-                      (scratch (alloc-bytes 32 8)))
-                 (seq
-                  (ptr-write-u64 ibuf 0 26217)          (nl_alloc_symbol ibuf 2 if_sym)
-                  (ptr-write-u64 bbuf 0 123576652230498) (nl_alloc_symbol bbuf 6 boundp_sym)
-                  (ptr-write-u64 sbuf 0 7628147)        (nl_alloc_symbol sbuf 3 set_sym)
-                  (ptr-write-u64 qbuf1 0 435745158513)  (nl_alloc_symbol qbuf1 5 quote_sym1)
-                  (ptr-write-u64 qbuf2 0 435745158513)  (nl_alloc_symbol qbuf2 5 quote_sym2)
-                  (nl_sexp_clone_into name_ptr name_clone1)
-                  (nl_sexp_clone_into name_ptr name_clone2)
-                  (nl_sexp_clone_into val_ptr val_clone)
-                  (nl_cons_write_nil niln1) (nl_cons_write_nil niln2)
-                  (nl_cons_write_nil niln3) (nl_cons_write_nil niln4)
-                  (nl_cons_write_nil nil_then)
-                  ;; (quote NAME) #1  -> for boundp
-                  (nelisp_cons_construct name_clone1 niln1 qn1_inner)
-                  (nelisp_cons_construct quote_sym1 qn1_inner qn1)
-                  ;; (boundp (quote NAME))
-                  (nelisp_cons_construct qn1 niln2 bp_inner)
-                  (nelisp_cons_construct boundp_sym bp_inner bp_form)
-                  ;; (quote NAME) #2  -> for set
-                  (nelisp_cons_construct name_clone2 niln3 qn2_inner)
-                  (nelisp_cons_construct quote_sym2 qn2_inner qn2)
-                  ;; (set (quote NAME) VALUE)
-                  (nelisp_cons_construct val_clone niln4 val_list)
-                  (nelisp_cons_construct qn2 val_list set_args)
-                  (nelisp_cons_construct set_sym set_args set_form)
-                  ;; (if (boundp (quote NAME)) nil (set (quote NAME) VALUE))
-                  (nelisp_cons_construct set_form niln1 e1)
-                  (nelisp_cons_construct nil_then e1 e2)
-                  (nelisp_cons_construct bp_form e2 e3)
-                  (nelisp_cons_construct if_sym e3 form)
-                  (let* ((rc (nelisp_eval_call form env scratch)))
-                    (if (= rc 0) (seq (nl_sexp_clone_into name_ptr out) 0) rc))))
+               (if (= (nelisp_mirror_is_bound (+ env 0) name_ptr (+ env 64)) 1)
+                   (seq (nl_sexp_clone_into name_ptr out) 0)
+                 (let* ((val_ptr (nl_cons_car_ptr rest_ptr))
+                        (val_slot (alloc-bytes 32 8))
+                        (rc (nelisp_eval_call val_ptr env val_slot)))
+                   (if (= rc 0)
+                       (seq (nl_env_set_value env name_ptr val_slot)
+                            (nl_sexp_clone_into name_ptr out) 0)
+                     rc)))
              ;; no VALUE: pure declaration -> yield NAME
              (seq (nl_sexp_clone_into name_ptr out) 0)))
        1)))
