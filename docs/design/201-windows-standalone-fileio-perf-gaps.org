@@ -1559,7 +1559,11 @@ claim this document keeps finding elsewhere.
 1. **11 windows-native gate failures** (§6.7's table): sockets (6), async
    process (2), FFI (2), and `repl-smoke`'s near-end arena behaviour (1).
    None is a regression.  Doc 138 owns the socket and spawn work by
-   lineage and already carries the design; Doc 100 §7 owns the FFI matrix;
+   lineage, carries the design, and now carries a work brief for the
+   socket half written against the refactor in `nelisp-standalone--socket-impl-forms`
+   -- what already exists, the eight Linux/Windows differences that are
+   invisible from the Linux code, two independently verifiable slices, and
+   the verification traps this document collected the hard way; Doc 100 §7 owns the FFI matrix;
    Doc 140 owns the arena.  Worth knowing when picking these up: this
    document used to hand them to "Doc 151's `-ENOSYS` follow-up list", and
    Doc 151 is marked SHIPPED and contains no such list -- it is
