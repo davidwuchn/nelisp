@@ -19700,6 +19700,34 @@ section banner comment just above for why, and
          (if (= (bf_require_arg_present_p args n) 1)
              (if (= (ptr-read-u64 (wf_arg_ptr args n) 0) 0) 0 1)
            0))
+      )
+     (nelisp-standalone--socket-impl-forms)
+     nil)))
+
+(defun nelisp-standalone--socket-impl-forms ()
+  "Return the eight `nelisp-socket-*' implementations for this target.
+
+Split out from `nelisp-standalone--socket-forms' so the two halves can
+differ per target independently: everything that function still holds is
+pure computation -- dotted-quad and IPv6-literal parsing, sockaddr
+construction, the error signaller, optional-argument decoding -- and is
+identical wherever sockets exist at all.  Only what is below touches the
+OS, and only that needs a second implementation.
+
+linux-x86_64 is still the only target with one.  A windows arm belongs
+here, over WS2_32 rather than raw syscall numbers, and the differences
+that matter are recorded so the next person does not rediscover them:
+AF_INET6 is 23 on Windows and 10 on Linux; a SOCKET is a handle rather
+than an fd, so `closesocket' rather than `close'; there is no
+`SOCK_NONBLOCK' type flag, so NOWAIT means `ioctlsocket' with FIONBIO;
+errors arrive through `WSAGetLastError' as WSAE* codes rather than as a
+negative errno return, so `nl_socket_signal_error' would need those
+mapped; and `WSAStartup' has to have run before any of it.  The PE side
+is already proven -- `lisp/nelisp-pe-write.el' emits a WS2_32.dll import
+directory today.  See docs/design/138 for the design and
+docs/design/201 §6.7 for the six gates this would turn green."
+  (if (eq nelisp-standalone--target 'linux-x86_64)
+      (list
       ;; nelisp-socket-listen HOST PORT &optional NOWAIT -> listen-fd.
       ;; socket(2) -> setsockopt(2) SO_REUSEADDR (best-effort: a failure
       ;; here is not fatal, matching common practice) -> bind(2) ->
@@ -19986,7 +20014,7 @@ section banner comment just above for why, and
               (if (< rc 0)
                   (nl_socket_signal_error rc)
                 (seq (wf_write_int out (ptr-read-u32 optval 0)) 0)))))))
-     nil)))
+    nil))
 
 (defun nelisp-standalone--socket-dispatch-arms ()
   "Return the eight `nelisp-socket-*' `nelisp_apply_function' dispatch
