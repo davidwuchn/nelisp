@@ -1087,6 +1087,7 @@ STANDALONE_READER_SMOKES = \
   standalone-reader-process-adapter-smoke \
   standalone-reader-process-adapter-smoke-red \
   standalone-reader-process-smoke \
+  standalone-reader-reader-parity-smoke \
   standalone-reader-realrt-smoke \
   standalone-reader-regexp-lead-filter-smoke \
   standalone-reader-recursion-guard-smoke \
@@ -1508,6 +1509,49 @@ standalone-reader-regexp-lead-filter-smoke: $(if $(wildcard target/nelisp target
 	case "$$out" in \
 	  *"pass=t"*) echo "[regexp-lead-filter-smoke] PASS: $$out";; \
 	  *) echo "[regexp-lead-filter-smoke] FAIL: $$out (expected pass=t -- the leading-character filter is skipping real matches, or is no longer firing)"; exit 1;; \
+	esac
+
+# Doc 201 §6.9 item 5.  The standalone has TWO readers: the native parser
+# that drives `load', and `nelisp--rd-one', a reader written in interpreted
+# Elisp that `read-from-string' resolves to.  Nothing compared them, and
+# they disagreed: `?x' read as the SYMBOL `?x' where Emacs and the native
+# parser both answer the integer 120 -- `nelisp--rd-one' had no `?' arm at
+# all.  Ninety-odd call sites in this tree use `read-from-string'.
+#
+# This gate reads the same corpus through BOTH and requires them to agree,
+# which is the check whose absence let one of them be wrong.  Every
+# expected value in `target/rd-*.txt' was read out of stock Emacs when the
+# corpus was written; the gate does not re-derive them, it requires the two
+# in-tree readers to answer the same thing -- a claim it can check without
+# an Emacs to hand, on any target.
+#
+# `read' takes the native path (see its own comment in the prelude), so
+# `read' vs `read-from-string' IS native vs Elisp.
+.PHONY: standalone-reader-reader-parity-smoke
+standalone-reader-reader-parity-smoke: $(if $(wildcard target/nelisp target/nelisp.exe),,standalone-reader)
+	@mkdir -p target; \
+	printf '%s\n' \
+	  '(let ((cases (list "?x" "?A" "?0" "? " "?)" "?(" "?;" "?\x27"' \
+	  '                   "?\\n" "?\\t" "?\\r" "?\\f" "?\\e" "?\\s" "?\\\\" "?\\a"' \
+	  '                   "?\\b" "?\\d" "?\\0" "?\\\"" "?\\?"' \
+	  '                   "(?a ?b)" "(list ?x 1)" "[?a ?b]"' \
+	  '                   "42" "-7" "1.5" "abc" "\"s\"" "(a . b)" "()" "nil" "t"' \
+	  '                   ":kw" "(a b) trailing" "  (ws)"))' \
+	  '      (bad 0) (checked 0))' \
+	  '  (dolist (s cases)' \
+	  '    (setq checked (1+ checked))' \
+	  '    (let ((native (condition-case e (read s) (error (list (quote ERR) (car e)))))' \
+	  '          (elisp  (condition-case e (car (read-from-string s)) (error (list (quote ERR) (car e))))))' \
+	  '      (unless (equal native elisp)' \
+	  '        (setq bad (1+ bad))' \
+	  '        (princ (format "  DISAGREE %S native=%S elisp=%S\n" s native elisp)))))' \
+	  '  (princ (format "checked=%d disagreements=%d chars-ok=%S pass=%S\n"' \
+	  '                 checked bad (equal (read "?x") 120) (= bad 0))))' \
+	  > target/standalone-reader-reader-parity-smoke.el; \
+	out="$$($(STANDALONE_BIN) --load target/standalone-reader-reader-parity-smoke.el 2>&1)"; \
+	case "$$out" in \
+	  *"pass=t"*) echo "[reader-parity-smoke] PASS: $$out";; \
+	  *) echo "[reader-parity-smoke] FAIL: $$out (expected pass=t -- the native reader and nelisp--rd-one disagree)"; exit 1;; \
 	esac
 
 # Doc 201 §5.3: §5.1 replaced `nl_sf_defvar'/`nl_sf_defconst''s per-call AST

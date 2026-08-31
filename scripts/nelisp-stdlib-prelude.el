@@ -8233,7 +8233,45 @@ are numbers; `1.' is the integer 1."
         (if (and (< (1+ i) n) (= (aref s (1+ i)) 64))
             (let ((r (nelisp--rd-one s (+ i 2) n))) (cons (list (intern ",@") (car r)) (cdr r)))
           (let ((r (nelisp--rd-one s (1+ i) n))) (cons (list (intern ",") (car r)) (cdr r)))))
-        ((= c 35) ; #
+        ((= c 63) ; ?  -- character literal
+        ;; This arm did not exist, so `?x' fell through to the atom path
+        ;; and `read-from-string' answered the SYMBOL `?x' where Emacs
+        ;; answers the integer 120.  Found by routing `read' through the
+        ;; native parser (Doc 201 §6.9 item 5) and comparing the two
+        ;; readers on the same input: the native one was right.  Every
+        ;; expected value in the corpus this was written against was read
+        ;; out of stock Emacs 30.1, not derived from the manual.
+        ;;
+        ;; Covers `?C' and the single-character escapes.  The modifier
+        ;; syntaxes (`?\C-x', `?\M-x', `?\^x') and the numeric ones
+        ;; (`?A', `?A', `?é') are NOT covered and fall through
+        ;; to the atom path exactly as the whole arm used to -- wrong in
+        ;; the same way it was before rather than newly wrong, and the
+        ;; corpus says so.
+        (if (>= (1+ i) n)
+            (let* ((e (nelisp--rd-atom-end s i n)))
+              (cons (intern (substring s i e)) e))
+          (let ((c1 (aref s (1+ i))))
+            (if (= c1 92) ; backslash
+                (if (>= (+ i 2) n)
+                    (cons (intern (substring s i (nelisp--rd-atom-end s i n)))
+                          (nelisp--rd-atom-end s i n))
+                  (let* ((c2 (aref s (+ i 2)))
+                         (v (cond ((= c2 110) 10)   ; n
+                                  ((= c2 116) 9)    ; t
+                                  ((= c2 114) 13)   ; r
+                                  ((= c2 102) 12)   ; f
+                                  ((= c2 101) 27)   ; e
+                                  ((= c2 115) 32)   ; s
+                                  ((= c2 97) 7)     ; a
+                                  ((= c2 98) 8)     ; b
+                                  ((= c2 100) 127)  ; d
+                                  ((= c2 118) 11)   ; v
+                                  ((= c2 48) 0)     ; 0
+                                  (t c2))))         ; \ \" \? \( ...
+                    (cons v (+ i 3))))
+              (cons c1 (+ i 2))))))
+       ((= c 35) ; #
          (if (and (< (1+ i) n) (= (aref s (1+ i)) 39))
              (let ((r (nelisp--rd-one s (+ i 2) n))) (cons (list 'function (car r)) (cdr r)))
            (let* ((e (nelisp--rd-atom-end s i n))
@@ -8273,6 +8311,27 @@ are numbers; `1.' is the integer 1."
                  e)))))))
 
 (unless (fboundp 'read-from-string)
+  ;; PERF (Doc 201 §6.9 item 5): this is `nelisp--rd-one', a reader written
+  ;; in interpreted Elisp, and on the standalone it charges roughly a basic
+  ;; operation per character -- 26.410s for 9114 bytes of nested conses,
+  ;; where the NATIVE parser that drives `load' reads the same input in
+  ;; 0.003s with an identical result.  Ninety-odd call sites in this tree
+  ;; use it.
+  ;;
+  ;; It is NOT rerouted here, because the native reader
+  ;; (`nelisp--read-all-from-string-native') answers a list of forms and no
+  ;; position, and this function's contract is `(FORM . END-INDEX)' -- the
+  ;; index is what callers iterate on.  Guessing it (last non-whitespace
+  ;; character, say) would be wrong the moment a comment follows the form,
+  ;; and a silently wrong index is worse than a slow correct one.
+  ;;
+  ;; If you do not need the index, `read' already takes the native path, and
+  ;; `load' has always used it.  The real fix is a native single-form
+  ;; builtin that returns the cursor as well: `bf_read_all_from_string_native'
+  ;; (scripts/nelisp-standalone-build.el) already drives
+  ;; `nelisp_reader_parse_one' with a cursor slot whose position sits at
+  ;; offset 8, so the parser side of that exists and only the Sexp-level
+  ;; `(FORM . INDEX)' return and its dispatch arm are missing.
   (defun read-from-string (string &optional start end)
     (nelisp--check-string string)
     (when start (unless (integerp start) (signal 'wrong-type-argument (list 'integerp start))))
@@ -8300,7 +8359,25 @@ are numbers; `1.' is the integer 1."
   (defun read (&optional stream)
     (unless (or (null stream) (stringp stream) (functionp stream))
       (signal (if (symbolp stream) 'void-function 'invalid-function) (list stream)))
-    (if (stringp stream) (car (read-from-string stream))
+    (if (stringp stream)
+        ;; PERF (Doc 201 §6.9 item 5): `read-from-string' below is
+        ;; `nelisp--rd-one', a reader written in interpreted Elisp, and on
+        ;; the standalone it costs a basic operation per character.  The
+        ;; SAME parser that drives `load' is also exposed to Lisp as
+        ;; `nelisp--read-all-from-string-native'.  Measured on 9114 bytes of
+        ;; nested conses: 26.410s through `read-from-string', 0.003s through
+        ;; the native reader, identical results.
+        ;;
+        ;; `read' can take that path exactly, because it answers the FIRST
+        ;; form and discards the position -- which is the one part of
+        ;; `read-from-string''s contract the bulk reader cannot supply, and
+        ;; the reason that function is left alone (see its own comment).
+        ;; An empty or all-whitespace string reads as no forms at all, where
+        ;; `read' owes an `end-of-file' signal, so that case falls through
+        ;; to the Elisp path rather than being special-cased twice.
+        (let ((forms (and (fboundp 'nelisp--read-all-from-string-native)
+                          (nelisp--read-all-from-string-native stream))))
+          (if forms (car forms) (car (read-from-string stream))))
       (signal 'error (list "read: only string streams supported")))))
 
 ;; Doc 152 gate-G: give the standard built-in error symbols their
