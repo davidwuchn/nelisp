@@ -10,10 +10,61 @@ cd "$(dirname "$0")/.." || exit 1
 # "Text file busy" happens when the previous gate's subprocess still holds
 # ./target/nelisp; it clears in well under a second, so one retry is enough
 # and a second failure is a real build error.
+# Which standalone target the rebuilds and the gates must use.  Restated on
+# every `make' below as a COMMAND-LINE variable rather than left to the
+# environment, for the reason tools/nelisp-reader-smokes.sh records at
+# length: on at least one host this repository is developed on, `make' is a
+# Cygwin build running MSYS2's `/bin/sh' and NOTHING crosses that boundary,
+# so an environment-only target silently becomes the default one.  Here
+# that would rebuild and run the LINUX binary while the row's gate expects
+# the Windows one -- every gate would fail for the wrong reason, and this
+# harness reads "the gate failed" as "the row is lethal", i.e. it would
+# report every row as proved without any of them having been exercised.
+MUTATION_TARGET_ARG=""
+if [ -n "${NELISP_STANDALONE_TARGET:-}" ]; then
+  MUTATION_TARGET_ARG="NELISP_STANDALONE_TARGET=$NELISP_STANDALONE_TARGET"
+  printf 'gate-mutation: target %s\n' "$NELISP_STANDALONE_TARGET"
+fi
+
 rebuild_checked() {
-  make standalone-reader >/dev/null 2>&1 && return 0
+  make standalone-reader $MUTATION_TARGET_ARG >/dev/null 2>&1 && return 0
   sleep 2
-  make standalone-reader >/dev/null 2>&1
+  make standalone-reader $MUTATION_TARGET_ARG >/dev/null 2>&1
+}
+
+# Does this row need the binary rebuilt around it?  True when the file it
+# mutates is BAKED INTO the binary at build time, which is most of
+# scripts/ and lisp/: the gates below all carry the conditional
+# prerequisite `$(if $(wildcard target/nelisp target/nelisp.exe),,
+# standalone-reader)', i.e. build only when the binary is ABSENT, never
+# when the source is newer.  Without a rebuild the row runs the old
+# artifact and reads as PASS on code that is no longer there.
+#
+# This predicate exists because the same list used to be written out three
+# times -- once for the rebuild WITH the injection, once on the skip path,
+# once for the rebuild after RESTORING it -- and when Doc 201 added four
+# gates to it, only the first copy was updated.  The visible consequence
+# was not a false PASS but a false FAILURE later: the row rebuilt with its
+# injection, restored the source, skipped the second rebuild, and left the
+# tree holding a binary built from injected source, so the next unrelated
+# run of that gate went red with nothing wrong in the tree.  One list.
+gate_needs_rebuild() {
+  case "$1" in
+    emacs-parity) return 0 ;;
+    standalone-reader-buffer-smoke) return 0 ;;
+    standalone-reader-winpath-smoke) return 0 ;;
+    standalone-reader-defvar-alloc-smoke) return 0 ;;
+    standalone-reader-fileattrs-smoke) return 0 ;;
+    standalone-reader-splitstring-perf-smoke) return 0 ;;
+    standalone-reader-regexp-lead-filter-smoke) return 0 ;;
+    nelisp-thread-standalone-smoke) return 0 ;;
+    nelisp-thread-allocating-standalone-smoke) return 0 ;;
+    nelisp-thread-mirror-guard-standalone-smoke) return 0 ;;
+    standalone-midform-gc-bounded) return 0 ;;
+  esac
+  # Doc 200: an `ert-full' row is only binary-sensitive when it mutates the
+  # standalone build script itself.
+  [ "$1:$2" = "ert-full:scripts/nelisp-standalone-build.el" ]
 }
 
 # `ert-full' rows run a real (deliberately red) `nelisp-ai.sh test', which
@@ -97,9 +148,9 @@ run_gate() {
     # it reaches the completion increment.  That missed-root manifestation is
     # an intentionally red hang, so bound the mutation run; the clean smoke
     # completes in well under one second on the same binary.
-    timeout 30 make "$g" >"$log" 2>&1
+    timeout 30 make "$g" $MUTATION_TARGET_ARG >"$log" 2>&1
   else
-    make "$g" >"$log" 2>&1
+    make "$g" $MUTATION_TARGET_ARG >"$log" 2>&1
   fi
 }
 
@@ -254,19 +305,34 @@ while IFS='|' read -r gate file expr what; do
   # Confirmed by hand while adding this row: with a leftover target/nelisp
   # already present, `make standalone-reader-buffer-smoke' on freshly
   # mutated source ran the OLD binary and reported PASS.
+  # Doc 201's `standalone-reader-winpath-smoke' and `standalone-reader-
+  # fileattrs-smoke' (both mutate scripts/nelisp-stdlib-prelude.el) and
+  # `standalone-reader-defvar-alloc-smoke'
+  # (mutates scripts/nelisp-standalone-build.el) join for the same
+  # reason a third time: both files are baked INTO the binary, both
+  # gates carry the binary-absence prerequisite, so without a rebuild
+  # each would run the old artifact and report PASS on code that is no
+  # longer there.
+  #
+  # `standalone-reader-regexp-lead-filter-smoke' (Doc 201 §5.4) mutates
+  # the same lisp/nelisp-stdlib-regexp.el and joins for the same reason.
+  #
+  # `standalone-reader-splitstring-perf-smoke' joins them and is a FIX,
+  # not an addition: its row (added 2026-08-30 with Doc 201 §4 item 1)
+  # mutates lisp/nelisp-stdlib-regexp.el, which
+  # `nelisp-standalone--reader-prelude-source' reads with
+  # `insert-file-contents' at BUILD time and bakes into the binary --
+  # the same shape as the three above, and it was not listed here.  That
+  # row was recorded in tools/gate-mutations.txt as never having
+  # completed a `gate-mutation-verify' run; a stale binary is why it
+  # could not have proved anything if it had.
   # Doc 199's `nelisp-thread-standalone-smoke' has the same conditional
   # prerequisite and mutates native-unit source, so it must rebuild both the
   # injected and restored binary for the same reason.  `ert-full' rows that
   # mutate the standalone build script also rebuild: Doc 200's cross-tag key
   # test executes target/nelisp, so a stale fixed binary would make the new
   # outer-tag-gate mutation read as green.
-  if [ "$gate" = "emacs-parity" ] || \
-     [ "$gate:$file" = "ert-full:scripts/nelisp-standalone-build.el" ] || \
-     [ "$gate" = "standalone-reader-buffer-smoke" ] || \
-     [ "$gate" = "nelisp-thread-standalone-smoke" ] || \
-     [ "$gate" = "nelisp-thread-allocating-standalone-smoke" ] || \
-     [ "$gate" = "nelisp-thread-mirror-guard-standalone-smoke" ] || \
-     [ "$gate" = "standalone-midform-gc-bounded" ]; then
+  if gate_needs_rebuild "$gate" "$file"; then
     if ! rebuild_checked; then
       echo "  $gate: HARNESS ERROR (rebuild with the injection failed; a stale binary would have read as PASS)"
       bad=$((bad+1))
@@ -304,12 +370,7 @@ while IFS='|' read -r gate file expr what; do
     # a skip that appears only once the defect lands is the defect itself,
     # dressed as "could not be asked".
     cp "$backup" "$file"
-    if [ "$gate" = "emacs-parity" ] || \
-       [ "$gate:$file" = "ert-full:scripts/nelisp-standalone-build.el" ] || \
-       [ "$gate" = "nelisp-thread-standalone-smoke" ] || \
-       [ "$gate" = "nelisp-thread-allocating-standalone-smoke" ] || \
-       [ "$gate" = "nelisp-thread-mirror-guard-standalone-smoke" ] || \
-       [ "$gate" = "standalone-midform-gc-bounded" ]; then
+    if gate_needs_rebuild "$gate" "$file"; then
       rebuild_checked || true
     fi
     baseline_log="$(mktemp)"
@@ -332,12 +393,7 @@ while IFS='|' read -r gate file expr what; do
     echo "  $gate: went red as it should ($what)"
   fi
   cp "$backup" "$file"; rm -f "$backup"
-  if [ "$gate" = "emacs-parity" ] || \
-     [ "$gate:$file" = "ert-full:scripts/nelisp-standalone-build.el" ] || \
-     [ "$gate" = "nelisp-thread-standalone-smoke" ] || \
-     [ "$gate" = "nelisp-thread-allocating-standalone-smoke" ] || \
-     [ "$gate" = "nelisp-thread-mirror-guard-standalone-smoke" ] || \
-     [ "$gate" = "standalone-midform-gc-bounded" ]; then
+  if gate_needs_rebuild "$gate" "$file"; then
     rebuild_checked || true
   fi
 done <<< "$rows"

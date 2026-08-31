@@ -523,4 +523,127 @@ version-consistency|release/stage-d-v3.0/install-v3.ps1|s/\[string\]\$Version = 
 # restored via `git checkout`), taking 20+ minutes before being aborted.
 # Root cause not diagnosed; re-run `gate-mutation-verify` on this row
 # before trusting it as the row's own proof.
-standalone-reader-splitstring-perf-smoke|lisp/nelisp-stdlib-regexp.el|s/(if (and separators/(if (and nil separators/|disables the literal-separator fast path, forcing every split-string call through the slow regexp engine
+# RE-POINTED 2026-08-30 (Doc 201 §6.6 item 4).  The row used to disable the
+# literal-separator fast path alone, and that stopped being lethal -- the
+# harness reported "STAYED GREEN with a real defect in front of it" on the
+# first run after Doc 201 §6.5 landed.  Not a weak gate: the improvement
+# working, which is failure mode 2 in this file's header.  §6.5 gave
+# `nlre-string-match' a leading-character filter, and a literal separator is
+# exactly the shape that filter helps most, so the regexp path this row
+# forces `split-string' down is no longer slow enough to breach the gate's
+# bound.  Measured on the gate's own 60-entry synthetic PATH,
+# windows-x86_64:
+#
+#   as-is                                  0.375s
+#   literal fast path off (the old row)    0.736s   <- under the 1.0s bound
+#   both off (this row)                    3.525s
+#
+# A self-baselined ratio bound was measured as an alternative and rejected:
+# split-string against `nelisp--split-on-char' on the same input in the same
+# process gives 2.72-2.80 as-is and 4.21-4.58 with the old injection, a
+# separation of only ~1.55x -- failure mode 3 territory, not worth pinning a
+# CI gate to.
+#
+# So the row now removes BOTH of the defences that keep a literal separator
+# off the backtracking scan.  The claim it proves is weaker than the old
+# one by exactly that much, and is stated rather than implied: the gate
+# catches the loss of literal-separator splitting, but no longer the loss of
+# either single defence on its own.  The lead filter has its own gate and
+# its own two rows (standalone-reader-regexp-lead-filter-smoke).
+#
+# Evidence, windows-x86_64, 2026-08-30, through the real harness with the
+# target pinned: `NELISP_STANDALONE_TARGET=windows-x86_64
+# NELISP_GATE_MUTATION_ONLY=standalone-reader-splitstring-perf-smoke
+# tools/nelisp-gate-mutation.sh' -> "PASS (1 gates caught their injected
+# defect)".
+standalone-reader-splitstring-perf-smoke|lisp/nelisp-stdlib-regexp.el|s/(if (and separators/(if (and nil separators/; s/^(defun nlre--leading-lit-char (nodes)$/(defun nlre--leading-lit-char (nodes) (setq nodes nil)/|disables BOTH literal-separator defences (the split fast path and the leading-character filter), forcing every split-string call through the full backtracking scan
+# Doc 201 §4 item 1.  `standalone-reader-winpath-smoke' polices the three
+# windows-native path defects Doc 201 §1/§2 and its §4 follow-up fixed:
+# `path-separator' vs `system-type', `file-exists-p' answering yes/no at all,
+# and `expand-file-name' keeping a drive designator instead of anchoring it
+# onto "/".  The injection puts a bogus component into every expanded name,
+# which is structural (the constant is wrong; nothing depends on timing or
+# on which platform runs it) and lethal on Linux and Windows alike -- the
+# gate's `exp-ok' and `find-ok' assertions both fail.
+#
+# Evidence, windows-x86_64, 2026-08-30.  RED with the injection:
+#   [winpath-smoke] FAIL: sep=";" abs-ok=t exp-ok=nil yes-ok=t no-ok=t
+#     found=nil pass=nil
+# GREEN restored:
+#   [winpath-smoke] PASS: sep=";" abs-ok=t exp-ok=t yes-ok=t no-ok=t
+#     found=".../target/tmp/winpath-smoke/nelisp-doc201-marker" pass=t
+standalone-reader-winpath-smoke|scripts/nelisp-stdlib-prelude.el|s#(concat (or drive "") "/" (mapconcat#(concat (or drive "") "/zz/" (mapconcat#|expand-file-name injects a bogus component into every name it expands
+# Doc 201 §5.3.  `standalone-reader-defvar-alloc-smoke' polices §5.1's
+# replacement of `nl_sf_defvar'/`nl_sf_defconst''s per-call AST synthesis
+# with direct primitives.  The row targets the half of that fix with a
+# structural failure mode: the `boundp' gate the synthetic
+# `(if (boundp ...) nil (set ...))' form used to carry had to be
+# re-implemented by hand, and losing it makes `defvar' clobber an
+# already-bound value.  Forcing that branch to nil is a wrong constant, not
+# a timing question, and reads the same on every platform.
+#
+# The row deliberately does NOT try to re-create the ~25x allocation
+# regression the gate's other assertion bounds: the pre-fix body was a
+# 12-line AST synthesis plus a recursive `nelisp_eval_call', which no small
+# `sed' expression reproduces, and this file's own header rules out subtle
+# injections.  That assertion is held by its own budget (200 allocations per
+# form, against 65 measured after the fix and ~1629 before it), read from
+# the allocator's exact counters rather than a clock.
+#
+# Evidence, windows-x86_64, 2026-08-30.  RED with the injection:
+#   [defvar-alloc-smoke] FAIL: per-form=63 budget=200 keep-ok=nil
+#     const-ok=t pass=nil
+# GREEN restored:
+#   [defvar-alloc-smoke] PASS: per-form=65 budget=200 keep-ok=t
+#     const-ok=t pass=t
+standalone-reader-defvar-alloc-smoke|scripts/nelisp-standalone-build.el|s/(if (= (nelisp_mirror_is_bound (+ env 0) name_ptr (+ env 64)) 1)/(if (= 0 1)/|defvar loses its boundp gate and overwrites an already-bound value
+# Doc 201 §4 item 2.  `standalone-reader-fileattrs-smoke' polices the
+# windows-native `stat'/`readdir' shims and the `nelisp--syscall-stat'
+# classification that moved onto st_mode with them.  The injection changes
+# the S_IFDIR constant the classifier compares against, so no directory is
+# ever recognised as one -- a wrong constant, lethal on every platform,
+# with no timing or load component.
+#
+# Evidence, windows-x86_64, 2026-08-30.  RED with the injection:
+#   [fileattrs-smoke] FAIL: size-ok=t mtime=1788083979 reg-ok=t dir-ok=nil
+#     names=("sub" "ten-bytes.txt") absent-ok=t pass=nil
+# GREEN restored:
+#   [fileattrs-smoke] PASS: size-ok=t mtime=1788084019 reg-ok=t dir-ok=t
+#     names=("sub" "ten-bytes.txt") absent-ok=t pass=t
+standalone-reader-fileattrs-smoke|scripts/nelisp-stdlib-prelude.el|s/(= (logand mode 61440) 16384)/(= (logand mode 61440) 16385)/|nelisp--syscall-stat compares st_mode's file-type bits against a wrong S_IFDIR, so no directory is recognised
+# Doc 201 §5.4, row 1 of 2 (the CORRECTNESS half).  A leading-character
+# filter that fires where it must not skips real matches, and no timing
+# assertion can see that -- so this row breaks the filter's own case
+# handling: it folds the required character with `nlre--flip-case' instead
+# of `nlre--fold-char', so the character a pattern demands is never the one
+# the string can offer and every leading-literal pattern stops matching.
+# A wrong function, not a wrong duration.
+#
+# Evidence, windows-x86_64, 2026-08-30.  RED with the injection (note the
+# first `got' element, `(string-match "abc" "xxabcyy")', turning nil):
+#   [regexp-lead-filter-smoke] FAIL: got=(nil nil 2 nil 2 0 nil 0 nil) ...
+#     ratio=0.041 pass=nil
+# GREEN restored:
+#   [regexp-lead-filter-smoke] PASS: got=(2 nil 2 nil 2 0 nil 0 nil) ...
+#     ratio=0.047 pass=t
+standalone-reader-regexp-lead-filter-smoke|lisp/nelisp-stdlib-regexp.el|s/(lead (and lead (nlre--fold-char lead)))/(lead (and lead (nlre--flip-case lead)))/|the leading-character filter folds the required character the wrong way, so no leading-literal pattern matches at all
+# Doc 201 §5.4, row 2 of 2 (the PERFORMANCE half).  Makes
+# `nlre--leading-lit-char' answer nil for every pattern, so the filter never
+# fires and the scan is exactly what it was before the fix.  Correctness is
+# untouched -- only the ratio moves -- which is the point: this row proves
+# the gate's bound actually bites rather than riding along behind the
+# correctness cases.
+#
+# This is a timing row, which this file's failure-mode 3 warns about.  It is
+# admissible because the bound is a ratio of two sweeps run back to back in
+# ONE process on the SAME strings, so a slow or loaded machine scales both
+# halves: measured 0.531 injected vs 0.048 restored against a 0.25
+# threshold, i.e. 2.1x and 5.2x clear of it in their own directions.
+#
+# Evidence, windows-x86_64, 2026-08-30.  RED with the injection:
+#   [regexp-lead-filter-smoke] FAIL: got=(2 nil 2 nil 2 0 nil 0 nil) ...
+#     lead=2.488 nolead=4.682 ratio=0.531 pass=nil
+# GREEN restored:
+#   [regexp-lead-filter-smoke] PASS: got=(2 nil 2 nil 2 0 nil 0 nil) ...
+#     lead=0.281 nolead=5.899 ratio=0.048 pass=t
+standalone-reader-regexp-lead-filter-smoke|lisp/nelisp-stdlib-regexp.el|s/^(defun nlre--leading-lit-char (nodes)$/(defun nlre--leading-lit-char (nodes) (setq nodes nil)/|the leading-character filter never fires, putting the scan back to full work at every start position
