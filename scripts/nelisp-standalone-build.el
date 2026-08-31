@@ -13447,7 +13447,7 @@ pre-existing `nl_os_process_fork' stub there."
                                  0)
                                (setq pos (+ pos reclen))))))))
                   0)))
-             (nl_os_close_handle fd)
+             (nl_os_close_dir fd)
              (nl_seq2 (nl_alloc_str sbuf slen out) 0))))))
     ;; nelisp--syscall-utimes PATH ATIME MTIME: utimes(2) (syscall 235) -- set
     ;; the access + modification times to ATIME / MTIME (seconds; usec = 0).
@@ -16353,7 +16353,16 @@ dispatch arm in `nelisp-standalone--applyfn-dispatch-table'.")
                     ;; `nelisp-standalone--os-syscall-xlat-forms' windows
                     ;; case): backs `nelisp--syscall-path-int' access(2)
                     ;; F_OK checks, i.e. `file-exists-p' and friends.
-                    "GetFileAttributesW"))
+                    "GetFileAttributesW"
+                    ;; Doc 201 §4 item 2, same windows case:
+                    ;; `nl_os_stat_path'/`nl_os_lstat_path' (file-attributes)
+                    ;; and `nl_os_open_dir'/`nl_os_getdents64'/
+                    ;; `nl_os_close_dir' (directory-files).
+                    "GetFileAttributesExW"
+                    "FindFirstFileW" "FindNextFileW" "FindClose"
+                    ;; `nl_os_getcwd' (windows os-base-forms): backs
+                    ;; `default-directory', which was nil on this target.
+                    "GetCurrentDirectoryW"))
         (cons "SHELL32.dll" (list "CommandLineToArgvW")))
   "PE imports needed by the Windows-native standalone reader.")
 
@@ -19016,10 +19025,15 @@ boundary (Doc 151 Phase B):
 - linux-aarch64: arm64 Linux has no legacy syscalls — map to the *at
   family (faccessat/unlinkat/mkdirat/renameat/newfstatat/...) with
   AT_FDCWD, preserving each builtin's return contract.
-- macos / windows: return -ENOSYS(-38) stubs.  Previously the shared
-  fileio unit fired the raw x86 numbers on those targets, i.e. random
-  foreign syscalls — the stub is strictly safer (callers already
-  handle negative rc as failure)."
+- macos: return -ENOSYS(-38) stubs.  Previously the shared fileio unit
+  fired the raw x86 numbers on those targets, i.e. random foreign
+  syscalls — the stub is strictly safer (callers already handle
+  negative rc as failure).
+- windows: the read side is native Win32 — access(F_OK) via
+  GetFileAttributesW (Doc 201 §2), stat/lstat via
+  GetFileAttributesExW and directory enumeration via
+  FindFirstFileW/FindNextFileW (Doc 201 §4 item 2).  The mutating
+  path syscalls stay -ENOSYS stubs."
   (pcase nelisp-standalone--target
     ('linux-aarch64
      `((defun nl_os_syscall_path (nr cpath)
@@ -19065,6 +19079,7 @@ boundary (Doc 151 Phase B):
          (syscall-direct 56 (- 0 100) cpath 16384 0 0 0))               ; openat O_DIRECTORY=0x4000 on arm64
        (defun nl_os_getdents64 (fd dbuf cap)
          (syscall-direct 61 fd dbuf cap 0 0 0))
+       (defun nl_os_close_dir (fd) (nl_os_close_handle fd))
        (defun nl_os_utimes_path (cpath buf)
          (syscall-direct 88 (- 0 100) cpath buf 0 0 0))                 ; utimensat (timespec[2]; sec+0 compatible)
        (defun nl_os_statx_path (cpath flags buf)
@@ -19080,12 +19095,13 @@ boundary (Doc 151 Phase B):
        (defun nl_os_readlink_path (cpath buf cap) (syscall-direct 89 cpath buf cap 0 0 0))
        (defun nl_os_open_dir (cpath) (syscall-direct 257 (- 0 100) cpath 65536 0 0 0))
        (defun nl_os_getdents64 (fd dbuf cap) (syscall-direct 217 fd dbuf cap 0 0 0))
+       (defun nl_os_close_dir (fd) (nl_os_close_handle fd))
        (defun nl_os_utimes_path (cpath buf) (syscall-direct 235 cpath buf 0 0 0 0))
        (defun nl_os_statx_path (cpath flags buf) (syscall-direct 332 (- 0 100) cpath flags 4095 buf 0))
        (defun nl_os_nanosleep (ts) (syscall-direct 35 ts 0 0 0 0 0))))
     ((or 'windows-x86_64 'windows-aarch64)
      ;; windows: every path-syscall builtin was an unconditional -ENOSYS
-     ;; stub (Doc 151 §B) until this fix -- `nelisp--syscall-stat'
+     ;; stub (Doc 151 §B) until Doc 201 §2 -- `nelisp--syscall-stat'
      ;; (scripts/nelisp-stdlib-prelude.el) falls back to
      ;; `nelisp--syscall-path-int' access(2)-style existence checks
      ;; (NR=21, F_OK), so `file-exists-p'/`file-directory-p'/
@@ -19102,10 +19118,16 @@ boundary (Doc 151 Phase B):
      ;; (this same target's `nelisp-standalone--reader-os-base-forms',
      ;; appended into the same source list by
      ;; `nelisp-standalone--reader-os-source-forms') builds the UTF-16
-     ;; path GetFileAttributesW requires.  Only NR=21 (access, F_OK) is
-     ;; wired; every other path syscall (unlink/mkdir/stat-buf/readdir/
-     ;; ...) stays an ENOSYS stub, unchanged from before this fix, and
-     ;; is not this fix's scope.
+     ;; path GetFileAttributesW requires.  Doc 201 §2 wired NR=21 (access,
+     ;; F_OK) only, and named the rest a follow-up; Doc 201 §4 item 2 is
+     ;; that follow-up and adds `stat'/`lstat' (GetFileAttributesExW) and
+     ;; directory enumeration (FindFirstFileW/FindNextFileW/FindClose), so
+     ;; `file-attributes' and `directory-files' work on this target at all.
+     ;; Still -ENOSYS, deliberately: the MUTATING path syscalls
+     ;; (unlink/rmdir/mkdir/rename/link/symlink/chmod/truncate/utimes) and
+     ;; `readlink'/`statx'/`nanosleep'.  Reading a Windows filesystem
+     ;; wrongly costs a wrong answer; writing one wrongly costs the file,
+     ;; so those want their own change with their own gate.
      `((defun nl_os_win_access (cpath)
          (let* ((wpath (nl_win_utf8_wcs_dup cpath))
                 (attrs (extern-call GetFileAttributesW wpath)))
@@ -19114,11 +19136,162 @@ boundary (Doc 151 Phase B):
        (defun nl_os_syscall_path_int (nr cpath iarg)
          (if (= nr 21) (nl_os_win_access cpath) (- 0 38)))
        (defun nl_os_syscall_path2 (_nr _c1 _c2) (- 0 38))
-       (defun nl_os_stat_path (_cpath _buf) (- 0 38))
-       (defun nl_os_lstat_path (_cpath _buf) (- 0 38))
+       ;; stat(2) shim.  `GetFileAttributesExW' (not
+       ;; `GetFileInformationByHandleEx') because it needs no open handle,
+       ;; so a directory, a locked file and a read-protected one all answer
+       ;; the same way `access' already does on this target.  Its
+       ;; WIN32_FILE_ATTRIBUTE_DATA is dwFileAttributes@0,
+       ;; ftCreationTime@4, ftLastAccessTime@12, ftLastWriteTime@20,
+       ;; nFileSizeHigh@28, nFileSizeLow@32 -- 36 bytes.  The fields are
+       ;; written back at the *Linux x86_64* `struct stat' offsets this
+       ;; repo's fileio builtins use as their portable vocabulary
+       ;; (`nl_bi_syscall_stat_field' names them), not at Windows ones.
+       (defun nl_win_filetime_unix (lo hi)
+         ;; FILETIME counts 100ns ticks from 1601-01-01; 116444736000000000
+         ;; of them separate that epoch from 1970-01-01.
+         (/ (- (+ lo (* hi 4294967296)) 116444736000000000) 10000000))
+       (defun nl_win_stat_zero (buf)
+         (let* ((i 0))
+           (seq
+            (while (< i 144)
+              (seq (ptr-write-u64 buf i 0) (setq i (+ i 8))))
+            0)))
+       (defun nl_win_stat_from_data (data buf nofollow)
+         (let* ((attrs (ptr-read-u32 data 0))
+                ;; FILE_ATTRIBUTE_DIRECTORY 0x10, _REPARSE_POINT 0x400,
+                ;; _READONLY 0x1.  Windows has no mode bits, so the shim
+                ;; reports the three shapes callers actually branch on:
+                ;; S_IFDIR|0755, S_IFLNK|0777, S_IFREG|0644 (0444 when the
+                ;; read-only attribute is set).
+                (mode (if (> (logand attrs 16) 0)
+                          16877
+                        (if (if (> nofollow 0) (> (logand attrs 1024) 0) 0)
+                            41471
+                          (if (> (logand attrs 1) 0) 33060 33188)))))
+           (seq
+            (nl_win_stat_zero buf)
+            (ptr-write-u64 buf 16 1)
+            (ptr-write-u32 buf 24 mode)
+            (ptr-write-u64 buf 48
+                           (+ (ptr-read-u32 data 32)
+                              (* (ptr-read-u32 data 28) 4294967296)))
+            (ptr-write-u64 buf 72
+                           (nl_win_filetime_unix (ptr-read-u32 data 12)
+                                                 (ptr-read-u32 data 16)))
+            (ptr-write-u64 buf 88
+                           (nl_win_filetime_unix (ptr-read-u32 data 20)
+                                                 (ptr-read-u32 data 24)))
+            (ptr-write-u64 buf 104
+                           (nl_win_filetime_unix (ptr-read-u32 data 4)
+                                                 (ptr-read-u32 data 8)))
+            0)))
+       (defun nl_win_stat_common (cpath buf nofollow)
+         (let* ((wpath (nl_win_utf8_wcs_dup cpath))
+                (data (alloc-bytes 40 8))
+                (ok (extern-call GetFileAttributesExW wpath 0 data)))
+           (if (= ok 0) (- 0 2) (nl_win_stat_from_data data buf nofollow))))
+       (defun nl_os_stat_path (cpath buf) (nl_win_stat_common cpath buf 0))
+       ;; `GetFileAttributesExW' does not follow a reparse point's target for
+       ;; the attribute word, so the same call serves both: `lstat' reports
+       ;; S_IFLNK when FILE_ATTRIBUTE_REPARSE_POINT is set and `stat' does
+       ;; not.  The size/time fields are the link's either way, which is
+       ;; where this shim stops being a real `stat' -- see
+       ;; `nl_os_readlink_path' below, still unimplemented.
+       (defun nl_os_lstat_path (cpath buf) (nl_win_stat_common cpath buf 1))
        (defun nl_os_readlink_path (_cpath _buf _cap) (- 0 38))
-       (defun nl_os_open_dir (_cpath) (- 0 38))
-       (defun nl_os_getdents64 (_fd _dbuf _cap) (- 0 38))
+       ;; Directory enumeration.  `FindFirstFileW' takes a glob and hands
+       ;; back the FIRST entry with the handle, where `getdents64' hands
+       ;; back only a handle -- so the shim owns a small state block instead
+       ;; of a bare fd, and `nl_os_open_dir' returns its address (always a
+       ;; positive heap pointer, which is what the caller's `(< fd 0)'
+       ;; failure test reads).  Layout: FindFirstFile handle@0, "an entry is
+       ;; pending in the buffer"@8, WIN32_FIND_DATAW@16 (592 bytes,
+       ;; cFileName at its own +44, i.e. block +60), UTF-8 name scratch@608
+       ;; (1024 bytes: 260 UTF-16 units cannot exceed 780 UTF-8 bytes).
+       ;;
+       ;; The scratch lives IN the block deliberately.  Converting each name
+       ;; into a freshly allocated buffer would allocate inside
+       ;; `nl_os_getdents64', which the caller
+       ;; (`nl_bi_syscall_readdir_names') runs in a loop while holding two
+       ;; raw `alloc-bytes' buffers -- exactly the shape that makes a
+       ;; collection mid-loop able to invalidate them.  This way the whole
+       ;; enumeration allocates once, in `nl_os_open_dir', before the
+       ;; caller's own buffers exist.
+       (defun nl_win_cstr_len (p)
+         (let* ((n 0))
+           (seq (while (> (ptr-read-u8 p n) 0) (setq n (+ n 1))) n)))
+       (defun nl_win_dir_pattern (cpath)
+         ;; "<cpath>\\*", with any trailing separator dropped first so
+         ;; "C:/dir/" does not become "C:/dir/\\*".
+         (let* ((n (nl_win_cstr_len cpath))
+                (n (if (> n 0)
+                       (if (or (= (ptr-read-u8 cpath (- n 1)) 47)
+                               (= (ptr-read-u8 cpath (- n 1)) 92))
+                           (- n 1)
+                         n)
+                     n))
+                (dst (alloc-bytes (+ n 4) 1))
+                (i 0))
+           (seq
+            (while (< i n)
+              (seq (ptr-write-u8 dst i (ptr-read-u8 cpath i))
+                   (setq i (+ i 1))))
+            (ptr-write-u8 dst n 92)
+            (ptr-write-u8 dst (+ n 1) 42)
+            (ptr-write-u8 dst (+ n 2) 0)
+            dst)))
+       (defun nl_os_open_dir (cpath)
+         (let* ((wpat (nl_win_utf8_wcs_dup (nl_win_dir_pattern cpath)))
+                (st (alloc-bytes 1632 8))
+                (h (extern-call FindFirstFileW wpat (+ st 16))))
+           (if (or (= h 0) (or (= h (- 0 1)) (= h 4294967295)))
+               (- 0 2)
+             (seq (ptr-write-u64 st 0 h) (ptr-write-u64 st 8 1) st))))
+       (defun nl_win_dir_emit (st dbuf pos)
+         ;; One dirent64 record at DBUF+POS from the pending WIN32_FIND_DATAW,
+         ;; returning the new POS.  dirent64: d_ino@0 d_off@8 d_reclen(u16)@16
+         ;; d_type(u8)@18 d_name@19 (NUL-terminated) -- the layout
+         ;; `nl_bi_syscall_readdir_names' walks.  d_type stays DT_UNKNOWN(0):
+         ;; the caller reads names only, and a wrong type is worse than none.
+         (let* ((_n (extern-call WideCharToMultiByte 65001 0 (+ st 60) -1
+                                 (+ st 608) 1024 0 0))
+                (nlen (nl_win_cstr_len (+ st 608)))
+                (i 0))
+           (seq
+            (while (< i nlen)
+              (seq (ptr-write-u8 dbuf (+ pos (+ 19 i))
+                                 (ptr-read-u8 (+ st 608) i))
+                   (setq i (+ i 1))))
+            (ptr-write-u8 dbuf (+ pos (+ 19 nlen)) 0)
+            (ptr-write-u64 dbuf pos 1)
+            (ptr-write-u64 dbuf (+ pos 8) 0)
+            (ptr-write-u16 dbuf (+ pos 16) (+ 20 nlen))
+            (ptr-write-u8 dbuf (+ pos 18) 0)
+            (+ pos (+ 20 nlen)))))
+       (defun nl_os_getdents64 (st dbuf cap)
+         ;; Fills DBUF with as many records as fit and returns the byte
+         ;; count, 0 when the enumeration is done -- the same contract the
+         ;; caller's `(while (> n 0))' loop already relies on, so a name
+         ;; that does not fit is simply left pending for the next call.
+         ;; 800 = the largest record this can emit (20 + 780).
+         (if (< st 0)
+             0
+           (let* ((pos 0) (more 1))
+             (seq
+              (while (> more 0)
+                (if (= (ptr-read-u64 st 8) 1)
+                    (if (> (+ pos 800) cap)
+                        (setq more 0)
+                      (seq (setq pos (nl_win_dir_emit st dbuf pos))
+                           (ptr-write-u64 st 8 0)))
+                  (if (= (extern-call FindNextFileW (ptr-read-u64 st 0)
+                                      (+ st 16))
+                         0)
+                      (setq more 0)
+                    (ptr-write-u64 st 8 1))))
+              pos))))
+       (defun nl_os_close_dir (st)
+         (if (< st 0) 0 (nl_seq2 (extern-call FindClose (ptr-read-u64 st 0)) 0)))
        (defun nl_os_utimes_path (_cpath _buf) (- 0 38))
        (defun nl_os_statx_path (_cpath _flags _buf) (- 0 38))
        (defun nl_os_nanosleep (_ts) (- 0 38))))
@@ -19131,6 +19304,7 @@ boundary (Doc 151 Phase B):
        (defun nl_os_readlink_path (_cpath _buf _cap) (- 0 38))
        (defun nl_os_open_dir (_cpath) (- 0 38))
        (defun nl_os_getdents64 (_fd _dbuf _cap) (- 0 38))
+       (defun nl_os_close_dir (fd) (nl_os_close_handle fd))
        (defun nl_os_utimes_path (_cpath _buf) (- 0 38))
        (defun nl_os_statx_path (_cpath _flags _buf) (- 0 38))
        (defun nl_os_nanosleep (_ts) (- 0 38))))))
@@ -19777,7 +19951,7 @@ section banner comment just above for why, and
            (seq
             (ptr-write-u32 pfd 0 fd)
             (ptr-write-u32 pfd 4 events)
-            (let* ((rc (syscall-direct 7 pfd 1 timeout 0 0 0))
+            (let* ((rc (syscall-direct 230 pfd 1 timeout 0 0 0))
                    (revents (/ (ptr-read-u32 pfd 4) 65536)))
               (if (if (> rc 0) (if (= (logand revents mask) 0) 0 1) 0)
                   (wf_write_t out)
@@ -20370,7 +20544,47 @@ target the same installed names signal catchable
               (nl_alloc_check_env_probe block off eqpos end)
               (nl_win_environ_walk block (+ end 1) rest)
               (nelisp_cons_construct pair rest result-slot)))))
-       (defun nl_os_getcwd (out) (wf_write_nil out))
+       ;; `default-directory' on windows-nt.  This was a `wf_write_nil'
+       ;; stub, so the symbol was bound to nil and `(expand-file-name "a")'
+       ;; answered "/a" -- a relative name resolved to the filesystem root.
+       ;; That is the identical failure the POSIX body's own comment records
+       ;; from before getcwd(2) was wired there, and the macos-aarch64 arm
+       ;; from before F_GETPATH was; windows was the last target still
+       ;; carrying it.  Found while writing Doc 201 §4 item 1's gate: the
+       ;; first probe of `(expand-file-name "target/tmp/...")' on this
+       ;; target came back "/target/tmp/...".
+       ;;
+       ;; `GetCurrentDirectoryW(len, buf)' answers the length in WCHARs
+       ;; written, NOT counting the NUL; when the buffer is too small it
+       ;; answers the REQUIRED length INCLUDING the NUL (so a result >= len
+       ;; means "did not fit"), and 0 on failure.  It returns backslashes
+       ;; and no trailing separator ("C:\dir"), so this converts to the
+       ;; forward slashes every other path in this runtime uses and appends
+       ;; the trailing slash Emacs keeps -- the same two rules the POSIX and
+       ;; macOS bodies apply.
+       (defun nl_os_getcwd (out)
+         (let* ((wbuf (alloc-bytes 2048 2))
+                (n (extern-call GetCurrentDirectoryW 1024 wbuf)))
+           (if (or (= n 0) (> n 1023))
+               (wf_write_nil out)
+             (let* ((cbuf (nl_win_wcs_utf8_dup wbuf))
+                    (len 0))
+               (seq
+                (while (> (ptr-read-u8 cbuf len) 0)
+                  (seq
+                   (if (= (ptr-read-u8 cbuf len) 92)
+                       (ptr-write-u8 cbuf len 47)
+                     0)
+                   (setq len (+ len 1))))
+                ;; `nl_win_wcs_utf8_dup' sizes the buffer to include the
+                ;; NUL, so index LEN is in bounds and is where the trailing
+                ;; slash goes.  A root path already ends in one.
+                (if (= len 0)
+                    (wf_write_nil out)
+                  (if (= (ptr-read-u8 cbuf (- len 1)) 47)
+                      (nl_alloc_str cbuf len out)
+                    (seq (ptr-write-u8 cbuf len 47)
+                         (nl_alloc_str cbuf (+ len 1) out)))))))))
        (defun nl_os_environ_init (_sp result-slot)
          (let* ((block (extern-call GetEnvironmentStringsW)))
            (seq
@@ -25056,15 +25270,22 @@ not exist must fail (exit 1), not silently produce a usable image."
           (with-temp-file near-end-file
             (insert "(setq near-end-ok 42)\n"))
           (with-temp-buffer
-            ;; Doc 140 Stage 8 (linux): the chunk-0 bump cursor is at the
-            ;; runtime mmap base + 0; runtime-parsed test code reaches it via
-            ;; `(car (nelisp--arena-stats))' rather than a fixed immediate.
-            (if (eq nelisp-standalone--target 'linux-x86_64)
-                (insert (format "(ptr-write-u64 (car (nelisp--arena-stats)) 0 %d)\n"
-                                near-end-bump))
-              (insert (format "(ptr-write-u64 %d 0 %d)\n"
-                              (nelisp-standalone--target-arena-metadata-address 0)
-                              near-end-bump)))
+            ;; Doc 140 Stage 8: the chunk-0 bump cursor.  `(car
+            ;; (nelisp--arena-stats))' asks the runtime where it is, on
+            ;; every target.
+            ;;
+            ;; This used to ask that way only on linux-x86_64 and write a
+            ;; COMPILE-TIME IMMEDIATE, `arena_base + 0', everywhere else --
+            ;; an address that stopped being the cursor when Doc 140 made
+            ;; the arena multi-chunk and moved chunk 0's cursor behind the
+            ;; metadata block.  So on every other target this probe stamped
+            ;; `near-end-bump' over an unrelated metadata word and killed
+            ;; the reader, and `standalone-reader-repl-smoke' reported
+            ;; `repl near-end rdf exit=5 stdout=""' as though the REPL were
+            ;; broken.  Asking the runtime cannot go stale the same way,
+            ;; and there is no longer a second answer to keep in step.
+            (insert (format "(ptr-write-u64 (car (nelisp--arena-stats)) 0 %d)\n"
+                            near-end-bump))
             (insert (format "(if (= (length (rdf %S)) 22) (nelisp--write-stdout-bytes \"near-end-ok\\n\") (nelisp--write-stdout-bytes \"near-end-bad\\n\"))\n"
                             near-end-file))
             (insert "(exit)\n")

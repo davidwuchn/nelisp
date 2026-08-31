@@ -1059,14 +1059,23 @@ Result keeps the trailing slash."
 
 (defun nelisp--path-split (s)
   ;; Split S on / and drop empty components, so a// collapses like Emacs.
-  (let ((out nil) (cur "") (i 0) (n (length s)))
+  ;;
+  ;; PERF (Doc 201 §6.8): this used to build each component one character at
+  ;; a time, `(setq cur (concat cur (substring s i (1+ i))))' -- two
+  ;; allocations and two interpreter calls per CHARACTER, where a component
+  ;; needs one `substring' in total.  On a runtime whose basic-op cost is
+  ;; ~0.15-0.4ms (§3) that made `expand-file-name' cost ~21ms for an
+  ;; ordinary path, and `executable-find' calls it once per PATH entry:
+  ;; three `executable-find' calls over a 59-entry PATH were essentially the
+  ;; whole 7.6s that `vendor/ddskk/skk-vars.el' still took to load.  Now it
+  ;; scans for separators and cuts one substring per component.
+  (let ((out nil) (start 0) (i 0) (n (length s)))
     (while (< i n)
-      (if (eq (aref s i) ?/)
-          (progn (when (> (length cur) 0) (setq out (cons cur out)))
-                 (setq cur ""))
-        (setq cur (concat cur (substring s i (1+ i)))))
+      (when (eq (aref s i) ?/)
+        (when (> i start) (setq out (cons (substring s start i) out)))
+        (setq start (1+ i)))
       (setq i (1+ i)))
-    (when (> (length cur) 0) (setq out (cons cur out)))
+    (when (> n start) (setq out (cons (substring s start n) out)))
     (nreverse out)))
 
 ;; This used to concatenate and stop -- no `.', no `..', no `~', no
@@ -1077,26 +1086,92 @@ Result keeps the trailing slash."
 ;; a runtime meant to host an editor that is a daily defect: buffer names,
 ;; `locate-library' hits and every cache key built from a path are all
 ;; affected.  Measured 2026-08-19 against Emacs 30.1.
+;; Windows-native standalone, Doc 201 §4 follow-up: this function was
+;; POSIX-only, so on windows-nt a drive-letter name was not recognised as
+;; absolute at all -- (expand-file-name "cmd.exe" "C:/Windows/System32")
+;; answered "/C:/Windows/System32/cmd.exe", which no Windows API can open.
+;; That is why `executable-find' still found nothing on a windows-native
+;; build even with Doc 201 §1 (`path-separator') and §2 (access(F_OK) via
+;; GetFileAttributesW) both fixed: PATH split into the right 59
+;; drive-letter directories, and every candidate built from one was then
+;; mangled beyond existence.  §2's own verification could not see it --
+;; none of the programs it probed for (python/kakasi/look) were installed
+;; on that host, so "not found" was the correct answer either way, and the
+;; end-to-end path was never once exercised with a program that IS there.
+;; `nelisp--windows-paths-p' is deliberately `boundp'-defensive: this
+;; function is defined long before `system-type' becomes bound further down
+;; this same file, and a call made in between must still answer POSIX-ly
+;; rather than signal.
+(defun nelisp--windows-paths-p ()
+  (and (boundp 'system-type) (eq system-type 'windows-nt)))
+
+(defun nelisp--path-drive (s)
+  "Return the leading \"X:\" drive designator of S, or nil when absent."
+  (if (and (>= (length s) 2) (eq (aref s 1) ?:))
+      (let ((c (aref s 0)))
+        (if (or (and (>= c ?A) (<= c ?Z)) (and (>= c ?a) (<= c ?z)))
+            (substring s 0 2)
+          nil))
+    nil))
+
+(defun nelisp--path-slashify (s)
+  "Return S with every backslash replaced by a forward slash.
+S itself is returned when it contains none, so the common case allocates
+nothing."
+  (let ((n (length s)) (i 0) (start 0) (parts nil))
+    (while (< i n)
+      (when (eq (aref s i) ?\\)
+        (setq parts (cons (substring s start i) parts))
+        (setq start (1+ i)))
+      (setq i (1+ i)))
+    (if (null parts)
+        s
+      (mapconcat 'identity (nreverse (cons (substring s start) parts)) "/"))))
+
 (defun expand-file-name (path &optional base)
-  (let* ((p (if (null path) "" path))
+  (let* ((win (nelisp--windows-paths-p))
+         (p (if (null path) "" path))
+         (p (if win (nelisp--path-slashify p) p))
          (p (if (and (> (length p) 0) (eq (aref p 0) ?~)
                      (if (= (length p) 1) 1 (eq (aref p 1) ?/)))
-                (concat (or (getenv "HOME") "~") (substring p 1))
+                (let ((home (or (getenv "HOME") "~")))
+                  (concat (if win (nelisp--path-slashify home) home)
+                          (substring p 1)))
               p))
-         (absolute (if (= (length p) 0) nil (eq (aref p 0) ?/)))
+         (drive (if win (nelisp--path-drive p) nil))
+         ;; Everything below works on the drive-less remainder and puts the
+         ;; designator back at the end, so the "/" -collapsing loop stays the
+         ;; single POSIX one it has always been.
+         (p (if drive (substring p 2) p))
+         (rooted (if (= (length p) 0) nil (eq (aref p 0) ?/)))
+         ;; A drive designator makes the name absolute on its own: "C:foo" is
+         ;; drive-relative in Windows, but this runtime keeps no per-drive
+         ;; current directory, so it resolves at that drive's root.
+         (absolute (if drive t rooted))
          (trailing (if (= (length p) 0) nil
                      (eq (aref p (- (length p) 1)) ?/)))
-         (anchor
-          (if absolute ""
-            (let ((b (or base
-                         (and (boundp 'default-directory) default-directory)
-                         "/")))
-              (if (if (> (length b) 0) (eq (aref b 0) ?/) nil)
-                  (file-name-as-directory b)
-                (file-name-as-directory (expand-file-name b))))))
-         (full (if absolute p (concat anchor p)))
-         (parts (nelisp--path-split full))
+         ;; A rooted name with no designator inherits the base's drive, which
+         ;; is what Emacs does; on any other target there is no drive to
+         ;; inherit, so BASE is left untouched exactly as before.
+         (need-base (if drive nil (if rooted win t)))
+         (anchor "")
+         (parts nil)
          (stack nil))
+    (when need-base
+      (let* ((b (or base
+                    (and (boundp 'default-directory) default-directory)
+                    "/"))
+             (b (if win (nelisp--path-slashify b) b))
+             (b (if (or (if win (nelisp--path-drive b) nil)
+                        (if (> (length b) 0) (eq (aref b 0) ?/) nil))
+                    b
+                  (expand-file-name b)))
+             (bdrive (if win (nelisp--path-drive b) nil)))
+        (setq drive bdrive)
+        (unless rooted
+          (setq anchor (file-name-as-directory
+                        (if bdrive (substring b 2) b))))))
+    (setq parts (nelisp--path-split (if absolute p (concat anchor p))))
     (while parts
       (let ((c (car parts)))
         (cond
@@ -1105,7 +1180,7 @@ Result keeps the trailing slash."
          (t (setq stack (cons c stack)))))
       (setq parts (cdr parts)))
     (setq stack (nreverse stack))
-    (let ((res (concat "/" (mapconcat 'identity stack "/"))))
+    (let ((res (concat (or drive "") "/" (mapconcat 'identity stack "/"))))
       (if (if trailing (> (length stack) 0) nil)
           (concat res "/")
         res))))
@@ -7238,6 +7313,23 @@ write instead of ever touching a real buffer."
   (defun kill-process (process &optional _current-group)
     (delete-process process)))
 (unless (fboundp 'executable-find)
+  ;; PERF (Doc 201 §6.8): splitting PATH costs ~0.43s on a real 2.3KB,
+  ;; 59-entry Windows one -- `nelisp--split-on-char' is a per-character walk
+  ;; and this runtime charges ~0.2ms per basic operation (§3).  Nothing about
+  ;; that walk depends on which program is being looked for, and
+  ;; `vendor/ddskk/skk-vars.el' alone calls `executable-find' three times at
+  ;; load, so it was paid three times for an identical answer.  The cache key
+  ;; is the PATH string itself, so a `setenv' invalidates it by construction
+  ;; -- there is no staleness window to reason about, and no hook to forget.
+  (defvar nelisp--path-entries-key nil)
+  (defvar nelisp--path-entries-value nil)
+  (defun nelisp--path-entries (path sep)
+    "Return PATH split on SEP, reusing the previous answer for the same PATH."
+    (if (equal path nelisp--path-entries-key)
+        nelisp--path-entries-value
+      (setq nelisp--path-entries-key path)
+      (setq nelisp--path-entries-value (nelisp--split-on-char path sep nil))
+      nelisp--path-entries-value))
   (defun executable-find (command &optional _remote)
     (nelisp--check-string command)
     ;; "" is a string that names nothing, so the answer is nil -- not the
@@ -7258,17 +7350,25 @@ write instead of ever touching a real buffer."
              ;; input.  PATH's separator is always a single literal byte
              ;; (";" or ":"), never a regexp, so there is nothing here for
              ;; the regexp engine to buy.
-             (dirs (nelisp--split-on-char
+             (dirs (nelisp--path-entries
                     (or (getenv "PATH") "/usr/local/bin:/usr/bin:/bin")
-                    (aref separator 0) nil))
+                    (aref separator 0)))
              found)
+        ;; PERF (Doc 201 §6.8): the probe below is a plain `concat', not an
+        ;; `expand-file-name'.  Expansion costs ~13ms here -- three
+        ;; full-string scans plus a component walk, all in interpreted elisp
+        ;; -- and this loop used to pay it once per PATH ENTRY, 59 times on
+        ;; an ordinary Windows PATH, which was what was left of
+        ;; `vendor/ddskk/skk-vars.el''s load time once §5.1/§5.2/§6.5 were
+        ;; in.  `file-exists-p' does not care: it hands the name to the OS,
+        ;; which resolves `..', doubled separators and (on windows-nt) mixed
+        ;; `\' and `/' exactly as it would after expansion.  So the sweep
+        ;; probes cheaply and expands ONCE, on the entry that answered yes,
+        ;; and the value returned is the same expanded name as before.
         (while (and dirs (not found))
-          (let ((path (expand-file-name command
-                                        (if (equal (car dirs) "")
-                                            "."
-                                          (car dirs)))))
-            (when (file-exists-p path)
-              (setq found path)))
+          (let* ((dir (if (equal (car dirs) "") "." (car dirs))))
+            (when (file-exists-p (concat (file-name-as-directory dir) command))
+              (setq found (expand-file-name command dir))))
           (setq dirs (cdr dirs)))
         found)))))
 (unless (fboundp 'make-process)
@@ -8395,14 +8495,34 @@ Prefers the real process id; falls back to the clock, marked with a leading
 ;; standalone reader binary); uses fset to shadow the broken deferred builtin
 ;; registration that makes fboundp return t but causes the combiner to abort.
 ;; On host Emacs, nelisp--syscall-path-int is not fboundp, so no shadowing.
+;;
+;; Doc 201 §4 item 2: the trichotomy's middle step asks whether PATH
+;; accepts a trailing slash, and Windows answers YES for an ordinary file
+;; -- so on a windows-native build every regular file read as a directory,
+;; `file-regular-p' answered nil for all of them and `file-directory-p'
+;; answered t.  Now that this target has a real `stat'
+;; (`nelisp--syscall-stat-field' -> `nl_os_stat_path' ->
+;; GetFileAttributesExW), the file/directory answer comes from st_mode.
+;; The access(2) F_OK check stays FIRST and the trichotomy stays as the
+;; fallback: absence is still one syscall (the shape `executable-find'
+;; walks a whole PATH with), and a target whose `stat' is still -ENOSYS
+;; (macos) keeps exactly the behaviour it had.
 (when (fboundp 'nelisp--syscall-path-int)
   (fset 'nelisp--syscall-stat
         (lambda (path)
           (if (not (= 0 (nelisp--syscall-path-int 21 path 0)))
               'absent
-            (if (= 0 (nelisp--syscall-path-int 21 (concat path "/") 0))
-                'directory
-              'file)))))
+            (let ((mode (if (fboundp 'nelisp--syscall-stat-field)
+                            (nelisp--syscall-stat-field path 24)
+                          -1)))
+              (if (>= mode 0)
+                  ;; S_IFMT 0o170000 = 61440, S_IFDIR 0o40000 = 16384.
+                  ;; Everything else keeps answering `file', which is what
+                  ;; the trichotomy did with the same inputs.
+                  (if (= (logand mode 61440) 16384) 'directory 'file)
+                (if (= 0 (nelisp--syscall-path-int 21 (concat path "/") 0))
+                    'directory
+                  'file)))))))
 ;; nelisp--syscall-readdir: pure-elisp reimplementation on top of the
 ;; working `nelisp--syscall-readdir-names' builtin.  The Rust-side
 ;; `nelisp--syscall-readdir' is a CLASS-2 deferred builtin on the standalone
@@ -8636,7 +8756,15 @@ and only running both says which."
     (and (stringp filename)
          (> (length filename) 0)
          (let ((c (aref filename 0)))
-           (or (= c 47) (= c 126))))))      ; "/" or "~"
+           (or (= c 47) (= c 126)             ; "/" or "~"
+               ;; Doc 201 §4 follow-up: on windows-nt a drive-letter name
+               ;; ("C:/x", "C:\\x") and a rooted backslash name ("\\x") are
+               ;; absolute too, and answering nil for one is what sent
+               ;; `expand-file-name' anchoring "C:/Windows" onto "/".  A
+               ;; backslash name stays relative on every other target, where
+               ;; it is an ordinary character in a file name.
+               (and (nelisp--windows-paths-p)
+                    (or (= c 92) (and (nelisp--path-drive filename) t))))))))
 (unless (fboundp 'rename-file)
   (defun rename-file (file newname &optional ok-if-already-exists)
     (nelisp--check-string file)
