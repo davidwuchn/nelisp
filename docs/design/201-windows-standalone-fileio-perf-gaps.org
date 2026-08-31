@@ -1484,6 +1484,72 @@ direct attribution -- strong inference, since a scanning stall cannot hide
 inside a process that is 99% busy, nor explain kernel time in a run that
 opens no files.
 
+*** §6.9 item 5, worked: two readers, both wrong, and a fix not worth building
+
+The question was why `read-from-string` is slow. The answer is that it is
+a DIFFERENT READER: it resolves to `nelisp--rd-one', written in
+interpreted Elisp, while `load' has always used the native parser, which is
+also exposed to Lisp as `nelisp--read-all-from-string-native'.  That
+builtin's own comment says what it is for -- "a bulk reader without the
+per-form `read-from-string' / `nelisp--rd-one' compatibility path".
+
+| 9114 bytes of nested conses | seconds |
+|---|---|
+| `read-from-string' (Elisp) | 26.410 |
+| the native reader | 0.003 |
+
+Identical results, ~8800x apart.
+
+`read' is rerouted, exactly: it answers the first form and discards the
+position, which is the one part of `read-from-string''s contract the bulk
+reader cannot supply.  `read-from-string' is NOT: its `(FORM . END-INDEX)'
+is what callers iterate on, and an index guessed from the last
+non-whitespace character is wrong the moment a comment follows the form.
+A silently wrong index is worse than a slow correct one.
+
+**Two reader defects, found only by comparing them.**  Having both
+reachable from Lisp made the differential possible, and both were wrong,
+in opposite directions:
+
+| input | Emacs 30.1 | `nelisp--rd-one' | native parser |
+|---|---|---|---|
+| `?x` | 120 | symbol `?x` | 120 |
+| `? ` | 32 | 32 | symbol `?` |
+
+`nelisp--rd-one' had no `?' arm at all.  The native lexer sent `?' followed
+by whitespace to the atom lexer, and since `load' uses that lexer,
+`(setq x ? )' -- valid Elisp -- failed to load with `void-variable: (?)'.
+Both fixed; both now answer identically to stock Emacs on a 40-case corpus,
+diffed line for line against Emacs output.
+`standalone-reader-reader-parity-smoke' is the check whose absence let both
+survive, and it needs no Emacs to hand.
+
+**The "real fix" is not worth building, and that is the useful part.**
+The obvious follow-up is a native single-form builtin returning
+`(FORM . INDEX)' -- the parser side already exists, since
+`bf_read_all_from_string_native' drives `nelisp_reader_parse_one' with a
+cursor whose position sits at offset 8.  Before writing it, the question
+worth asking is who would take that path, and the answer on this target is
+nobody:
+
+- `load' uses the native driver (228KB of `skk-vars.el' in 0.414s).
+- `read' now uses the native parser.
+- `nelisp--load-eval-source-incremental'
+  (`lisp/nelisp-stdlib-misc.el'), which DOES read form-by-form through
+  `read-from-string' and says in its own comment why it cannot use the bulk
+  reader -- the whole AST "can overflow the standalone arena on
+  upstream-sized package files" -- is not in the standalone image at all.
+  That file is referenced only from comments in the build script, and
+  `nelisp--load-eval-source-incremental' is not `fboundp' on the binary.
+  Checked, not assumed.
+
+So the exposure is user code that calls `read-from-string` directly, plus
+that incremental loader if a program loads `nelisp-stdlib-misc.el' itself
+(two gates do).  Real, but nothing the runtime does by default.  Building
+the builtin now would be a native-unit change -- the highest-blast-radius
+component there is -- for a path nothing takes.  It is worth building the
+day something needs it, and the note above says exactly where it goes.
+
 ** §6.9 What is still open
 
 Rewritten after §6.8's later rounds; three of its earlier items are simply
@@ -1515,14 +1581,12 @@ claim this document keeps finding elsewhere.
    patterns (§6.5).  It is the multiplier under everything above, and the
    only lever with no owner but us.  Two concrete threads into it: that
    unexplained 5%, and the allocation-shaped kernel time §6.8 measured.
-5. **`read-from-string` is not the reader `load` uses.**  Found while
-   testing whether the rule tree could be serialised: 9KB of nested conses
-   took 12.763s through `read-from-string`, where `load` reads
-   `skk-vars.el`'s 228KB in 0.414s.  Whatever `read-from-string` resolves
-   to on the standalone is a different and far slower path, and nothing
-   currently measures it.  Not chased here -- the rule-tree work routed
-   around it via `load` -- but a caller that does not know to route around
-   it will simply be slow.
+5. **A native single-form reader builtin**, if anything ever needs one.
+   Worked in §6.8: `read-from-string` is ~8800x slower than the native
+   parser, `read` now takes the native path, and both readers' `?` defects
+   are fixed and gated.  The remaining builtin is deliberately NOT built,
+   because nothing on this target takes that path -- see that section for
+   the check.  Where it goes is recorded there.
 6. **The mutating Windows path syscalls** (§6.3) remain `-ENOSYS`:
    unlink/rmdir/mkdir/rename/link/symlink/chmod/truncate/utimes, plus
    `readlink`/`statx`/`nanosleep`.
