@@ -481,6 +481,16 @@ standalone-reader-nonblocking-socket-smoke|scripts/nelisp-standalone-build.el|s/
 # measured RED at `mixed=(failed ("failed with code 0\n") nil
 # ("finished\n"))' (the "ok" case's own network status, expected `open').
 standalone-reader-network-process-nowait-smoke|packages/nelisp-process-adapter/src/nelisp-process-adapter.el|s/(if (= err 0)/(if (= err 999)/|a successful nonblocking connect (real SO_ERROR 0) is misclassified as failed, firing "failed with code 0\n" instead of transitioning to open
+# windows-x86_64 async-process fixture bound: suppress the shared-loop pump
+# entirely, so the child can start and write but its output can never reach
+# the filter.  The first fixture-dependent accept-process-output must exhaust
+# its relaxed 3.0s bound and the gate must fail with filter=nil; this proves
+# that the bound still bites instead of masking a genuine delivery hang.
+# Measured 2026-09-02 on windows-x86_64: the restricted harness reported
+# "went red as it should" for this row (checked=1, failed=0); after its trap
+# restored the file, the clean gate passed with filter=("first-" "second")
+# and the live-child sentinel "terminated\n".
+standalone-reader-process-adapter-smoke|packages/nelisp-process-adapter/src/nelisp-process-adapter.el|s/(when (nelisp-process-adapter--drain-and-fire p)/(when (and nil (nelisp-process-adapter--drain-and-fire p))/|the shared process pump never fires, so fixture output cannot be delivered and the relaxed Windows wait must expire red|windows-x86_64
 # Doc 194 P5 (feat/network-process-p345): manually verified RED-with-
 # injection / GREEN-with-injection-reverted before adding -- an accepted
 # child's `:filter' is dropped (set to nil) instead of copied from the

@@ -2812,22 +2812,34 @@ standalone-reader-async-core-smoke: standalone-reader
 # exit criterion.
 NELISP_PROCESS_ADAPTER_LOAD_1 = (load "packages/nelisp-eventloop/src/nelisp-async-core.el")
 NELISP_PROCESS_ADAPTER_LOAD_2 = (load "packages/nelisp-process-adapter/src/nelisp-process-adapter.el")
+PROCESS_ADAPTER_EXIT0_COMMAND = $(if $(filter windows%,$(STANDALONE_GATE_TARGET)),(list "C:/Windows/System32/cmd.exe" "/d" "/c" "exit 0"),(list "/bin/sh" "-c" "exit 0"))
+PROCESS_ADAPTER_EXIT7_COMMAND = $(if $(filter windows%,$(STANDALONE_GATE_TARGET)),(list "C:/Windows/System32/cmd.exe" "/d" "/c" "exit 7"),(list "/bin/sh" "-c" "exit 7"))
+PROCESS_ADAPTER_CAT_COMMAND = $(if $(filter windows%,$(STANDALONE_GATE_TARGET)),(list "$(STANDALONE_BIN)" "target/standalone-reader-process-child-cat.el"),(list "/bin/cat"))
+PROCESS_ADAPTER_ECHO_COMMAND = $(if $(filter windows%,$(STANDALONE_GATE_TARGET)),(list "$(STANDALONE_BIN)" "target/standalone-reader-process-child-echo.el"),(list "/bin/echo" "hi"))
+PROCESS_ADAPTER_SLEEP_COMMAND = $(if $(filter windows%,$(STANDALONE_GATE_TARGET)),(list "$(STANDALONE_BIN)" "target/standalone-reader-process-child-sleep.el"),(list "/bin/sleep" "1"))
 standalone-reader-process-adapter-smoke: standalone-reader
 	@mkdir -p target
+	@printf '%s\n' '(let (chunk) (while (setq chunk (read-stdin-bytes 4096)) (princ chunk)))' > target/standalone-reader-process-child-cat.el
+	@printf '%s\n' '$(NELISP_PROCESS_ADAPTER_LOAD_1)' '(nelisp-async-core--nanosleep 10)' > target/standalone-reader-process-child-sleep.el
+	# The child fixture measured 0.557-0.838s quiet and at most 2.56s with four
+	# concurrent children.  Windows gets 3.0s for the first output delivery:
+	# 0.44s above that loaded maximum, yet 177s below the gate's 180s timeout,
+	# so a child/pump hang still fails loudly.  Once started, the second pump
+	# keeps the original 0.3s bound; the deliberate live-child 0.2s stays short.
 	@printf '%s\n' \
 	  '$(NELISP_PROCESS_ADAPTER_LOAD_1)' \
 	  '$(NELISP_PROCESS_ADAPTER_LOAD_2)' \
-	  '(let* (chunks (p (make-process :name "cat" :command (list "/bin/cat") :filter (lambda (_p c) (push c chunks))))) (nelisp-process-write p "first-") (accept-process-output p 0.3) (nelisp-process-write p "second") (accept-process-output p 0.3) (nelisp-process-close-stdin p) (delete-process p) (nreverse chunks))' \
+	  '(let* (chunks (p (make-process :name "cat" :command $(PROCESS_ADAPTER_CAT_COMMAND) :filter (lambda (_p c) (push c chunks))))) (nelisp-process-write p "first-") (accept-process-output p $(if $(filter windows%,$(STANDALONE_GATE_TARGET)),3.0,0.3)) (nelisp-process-write p "second") (accept-process-output p 0.3) (nelisp-process-close-stdin p) (delete-process p) (nreverse chunks))' \
 	  > target/standalone-reader-process-adapter-smoke-filter.el
 	@printf '%s\n' \
 	  '$(NELISP_PROCESS_ADAPTER_LOAD_1)' \
 	  '$(NELISP_PROCESS_ADAPTER_LOAD_2)' \
-	  '(list (let (msgs (p (make-process :name "ok" :command (list "/bin/sh" "-c" "exit 0") :sentinel (lambda (_p m) (push m msgs))))) (accept-process-output p 1) (accept-process-output p 1) (car msgs)) (let (msgs (p (make-process :name "bad" :command (list "/bin/sh" "-c" "exit 7") :sentinel (lambda (_p m) (push m msgs))))) (accept-process-output p 1) (accept-process-output p 1) (car msgs)) (let (msgs (p (make-process :name "sl" :command (list "/bin/sleep" "1") :sentinel (lambda (_p m) (push m msgs))))) (accept-process-output p 0.2) (delete-process p) (car msgs)))' \
+	  '(list (let (msgs (p (make-process :name "ok" :command $(PROCESS_ADAPTER_EXIT0_COMMAND) :sentinel (lambda (_p m) (push m msgs))))) (accept-process-output p 1) (accept-process-output p 1) (car msgs)) (let (msgs (p (make-process :name "bad" :command $(PROCESS_ADAPTER_EXIT7_COMMAND) :sentinel (lambda (_p m) (push m msgs))))) (accept-process-output p 1) (accept-process-output p 1) (car msgs)) (let (msgs (p (make-process :name "sl" :command $(PROCESS_ADAPTER_SLEEP_COMMAND) :sentinel (lambda (_p m) (push m msgs))))) (accept-process-output p 0.2) (delete-process p) (car msgs)))' \
 	  > target/standalone-reader-process-adapter-smoke-sentinel.el
 	@printf '%s\n' \
 	  '$(NELISP_PROCESS_ADAPTER_LOAD_1)' \
 	  '$(NELISP_PROCESS_ADAPTER_LOAD_2)' \
-	  '(let* (fired2 (p1 (make-process :name "fast" :command (list "/bin/sh" "-c" "exit 0"))) (p2 (make-process :name "slow" :command (list "/bin/sleep" "1") :sentinel (lambda (_p m) (setq fired2 m))))) (accept-process-output p1 1) (let ((res (list fired2 (process-live-p p2)))) (delete-process p2) res))' \
+	  '(let* (fired2 (p1 (make-process :name "fast" :command $(PROCESS_ADAPTER_EXIT0_COMMAND))) (p2 (make-process :name "slow" :command $(PROCESS_ADAPTER_SLEEP_COMMAND) :sentinel (lambda (_p m) (setq fired2 m))))) (accept-process-output p1 1) (let ((res (list fired2 (process-live-p p2)))) (delete-process p2) res))' \
 	  > target/standalone-reader-process-adapter-smoke-narrow.el
 	@printf '%s\n' \
 	  '$(NELISP_PROCESS_ADAPTER_LOAD_1)' \
@@ -2874,8 +2886,12 @@ standalone-reader-process-adapter-smoke: standalone-reader
 # this smoke catching it.
 standalone-reader-process-adapter-smoke-red: standalone-reader
 	@mkdir -p target
+	@printf '%s\n' '(princ "hi\n")' > target/standalone-reader-process-child-echo.el
+	# Same 0.557-0.838s quiet / 2.56s four-child loaded fixture measurement as
+	# the full adapter gate: Windows gets 3.0s, leaving 0.44s above the measured
+	# maximum and 177s below the 180s outer timeout, so a hang remains a failure.
 	@printf '%s\n' \
-	  '(let (got) (make-process :name "t" :command (list "/bin/echo" "hi") :filter (lambda (_p chunk) (push chunk got))) (accept-process-output nil 1) got)' \
+	  '(let (got) (make-process :name "t" :command $(PROCESS_ADAPTER_ECHO_COMMAND) :filter (lambda (_p chunk) (push chunk got))) (accept-process-output nil $(if $(filter windows%,$(STANDALONE_GATE_TARGET)),3.0,1)) got)' \
 	  > target/standalone-reader-process-adapter-smoke-red-filter.el
 	@printf '%s\n' \
 	  '(let ((n 0)) (run-at-time 0 0.02 (lambda () (setq n (1+ n)))) (accept-process-output nil 0.3) (>= n 2))' \
@@ -2953,7 +2969,7 @@ standalone-reader-network-process-smoke: standalone-reader
 	@printf '%s\n' \
 	  '$(NELISP_PROCESS_ADAPTER_LOAD_1)' \
 	  '$(NELISP_PROCESS_ADAPTER_LOAD_2)' \
-	  '(let* ((lfd (nelisp-socket-listen "127.0.0.1" 55902)) (net (open-network-stream "netcli" nil "127.0.0.1" 55902)) (sfd (nelisp-socket-accept lfd)) msgs (sub (make-process :name "echo" :command (list "/bin/sh" "-c" "exit 0") :sentinel (lambda (_p m) (push m msgs))))) (accept-process-output nil 1) (accept-process-output nil 1) (let ((result (list (car msgs) (process-status net) (process-live-p sub)))) (delete-process net) (nelisp-socket-close sfd) (nelisp-socket-close lfd) result))' \
+	  '(let* ((lfd (nelisp-socket-listen "127.0.0.1" 55902)) (net (open-network-stream "netcli" nil "127.0.0.1" 55902)) (sfd (nelisp-socket-accept lfd)) msgs (sub (make-process :name "echo" :command $(PROCESS_ADAPTER_EXIT0_COMMAND) :sentinel (lambda (_p m) (push m msgs))))) (accept-process-output nil 1) (accept-process-output nil 1) (let ((result (list (car msgs) (process-status net) (process-live-p sub)))) (delete-process net) (nelisp-socket-close sfd) (nelisp-socket-close lfd) result))' \
 	  > target/standalone-reader-network-process-smoke-mixed.el
 	@red_out="$$($(STANDALONE_BIN) --load target/standalone-reader-network-process-smoke-red.el)"; \
 	roundtrip_out="$$($(STANDALONE_BIN) --load target/standalone-reader-network-process-smoke-roundtrip.el)"; \
@@ -3190,7 +3206,7 @@ standalone-reader-network-process-nowait-smoke: standalone-reader
 	@printf '%s\n' \
 	  '$(NELISP_PROCESS_ADAPTER_LOAD_1)' \
 	  '$(NELISP_PROCESS_ADAPTER_LOAD_2)' \
-	  '(let* (net-msgs sub-msgs (lfd (nelisp-socket-listen "127.0.0.1" 56011)) (net (make-network-process :name "net" :host "127.0.0.1" :service 56011 :nowait t :sentinel (lambda (_p m) (push m net-msgs)))) (sub (make-process :name "echo" :command (list "/bin/sh" "-c" "exit 0") :sentinel (lambda (_p m) (push m sub-msgs))))) (accept-process-output nil 2) (accept-process-output nil 2) (let ((result (list (process-status net) (reverse net-msgs) (process-live-p sub) (reverse sub-msgs)))) (delete-process net) (nelisp-socket-close lfd) result))' \
+	  '(let* (net-msgs sub-msgs (lfd (nelisp-socket-listen "127.0.0.1" 56011)) (net (make-network-process :name "net" :host "127.0.0.1" :service 56011 :nowait t :sentinel (lambda (_p m) (push m net-msgs)))) (sub (make-process :name "echo" :command $(PROCESS_ADAPTER_EXIT0_COMMAND) :sentinel (lambda (_p m) (push m sub-msgs))))) (accept-process-output nil 2) (accept-process-output nil 2) (let ((result (list (process-status net) (reverse net-msgs) (process-live-p sub) (reverse sub-msgs)))) (delete-process net) (nelisp-socket-close lfd) result))' \
 	  > target/standalone-reader-network-process-nowait-smoke-mixed.el
 	@ok_out="$$($(STANDALONE_BIN) --load target/standalone-reader-network-process-nowait-smoke-ok.el)"; \
 	refused_out="$$($(STANDALONE_BIN) --load target/standalone-reader-network-process-nowait-smoke-refused.el)"; \

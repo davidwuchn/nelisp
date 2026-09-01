@@ -740,8 +740,8 @@ A dispatch arm nothing installs is dead code that still links."
              '(nl_bi_process_make_object pid readfd stdin_writefd out)
              (nelisp-standalone--fileio-source)))))
 
-(ert-deftest nelisp-standalone-target-windows-process-slice1-is-per-name ()
-  "Windows slice 1 exposes only its complete output/normal-exit lifecycle."
+(ert-deftest nelisp-standalone-target-windows-process-lifecycle-is-per-name ()
+  "Windows x86-64 exposes its complete async-process lifecycle per name."
   (let* ((nelisp-standalone--target 'windows-x86_64)
          (arms (nelisp-standalone--process-dispatch-arms))
          (arm (lambda (name) (assoc (list :lit name) arms))))
@@ -754,23 +754,31 @@ A dispatch arm nothing installs is dead code that still links."
     (should (equal (cdr (funcall arm "nelisp-process-status"))
                    '(wf_write_int out
                      (nl_bi_process_windows_status_code (wf_arg_ptr args 0)))))
-    ;; Slice 2 names must remain catchably unsupported, not reach POSIX code.
-    (dolist (name '("nelisp-process-write" "nelisp-process-close-stdin"
-                    "nelisp-process-delete"))
-      (should-not (equal (cdr (funcall arm name))
-                         (cdr (assoc (list :lit name)
-                                     (let ((nelisp-standalone--target
-                                            'linux-x86_64))
-                                       (nelisp-standalone--process-dispatch-arms)))))))
+    (should (equal (cdr (funcall arm "nelisp-process-write"))
+                   '(nl_bi_process_windows_write args out)))
+    (should (equal (cdr (funcall arm "nelisp-process-close-stdin"))
+                   '(nl_bi_process_windows_close_stdin args out)))
+    (should (equal (cdr (funcall arm "nelisp-process-delete"))
+                   '(seq
+                     (nl_bi_process_windows_delete_object (wf_arg_ptr args 0))
+                     (wf_write_nil out))))
     (let ((source (nelisp-standalone--fileio-source)))
       (should (memq 'CreatePipe (flatten-tree source)))
       (should (memq 'SetHandleInformation (flatten-tree source)))
-      (should (memq 'PeekNamedPipe (flatten-tree source)))))
+      (should (memq 'PeekNamedPipe (flatten-tree source)))
+      (should (memq 'TerminateProcess (flatten-tree source)))))
   (let* ((nelisp-standalone--target 'windows-aarch64)
-         (start (assoc '(:lit "nelisp-process-start")
-                       (nelisp-standalone--process-dispatch-arms))))
+         (arms (nelisp-standalone--process-dispatch-arms))
+         (start (assoc '(:lit "nelisp-process-start") arms)))
     (should-not (equal (cdr start) '(nl_bi_process_start_process args out)))
-    (should-not (equal (cdr start) '(nl_bi_process_windows_start args out)))))
+    (should-not (equal (cdr start) '(nl_bi_process_windows_start args out)))
+    ;; Slice 2 remains catchably unsupported on the unfinished aarch64 arm.
+    ;; Every unsupported entry in this one dispatch build shares the exact
+    ;; same signal form object; compare to START rather than constructing a
+    ;; fresh gensym-bearing form that cannot be `equal'.
+    (dolist (name '("nelisp-process-write" "nelisp-process-close-stdin"
+                    "nelisp-process-delete"))
+      (should (eq (cdr (assoc (list :lit name) arms)) (cdr start))))))
 
 (ert-deftest nelisp-standalone-target-reader-process-syscalls-are-targeted ()
   "Process helper syscall numbers stay target-specific."

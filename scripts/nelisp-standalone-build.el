@@ -11529,7 +11529,7 @@ Wave-2 (C) appends bf_ash (shl/sar compose) + bf_str_lt (byte-lexicographic).")
     ((:lit "nelisp-process-delete") . (seq (nl_bi_process_delete_object (wf_arg_ptr args 0)) (wf_write_nil out))))
   "The pre-existing process arms, unchanged for every POSIX target.")
 
-(defconst nelisp-standalone--process-windows-slice1-real-arms
+(defconst nelisp-standalone--process-windows-real-arms
   '(((:lit "nelisp-process-call-process") . (nl_bi_process_call_process args out))
     ((:lit "nelisp-process-start") . (nl_bi_process_windows_start args out))
     ((:lit "nelisp-process-start-process") . (nl_bi_process_windows_start args out))
@@ -11539,9 +11539,12 @@ Wave-2 (C) appends bf_ash (shl/sar compose) + bf_str_lt (byte-lexicographic).")
     ((:lit "nelisp-process-status") . (wf_write_int out (nl_bi_process_windows_status_code (wf_arg_ptr args 0))))
     ((:lit "nelisp-process-exit-status") . (wf_write_int out (nl_bi_process_windows_exit_code (wf_arg_ptr args 0))))
     ((:lit "nelisp-process-read-output") . (nl_bi_process_windows_read_output args out))
+    ((:lit "nelisp-process-write") . (nl_bi_process_windows_write args out))
+    ((:lit "nelisp-process-close-stdin") . (nl_bi_process_windows_close_stdin args out))
     ((:lit "nelisp-process-poll") . (nl_bi_process_windows_poll args out))
-    ((:lit "nelisp-process-wait") . (wf_write_int out (nl_bi_process_windows_wait_object (wf_arg_ptr args 0)))))
-  "Complete output/normal-exit arms in windows-x86_64 slice 1.")
+    ((:lit "nelisp-process-wait") . (wf_write_int out (nl_bi_process_windows_wait_object (wf_arg_ptr args 0))))
+    ((:lit "nelisp-process-delete") . (seq (nl_bi_process_windows_delete_object (wf_arg_ptr args 0)) (wf_write_nil out))))
+  "Complete async-process lifecycle arms for windows-x86_64.")
 
 (defun nelisp-standalone--process-dispatch-arms ()
   "Return per-name process arms, keeping unfinished Windows names unsupported."
@@ -11549,9 +11552,9 @@ Wave-2 (C) appends bf_ash (shl/sar compose) + bf_str_lt (byte-lexicographic).")
                  '(windows-x86_64 windows-aarch64)))
       nelisp-standalone--process-posix-dispatch-arms
     (let ((real (if (eq nelisp-standalone--target 'windows-x86_64)
-                    nelisp-standalone--process-windows-slice1-real-arms
-                  (list (car nelisp-standalone--process-windows-slice1-real-arms)
-                        (nth 3 nelisp-standalone--process-windows-slice1-real-arms))))
+                    nelisp-standalone--process-windows-real-arms
+                  (list (car nelisp-standalone--process-windows-real-arms)
+                        (nth 3 nelisp-standalone--process-windows-real-arms))))
           (unsupported (nelisp-standalone--applyfn-unsupported-primitive-form)))
       (mapcar
        (lambda (posix-arm)
@@ -13024,9 +13027,10 @@ fork -> setup_child_fds -> execve -> wait4 body unchanged.  Windows targets
 GetExitCodeProcess -> CloseHandle spawn-model implementation instead, since
 Windows has no fork().  Both variants support the synchronous call shape
 `(call-process PROGRAM nil DESTINATION nil ARG...)' with DESTINATION = nil
-(discard), a plain string path, or `(:file LOGFILE)'; async start-process and
-stdin feeding stay POSIX-only / out of scope on Windows, matching the
-pre-existing `nl_os_process_fork' stub there."
+(discard), a plain string path, or `(:file LOGFILE)'.  The separate
+`nelisp-standalone--fileio-process-async-forms' supplies the complete
+CreatePipe/CreateProcessW lifecycle on windows-x86_64; windows-aarch64 keeps
+those async names unsupported."
   (pcase nelisp-standalone--target
     ((or 'windows-x86_64 'windows-aarch64)
      '(
@@ -13306,9 +13310,10 @@ Other targets return nil, preserving their generated process source exactly."
               (t err)))
       (defun nl_process_windows_last_error ()
         (nl_process_windows_map_errno (extern-call GetLastError)))
-      ;; Slots 0..5 preserve the POSIX public layout.  Slot 6 owns the process
-      ;; HANDLE; slot 1 remains the real DWORD pid returned to callers.
-      (defun nl_bi_process_windows_make_object (pid process_handle out_handle out)
+      ;; Slots 0..5 preserve the POSIX public layout.  Slot 5 owns the parent
+      ;; write end of the child's stdin pipe; slot 6 owns the process HANDLE;
+      ;; slot 1 remains the real DWORD pid returned to callers.
+      (defun nl_bi_process_windows_make_object (pid process_handle out_handle in_handle out)
         (seq
          (vector-make 7 out)
          (nl_bi_process_set_int out 0 1886547811)
@@ -13316,7 +13321,7 @@ Other targets return nil, preserving their generated process source exactly."
          (nl_bi_process_set_int out 2 out_handle)
          (nl_bi_process_set_int out 3 0)
          (nl_bi_process_set_int out 4 -1)
-         (nl_bi_process_set_int out 5 -1) ; no writable stdin in slice 1
+         (nl_bi_process_set_int out 5 in_handle)
          (nl_bi_process_set_int out 6 process_handle)
          0))
       (defun nl_bi_process_windows_mark_exit (proc code)
@@ -13389,6 +13394,57 @@ Other targets return nil, preserving their generated process source exactly."
                      0)
                   (nl_seq2 (nl_alloc_str buf n out) 0)))
             (nl_seq2 (wf_write_nil out) 0))))
+      (defun nl_bi_process_windows_write (args out)
+        (let* ((proc (wf_arg_ptr args 0))
+               (str (wf_arg_ptr args 1)))
+          (if (= (nl_bi_process_object_p_raw proc) 1)
+              (let* ((handle (nl_bi_process_get_int proc 5))
+                     (n (if (>= handle 0)
+                            (nl_os_write_file_handle
+                             handle (nl_bi_strptr str) (nl_bi_strlen str))
+                          -1)))
+                (if (< n 0)
+                    (nl_seq2 (wf_write_nil out) 0)
+                  (nl_seq2 (wf_write_int out n) 0)))
+            (nl_seq2 (wf_write_nil out) 0))))
+      (defun nl_bi_process_windows_close_stdin (args out)
+        (let* ((proc (wf_arg_ptr args 0)))
+          (if (= (nl_bi_process_object_p_raw proc) 1)
+              (let* ((handle (nl_bi_process_get_int proc 5)))
+                (seq
+                 (if (>= handle 0) (extern-call CloseHandle handle) 0)
+                 (nl_bi_process_set_int proc 5 -1)
+                 (wf_write_t out)))
+            (wf_write_nil out))))
+      (defun nl_bi_process_windows_delete_object (proc)
+        (if (= (nl_bi_process_object_p_raw proc) 1)
+            (let* ((status (nl_bi_process_windows_status_code proc))
+                   (process_handle (nl_bi_process_get_int proc 6))
+                   (out_handle (nl_bi_process_get_int proc 2))
+                   (in_handle (nl_bi_process_get_int proc 5)))
+              (seq
+               ;; TerminateProcess is asynchronous.  Wait only after it
+               ;; succeeds, then let refresh collect the real exit code and
+               ;; close the process HANDLE.  A failed termination request is
+               ;; never converted into an infinite wait.
+               (if (and (= status 0) (>= process_handle 0))
+                   ;; Preserve the adapter's established cross-target delete
+                   ;; contract: 128+SIGTERM(15) formats as "terminated\n".
+                   (if (= (extern-call TerminateProcess process_handle 143) 0)
+                       0
+                     (nl_bi_process_windows_refresh proc 1))
+                 0)
+               ;; If refresh above did not own/close it, deletion still does.
+               (if (>= (nl_bi_process_get_int proc 6) 0)
+                   (extern-call CloseHandle (nl_bi_process_get_int proc 6)) 0)
+               (if (>= out_handle 0) (extern-call CloseHandle out_handle) 0)
+               (if (>= in_handle 0) (extern-call CloseHandle in_handle) 0)
+               (nl_bi_process_set_int proc 2 -1)
+               (nl_bi_process_set_int proc 5 -1)
+               (nl_bi_process_set_int proc 6 -1)
+               (nl_bi_process_set_int proc 3 3)
+               0))
+          0))
       (defun nl_bi_process_windows_poll (args out)
         (let* ((proc (wf_arg_ptr args 0))
                (pipe_handle (nl_bi_process_get_int proc 2))
@@ -13469,10 +13525,9 @@ Other targets return nil, preserving their generated process source exactly."
                (extern-call VirtualFree si 0 32768)
                (extern-call CloseHandle child_stdout)
                (extern-call CloseHandle child_stdin)
-               ;; No parent writer is exposed in slice 1: child observes EOF.
-               (extern-call CloseHandle parent_stdin)
                (if (= created 0)
                    (seq (extern-call CloseHandle parent_stdout)
+                        (extern-call CloseHandle parent_stdin)
                         (extern-call VirtualFree pi 0 32768)
                         (wf_write_nil out))
                  (let* ((process_handle (ptr-read-u64 pi 0))
@@ -13482,7 +13537,7 @@ Other targets return nil, preserving their generated process source exactly."
                     (extern-call CloseHandle thread_handle)
                     (extern-call VirtualFree pi 0 32768)
                     (nl_bi_process_windows_make_object
-                     pid process_handle parent_stdout out))))))))))))
+                     pid process_handle parent_stdout parent_stdin out))))))))))))
 
 (defconst nelisp-standalone--fileio-forms-part3
   '(
@@ -16589,6 +16644,7 @@ dispatch arm in `nelisp-standalone--applyfn-dispatch-table'.")
                     ;; pipes, parent-end inheritance clearing, and nonblocking
                     ;; availability/error probes.
                     "CreatePipe" "SetHandleInformation" "PeekNamedPipe"
+                    "TerminateProcess"
                     "GetLastError"
                     ;; fix/windows-env-inherit: startup `nl_os_environ_init'
                     ;; env-block walk (see the windows os-base-forms comment).
