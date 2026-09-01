@@ -3266,6 +3266,19 @@ standalone-reader-nonblocking-socket-smoke: standalone-reader
 	# identical).  The Windows readiness bound is therefore 3.0s, about 0.95s
 	# of margin, while its poll timeout is 5s so a full timeout still fails the
 	# bound loudly.  NOWAIT connect itself stays under 1.0s on every target.
+	#
+	# "Still fails loudly" was run, not asserted -- a loosened constant with
+	# only an argument behind it is what this repo keeps getting burned by.
+	# Injection: the windows `nl_socket_poll_impl' asks WSAPoll for no events
+	# at all (`events' 0), so it can never report ready and must sit out its
+	# whole timeout.  Clean: gate PASS, probe elapsed1=0.001 ready=t
+	# elapsed2=2.040.  Injected: gate FAIL on BOTH cases
+	# (connect-ok=(t t nil nil 0) connect-refused=(t t nil nil t)), probe
+	# elapsed1=0.000 ready=nil elapsed2=5.009 -- past the 3.0s bound, which is
+	# the thing being checked.  Restored: PASS again.  Not a
+	# `tools/gate-mutations.txt' row: that file has no per-target column, and a
+	# windows-only injection would sit unreachable on linux, which is failure
+	# mode 1 in its own header.
 	@printf '%s\n' \
 	  '(let* ((start (float-time)) (lfd (nelisp-socket-listen "127.0.0.1" 55990 t)) (cfd (nelisp-socket-connect "127.0.0.1" 55990 t)) (elapsed1 (- (float-time) start)) (ready (nelisp-socket-poll cfd t 3000)) (elapsed2 (- (float-time) start)) (cerr (nelisp-socket-connect-error cfd))) (nelisp-socket-close cfd) (nelisp-socket-close lfd) (list (< elapsed1 1.0) (integerp cfd) ready (< elapsed2 1.0) cerr))' \
 	  > target/standalone-reader-nonblocking-socket-smoke-connect-ok.el
