@@ -16363,7 +16363,12 @@ dispatch arm in `nelisp-standalone--applyfn-dispatch-table'.")
                     ;; `nl_os_getcwd' (windows os-base-forms): backs
                     ;; `default-directory', which was nil on this target.
                     "GetCurrentDirectoryW"))
-        (cons "SHELL32.dll" (list "CommandLineToArgvW")))
+        (cons "SHELL32.dll" (list "CommandLineToArgvW"))
+        ;; Doc 138 socket slice 1: Winsock startup plus the connected-client
+        ;; operations implemented by `nelisp-standalone--socket-impl-forms'.
+        (cons "WS2_32.dll"
+              (list "WSAStartup" "WSAGetLastError" "socket" "ioctlsocket"
+                    "connect" "send" "recv" "closesocket")))
   "PE imports needed by the Windows-native standalone reader.")
 
 (defun nelisp-standalone--reader-pe-imports ()
@@ -19392,10 +19397,12 @@ the prelude's source fixes both without a second change."
 ;; were.
 (defun nelisp-standalone--socket-forms ()
   "Return the native socket units for the CURRENT `nelisp-standalone--target'.
-Empty list on every target except `linux-x86_64' -- see this file's socket
-section banner comment just above for why, and
-`nelisp-standalone--socket-dispatch-arms' for the non-Linux-x86_64 gate."
-  (if (not (eq nelisp-standalone--target 'linux-x86_64))
+The target-independent address parsers/builders and argument/error helpers are
+emitted for `linux-x86_64' and `windows-x86_64'.  See this file's socket section
+banner comment just above for the raw-memory boundary, and
+`nelisp-standalone--socket-dispatch-arms' for per-name target availability."
+  (if (not (memq nelisp-standalone--target
+                 '(linux-x86_64 windows-x86_64)))
       nil
     (append
      (list
@@ -19669,7 +19676,10 @@ section banner comment just above for why, and
       ;; print+abort -- is what makes this catchable).  ERRNO is the raw
       ;; (negative) syscall return value, or the sentinel -9999 for "not an
       ;; OS errno at all, `nl_socket_build_sockaddr' rejected the host
-      ;; string" (DNS/malformed-address, out of scope).
+      ;; string" (DNS/malformed-address, out of scope).  Windows call sites
+      ;; preserve this contract by negating the positive WSAE* value returned
+      ;; by `WSAGetLastError'; no POSIX errno mapping is attempted, so the
+      ;; user-visible magnitude is in the Winsock error-number space there.
       `(defun nl_socket_signal_error (errno)
          (let* ((tagbuf (alloc-bytes 24 1))
                 (nilslot (alloc-bytes 32 8))
@@ -19714,20 +19724,17 @@ construction, the error signaller, optional-argument decoding -- and is
 identical wherever sockets exist at all.  Only what is below touches the
 OS, and only that needs a second implementation.
 
-linux-x86_64 is still the only target with one.  A windows arm belongs
-here, over WS2_32 rather than raw syscall numbers, and the differences
-that matter are recorded so the next person does not rediscover them:
-AF_INET6 is 23 on Windows and 10 on Linux; a SOCKET is a handle rather
-than an fd, so `closesocket' rather than `close'; there is no
-`SOCK_NONBLOCK' type flag, so NOWAIT means `ioctlsocket' with FIONBIO;
-errors arrive through `WSAGetLastError' as WSAE* codes rather than as a
-negative errno return, so `nl_socket_signal_error' would need those
-mapped; and `WSAStartup' has to have run before any of it.  The PE side
-is already proven -- `lisp/nelisp-pe-write.el' emits a WS2_32.dll import
-directory today.  See docs/design/138 for the design and
-docs/design/201 §6.7 for the six gates this would turn green."
-  (if (eq nelisp-standalone--target 'linux-x86_64)
-      (list
+linux-x86_64 implements all eight names through raw syscalls.
+windows-x86_64 slice 1 implements only connect/send/recv/close over WS2_32;
+listen/accept/poll/connect-error deliberately remain unsupported and are never
+referenced by that target's dispatch arms.  Its AF_INET6 value is 23; SOCKET is
+a handle closed by `closesocket'; NOWAIT uses `ioctlsocket(FIONBIO)' rather
+than a socket type flag; call-site errors negate `WSAGetLastError' so the
+shared signaller still receives a negative number; and one reader-startup
+`WSAStartup(2.2)' call precedes user code.  See docs/design/138."
+  (pcase nelisp-standalone--target
+    ('linux-x86_64
+     (list
       ;; nelisp-socket-listen HOST PORT &optional NOWAIT -> listen-fd.
       ;; socket(2) -> setsockopt(2) SO_REUSEADDR (best-effort: a failure
       ;; here is not fatal, matching common practice) -> bind(2) ->
@@ -20013,37 +20020,116 @@ docs/design/201 §6.7 for the six gates this would turn green."
             (let* ((rc (syscall-direct 55 fd 1 4 optval optlen 0)))
               (if (< rc 0)
                   (nl_socket_signal_error rc)
-                (seq (wf_write_int out (ptr-read-u32 optval 0)) 0)))))))
-    nil))
+                (seq (wf_write_int out (ptr-read-u32 optval 0)) 0))))))))
+    ('windows-x86_64
+     (list
+      ;; Winsock is initialized once from the reader driver's startup path,
+      ;; before any user form can reach a socket dispatch arm.  WSADATA is 408
+      ;; bytes on Win64.  Unlike other Winsock calls, WSAStartup returns its
+      ;; error code directly rather than requiring WSAGetLastError.
+      '(defun nl_socket_init ()
+         (let* ((wsa_data (alloc-bytes 408 8))
+                (rc (extern-call WSAStartup 514 wsa_data)))
+           (if (= rc 0) 0 (nl_socket_signal_error (- 0 rc)))))
+      '(defun nl_socket_windows_error ()
+         (- 0 (extern-call WSAGetLastError)))
+      '(defun nl_socket_windows_close_error (sock errno)
+         (seq (extern-call closesocket sock)
+              (nl_socket_signal_error errno)))
+      ;; NOWAIT is a real supported mode in slice 1.  FIONBIO is a u_long
+      ;; command (#x8004667e) whose argument points at a four-byte 0/1 value.
+      '(defun nl_socket_windows_set_nonblock (sock enabled)
+         (let* ((arg (alloc-bytes 4 4)))
+           (seq
+            (ptr-write-u32 arg 0 enabled)
+            (let* ((rc (extern-call ioctlsocket sock 2147772030 arg)))
+              (if (= rc (- 0 1)) (nl_socket_windows_error) 0)))))
+      ;; The shared sockaddr_in6 builder writes Linux AF_INET6=10.  Its layout
+      ;; is otherwise byte-identical, so overwrite only the native-endian
+      ;; family byte with Winsock AF_INET6=23 after a successful build.
+      '(defun nl_socket_connect_impl (args out)
+         (let* ((host_sx (wf_arg_ptr args 0))
+                (host_ptr (nl_bi_strptr host_sx))
+                (host_len (nl_bi_strlen host_sx))
+                (port (wf_argval args 1))
+                (nowait (nl_socket_bool_arg args 2))
+                (family (if (= (nl_ipv6_has_colon_walk host_ptr 0 host_len) 1) 23 2))
+                (sock (extern-call socket family 1 0)))
+           (if (= sock (- 0 1))
+               (nl_socket_signal_error (nl_socket_windows_error))
+             (let* ((addr (if (= family 23) (alloc-bytes 28 1) (alloc-bytes 16 1)))
+                    (abuild (if (= family 23)
+                                (nl_socket_build_sockaddr6 host_ptr host_len port addr)
+                              (nl_socket_build_sockaddr host_ptr host_len port addr)))
+                    (alen (if (= family 23) 28 16)))
+               (if (< abuild 0)
+                   (nl_socket_windows_close_error sock (- 0 9999))
+                 (seq
+                  (if (= family 23) (ptr-write-u8 addr 0 23) 0)
+                  (let* ((nb_err (if (= nowait 1)
+                                     (nl_socket_windows_set_nonblock sock 1)
+                                   0)))
+                    (if (< nb_err 0)
+                        (nl_socket_windows_close_error sock nb_err)
+                      (let* ((crc (extern-call connect sock addr alen)))
+                        (if (= crc (- 0 1))
+                            (let* ((errno (nl_socket_windows_error)))
+                              ;; Microsoft documents WSAEWOULDBLOCK (10035)
+                              ;; as the in-flight result for nonblocking connect.
+                              (if (if (= nowait 1) (= errno (- 0 10035)) 0)
+                                  (seq (wf_write_int out sock) 0)
+                                (nl_socket_windows_close_error sock errno)))
+                          (seq (wf_write_int out sock) 0)))))))))))
+      '(defun nl_socket_send_impl (args out)
+         (let* ((sock (wf_argval args 0))
+                (str_sx (wf_arg_ptr args 1))
+                (n (extern-call send sock (nl_bi_strptr str_sx)
+                                (nl_bi_strlen str_sx) 0)))
+           (if (= n (- 0 1))
+               (nl_socket_signal_error (nl_socket_windows_error))
+             (seq (wf_write_int out n) 0))))
+      '(defun nl_socket_recv_impl (args out)
+         (let* ((sock (wf_argval args 0))
+                (maxbytes (wf_argval args 1))
+                (buf (alloc-bytes maxbytes 1))
+                (n (extern-call recv sock buf maxbytes 0)))
+           (if (= n (- 0 1))
+               (nl_socket_signal_error (nl_socket_windows_error))
+             (seq (nl_alloc_unibyte_str buf n out) 0))))
+      ;; Preserve the Linux primitive's cleanup contract: close is best-effort
+      ;; and always returns nil.  A SOCKET must never reach CloseHandle/close.
+      '(defun nl_socket_close_impl (args out)
+         (seq (extern-call closesocket (wf_argval args 0))
+              (wf_write_nil out)
+              0))))
+    (_ nil)))
 
 (defun nelisp-standalone--socket-dispatch-arms ()
   "Return the eight `nelisp-socket-*' `nelisp_apply_function' dispatch
 arms (six Phase 1 primitives + two doc 194 P3 additions, `nelisp-socket-
-poll'/`nelisp-socket-connect-error').  Real raw-SYSCALL implementations
-(`nelisp-standalone--socket-forms') on `linux-x86_64'; on every other
-target, the SAME catchable `nelisp-unsupported-primitive' signal Task A's
-fix installs as the unknown-builtin default -- the primitive names exist
-and are `fboundp', calling one just refuses loudly instead of either
-issuing a wrong syscall number for a target this DSL has not been taught,
-or silently failing to link (`nl_socket_listen_impl' et al. are only
-DEFINED on `linux-x86_64', so these dispatch arms must not reference them
-at all on other targets)."
-  (let ((names '("nelisp-socket-listen" "nelisp-socket-accept"
-                 "nelisp-socket-connect" "nelisp-socket-send"
-                 "nelisp-socket-recv" "nelisp-socket-close"
-                 "nelisp-socket-poll" "nelisp-socket-connect-error")))
-    (if (eq nelisp-standalone--target 'linux-x86_64)
-        (list
-         `((:lit "nelisp-socket-listen") . (nl_socket_listen_impl args out))
-         `((:lit "nelisp-socket-accept") . (nl_socket_accept_impl args out))
-         `((:lit "nelisp-socket-connect") . (nl_socket_connect_impl args out))
-         `((:lit "nelisp-socket-send") . (nl_socket_send_impl args out))
-         `((:lit "nelisp-socket-recv") . (nl_socket_recv_impl args out))
-         `((:lit "nelisp-socket-close") . (nl_socket_close_impl args out))
-         `((:lit "nelisp-socket-poll") . (nl_socket_poll_impl args out))
-         `((:lit "nelisp-socket-connect-error") . (nl_socket_connect_error_impl args out)))
-      (let ((sig (nelisp-standalone--applyfn-unsupported-primitive-form)))
-        (mapcar (lambda (nm) (cons (list :lit nm) sig)) names)))))
+poll'/`nelisp-socket-connect-error').  Availability is deliberately per name,
+not one all-or-nothing target boolean: linux-x86_64 has all eight real arms;
+windows-x86_64 slice 1 has only connect/send/recv/close.  Every absent name
+routes to the SAME catchable `nelisp-unsupported-primitive' form as the
+unknown-builtin default, so a partial target arm remains honestly unsupported
+instead of referencing an implementation that was never emitted."
+  (let ((entries
+         '(("nelisp-socket-listen" nl_socket_listen_impl linux-x86_64)
+           ("nelisp-socket-accept" nl_socket_accept_impl linux-x86_64)
+           ("nelisp-socket-connect" nl_socket_connect_impl linux-x86_64 windows-x86_64)
+           ("nelisp-socket-send" nl_socket_send_impl linux-x86_64 windows-x86_64)
+           ("nelisp-socket-recv" nl_socket_recv_impl linux-x86_64 windows-x86_64)
+           ("nelisp-socket-close" nl_socket_close_impl linux-x86_64 windows-x86_64)
+           ("nelisp-socket-poll" nl_socket_poll_impl linux-x86_64)
+           ("nelisp-socket-connect-error" nl_socket_connect_error_impl linux-x86_64)))
+        (sig (nelisp-standalone--applyfn-unsupported-primitive-form)))
+    (mapcar
+     (lambda (entry)
+       (cons (list :lit (car entry))
+             (if (memq nelisp-standalone--target (cddr entry))
+                 (list (cadr entry) 'args 'out)
+               sig)))
+     entries)))
 
 ;; ===================================================================
 ;; Doc 199 Tier 2 -- interpreter-callable Shape-B clone(2) workers.
@@ -21993,6 +22079,13 @@ correctly."
         ;; runtime-image commands) and sidesteps the deep-nesting bug entirely.
         (nl_argv_list_from argc sp0 1 argv_list)
         (nl_env_set_value ctx argv_sym argv_list)
+        ;; Doc 138 socket slice 1: the Windows implementation requires one
+        ;; successful WSAStartup before any other WS2_32 call.  This splice is
+        ;; emitted only for windows-x86_64 and runs exactly once at process
+        ;; startup, at the same shallow depth as `nl_os_environ_init'.
+        ,@(if (eq nelisp-standalone--target 'windows-x86_64)
+              '((nl_socket_init))
+            nil)
         ;; fix/windows-env-inherit: `nl_os_environ_init' is the real
         ;; GetEnvironmentStringsW-backed populator on Windows and a
         ;; `wf_write_nil' no-op (POSIX unchanged) everywhere else -- same

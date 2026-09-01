@@ -14457,7 +14457,13 @@ same branch and emit the same byte count."
                                      ;; above (see nelisp-standalone-build.el's
                                      ;; windows os-base-forms comment).
                                      GetEnvironmentStringsW
-                                     FreeEnvironmentStringsW))))
+                                     FreeEnvironmentStringsW
+                                     ;; Doc 138 socket slice 1: each import is
+                                     ;; reachable from a generated nested
+                                     ;; `let*', the same silent-corruption risk.
+                                     WSAStartup WSAGetLastError socket
+                                     ioctlsocket connect send recv
+                                     closesocket))))
          (call-temp-save-count 0)
          (call-needs-align needs-align))
     (when (and (not win64-p)

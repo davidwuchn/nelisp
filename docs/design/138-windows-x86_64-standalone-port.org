@@ -2322,10 +2322,43 @@ flag checked by the first socket call.  Do not put it in every call.
    =network-process-*= gates and =hosts-file-smoke= green.
 
 Do not start slice 2 before slice 1's gate is green.  A half-migrated
-socket layer is worse than none: the dispatch arms open as soon as
-=--socket-impl-forms= is non-empty, so a partial arm makes
+socket layer is worse than none: a partial arm would make
 =nelisp-socket-listen= reachable and broken rather than honestly
 unsupported.
+
+*Slice 1 landed 2026-09-01.*  =standalone-reader-dns-smoke= is green on
+windows-x86_64 through its LIVE lookup path (=(t open)=, not the no-egress
+SKIP), the windows aggregate went =checked=47 findings=11= ->
+=checked=47 findings=10= with no other gate's state changed, and all four
+targets still link 111 units.  Two corrections to what this section said
+before it was executed from, both measured while doing it:
+
+- The hazard above was real but its mechanism was misdescribed.  Nothing
+  keyed off =--socket-impl-forms= being non-empty:
+  =nelisp-standalone--socket-dispatch-arms= and
+  =nelisp-standalone--socket-forms= both branched on
+  =(eq nelisp-standalone--target 'linux-x86_64)= directly.  The gate is now
+  a per-NAME availability table, so a target may implement any subset and
+  every absent name still routes to =nelisp-unsupported-primitive=.  That
+  is what keeps slice 2's four names honest today; verified by probe
+  (=(unsupported unsupported unsupported unsupported)=) rather than assumed.
+- The error-space question this section left open is decided: windows call
+  sites negate =WSAGetLastError='s positive WSAE* value and hand that to the
+  unchanged =nl_socket_signal_error=, so the signaller's
+  negative-number contract holds and no POSIX mapping is attempted.  The
+  user-visible magnitude on this target is therefore a Winsock number.
+  Recorded in that function's own comment.  Checked first: nothing in
+  =packages/nelisp-process-adapter/= pattern-matches a specific errno --
+  it negates the value into a sentinel string, and compares
+  =nelisp-socket-connect-error= against =0= only.
+
+Also worth knowing before slice 2: =nelisp-socket-connect='s NOWAIT
+argument IS implemented on windows (=ioctlsocket(FIONBIO)=), but
+=nelisp-socket-poll= / =nelisp-socket-connect-error= are not, so a NOWAIT
+connect currently yields a socket no caller can drive to completion.  That
+is not a regression -- =connect= itself was unsupported before -- but it
+does mean the =:nowait= adapter path now fails at a later point than it
+used to, which will look like a new defect to anyone who does not know.
 
 ** How to verify, and the traps in doing so
 
