@@ -14450,6 +14450,8 @@ same branch and emit the same byte count."
           (and win64-p (memq name '(CreateFileW ReadFile WriteFile CloseHandle
                                      CreateProcessW WaitForSingleObject
                                      GetExitCodeProcess VirtualAlloc VirtualFree
+                                     CreatePipe SetHandleInformation PeekNamedPipe
+                                     GetLastError
                                      ;; fix/windows-env-inherit: startup
                                      ;; `nl_os_environ_init' reaches these from a
                                      ;; nested `let*' -- same corruption-risk

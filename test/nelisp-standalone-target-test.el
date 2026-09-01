@@ -693,11 +693,11 @@ A dispatch arm nothing installs is dead code that still links."
     (should (tree-member-p
              '((:lit "nelisp-process-call-process") .
                (nl_bi_process_call_process args out))
-             nelisp-standalone--applyfn-bf-arms))
+             (nelisp-standalone--process-dispatch-arms)))
     (should (tree-member-p
              '((:lit "nelisp-process-start") .
                (nl_bi_process_start_process args out))
-             nelisp-standalone--applyfn-bf-arms))
+             (nelisp-standalone--process-dispatch-arms)))
     (should (tree-member-p
              '((:lit "nelisp-portable-syscall") .
                (wf_write_int out (nl_bi_portable_syscall args)))
@@ -739,6 +739,38 @@ A dispatch arm nothing installs is dead code that still links."
     (should (tree-member-p
              '(nl_bi_process_make_object pid readfd stdin_writefd out)
              (nelisp-standalone--fileio-source)))))
+
+(ert-deftest nelisp-standalone-target-windows-process-slice1-is-per-name ()
+  "Windows slice 1 exposes only its complete output/normal-exit lifecycle."
+  (let* ((nelisp-standalone--target 'windows-x86_64)
+         (arms (nelisp-standalone--process-dispatch-arms))
+         (arm (lambda (name) (assoc (list :lit name) arms))))
+    (should (equal (cdr (funcall arm "nelisp-process-call-process"))
+                   '(nl_bi_process_call_process args out)))
+    (should (equal (cdr (funcall arm "nelisp-process-start"))
+                   '(nl_bi_process_windows_start args out)))
+    (should (equal (cdr (funcall arm "nelisp-process-poll"))
+                   '(nl_bi_process_windows_poll args out)))
+    (should (equal (cdr (funcall arm "nelisp-process-status"))
+                   '(wf_write_int out
+                     (nl_bi_process_windows_status_code (wf_arg_ptr args 0)))))
+    ;; Slice 2 names must remain catchably unsupported, not reach POSIX code.
+    (dolist (name '("nelisp-process-write" "nelisp-process-close-stdin"
+                    "nelisp-process-delete"))
+      (should-not (equal (cdr (funcall arm name))
+                         (cdr (assoc (list :lit name)
+                                     (let ((nelisp-standalone--target
+                                            'linux-x86_64))
+                                       (nelisp-standalone--process-dispatch-arms)))))))
+    (let ((source (nelisp-standalone--fileio-source)))
+      (should (memq 'CreatePipe (flatten-tree source)))
+      (should (memq 'SetHandleInformation (flatten-tree source)))
+      (should (memq 'PeekNamedPipe (flatten-tree source)))))
+  (let* ((nelisp-standalone--target 'windows-aarch64)
+         (start (assoc '(:lit "nelisp-process-start")
+                       (nelisp-standalone--process-dispatch-arms))))
+    (should-not (equal (cdr start) '(nl_bi_process_start_process args out)))
+    (should-not (equal (cdr start) '(nl_bi_process_windows_start args out)))))
 
 (ert-deftest nelisp-standalone-target-reader-process-syscalls-are-targeted ()
   "Process helper syscall numbers stay target-specific."
