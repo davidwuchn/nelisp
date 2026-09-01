@@ -21,6 +21,7 @@ cd "$(dirname "$0")/.." || exit 1
 # harness reads "the gate failed" as "the row is lethal", i.e. it would
 # report every row as proved without any of them having been exercised.
 MUTATION_TARGET_ARG=""
+MUTATION_TARGET=${NELISP_STANDALONE_TARGET:-linux-x86_64}
 if [ -n "${NELISP_STANDALONE_TARGET:-}" ]; then
   MUTATION_TARGET_ARG="NELISP_STANDALONE_TARGET=$NELISP_STANDALONE_TARGET"
   printf 'gate-mutation: target %s\n' "$NELISP_STANDALONE_TARGET"
@@ -61,6 +62,7 @@ gate_needs_rebuild() {
     nelisp-thread-allocating-standalone-smoke) return 0 ;;
     nelisp-thread-mirror-guard-standalone-smoke) return 0 ;;
     standalone-midform-gc-bounded) return 0 ;;
+    standalone-reader-nonblocking-socket-smoke) return 0 ;;
   esac
   # Doc 200: an `ert-full' row is only binary-sensitive when it mutates the
   # standalone build script itself.
@@ -155,6 +157,34 @@ run_gate() {
 }
 
 rows=$(grep -v '^#' tools/gate-mutations.txt | grep -v '^[[:space:]]*$')
+
+# Rows historically had exactly four fields.  A fifth is now an optional
+# standalone target scope; validate the whole table before selection or
+# mutation so a typo cannot silently widen/narrow a row, even when a filter
+# would otherwise hide that row from this run.
+row_number=0
+while IFS= read -r row; do
+  row_number=$((row_number+1))
+  field_count=1
+  field_tail=$row
+  while [ "${field_tail#*|}" != "$field_tail" ]; do
+    field_count=$((field_count+1))
+    field_tail=${field_tail#*|}
+  done
+  case "$field_count" in
+    4|5) ;;
+    *) echo "gate-mutation: FAIL (row $row_number has $field_count fields; expected GATE|FILE|SED|WHAT[|TARGET])"; exit 1 ;;
+  esac
+  IFS='|' read -r row_gate row_file row_expr row_what row_scope <<< "$row"
+  if [ -z "$row_gate" ] || [ -z "$row_file" ] || [ -z "$row_expr" ] || [ -z "$row_what" ]; then
+    echo "gate-mutation: FAIL (row $row_number has an empty required field)"
+    exit 1
+  fi
+  case "${row_scope:-}" in
+    ""|linux-x86_64|linux-aarch64|windows-x86_64|windows-aarch64|macos-x86_64|macos-aarch64) ;;
+    *) echo "gate-mutation: FAIL (row $row_number has malformed target scope '$row_scope')"; exit 1 ;;
+  esac
+done <<< "$rows"
 
 # Row selection.  Authoring a row requires proving it is REACHED -- inject it,
 # watch the gate go RED, restore, watch it go GREEN -- and doing that against
@@ -268,17 +298,21 @@ fi
 # a row, so a kill mid-row keeps the mutation.  This exits before any row
 # is touched.
 if [ -n "${NELISP_GATE_MUTATION_LIST_ONLY:-}" ]; then
-  printf '%s\n' "$rows" | awk -F'|' '{printf "  %-46s %s\n", $1, $2}'
+  printf '%s\n' "$rows" | awk -F'|' '{scope = (NF == 5 ? " [" $5 "]" : ""); printf "  %-46s %s%s\n", $1, $2, scope}'
   printf 'gate-mutation: %s row(s) selected (list-only; nothing was injected)\n' \
     "$(printf '%s\n' "$rows" | wc -l | tr -d ' ')"
   exit 0
 fi
 
 
-total=0; bad=0
-while IFS='|' read -r gate file expr what; do
+passed=0; failed=0; skipped=0
+while IFS='|' read -r gate file expr what scope; do
   [ -z "${gate:-}" ] && continue
-  total=$((total+1))
+  if [ -n "${scope:-}" ] && [ "$scope" != "$MUTATION_TARGET" ]; then
+    echo "  $gate: SKIP (row scope $scope does not include target $MUTATION_TARGET)"
+    skipped=$((skipped+1))
+    continue
+  fi
   backup="$(mktemp)"
   cp "$file" "$backup" || { echo "gate-mutation: FAIL (cannot back up $file)"; exit 1; }
   # Arm the interrupt-restore for this row before the file is touched.
@@ -286,7 +320,7 @@ while IFS='|' read -r gate file expr what; do
   sed -i "$expr" "$file"
   if cmp -s "$file" "$backup"; then
     echo "  $gate: SED MATCHED NOTHING -- the injection is stale ($what)"
-    bad=$((bad+1))
+    failed=$((failed+1))
     cp "$backup" "$file"; rm -f "$backup"; continue
   fi
   # A gate that needs the binary must see the mutated source, so rebuild --
@@ -335,7 +369,7 @@ while IFS='|' read -r gate file expr what; do
   if gate_needs_rebuild "$gate" "$file"; then
     if ! rebuild_checked; then
       echo "  $gate: HARNESS ERROR (rebuild with the injection failed; a stale binary would have read as PASS)"
-      bad=$((bad+1))
+      failed=$((failed+1))
       cp "$backup" "$file"; rm -f "$backup"; continue
     fi
   fi
@@ -379,27 +413,30 @@ while IFS='|' read -r gate file expr what; do
     rm -f "$baseline_log"
     if [ -n "$skip_before" ]; then
       echo "  $gate: SKIP (gate not runnable on this host: $skip_after)"
+      skipped=$((skipped+1))
     else
       echo "  $gate: STAYED GREEN BY SKIPPING once the defect landed -- the clean tree does not skip for the same reason, so the injection itself trips the skip path and hides behind it ($what)"
-      bad=$((bad+1))
+      failed=$((failed+1))
     fi
     rm -f "$backup"
     continue
   fi
   if [ "$gate_ok" = 1 ]; then
     echo "  $gate: STAYED GREEN with a real defect in front of it ($what)"
-    bad=$((bad+1))
+    failed=$((failed+1))
   else
     echo "  $gate: went red as it should ($what)"
+    passed=$((passed+1))
   fi
   cp "$backup" "$file"; rm -f "$backup"
   if gate_needs_rebuild "$gate" "$file"; then
     rebuild_checked || true
   fi
 done <<< "$rows"
-echo "GATE-COUNT checked=$total findings=$bad"
-if [ "$bad" -gt 0 ]; then
-  echo "gate-mutation: FAIL ($bad of $total gates did not catch their injected defect)"
+checked=$((passed+failed))
+echo "GATE-COUNT checked=$checked findings=$failed passed=$passed failed=$failed skipped=$skipped"
+if [ "$failed" -gt 0 ]; then
+  echo "gate-mutation: FAIL ($failed failed, $passed passed, $skipped skipped)"
   exit 1
 fi
-echo "gate-mutation: PASS ($total gates caught their injected defect)"
+echo "gate-mutation: PASS ($passed passed, $skipped skipped)"

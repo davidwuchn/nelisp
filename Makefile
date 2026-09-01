@@ -3279,10 +3279,9 @@ standalone-reader-nonblocking-socket-smoke: standalone-reader
 	# elapsed2=2.040.  Injected: gate FAIL on BOTH cases
 	# (connect-ok=(t t nil nil 0) connect-refused=(t t nil nil t)), probe
 	# elapsed1=0.000 ready=nil elapsed2=5.009 -- past the 3.0s bound, which is
-	# the thing being checked.  Restored: PASS again.  Not a
-	# `tools/gate-mutations.txt' row: that file has no per-target column, and a
-	# windows-only injection would sit unreachable on linux, which is failure
-	# mode 1 in its own header.
+	# the thing being checked.  Restored: PASS again.  This is now the
+	# windows-x86_64-scoped row in `tools/gate-mutations.txt'; target scoping keeps
+	# the injection from sitting unreachable on Linux (failure mode 1 there).
 	@printf '%s\n' \
 	  '(let* ((start (float-time)) (lfd (nelisp-socket-listen "127.0.0.1" 55990 t)) (cfd (nelisp-socket-connect "127.0.0.1" 55990 t)) (elapsed1 (- (float-time) start)) (ready (nelisp-socket-poll cfd t 3000)) (elapsed2 (- (float-time) start)) (cerr (nelisp-socket-connect-error cfd))) (nelisp-socket-close cfd) (nelisp-socket-close lfd) (list (< elapsed1 1.0) (integerp cfd) ready (< elapsed2 1.0) cerr))' \
 	  > target/standalone-reader-nonblocking-socket-smoke-connect-ok.el

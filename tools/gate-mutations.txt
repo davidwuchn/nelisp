@@ -1,11 +1,22 @@
 # Known-defect injections (tools/nelisp-gate-mutation.sh).
 #
-# Each row is: GATE | FILE | SED-EXPRESSION | WHAT IT BREAKS
+# Each row is: GATE | FILE | SED-EXPRESSION | WHAT IT BREAKS [| TARGET]
 #
 # The row is applied with `sed -i', the gate is run, and the file is
 # restored.  The gate MUST fail.  A gate that stays green with a real defect
 # in front of it is not a gate, and on 2026-08-19 three of them were in
 # exactly that state while printing PASS.
+#
+# TARGET is optional and is one exact standalone target name (for example
+# `linux-x86_64').  With no fifth field the row applies to every target, which
+# preserves every row written before target scoping existed.  An out-of-scope
+# row is SKIPPED before its file is touched: it did not test its gate and is
+# therefore neither a pass nor a failure.  The harness reports passed, failed,
+# and skipped separately; counting a skipped row as checked would recreate the
+# same "green while seeing nothing" failure this table exists to prevent.
+# Malformed scopes and any field count other than four or five are errors, so
+# a typo cannot quietly widen or narrow a row.  As before, `|' cannot appear
+# inside SED-EXPRESSION or WHAT because it is the field separator.
 #
 # Keep the injections small and obviously wrong.  A subtle one that a gate
 # legitimately does not cover teaches nothing except to delete the row.
@@ -167,7 +178,7 @@ gate-selfcheck|tools/nelisp-bootstrap-contract.el|s/^    (princ (format "GATE-CO
 # rebuilt clean immediately afterwards.  The mutation harness rebuild list
 # above includes this conditional-prerequisite standalone gate, so the row
 # cannot accidentally exercise a stale clean target/nelisp.
-nelisp-thread-mirror-guard-standalone-smoke|lisp/nelisp-cc-rootstack.el|s/(nl_thread_registry_find mirror-ptr)/(nl_thread_registry_find 0)/|worker registry lookup uses a non-worker key, so mirror/intern writes are admitted instead of raising the named condition
+nelisp-thread-mirror-guard-standalone-smoke|lisp/nelisp-cc-rootstack.el|s/(nl_thread_registry_find mirror-ptr)/(nl_thread_registry_find 0)/|worker registry lookup uses a non-worker key, so mirror/intern writes are admitted instead of raising the named condition|linux-x86_64
 #
 # 2026-08-23 (Doc 188 P1, buffer unification): standalone-reader-buffer-
 # smoke is new this session.  Confirmed by hand before this row was
@@ -305,7 +316,7 @@ nl-num-standalone-smoke|packages/nl-num/src/nl-num-rational.el|s/(+ (nl-num--rea
 # distinct result slots remain zero and the interpreter-driven reduction is 0
 # instead of 42.  This isolates a missing/torn result publication from a lost
 # completion increment (which would correctly keep the join waiting).
-nelisp-thread-standalone-smoke|scripts/nelisp-standalone-build.el|s/(ptr-write-u64 result 0 sum)/(ptr-write-u64 result 0 0)/|a GC-free worker signals completion without publishing its partial sum, so join returns but the interpreter observes 0 instead of 42
+nelisp-thread-standalone-smoke|scripts/nelisp-standalone-build.el|s/(ptr-write-u64 result 0 sum)/(ptr-write-u64 result 0 0)/|a GC-free worker signals completion without publishing its partial sum, so join returns but the interpreter observes 0 instead of 42|linux-x86_64
 # nelisp-thread-allocating-standalone-smoke: Doc 199's bounded-section active
 # publication.  Parked collection and both reclaim guards key off this bit;
 # forcing the unique begin store to zero makes the existing section-exit
@@ -330,7 +341,7 @@ nelisp-thread-standalone-smoke|scripts/nelisp-standalone-build.el|s/(ptr-write-u
 # last-parked=3 assertion fail.  This is intentionally an observer-boundary
 # mutation: the native park path still executes, so no stale-binary rebuild can
 # accidentally turn an unreachable mutation into a false green result.
-nelisp-thread-percpu-roots-smoke|tools/nelisp-thread-percpu-roots-smoke.el|s/(nth 18 (nelisp--debug-switch 0))/0/|the reached post-mark/sweep diagnostic reports zero parked workers, so the mandatory last-parked=3 assertion fails
+nelisp-thread-percpu-roots-smoke|tools/nelisp-thread-percpu-roots-smoke.el|s/(nth 18 (nelisp--debug-switch 0))/0/|the reached post-mark/sweep diagnostic reports zero parked workers, so the mandatory last-parked=3 assertion fails|linux-x86_64
 # A second percpu row bypassing nl_thread_park_request_begin was tried and
 # REMOVED: it reproduces 10/10 locally but CI round 25 reported it as
 # 'STAYED GREEN with a real defect in front of it', i.e. the defect it injects
@@ -368,7 +379,7 @@ standalone-reader-bounded-backtrace-smoke|scripts/nelisp-standalone-build.el|s/(
 # production default boot state.  The mutation harness rebuilds the injected
 # and restored binaries because this row changes generated native code, not
 # the host-side checker.
-standalone-midform-gc-bounded|scripts/nelisp-standalone-build.el|s/(defun nl_os_empty_chunk_reclaim_p () 1)/(defun nl_os_empty_chunk_reclaim_p () 0)/|Linux sweep stops releasing proven-empty growth chunks, restoring linear default-loop RSS growth
+standalone-midform-gc-bounded|scripts/nelisp-standalone-build.el|s/(defun nl_os_empty_chunk_reclaim_p () 1)/(defun nl_os_empty_chunk_reclaim_p () 0)/|Linux sweep stops releasing proven-empty growth chunks, restoring linear default-loop RSS growth|linux-x86_64
 # precise-root-coverage: the row this gate was built around.  Deleting the
 # executing form's own root arm is the defect shape any change to the recorded
 # root set risks, and in the SHIPPED configuration it is invisible: measured
@@ -417,7 +428,7 @@ precise-root-coverage|scripts/nelisp-standalone-build.el|s/(nl_seq2 (nl_gc_mark_
 # same target, new surrounding text; re-verified RED-with-injection
 # (accept4 fails every connection with EINVAL) / GREEN-with-injection-
 # reverted before updating.
-standalone-reader-socket-smoke|scripts/nelisp-standalone-build.el|s/(cfd (syscall-direct 288 (wf_argval args 0) 0 0 flags 0 0)))/(cfd (syscall-direct 289 (wf_argval args 0) 0 0 flags 0 0)))/|accept4 issues the wrong raw syscall number, so nelisp-socket-accept fails on every connection instead of returning the queued one
+standalone-reader-socket-smoke|scripts/nelisp-standalone-build.el|s/(cfd (syscall-direct 288 (wf_argval args 0) 0 0 flags 0 0)))/(cfd (syscall-direct 289 (wf_argval args 0) 0 0 flags 0 0)))/|accept4 issues the wrong raw syscall number, so nelisp-socket-accept fails on every connection instead of returning the queued one|linux-x86_64
 # Doc 194 P0 (feat/network-process-p0): manually verified RED-with-
 # injection / GREEN-with-injection-reverted before adding -- the
 # synchronous client's initial status flips from `open' to `closed' at
@@ -454,7 +465,12 @@ standalone-reader-dns-smoke|packages/nelisp-process-adapter/src/nelisp-process-a
 # measured RED at `connect-ok=(t t nil t 0) connect-refused=(t t nil t
 # t)' (the two `nil's are the `ready' checks, both wrongly false), GREEN
 # again with `7' restored.
-standalone-reader-nonblocking-socket-smoke|scripts/nelisp-standalone-build.el|s/(let\* ((rc (syscall-direct 7 pfd 1 timeout 0 0 0))/(let* ((rc (syscall-direct 230 pfd 1 timeout 0 0 0))/|nelisp-socket-poll issues clock_nanosleep(230) instead of poll(7), so it silently always answers not-ready regardless of true socket readiness
+standalone-reader-nonblocking-socket-smoke|scripts/nelisp-standalone-build.el|s/(let\* ((rc (syscall-direct 7 pfd 1 timeout 0 0 0))/(let* ((rc (syscall-direct 230 pfd 1 timeout 0 0 0))/|nelisp-socket-poll issues clock_nanosleep(230) instead of poll(7), so it silently always answers not-ready regardless of true socket readiness|linux-x86_64
+# feat/windows-socket-arm: Windows-only refusal-bound proof from the gate's
+# Makefile comment.  `events' 0 makes WSAPoll wait out its full timeout.
+# Clean: PASS, elapsed2=2.040.  Injected: FAIL, elapsed2=5.009, beyond the
+# relaxed 3.0s refusal bound.  Restored: PASS again.
+standalone-reader-nonblocking-socket-smoke|scripts/nelisp-standalone-build.el|s/(events (if (= want_write 1) 16 768))/(events 0)/|the Windows WSAPoll arm requests no events, so refusal readiness waits the full 5s timeout and violates the deliberately relaxed 3s bound|windows-x86_64
 # Doc 194 P4 (feat/network-process-p345): manually verified RED-with-
 # injection / GREEN-with-injection-reverted before adding -- the async
 # connect-completion status machine's own success/failure branch is
