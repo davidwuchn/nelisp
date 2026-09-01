@@ -19988,7 +19988,7 @@ signaller receives their negative form; and one reader-startup
            (seq
             (ptr-write-u32 pfd 0 fd)
             (ptr-write-u32 pfd 4 events)
-            (let* ((rc (syscall-direct 230 pfd 1 timeout 0 0 0))
+            (let* ((rc (syscall-direct 7 pfd 1 timeout 0 0 0))
                    (revents (/ (ptr-read-u32 pfd 4) 65536)))
               (if (if (> rc 0) (if (= (logand revents mask) 0) 0 1) 0)
                   (wf_write_t out)
