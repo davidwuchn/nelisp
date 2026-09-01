@@ -2485,12 +2485,16 @@ standalone-reader-match-data-smoke: standalone-reader
 # polyfill derived from the already-working `float-time': decomposes the
 # epoch-seconds double into host Emacs's (HIGH LOW USEC PSEC) shape (PSEC
 # always 0, see the defun's comment for why).  Asserts HIGH*65536+LOW
-# reconstructs the same whole-second count `(floor (float-time))' gives,
-# and that USEC/PSEC are in-range.
+# reconstructs a whole-second count inside two `float-time' reads bracketing
+# `current-time', and that USEC/PSEC are in-range.  Comparing against one
+# later read raced at a second boundary: measured 0/170 failures unloaded and
+# 1/300 under CPU load, with only this equality false.  The closed interval is
+# normally one exact second; if a boundary is crossed, it contains precisely
+# the possible seconds at which the bracketed `current-time' read occurred.
 standalone-reader-current-time-smoke: standalone-reader
 	@mkdir -p target
 	@printf '%s\n' \
-	  '(let* ((tm (current-time)) (hi (nth 0 tm)) (lo (nth 1 tm)) (us (nth 2 tm)) (ps (nth 3 tm))) (list (= (length tm) 4) (= (+ (* hi 65536) lo) (floor (float-time))) (and (>= us 0) (< us 1000000)) (= ps 0)))' \
+	  '(let* ((before (float-time)) (tm (current-time)) (after (float-time)) (hi (nth 0 tm)) (lo (nth 1 tm)) (us (nth 2 tm)) (ps (nth 3 tm)) (secs (+ (* hi 65536) lo))) (list (= (length tm) 4) (and (>= secs (floor before)) (<= secs (floor after))) (and (>= us 0) (< us 1000000)) (= ps 0)))' \
 	  > target/standalone-reader-current-time-smoke.el
 	@out="$$($(STANDALONE_BIN) --load target/standalone-reader-current-time-smoke.el)"; \
 	if [ "$$out" = "(t t t t)" ]; then \
