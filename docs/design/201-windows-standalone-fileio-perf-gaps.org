@@ -1556,20 +1556,30 @@ Rewritten after §6.8's later rounds; three of its earlier items are simply
 done, and leaving them standing would have been the same kind of stale
 claim this document keeps finding elsewhere.
 
-1. **10 windows-native gate failures** (§6.7's table): sockets (5), async
-   process (2), FFI (2), and `repl-smoke`'s near-end arena behaviour (1).
-   Was 11 until 2026-09-01, when Doc 138's socket work brief slice 1 (the
-   windows arm of `nelisp-standalone--socket-impl-forms` over WS2_32:
-   connect/send/recv/close plus one startup `WSAStartup`) turned
-   `standalone-reader-dns-smoke` green -- measured, `checked=47
-   findings=11` before and `checked=47 findings=10` after, with the gate
-   taking its LIVE lookup path (`(t open)`) rather than its no-egress SKIP.
-   The five socket gates still red are `network-process-smoke`, `-server-`,
-   `-nowait-`, `nonblocking-socket-smoke` and `hosts-file-smoke`; all five
-   need slice 2 (listen/accept/poll/connect-error), which is why slice 1
-   left those four primitive names routed to
-   `nelisp-unsupported-primitive` on this target rather than half-wiring
-   them.
+1. **7 windows-native gate failures** (§6.7's table): async process (4),
+   FFI (2), and `repl-smoke`'s near-end arena behaviour (1).  **No socket
+   gate is red any more, and no gate is now waiting on socket work.**
+   Was 11 until 2026-09-01, when Doc 138's socket work brief was executed
+   in two slices and took it to 10 and then to 7, each number measured on
+   this host rather than claimed:
+
+   - Slice 1 (`connect`/`send`/`recv`/`close` over WS2_32 plus one startup
+     `WSAStartup`) turned `standalone-reader-dns-smoke` green, `findings=11`
+     -> `10`, with the gate taking its LIVE lookup path (`(t open)`) rather
+     than the no-egress SKIP path that also exits 0.
+   - Slice 2 (`listen`/`accept`/`poll`/`connect-error`) turned
+     `hosts-file-smoke`, `nonblocking-socket-smoke` and
+     `network-process-server-smoke` green, `findings=10` -> `7`.
+
+   The two `network-process-*` gates that stay red are **reclassified**:
+   their socket halves now pass (`network-process-smoke`'s roundtrip and
+   refused-connect cases, `-nowait-`'s success and refusal cases including
+   the `"failed with code 111\n"` sentinel), and only their mixed cases
+   fail, at `make-process` with `(processp nil)`.  They belong to the
+   windows async-process arm, not to sockets -- which is why the async
+   process count above is 4 rather than 2.  Doc 138's work brief opened by
+   saying six gates waited on the socket arm "and nothing else"; that was
+   measured wrong and is corrected there.
    None is a regression.  Doc 138 owns the socket and spawn work by
    lineage, carries the design, and now carries a work brief for the
    socket half written against the refactor in `nelisp-standalone--socket-impl-forms`

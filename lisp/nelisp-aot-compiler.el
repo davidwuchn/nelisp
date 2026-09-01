@@ -14462,7 +14462,8 @@ same branch and emit the same byte count."
                                      ;; reachable from a generated nested
                                      ;; `let*', the same silent-corruption risk.
                                      WSAStartup WSAGetLastError socket
-                                     ioctlsocket connect send recv
+                                     ioctlsocket setsockopt bind listen accept
+                                     connect send recv WSAPoll getsockopt
                                      closesocket))))
          (call-temp-save-count 0)
          (call-needs-align needs-align))

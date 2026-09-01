@@ -16364,11 +16364,13 @@ dispatch arm in `nelisp-standalone--applyfn-dispatch-table'.")
                     ;; `default-directory', which was nil on this target.
                     "GetCurrentDirectoryW"))
         (cons "SHELL32.dll" (list "CommandLineToArgvW"))
-        ;; Doc 138 socket slice 1: Winsock startup plus the connected-client
-        ;; operations implemented by `nelisp-standalone--socket-impl-forms'.
+        ;; Doc 138 socket slices 1-2: Winsock startup plus the connected-client,
+        ;; listening, readiness and connect-status operations implemented by
+        ;; `nelisp-standalone--socket-impl-forms'.
         (cons "WS2_32.dll"
               (list "WSAStartup" "WSAGetLastError" "socket" "ioctlsocket"
-                    "connect" "send" "recv" "closesocket")))
+                    "setsockopt" "bind" "listen" "accept" "connect"
+                    "send" "recv" "WSAPoll" "getsockopt" "closesocket")))
   "PE imports needed by the Windows-native standalone reader.")
 
 (defun nelisp-standalone--reader-pe-imports ()
@@ -19677,9 +19679,10 @@ banner comment just above for the raw-memory boundary, and
       ;; (negative) syscall return value, or the sentinel -9999 for "not an
       ;; OS errno at all, `nl_socket_build_sockaddr' rejected the host
       ;; string" (DNS/malformed-address, out of scope).  Windows call sites
-      ;; preserve this contract by negating the positive WSAE* value returned
-      ;; by `WSAGetLastError'; no POSIX errno mapping is attempted, so the
-      ;; user-visible magnitude is in the Winsock error-number space there.
+      ;; preserve this contract by mapping the common WSAE* values to their
+      ;; POSIX equivalents at the target boundary, then negating the result.
+      ;; Unmapped Winsock values retain their real magnitude rather than being
+      ;; flattened to an incorrect POSIX errno.
       `(defun nl_socket_signal_error (errno)
          (let* ((tagbuf (alloc-bytes 24 1))
                 (nilslot (alloc-bytes 32 8))
@@ -19725,12 +19728,11 @@ identical wherever sockets exist at all.  Only what is below touches the
 OS, and only that needs a second implementation.
 
 linux-x86_64 implements all eight names through raw syscalls.
-windows-x86_64 slice 1 implements only connect/send/recv/close over WS2_32;
-listen/accept/poll/connect-error deliberately remain unsupported and are never
-referenced by that target's dispatch arms.  Its AF_INET6 value is 23; SOCKET is
-a handle closed by `closesocket'; NOWAIT uses `ioctlsocket(FIONBIO)' rather
-than a socket type flag; call-site errors negate `WSAGetLastError' so the
-shared signaller still receives a negative number; and one reader-startup
+windows-x86_64 implements all eight over WS2_32.  Its AF_INET6 value is 23;
+SOCKET is a handle closed by `closesocket'; NOWAIT uses
+`ioctlsocket(FIONBIO)' rather than a socket type flag; common WSAE* values are
+mapped to POSIX errno numbers at the Windows boundary before the shared
+signaller receives their negative form; and one reader-startup
 `WSAStartup(2.2)' call precedes user code.  See docs/design/138."
   (pcase nelisp-standalone--target
     ('linux-x86_64
@@ -20031,8 +20033,30 @@ shared signaller still receives a negative number; and one reader-startup
          (let* ((wsa_data (alloc-bytes 408 8))
                 (rc (extern-call WSAStartup 514 wsa_data)))
            (if (= rc 0) 0 (nl_socket_signal_error (- 0 rc)))))
+      ;; Translate only errors this socket surface can actually produce:
+      ;; WSAEADDRINUSE, WSAENETUNREACH, WSAECONNRESET, WSAETIMEDOUT,
+      ;; WSAECONNREFUSED, WSAEHOSTUNREACH, WSAEWOULDBLOCK, WSAEINPROGRESS and
+      ;; WSAEALREADY.  An unknown value passes through unchanged: retaining a
+      ;; real Winsock number is safer than inventing the wrong POSIX errno.
+      '(defun nl_socket_windows_map_errno (errno)
+         (if (= errno 10048) 98
+           (if (= errno 10051) 101
+             (if (= errno 10054) 104
+               (if (= errno 10060) 110
+                 (if (= errno 10061) 111
+                   (if (= errno 10065) 113
+                     (if (= errno 10035) 11
+                       (if (= errno 10036) 115
+                         (if (= errno 10037) 115 errno))))))))))
+      '(defun nl_socket_windows_raw_error ()
+         (extern-call WSAGetLastError))
       '(defun nl_socket_windows_error ()
-         (- 0 (extern-call WSAGetLastError)))
+         (- 0 (nl_socket_windows_map_errno (nl_socket_windows_raw_error))))
+      ;; Winsock's int-returning functions return SOCKET_ERROR, a signed
+      ;; 32-bit -1.  The standalone extern-call ABI exposes EAX zero-extended
+      ;; on Win64, so the observable value is #xffffffff; accept both forms.
+      '(defun nl_socket_windows_socket_error_p (rc)
+         (if (= rc (- 0 1)) 1 (if (= rc 4294967295) 1 0)))
       '(defun nl_socket_windows_close_error (sock errno)
          (seq (extern-call closesocket sock)
               (nl_socket_signal_error errno)))
@@ -20043,7 +20067,73 @@ shared signaller still receives a negative number; and one reader-startup
            (seq
             (ptr-write-u32 arg 0 enabled)
             (let* ((rc (extern-call ioctlsocket sock 2147772030 arg)))
-              (if (= rc (- 0 1)) (nl_socket_windows_error) 0)))))
+              (if (= (nl_socket_windows_socket_error_p rc) 1)
+                  (nl_socket_windows_error)
+                0)))))
+      ;; The listener's NOWAIT bit is what makes accept itself nonblocking on
+      ;; an empty queue.  Winsock accept has no flags argument; the accepted
+      ;; socket inherits the listener's blocking mode.  The accept primitive
+      ;; below additionally applies its own NOWAIT argument to a successfully
+      ;; returned socket, preserving the existing returned-socket contract
+      ;; when a blocking listener already has a connection queued.
+      '(defun nl_socket_listen_impl (args out)
+         (let* ((host_sx (wf_arg_ptr args 0))
+                (host_ptr (nl_bi_strptr host_sx))
+                (host_len (nl_bi_strlen host_sx))
+                (port (wf_argval args 1))
+                (nowait (nl_socket_bool_arg args 2))
+                (family (if (= (nl_ipv6_has_colon_walk host_ptr 0 host_len) 1) 23 2))
+                (sock (extern-call socket family 1 0)))
+           (if (= sock (- 0 1))
+               (nl_socket_signal_error (nl_socket_windows_error))
+             (let* ((optval (alloc-bytes 4 4))
+                    (addr (if (= family 23) (alloc-bytes 28 1) (alloc-bytes 16 1)))
+                    (abuild (if (= family 23)
+                                (nl_socket_build_sockaddr6 host_ptr host_len port addr)
+                              (nl_socket_build_sockaddr host_ptr host_len port addr)))
+                    (alen (if (= family 23) 28 16)))
+               (if (< abuild 0)
+                   (nl_socket_windows_close_error sock (- 0 9999))
+                 (seq
+                  (ptr-write-u32 optval 0 1)
+                  ;; Winsock constants, not the numerically different Linux
+                  ;; SOL_SOCKET=1/SO_REUSEADDR=2 pair.  Best-effort, matching
+                  ;; the Linux arm's existing reuse option contract.
+                  (extern-call setsockopt sock 65535 4 optval 4)
+                  (if (= family 23) (ptr-write-u8 addr 0 23) 0)
+                  (let* ((nb_err (if (= nowait 1)
+                                     (nl_socket_windows_set_nonblock sock 1)
+                                   0)))
+                    (if (< nb_err 0)
+                        (nl_socket_windows_close_error sock nb_err)
+                      (let* ((brc (extern-call bind sock addr alen)))
+                        (if (= (nl_socket_windows_socket_error_p brc) 1)
+                            (nl_socket_windows_close_error
+                             sock (nl_socket_windows_error))
+                          (let* ((lrc (extern-call listen sock 16)))
+                            (if (= (nl_socket_windows_socket_error_p lrc) 1)
+                                (nl_socket_windows_close_error
+                                 sock (nl_socket_windows_error))
+                              (seq (wf_write_int out sock) 0)))))))))))))
+      '(defun nl_socket_accept_impl (args out)
+         (let* ((nowait (nl_socket_bool_arg args 1))
+                (sock (extern-call accept (wf_argval args 0) 0 0)))
+           (if (= sock (- 0 1))
+               (let* ((wsa_errno (nl_socket_windows_raw_error)))
+                 ;; WSAEWOULDBLOCK is the empty-queue soft outcome only when
+                 ;; NOWAIT was requested.  Both this check and connect's
+                 ;; in-flight check deliberately use the raw WSA code; every
+                 ;; value exposed or signalled is mapped afterwards.
+                 (if (if (= nowait 1) (= wsa_errno 10035) 0)
+                     (seq (wf_write_int out (- 0 1)) 0)
+                   (nl_socket_signal_error
+                    (- 0 (nl_socket_windows_map_errno wsa_errno)))))
+             (let* ((nb_err (if (= nowait 1)
+                                (nl_socket_windows_set_nonblock sock 1)
+                              0)))
+               (if (< nb_err 0)
+                   (nl_socket_windows_close_error sock nb_err)
+                 (seq (wf_write_int out sock) 0))))))
       ;; The shared sockaddr_in6 builder writes Linux AF_INET6=10.  Its layout
       ;; is otherwise byte-identical, so overwrite only the native-endian
       ;; family byte with Winsock AF_INET6=23 after a successful build.
@@ -20072,20 +20162,24 @@ shared signaller still receives a negative number; and one reader-startup
                     (if (< nb_err 0)
                         (nl_socket_windows_close_error sock nb_err)
                       (let* ((crc (extern-call connect sock addr alen)))
-                        (if (= crc (- 0 1))
-                            (let* ((errno (nl_socket_windows_error)))
+                        (if (= (nl_socket_windows_socket_error_p crc) 1)
+                            (let* ((wsa_errno (nl_socket_windows_raw_error)))
                               ;; Microsoft documents WSAEWOULDBLOCK (10035)
                               ;; as the in-flight result for nonblocking connect.
-                              (if (if (= nowait 1) (= errno (- 0 10035)) 0)
+                              ;; Compare raw here, exactly as accept does, then
+                              ;; map only a real error crossing the boundary.
+                              (if (if (= nowait 1) (= wsa_errno 10035) 0)
                                   (seq (wf_write_int out sock) 0)
-                                (nl_socket_windows_close_error sock errno)))
+                                (nl_socket_windows_close_error
+                                 sock (- 0 (nl_socket_windows_map_errno
+                                             wsa_errno)))))
                           (seq (wf_write_int out sock) 0)))))))))))
       '(defun nl_socket_send_impl (args out)
          (let* ((sock (wf_argval args 0))
                 (str_sx (wf_arg_ptr args 1))
                 (n (extern-call send sock (nl_bi_strptr str_sx)
                                 (nl_bi_strlen str_sx) 0)))
-           (if (= n (- 0 1))
+           (if (= (nl_socket_windows_socket_error_p n) 1)
                (nl_socket_signal_error (nl_socket_windows_error))
              (seq (wf_write_int out n) 0))))
       '(defun nl_socket_recv_impl (args out)
@@ -20093,9 +20187,53 @@ shared signaller still receives a negative number; and one reader-startup
                 (maxbytes (wf_argval args 1))
                 (buf (alloc-bytes maxbytes 1))
                 (n (extern-call recv sock buf maxbytes 0)))
-           (if (= n (- 0 1))
+           (if (= (nl_socket_windows_socket_error_p n) 1)
                (nl_socket_signal_error (nl_socket_windows_error))
              (seq (nl_alloc_unibyte_str buf n out) 0))))
+      ;; Measured on this Windows 11 host before choosing the implementation:
+      ;; a refused nonblocking loopback connect made WSAPoll return 1 with
+      ;; revents=#x13 (POLLWRNORM|POLLERR|POLLHUP), while select returned the
+      ;; same socket in exceptfds; both took about 2.0 seconds.  Thus WSAPoll
+      ;; does report failed connects here, contrary to Doc 138's warning, and
+      ;; select provides no timing advantage.  Its ABI is NOT Linux pollfd:
+      ;; Win64 WSAPOLLFD is 16 bytes (8-byte SOCKET, events at 8, revents at
+      ;; 10).  Its event numbers also differ: POLLIN=#x300, POLLOUT=#x10,
+      ;; POLLERR|POLLHUP|POLLNVAL=#x7.
+      '(defun nl_socket_poll_impl (args out)
+         (let* ((sock (wf_argval args 0))
+                (want_write (nl_socket_bool_arg args 1))
+                (timeout (wf_argval args 2))
+                (events (if (= want_write 1) 16 768))
+                (mask (if (= want_write 1) 23 775))
+                (pfd (alloc-bytes 16 8)))
+           (seq
+            (ptr-write-u64 pfd 0 sock)
+            (ptr-write-u32 pfd 8 events)
+            (let* ((rc (extern-call WSAPoll pfd 1 timeout))
+                   (revents (/ (ptr-read-u32 pfd 8) 65536)))
+              (if (= (nl_socket_windows_socket_error_p rc) 1)
+                  (nl_socket_signal_error (nl_socket_windows_error))
+                (if (if (> rc 0)
+                        (if (= (logand revents mask) 0) 0 1)
+                      0)
+                    (wf_write_t out)
+                  (wf_write_nil out)))))))
+      '(defun nl_socket_connect_error_impl (args out)
+         (let* ((sock (wf_argval args 0))
+                (optval (alloc-bytes 4 4))
+                (optlen (alloc-bytes 4 4)))
+           (seq
+            (ptr-write-u32 optlen 0 4)
+            ;; Winsock SOL_SOCKET=#xffff and SO_ERROR=#x1007.  Copying the
+            ;; Linux arm's numeric 1/4 pair queries different options.
+            (let* ((rc (extern-call getsockopt sock 65535 4103 optval optlen)))
+              (if (= (nl_socket_windows_socket_error_p rc) 1)
+                  (nl_socket_signal_error (nl_socket_windows_error))
+                (seq
+                 (wf_write_int out
+                               (nl_socket_windows_map_errno
+                                (ptr-read-u32 optval 0)))
+                 0))))))
       ;; Preserve the Linux primitive's cleanup contract: close is best-effort
       ;; and always returns nil.  A SOCKET must never reach CloseHandle/close.
       '(defun nl_socket_close_impl (args out)
@@ -20108,20 +20246,20 @@ shared signaller still receives a negative number; and one reader-startup
   "Return the eight `nelisp-socket-*' `nelisp_apply_function' dispatch
 arms (six Phase 1 primitives + two doc 194 P3 additions, `nelisp-socket-
 poll'/`nelisp-socket-connect-error').  Availability is deliberately per name,
-not one all-or-nothing target boolean: linux-x86_64 has all eight real arms;
-windows-x86_64 slice 1 has only connect/send/recv/close.  Every absent name
+not one all-or-nothing target boolean: linux-x86_64 and windows-x86_64 have
+all eight real arms.  Every absent name
 routes to the SAME catchable `nelisp-unsupported-primitive' form as the
 unknown-builtin default, so a partial target arm remains honestly unsupported
 instead of referencing an implementation that was never emitted."
   (let ((entries
-         '(("nelisp-socket-listen" nl_socket_listen_impl linux-x86_64)
-           ("nelisp-socket-accept" nl_socket_accept_impl linux-x86_64)
+         '(("nelisp-socket-listen" nl_socket_listen_impl linux-x86_64 windows-x86_64)
+           ("nelisp-socket-accept" nl_socket_accept_impl linux-x86_64 windows-x86_64)
            ("nelisp-socket-connect" nl_socket_connect_impl linux-x86_64 windows-x86_64)
            ("nelisp-socket-send" nl_socket_send_impl linux-x86_64 windows-x86_64)
            ("nelisp-socket-recv" nl_socket_recv_impl linux-x86_64 windows-x86_64)
            ("nelisp-socket-close" nl_socket_close_impl linux-x86_64 windows-x86_64)
-           ("nelisp-socket-poll" nl_socket_poll_impl linux-x86_64)
-           ("nelisp-socket-connect-error" nl_socket_connect_error_impl linux-x86_64)))
+           ("nelisp-socket-poll" nl_socket_poll_impl linux-x86_64 windows-x86_64)
+           ("nelisp-socket-connect-error" nl_socket_connect_error_impl linux-x86_64 windows-x86_64)))
         (sig (nelisp-standalone--applyfn-unsupported-primitive-form)))
     (mapcar
      (lambda (entry)

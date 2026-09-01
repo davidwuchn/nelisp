@@ -2249,10 +2249,12 @@ largest uncertainty (B1 + B2) first.
 
 * Work brief — the windows-native socket arm (written 2026-09-01)
 
-Six gates are waiting on this and nothing else: =standalone-reader-dns-smoke=,
+Six gates need this socket arm: =standalone-reader-dns-smoke=,
 =network-process-smoke=, =-server-=, =-nowait-=, =nonblocking-socket-smoke=,
-=hosts-file-smoke=.  (=tls-smoke= needs this AND PE dynamic linking, so it is
-not in scope here.)  Doc 201 §6.7 has the inventory that produced that list.
+=hosts-file-smoke=.  The two mixed =network-process-*= cases also need the
+separately-owned Windows async-process arm: measured here, =make-process=
+returned nil and failed with =(processp nil)=.  (=tls-smoke= needs this AND PE
+dynamic linking, so it is not in scope here.)  Doc 201 §6.7 has the inventory.
 
 This section is written to be executed from, not read for background: the
 design above already covers the Winsock calls, and everything below is what

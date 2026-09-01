@@ -3170,6 +3170,9 @@ standalone-reader-dns-smoke: standalone-reader
 # real status and the network connect still completes to `open'.
 standalone-reader-network-process-nowait-smoke: standalone-reader
 	@mkdir -p target
+	# Windows 11 measured refused-connect readiness at 2.03-2.05s.  Give the
+	# adapter's outer poll loop 3s there (0.95s margin); Linux keeps its proven
+	# 2s bound.  This remains a bounded completion assertion, never a hang mask.
 	@printf '%s\n' \
 	  '$(NELISP_PROCESS_ADAPTER_LOAD_1)' \
 	  '$(NELISP_PROCESS_ADAPTER_LOAD_2)' \
@@ -3178,7 +3181,7 @@ standalone-reader-network-process-nowait-smoke: standalone-reader
 	@printf '%s\n' \
 	  '$(NELISP_PROCESS_ADAPTER_LOAD_1)' \
 	  '$(NELISP_PROCESS_ADAPTER_LOAD_2)' \
-	  '(let* (msgs (cli (make-network-process :name "cli" :host "127.0.0.1" :service 1 :nowait t :sentinel (lambda (_p m) (push m msgs)))) (status0 (process-status cli))) (accept-process-output cli 2) (let ((result (list status0 (process-status cli) (reverse msgs)))) (ignore-errors (delete-process cli)) result))' \
+	  '(let* (msgs (cli (make-network-process :name "cli" :host "127.0.0.1" :service 1 :nowait t :sentinel (lambda (_p m) (push m msgs)))) (status0 (process-status cli))) (accept-process-output cli $(if $(filter windows%,$(STANDALONE_GATE_TARGET)),3,2)) (let ((result (list status0 (process-status cli) (reverse msgs)))) (ignore-errors (delete-process cli)) result))' \
 	  > target/standalone-reader-network-process-nowait-smoke-refused.el
 	@printf '%s\n' \
 	  '$(NELISP_PROCESS_ADAPTER_LOAD_1)' \
@@ -3259,11 +3262,15 @@ standalone-reader-network-process-server-smoke: standalone-reader
 
 standalone-reader-nonblocking-socket-smoke: standalone-reader
 	@mkdir -p target
+	# Windows 11 measured WSAPoll refusal readiness at 2.03-2.05s (select was
+	# identical).  The Windows readiness bound is therefore 3.0s, about 0.95s
+	# of margin, while its poll timeout is 5s so a full timeout still fails the
+	# bound loudly.  NOWAIT connect itself stays under 1.0s on every target.
 	@printf '%s\n' \
 	  '(let* ((start (float-time)) (lfd (nelisp-socket-listen "127.0.0.1" 55990 t)) (cfd (nelisp-socket-connect "127.0.0.1" 55990 t)) (elapsed1 (- (float-time) start)) (ready (nelisp-socket-poll cfd t 3000)) (elapsed2 (- (float-time) start)) (cerr (nelisp-socket-connect-error cfd))) (nelisp-socket-close cfd) (nelisp-socket-close lfd) (list (< elapsed1 1.0) (integerp cfd) ready (< elapsed2 1.0) cerr))' \
 	  > target/standalone-reader-nonblocking-socket-smoke-connect-ok.el
 	@printf '%s\n' \
-	  '(let* ((start (float-time)) (cfd (nelisp-socket-connect "127.0.0.1" 1 t)) (elapsed1 (- (float-time) start)) (ready (nelisp-socket-poll cfd t 3000)) (elapsed2 (- (float-time) start)) (cerr (nelisp-socket-connect-error cfd))) (nelisp-socket-close cfd) (list (< elapsed1 1.0) (integerp cfd) ready (< elapsed2 1.0) (/= cerr 0)))' \
+	  '(let* ((start (float-time)) (cfd (nelisp-socket-connect "127.0.0.1" 1 t)) (elapsed1 (- (float-time) start)) (ready (nelisp-socket-poll cfd t $(if $(filter windows%,$(STANDALONE_GATE_TARGET)),5000,3000))) (elapsed2 (- (float-time) start)) (cerr (nelisp-socket-connect-error cfd))) (nelisp-socket-close cfd) (list (< elapsed1 1.0) (integerp cfd) ready (< elapsed2 $(if $(filter windows%,$(STANDALONE_GATE_TARGET)),3.0,1.0)) (/= cerr 0)))' \
 	  > target/standalone-reader-nonblocking-socket-smoke-connect-refused.el
 	@printf '%s\n' \
 	  '(let* ((lfd (nelisp-socket-listen "127.0.0.1" 55991 t)) (empty (nelisp-socket-accept lfd t)) (cfd (nelisp-socket-connect "127.0.0.1" 55991)) (sfd (nelisp-socket-accept lfd t))) (nelisp-socket-close cfd) (nelisp-socket-close sfd) (nelisp-socket-close lfd) (list empty (integerp sfd) (>= sfd 0)))' \
