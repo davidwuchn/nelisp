@@ -1556,12 +1556,13 @@ Rewritten after §6.8's later rounds; three of its earlier items are simply
 done, and leaving them standing would have been the same kind of stale
 claim this document keeps finding elsewhere.
 
-1. **7 windows-native gate failures** (§6.7's table): async process (4),
-   FFI (2), and `repl-smoke`'s near-end arena behaviour (1).  **No socket
-   gate is red any more, and no gate is now waiting on socket work.**
-   Was 11 until 2026-09-01, when Doc 138's socket work brief was executed
-   in two slices and took it to 10 and then to 7, each number measured on
-   this host rather than claimed:
+1. **3 windows-native gate failures** (§6.7's table): FFI (2 --
+   `ffi-smoke` and `tls-smoke`, both waiting on PE dynamic linking) and
+   `repl-smoke`'s near-end arena behaviour (1).  **No gate is waiting on
+   socket or process work any more.**
+   Was 11 on 2026-09-01.  Doc 138's socket work brief took it to 10 and
+   then 7, and the windows async-process arm took it to 3 on 2026-09-02.
+   Every number below was measured on this host rather than claimed:
 
    - Slice 1 (`connect`/`send`/`recv`/`close` over WS2_32 plus one startup
      `WSAStartup`) turned `standalone-reader-dns-smoke` green, `findings=11`
@@ -1571,15 +1572,21 @@ claim this document keeps finding elsewhere.
      `hosts-file-smoke`, `nonblocking-socket-smoke` and
      `network-process-server-smoke` green, `findings=10` -> `7`.
 
-   The two `network-process-*` gates that stay red are **reclassified**:
-   their socket halves now pass (`network-process-smoke`'s roundtrip and
-   refused-connect cases, `-nowait-`'s success and refusal cases including
-   the `"failed with code 111\n"` sentinel), and only their mixed cases
-   fail, at `make-process` with `(processp nil)`.  They belong to the
-   windows async-process arm, not to sockets -- which is why the async
-   process count above is 4 rather than 2.  Doc 138's work brief opened by
-   saying six gates waited on the socket arm "and nothing else"; that was
-   measured wrong and is corrected there.
+   - The windows async-process arm then turned the remaining four green,
+     `findings=7` -> `3`: `make-process` answered nil on this target, so
+     `network-process-smoke` and `-nowait-`'s mixed cases and both
+     `process-adapter` gates died at `(processp nil)`.  Slice 1 gave it a
+     real `CreateProcessW` lifecycle, slice 2 the duplex stdin half, and
+     the gates got a child this platform actually has -- they had spawned
+     `/bin/sh`, `/bin/cat`, `/bin/echo` and `/bin/sleep` by absolute POSIX
+     path.  Worth knowing: at that point ALL fourteen `nelisp-process-*`
+     names dispatched unconditionally on windows and fell through to POSIX
+     stubs, so `start` returned nil rather than refusing and
+     `async-ready-p` answered `t`.  Availability there is per name now.
+
+   Doc 138's work brief opened by saying six gates waited on the socket arm
+   "and nothing else".  Measured, two of them also needed the async-process
+   arm; that sentence is corrected there.
    None is a regression.  Doc 138 owns the socket and spawn work by
    lineage, carries the design, and now carries a work brief for the
    socket half written against the refactor in `nelisp-standalone--socket-impl-forms`

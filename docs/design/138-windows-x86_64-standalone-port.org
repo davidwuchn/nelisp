@@ -2401,6 +2401,22 @@ updated to say that the windows arm exists and what it does NOT cover.
 Doc 201 §6.9 item 1 shrinks by six; update its count rather than leaving a
 stale one.
 
+*Met 2026-09-02.*  All six are green, all four targets link 111 units, the
+docstring is updated, and Doc 201 §6.9 item 1 is recounted (11 -> 3; the
+extra two beyond this work's six came from the async-process arm).  The
+mutation rows are proved with one honest exception recorded here rather than
+glossed: =standalone-reader-nonblocking-socket-smoke='s LINUX row cannot be
+shown RED on a windows host, because the code it injects into is not emitted
+into that binary.  Target scoping (=tools/gate-mutations.txt=, fifth field,
+added 2026-09-02) is what makes that a SKIP instead of a false "STAYED
+GREEN", and the windows half of that gate has its own scoped row which IS
+proved RED here.
+
+Two of the six needed more than sockets, which this section did not
+anticipate: =network-process-smoke= and =-nowait-= also required the windows
+async-process arm, and went green only once =make-process= worked.  Their
+socket halves passed before that.
+
 * One-line summary
 
 macOS was a triple burden — new ISA (arm64, 75 ops) + exec format + signing.
