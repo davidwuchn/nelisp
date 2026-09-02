@@ -25842,8 +25842,12 @@ not exist must fail (exit 1), not silently produce a usable image."
       (error "no-args repl exit=%S stdout=%S" no-args-rc no-args-out))
     (unwind-protect
         (progn
-          (with-temp-file near-end-file
-            (insert "(setq near-end-ok 42)\n"))
+          ;; The assertion below is byte-counted.  Native Windows Emacs writes
+          ;; the buffer's newline as CRLF unless the fixture pins Unix coding,
+          ;; turning the intended 22-byte file into a correct 23-byte read.
+          (let ((coding-system-for-write 'utf-8-unix))
+            (with-temp-file near-end-file
+              (insert "(setq near-end-ok 42)\n")))
           (with-temp-buffer
             ;; Doc 140 Stage 8: the chunk-0 bump cursor.  `(car
             ;; (nelisp--arena-stats))' asks the runtime where it is, on
