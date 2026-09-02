@@ -600,6 +600,25 @@ Sets `nlre--match-data' (and host match-data when available via set-match-data).
 ;; `nlre-split-string' with a single-byte literal separator, since a
 ;; caller other than `executable-find' hitting this same cost was flagged
 ;; as a known follow-up in that commit and in docs/design/201 §5.2.
+(unless (fboundp 'nelisp--split-on-char)
+  ;; The standalone prelude normally supplies this helper.  Hosted users of
+  ;; this library do not load that prelude, so keep an identical fallback
+  ;; here rather than sending their literal separators through the regexp
+  ;; engine.
+  (defun nelisp--split-on-char (string char omit-empty)
+    (let ((start 0)
+          (idx 0)
+          (len (length string))
+          (parts nil))
+      (while (<= idx len)
+        (if (or (= idx len) (= (aref string idx) char))
+            (let ((part (substring string start idx)))
+              (unless (and omit-empty (= (length part) 0))
+                (setq parts (cons part parts)))
+              (setq start (1+ idx))))
+        (setq idx (1+ idx)))
+      (nreverse parts))))
+
 (defconst nlre--split-single-byte-metachars '(?. ?* ?+ ?\? ?\[ ?\] ?^ ?$ ?\\)
   "Emacs-regexp metacharacters that make a would-be one-byte SEPARATOR to
 `nlre-split-string' unsafe to treat as a plain literal byte.")
