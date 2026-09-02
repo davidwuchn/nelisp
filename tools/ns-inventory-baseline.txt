@@ -195,7 +195,14 @@
 # 250 -> 245 on 2026-09-03: ratcheted to the measured tree after the Stage B
 # collision review.  No new collision was accepted to spend the five-entry
 # headroom; leaving it would hide the next regression.
-ns-collision 245
+# 245 -> 246 on 2026-09-03: `nelisp--split-on-char'.  7b23571b gave
+# lisp/nelisp-stdlib-regexp.el an fboundp-guarded copy of the prelude's
+# helper so nlre-split-string's literal-separator fast path resolves under
+# hosted Emacs too (the prelude is what the standalone loads, and the hosted
+# ERT never loads it -- nelisp-regexp-split-string-matches-host was red on
+# main because of exactly that).  Same body in both files; the bootstrap-copy
+# shape every other pinned prelude collision here has.
+ns-collision 246
 # 97 -> 96 on 2026-08-19: `string-equal' no longer differs between the two
 # files -- the prelude's now signals for a non-string instead of falling
 # through to `equal', and the lisp copy was brought with it.  Ratcheted down
@@ -557,7 +564,13 @@ ns-collision-divergent 126
 # checked-in ceiling at 7a0d3649.  This count-only category is outside the
 # collision review, but leaving it red would make `make ns-inventory' unable
 # to enforce the newly tightened collision totals.
-ns-prefix-violation 944
+# 944 -> 945 on 2026-09-03: `nelisp--split-on-char' in lisp/nelisp-stdlib-regexp.el
+# (7b23571b).  It carries the prelude helper's exact name on purpose -- the
+# copy is fboundp-guarded so the standalone keeps the prelude's definition and
+# only hosted Emacs takes this one -- so it cannot be renamed into the file's
+# own prefix without defeating the guard.  A deliberate one-name exception,
+# not a drift.
+ns-prefix-violation 945
 # 611 -> 613 on 2026-08-20: `nelisp--check-string'/`--check-symbol' and the
 # other argument-check helpers are referenced from the lisp/ mirrors that
 # carry copies of the functions using them.  This is the kind this file
@@ -664,7 +677,9 @@ ns-prefix-violation 944
 # 722 -> 725 on 2026-09-03: likewise already three over baseline at 7a0d3649.
 # This file explicitly treats private escapes as count-only conceded debt;
 # reconcile to the measured tree so the collision identity gate can run.
-ns-private-escape 725
+# 725 -> 724 on 2026-09-03: ratcheted down to the measured value (the gate
+# reported it one below baseline).
+ns-private-escape 724
 ns-unreadable 0
 
 # `pinned-collision KEY' pins every ns-collision and ns-collision-divergent
@@ -1073,3 +1088,4 @@ pinned-collision ns-collision	nelisp-cl-generic--same-specializer-p	lisp/nelisp-
 pinned-collision ns-collision	nelisp-cl-generic--struct-depth	lisp/nelisp-cl-macros.el scripts/nelisp-stdlib-prelude.el
 pinned-collision ns-collision	nelisp-cl-generic--struct-parent	lisp/nelisp-cl-macros.el scripts/nelisp-stdlib-prelude.el
 pinned-collision ns-collision	nelisp-cl-generic--type-match	lisp/nelisp-cl-macros.el scripts/nelisp-stdlib-prelude.el
+pinned-collision ns-collision	nelisp--split-on-char	lisp/nelisp-stdlib-regexp.el scripts/nelisp-stdlib-prelude.el
