@@ -1,5 +1,31 @@
 # NeLisp Release Notes
 
+## v1.1.2 — 2026-08-30
+
+Full notes: [`release/v1.1.2/RELEASE.md`](release/v1.1.2/RELEASE.md).
+
+The other half of v1.1.1's value-word boundary: `and` and `or`.  v1.1.1
+left them unconverted and said so, reasoning that boxing one would make a
+false answer read as true.  That was right about boxing an *arm* and wrong
+about leaving the *form* alone -- `(g (and 1 3) 2)` answered 222 for 111,
+and `(g (and 1 (+ x 1)) 4)` took SIGSEGV.
+
+- **The connective now works in the raw domain, and the form is boxed at
+  the boundary.**  `--emit-logic` short-circuits on a zero test of the
+  machine word and the arm that stops it is also the value; one register
+  serving as both is why the arm must stay raw and the conversion must go
+  on the whole form.
+- **Scoped to the runtime-entered lane.**  Unscoped it reached the
+  reader's sources too, and the binary it built came apart across the
+  `extras` tier while `ert-full` stayed at 0 unexpected -- the host suite
+  does not run what the compiler emitted.
+- **The `call` node stopped declaring a representation it had not
+  established.**  It is now computed as a greatest fixpoint over the call
+  graph; a callee nothing can classify declines instead of guessing.
+- **The string grammar's returns are classified from their own emit
+  comments** -- sentinel-returning ops are boxed at a boundary,
+  slot-returning ops are not.
+
 ## v1.1.1 — 2026-08-30
 
 Full notes: [`release/v1.1.1/RELEASE.md`](release/v1.1.1/RELEASE.md).
