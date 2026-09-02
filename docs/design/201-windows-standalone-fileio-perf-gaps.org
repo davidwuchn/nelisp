@@ -1556,10 +1556,11 @@ Rewritten after §6.8's later rounds; three of its earlier items are simply
 done, and leaving them standing would have been the same kind of stale
 claim this document keeps finding elsewhere.
 
-1. **3 windows-native gate failures** (§6.7's table): FFI (2 --
-   `ffi-smoke` and `tls-smoke`, both waiting on PE dynamic linking) and
-   `repl-smoke`'s near-end arena behaviour (1).  **No gate is waiting on
-   socket or process work any more.**
+1. **2 windows-native gate failures** (§6.7's table): FFI (2 --
+   `ffi-smoke` and `tls-smoke`, both waiting on PE dynamic linking).
+   **No gate is waiting on socket, process, or arena work any more.**
+   `repl-smoke` left the list 2026-09-03; see item 2 for what it actually
+   was.
    Was 11 on 2026-09-01.  Doc 138's socket work brief took it to 10 and
    then 7, and the windows async-process arm took it to 3 on 2026-09-02.
    Every number below was measured on this host rather than claimed:
@@ -1597,11 +1598,19 @@ claim this document keeps finding elsewhere.
    document used to hand them to "Doc 151's `-ENOSYS` follow-up list", and
    Doc 151 is marked SHIPPED and contains no such list -- it is
    referenced, not written.
-2. **`repl-smoke`'s remaining half.**  Its crash was a harness defect and
-   is fixed (§6.7), but the near-end probe still answers `near-end-bad`:
-   chunk growth at the end of chunk 0 behaves differently on this target.
-   Doc 140's territory, and the one item in (1) that is a real behavioural
-   difference rather than an unwired subsystem.
+2. **`repl-smoke`'s remaining half -- CLOSED, and the diagnosis here was
+   wrong.**  This item used to say the near-end probe's `near-end-bad`
+   meant "chunk growth at the end of chunk 0 behaves differently on this
+   target" and handed it to Doc 140.  Measured 2026-09-03 (`3c32741c`):
+   build-time arena size and runtime chunk-0 size are both 67108864, chunk
+   growth is fine, and `rdf` returned the fixture correctly.  The fixture
+   was 23 bytes, not 22 -- `with-temp-file` on Windows Emacs wrote CRLF --
+   and only the `(= (length ...) 22)` comparison failed.  The probe now
+   pins the fixture to `utf-8-unix`.  Recorded as the third CRLF in this
+   line of work (after `cmd.exe`'s echo output and the process gates'
+   fixture): on windows, a length off by one per line is a line ending
+   until proven otherwise, and a gate that collapses a value to
+   ok/bad should print the value before anyone theorises about it.
 3. **Native AOT emission on windows-x86_64.**  §6.8 measured that
    compiling these files makes them SLOWER -- `nelc` is bytecode run by a
    VM that is itself interpreted elisp, and `neln` silently emits no
