@@ -582,6 +582,14 @@ version-consistency|release/stage-d-v3.0/install-v3.ps1|s/\[string\]\$Version = 
 # NELISP_GATE_MUTATION_ONLY=standalone-reader-splitstring-perf-smoke
 # tools/nelisp-gate-mutation.sh' -> "PASS (1 gates caught their injected
 # defect)".
+#
+# REPAIRED 2026-09-03 (failure mode 3).  The absolute 1.0s verdict disagreed
+# across hosts.  WSL Emacs 30.1 measured 0.043-0.045s clean and 0.596-0.653s
+# with this injection: ~14x slower, but still 0.347-0.404s inside the bound,
+# so the gate stayed green.  The smoke now prints elapsed time only as a
+# diagnostic and structurally requires `nlre--string-match-calls' to remain
+# zero.  This injection is therefore proved by entering the regexp engine,
+# independent of how quickly that host executes it.
 standalone-reader-splitstring-perf-smoke|lisp/nelisp-stdlib-regexp.el|s/(if (and separators/(if (and nil separators/; s/^(defun nlre--leading-lit-char (nodes)$/(defun nlre--leading-lit-char (nodes) (setq nodes nil)/|disables BOTH literal-separator defences (the split fast path and the leading-character filter), forcing every split-string call through the full backtracking scan
 # Doc 201 §4 item 1.  `standalone-reader-winpath-smoke' polices the three
 # windows-native path defects Doc 201 §1/§2 and its §4 follow-up fixed:
@@ -653,18 +661,17 @@ standalone-reader-fileattrs-smoke|scripts/nelisp-stdlib-prelude.el|s/(= (logand 
 #   [regexp-lead-filter-smoke] PASS: got=(2 nil 2 nil 2 0 nil 0 nil) ...
 #     ratio=0.047 pass=t
 standalone-reader-regexp-lead-filter-smoke|lisp/nelisp-stdlib-regexp.el|s/(lead (and lead (nlre--fold-char lead)))/(lead (and lead (nlre--flip-case lead)))/|the leading-character filter folds the required character the wrong way, so no leading-literal pattern matches at all
-# Doc 201 §5.4, row 2 of 2 (the PERFORMANCE half).  Makes
+# Doc 201 §5.4, row 2 of 2 (the PATH-SELECTION half).  Makes
 # `nlre--leading-lit-char' answer nil for every pattern, so the filter never
 # fires and the scan is exactly what it was before the fix.  Correctness is
-# untouched -- only the ratio moves -- which is the point: this row proves
-# the gate's bound actually bites rather than riding along behind the
-# correctness cases.
+# untouched.  The smoke now counts calls that actually select the filter and
+# requires exactly 42 for its 42 leading-literal cases.
 #
-# This is a timing row, which this file's failure-mode 3 warns about.  It is
-# admissible because the bound is a ratio of two sweeps run back to back in
-# ONE process on the SAME strings, so a slow or loaded machine scales both
-# halves: measured 0.531 injected vs 0.048 restored against a 0.25
-# threshold, i.e. 2.1x and 5.2x clear of it in their own directions.
+# The original verdict was a ratio of two sweeps run back to back in one
+# process on the same strings: measured 0.531 injected vs 0.048 restored
+# against a 0.25 threshold.  CI later disproved the assumption that this
+# self-baseline made the timing row portable; the replacement below is why
+# the row remains admissible now.
 #
 # Evidence, windows-x86_64, 2026-08-30.  RED with the injection:
 #   [regexp-lead-filter-smoke] FAIL: got=(2 nil 2 nil 2 0 nil 0 nil) ...
@@ -672,6 +679,13 @@ standalone-reader-regexp-lead-filter-smoke|lisp/nelisp-stdlib-regexp.el|s/(lead 
 # GREEN restored:
 #   [regexp-lead-filter-smoke] PASS: got=(2 nil 2 nil 2 0 nil 0 nil) ...
 #     lead=0.281 nolead=5.899 ratio=0.048 pass=t
+#
+# REPAIRED 2026-09-03 (failure mode 3).  Despite the same-process ratio, CI's
+# runner stayed green with this injection.  WSL Emacs 30.1 measured ratios
+# 0.065-0.071 clean against the <0.25 threshold and 0.272-0.301 injected --
+# only 0.022-0.051 across the threshold.  Ratio and times remain diagnostics,
+# but the verdict now uses the exact path-selection count: 42 clean, 0 when
+# this injection makes the filter unreachable.
 standalone-reader-regexp-lead-filter-smoke|lisp/nelisp-stdlib-regexp.el|s/^(defun nlre--leading-lit-char (nodes)$/(defun nlre--leading-lit-char (nodes) (setq nodes nil)/|the leading-character filter never fires, putting the scan back to full work at every start position
 # Stage D1 (2026-09-03).  The Windows-scoped FFI gate must execute the PE
 # import-backed arm, not merely find the builtin name.  Replacing the mapped

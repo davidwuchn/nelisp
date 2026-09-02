@@ -39,6 +39,8 @@
   "Number of compiled regexp cache misses.")
 (defvar nlre--string-match-calls 0
   "Number of calls to `nlre-string-match'.")
+(defvar nlre--leading-filter-calls 0
+  "Number of `nlre-string-match' calls that selected the leading filter.")
 (defvar nlre--string-match-counter-file nil
   "When non-nil, file path receiving periodic `nlre-string-match' call counts.")
 (defvar nlre--string-match-counter-interval 1000
@@ -546,6 +548,8 @@ Sets `nlre--match-data' (and host match-data when available via set-match-data).
          (caps (make-vector ng nil))
          (hit nil))
     (setq nlre--caps caps)
+    (when lead
+      (setq nlre--leading-filter-calls (1+ nlre--leading-filter-calls)))
     ;; Two loops rather than one with the filter test inside it.  The
     ;; filter exists to make a rejected position cost almost nothing, and a
     ;; `lead' test in a shared loop hands that cost straight back to every

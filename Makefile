@@ -1310,28 +1310,33 @@ standalone-reader-elt-smoke: $(if $(wildcard target/nelisp target/nelisp.exe),,s
 	if [ "$$fail" -ne 0 ]; then exit 1; fi; \
 	echo "[elt-smoke] PASS"
 
-# Doc 201 §4 item 1 / §5.2: asserts the WALL-CLOCK bound the regexp-engine
-# `split-string' defect (fixed dev/nelisp commit `70cd5852', general fast
-# path in `2d433761') violated by ~8x on a real PATH split. Measures
+# Doc 201 §4 item 1 / §5.2: structurally asserts that the literal-separator
+# fast path (fixed dev/nelisp commit `70cd5852', generalized in `2d433761')
+# bypasses the regexp engine.  Measures
 # `split-string' itself on a synthetic ~60-entry, ~2KB literal-separator
 # PATH -- not the full `executable-find' (whose own `expand-file-name'/
 # `file-exists-p' loop costs ~1.8-2.5s independent of this defect on this
 # machine, which would swamp an ~8x split-string regression's margin) --
 # so this gate isolates the one thing it exists to catch. A synthetic
 # PATH (not the host's real one, which varies by machine/CI) keeps the
-# gate deterministic. 1.0s is a loose bound -- the fixed path measured
-# ~0.03-0.1s in-process here, the pre-fix regexp-engine path measured
-# 3.2-3.4s wall clock for one split alone.
+# gate deterministic.  Elapsed time remains diagnostic, but the verdict is
+# exact: `nlre--string-match-calls' must stay zero.  The former absolute 1.0s
+# bound was host-sensitive: on WSL the injected path measured 0.596-0.653s
+# and stayed green despite being ~14x slower than the 0.043-0.045s clean path.
 standalone-reader-splitstring-perf-smoke: $(if $(wildcard target/nelisp target/nelisp.exe),,standalone-reader)
 	@bin=$(STANDALONE_BIN); \
 	mkdir -p target; \
 	printf '%s\n' \
 	  '(let* ((n 60) (path (format "/fake/nelisp-perf-smoke/dir-0")))' \
 	  '  (let ((i 1)) (while (< i n) (setq path (concat path ";" (format "/fake/nelisp-perf-smoke/dir-%d" i))) (setq i (1+ i))))' \
+	  '  (setq nlre--string-match-calls 0)' \
 	  '  (let* ((t0 (float-time))' \
 	  '         (dirs (split-string path ";"))' \
-	  '         (elapsed (- (float-time) t0)))' \
-	  '    (princ (format "n-dirs=%d elapsed=%.3f pass=%S\n" (length dirs) elapsed (and (= (length dirs) n) (< elapsed 1.0))))))' \
+	  '         (elapsed (- (float-time) t0))' \
+	  '         (regexp-calls nlre--string-match-calls))' \
+	  '    (princ (format "n-dirs=%d elapsed=%.3f regexp-calls=%d pass=%S\n"' \
+	  '                   (length dirs) elapsed regexp-calls' \
+	  '                   (and (= (length dirs) n) (= regexp-calls 0))))))' \
 	  > target/standalone-reader-splitstring-perf-smoke.el; \
 	out="$$($$bin --load target/standalone-reader-splitstring-perf-smoke.el 2>&1)"; \
 	case "$$out" in \
@@ -1451,14 +1456,15 @@ standalone-reader-fileattrs-smoke: $(if $(wildcard target/nelisp target/nelisp.e
 # (string-match "ddskk-[0-9]+\\.[0-9]+" p))', i.e. ~59ms per call against a
 # ~51-character string.
 #
-# The bound is a RATIO, not a wall clock, and both halves run in the same
+# The ratio remains a same-process diagnostic, and both halves run in the same
 # process on the same 42 strings: sweep A uses a pattern whose first node is
 # a mandatory literal (the shape the filter can skip positions for), sweep B
 # a pattern with no leading literal (the shape it cannot help).  Neither
-# matches, so both are full scans.  A machine that is slow scales both.
-# Measured windows-x86_64, 2026-08-30, three runs each: 0.536-0.570 before
-# the fix, 0.076-0.078 after.  0.25 sits 3.2x above the fixed ratio and 2.1x
-# below the regressed one.
+# matches, so both are full scans.  The verdict is structural rather than
+# timed: `nlre--leading-filter-calls' must report exactly the 42 sweep-A
+# calls and none of sweep B.  The old ratio < 0.25 verdict was host-sensitive:
+# WSL measured 0.272-0.301 injected and 0.065-0.071 clean, while CI's runner
+# stayed green with the same injection.
 #
 # The thirteen correctness cases are not filler.  A leading-character filter
 # that fires where it must not silently SKIPS REAL MATCHES, which no timing
@@ -1494,6 +1500,7 @@ standalone-reader-regexp-lead-filter-smoke: $(if $(wildcard target/nelisp target
 	  '  (while (< i 42)' \
 	  '    (setq paths (cons (format "/home/someone/.emacs.d/elpa/package-%02d/lisp" i) paths))' \
 	  '    (setq i (1+ i)))' \
+	  '  (setq nlre--leading-filter-calls 0)' \
 	  '  (let* ((t0 (float-time))' \
 	  '         (_a (dolist (p paths) (string-match "ddskk-[0-9]+\\.[0-9]+" p)))' \
 	  '         (ta (- (float-time) t0))' \
@@ -1501,9 +1508,11 @@ standalone-reader-regexp-lead-filter-smoke: $(if $(wildcard target/nelisp target
 	  '         (_b (dolist (p paths) (string-match "[0-9]+zzz" p)))' \
 	  '         (tb (- (float-time) t1))' \
 	  '         (ratio (/ ta tb))' \
-	  '         (ratio-ok (< ratio 0.25)))' \
-	  '    (princ (format "got=%S r6=%S g1=%S r7=%S g2=%S lead=%.3f nolead=%.3f ratio=%.3f pass=%S\n"' \
-	  '                   got r6 g1 r7 g2 ta tb ratio (and correct-ok ratio-ok)))))' \
+	  '         (filter-calls nlre--leading-filter-calls)' \
+	  '         (filter-ok (= filter-calls (length paths))))' \
+	  '    (princ (format "got=%S r6=%S g1=%S r7=%S g2=%S lead=%.3f nolead=%.3f ratio=%.3f filter-calls=%d pass=%S\n"' \
+	  '                   got r6 g1 r7 g2 ta tb ratio filter-calls' \
+	  '                   (and correct-ok filter-ok)))))' \
 	  > target/standalone-reader-regexp-lead-filter-smoke.el; \
 	out="$$($$bin --load target/standalone-reader-regexp-lead-filter-smoke.el 2>&1)"; \
 	case "$$out" in \
