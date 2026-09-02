@@ -508,33 +508,39 @@ into the new one.  POS nil detaches the marker from its buffer."
 (defmacro nelisp-marker--defarithn (name)
   "Define NAME as a marker-tolerant wrapper around the native variadic NAME."
   (let ((native (intern (concat "nelisp-marker--native-" (symbol-name name)))))
-    `(unless (assq ',name nelisp-marker--native-ops)
-       (defalias ',native (symbol-function ',name))
-       (push (cons ',name (symbol-function ',name)) nelisp-marker--native-ops)
-       (defun ,name (&rest args)
-         (apply #',native (mapcar #'nelisp-marker--num args))))))
+    `(progn
+       (declare-function ,native nil)
+       (unless (assq ',name nelisp-marker--native-ops)
+         (defalias ',native (symbol-function ',name))
+         (push (cons ',name (symbol-function ',name)) nelisp-marker--native-ops)
+         (defun ,name (&rest args)
+           (apply #',native (mapcar #'nelisp-marker--num args)))))))
 
 (defmacro nelisp-marker--defarith1 (name)
   "Define NAME as a marker-tolerant wrapper around the native 1-arg NAME."
   (let ((native (intern (concat "nelisp-marker--native-" (symbol-name name)))))
-    `(unless (assq ',name nelisp-marker--native-ops)
-       (defalias ',native (symbol-function ',name))
-       (push (cons ',name (symbol-function ',name)) nelisp-marker--native-ops)
-       (defun ,name (a)
-         (if (numberp a) (,native a) (,native (nelisp-marker--num a)))))))
+    `(progn
+       (declare-function ,native nil)
+       (unless (assq ',name nelisp-marker--native-ops)
+         (defalias ',native (symbol-function ',name))
+         (push (cons ',name (symbol-function ',name)) nelisp-marker--native-ops)
+         (defun ,name (a)
+           (if (numberp a) (,native a) (,native (nelisp-marker--num a))))))))
 
 (defmacro nelisp-marker--defarith2 (name)
   "Define NAME as a marker-tolerant wrapper around the native NAME.
 Two-argument fast path first; anything else falls back to `apply'."
   (let ((native (intern (concat "nelisp-marker--native-" (symbol-name name)))))
-    `(unless (assq ',name nelisp-marker--native-ops)
-       (defalias ',native (symbol-function ',name))
-       (push (cons ',name (symbol-function ',name)) nelisp-marker--native-ops)
-       (defun ,name (a b &rest more)
-         (if (and (null more) (numberp a) (numberp b))
-             (,native a b)
-           (apply #',native (nelisp-marker--num a) (nelisp-marker--num b)
-                  (mapcar #'nelisp-marker--num more)))))))
+    `(progn
+       (declare-function ,native nil)
+       (unless (assq ',name nelisp-marker--native-ops)
+         (defalias ',native (symbol-function ',name))
+         (push (cons ',name (symbol-function ',name)) nelisp-marker--native-ops)
+         (defun ,name (a b &rest more)
+           (if (and (null more) (numberp a) (numberp b))
+               (,native a b)
+             (apply #',native (nelisp-marker--num a) (nelisp-marker--num b)
+                    (mapcar #'nelisp-marker--num more))))))))
 
 (defun nelisp-marker-install-arithmetic ()
   "Make the arithmetic and comparison primitives accept markers.
