@@ -41,6 +41,21 @@ For this repository:
   `worklog_entry` and `worklog_fts` yourself, because nothing keeps them in
   sync outside `anvil-worklog.el`.  Prefer the elisp path.
 
+  Two things about verifying the write, both learned by getting them wrong:
+
+  - **Quote a hyphenated search term.**  `(anvil-worklog-search "split-brain")`
+    answers 0 and looks like the write failed; the FTS query parser reads the
+    hyphen as syntax.  `"\"split-brain\""` finds it.  A failed search is not
+    evidence of a failed write.
+  - **The elisp path and a hand-written row disagree about the machine
+    name.**  `anvil-worklog.el` derives `windows-THINKPAD-E14-GE` where this
+    session's `sqlite3` rows used `windows-ThinkPad-E14-Gen5`, so the two land
+    under different synthetic `file` keys and a per-machine listing shows only
+    one of them.  This predates any of it -- the canonical DB already holds
+    five spellings of this one Windows host (898 / 580 / 24 / 23 / 22 rows).
+    Search finds entries regardless; `worklog-list` filtered by machine does
+    not.
+
   This bullet used to name `bin/anvil standalone-db` (via the local `nelisp`
   command) as the fallback.  That path has not been able to work since
   2026-06-02 and the claim is withdrawn rather than left standing.  Measured
