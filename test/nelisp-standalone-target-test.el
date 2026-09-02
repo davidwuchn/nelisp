@@ -1952,9 +1952,10 @@ deterministic against-the-bug gate for both emitted cache implementations."
 
 ;; Doc 194 S5.3/P3 exit criterion: the eight `nelisp-socket-*' names (six
 ;; Phase 1 primitives + `nelisp-socket-poll'/`nelisp-socket-connect-error',
-;; added this phase) must raise the catchable `nelisp-unsupported-
-;; primitive' form -- not compile a real (wrong) syscall, not silently fail
-;; to link -- on every target other than `linux-x86_64'.  This is "the
+;; added this phase) must carry real arms on `linux-x86_64' and
+;; `windows-x86_64'.  On the three remaining targets they must raise the
+;; catchable `nelisp-unsupported-primitive' form -- not compile a real
+;; (wrong-platform) call, not silently fail to link.  This is "the
 ;; existing target-swap harness Phase 1's own gate uses" the design doc
 ;; refers to: `nelisp-standalone--target' let-bound per case and the
 ;; GENERATED dispatch-arm forms inspected directly at the source level, no
@@ -1962,30 +1963,31 @@ deterministic against-the-bug gate for both emitted cache implementations."
 ;; built on this x86_64 Linux host could not run here anyway).  Phase 1
 ;; itself never had this ERT-level proof for its own six names (a
 ;; pre-existing gap, not this phase's own regression) -- verified before
-;; this test existed: `linux-x86_64' returns the six real `nl_socket_*_impl'
-;; call forms and `windows-x86_64'/`macos-aarch64'/`linux-aarch64' each
-;; returned the empty native-forms list (`nelisp-standalone--socket-forms')
-;; while STILL wiring six dispatch arms (`nelisp-standalone--socket-
-;; dispatch-arms' does not consult `-forms' at all for its non-linux-x86_64
-;; branch) -- so this test covers all eight names on every target in one
-;; pass, closing that gap for the family as a whole, not only its own two
-;; new members.
-(ert-deftest nelisp-standalone-target-socket-dispatch-linux-x86-64-real ()
-  "linux-x86_64 gets real native call forms for all eight socket primitives."
-  (let* ((nelisp-standalone--target 'linux-x86_64)
-         (arms (nelisp-standalone--socket-dispatch-arms))
-         (names (mapcar (lambda (a) (cadr (car a))) arms)))
-    (should (equal names '("nelisp-socket-listen" "nelisp-socket-accept"
-                            "nelisp-socket-connect" "nelisp-socket-send"
-                            "nelisp-socket-recv" "nelisp-socket-close"
-                            "nelisp-socket-poll" "nelisp-socket-connect-error")))
-    (should (equal (cdr (nth 6 arms)) '(nl_socket_poll_impl args out)))
-    (should (equal (cdr (nth 7 arms)) '(nl_socket_connect_error_impl args out)))))
+;; this test existed: `linux-x86_64' returned real call forms while the
+;; other targets wired the shared unsupported form.  The Windows socket arm
+;; later made availability per name and gave `windows-x86_64' all eight real
+;; implementations, so the tests below state both sides of that contract.
+(ert-deftest nelisp-standalone-target-socket-dispatch-supported-targets-real ()
+  "Both x86-64 targets get real call forms for all eight socket primitives."
+  (let ((expected
+         '(((:lit "nelisp-socket-listen") . (nl_socket_listen_impl args out))
+           ((:lit "nelisp-socket-accept") . (nl_socket_accept_impl args out))
+           ((:lit "nelisp-socket-connect") . (nl_socket_connect_impl args out))
+           ((:lit "nelisp-socket-send") . (nl_socket_send_impl args out))
+           ((:lit "nelisp-socket-recv") . (nl_socket_recv_impl args out))
+           ((:lit "nelisp-socket-close") . (nl_socket_close_impl args out))
+           ((:lit "nelisp-socket-poll") . (nl_socket_poll_impl args out))
+           ((:lit "nelisp-socket-connect-error") .
+            (nl_socket_connect_error_impl args out)))))
+    (dolist (target '(linux-x86_64 windows-x86_64))
+      (let ((nelisp-standalone--target target))
+        (should (equal (nelisp-standalone--socket-dispatch-arms)
+                       expected))))))
 
-(ert-deftest nelisp-standalone-target-socket-dispatch-non-linux-x86-64-unsupported ()
+(ert-deftest nelisp-standalone-target-socket-dispatch-unsupported-targets ()
   "Every socket primitive -- including the two P3 additions -- raises the
-catchable `nelisp-unsupported-primitive' signal form on every non-
-linux-x86_64 target, never a real (wrong-syscall) call form.
+catchable `nelisp-unsupported-primitive' signal form on linux-aarch64,
+macos-aarch64, and windows-aarch64, never a real call form.
 
 `nelisp-standalone--applyfn-unsupported-primitive-form' is NOT a pure
 function returning an `equal'-stable constant across separate calls (it
@@ -2008,7 +2010,7 @@ real) native call\"."
                            "nelisp-socket-connect" "nelisp-socket-send"
                            "nelisp-socket-recv" "nelisp-socket-close"
                            "nelisp-socket-poll" "nelisp-socket-connect-error")))
-    (dolist (target '(windows-x86_64 windows-aarch64 macos-aarch64 linux-aarch64))
+    (dolist (target '(linux-aarch64 macos-aarch64 windows-aarch64))
       (let* ((nelisp-standalone--target target)
              (arms (nelisp-standalone--socket-dispatch-arms))
              (names (mapcar (lambda (a) (cadr (car a))) arms))
