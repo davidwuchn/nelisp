@@ -2504,11 +2504,10 @@ standalone-reader-current-time-smoke: standalone-reader
 	  exit 1; \
 	fi
 
-# Phase 47.D Step C / D1 / F1: runtime FFI smoke.  Builds a DYNAMICALLY linked
-# reader (NELISP_READER_DYNAMIC=1) that imports libc + GnuTLS + FreeType and
-# exposes them via the `nl-ffi-call' dispatcher, then asserts the calls route
-# through the linker-generated PLT stubs + ld.so-resolved GOT slots into the real
-# shared libraries.  Covers: libc int->int (toupper), libm double->double f64
+# Phase 47.D Step C / D1 / F1: runtime FFI smoke.  Linux builds its opt-in
+# dynamic reader (NELISP_READER_DYNAMIC=1) with the full table; windows-x86_64
+# builds its ordinary PE reader with the UCRT-mapped libc/libm subset.  Covers:
+# libc int->int (toupper), libm double->double f64
 # marshalling (sqrt/pow/ldexp(f64+i64)/hypot via XMM args + xmm0 return), GnuTLS
 # const char* return (D1: gnutls_check_version), FreeType pointer-out-params (F1:
 # FT_Init_FreeType + FT_Library_Version).  Self-contained (does NOT depend on the default static
@@ -2516,9 +2515,15 @@ standalone-reader-current-time-smoke: standalone-reader
 # they survive minor library bumps.
 standalone-reader-ffi-smoke:
 	@mkdir -p target
+ifeq ($(STANDALONE_GATE_TARGET),windows-x86_64)
+	@$(EMACS) --batch -Q -L lisp -L src -L scripts \
+	  --eval '(setq load-prefer-newer t)' \
+	  -l nelisp-standalone-build -f nelisp-standalone-build-reader
+else
 	@NELISP_READER_DYNAMIC=1 $(EMACS) --batch -Q -L lisp -L src -L scripts \
 	  --eval '(setq load-prefer-newer t)' \
 	  -l nelisp-standalone-build -f nelisp-standalone-build-reader
+endif
 	@chmod +x target/nelisp
 	@printf '%s\n' '(nl-ffi-call "toupper" 97)' > target/standalone-reader-ffi-smoke.el
 	@out="$$($(STANDALONE_BIN) --load target/standalone-reader-ffi-smoke.el)"; \
@@ -2526,6 +2531,15 @@ standalone-reader-ffi-smoke:
 	  echo "[ffi-smoke libc] PASS: (nl-ffi-call \"toupper\" 97) -> $$out"; \
 	else \
 	  echo "[ffi-smoke libc] FAIL: -> $$out (expected 65)"; exit 1; \
+	fi
+	@if [ "$(STANDALONE_GATE_TARGET)" = "windows-x86_64" ]; then \
+	  printf '%s\n' '(nl-ffi-call "toupper" -1)' > target/standalone-reader-ffi-s32.el; \
+	  out="$$($(STANDALONE_BIN) --load target/standalone-reader-ffi-s32.el)"; \
+	  if [ "$$out" = "-1" ]; then \
+	    echo "[ffi-smoke Win64 s32] PASS: toupper(EOF) -> $$out"; \
+	  else \
+	    echo "[ffi-smoke Win64 s32] FAIL: -> $$out (expected -1)"; exit 1; \
+	  fi; \
 	fi
 	@: 'f64 FFI: double args/return through XMM.  The reader top-level printer'
 	@: 'renders any float (even a literal) as #<object>, so assert on numeric'
@@ -2544,6 +2558,10 @@ standalone-reader-ffi-smoke:
 	else \
 	  echo "[ffi-smoke f64 mixed] FAIL: -> $$out (expected (t t t))"; exit 1; \
 	fi
+ifeq ($(STANDALONE_GATE_TARGET),windows-x86_64)
+	@echo "[ffi-smoke D1 gnutls] SKIP: Windows external TLS policy is Stage D2"
+	@echo "[ffi-smoke FreeType] SKIP: no Windows DLL mapping in Stage D1"
+else
 	@printf '%s\n' '(let ((p (nl-ffi-call "gnutls_check_version" 0))) (if (= p 0) "NULL" (unibyte-string (ptr-read-u8 p 0) (ptr-read-u8 p 1))))' > target/standalone-reader-ffi-d1.el
 	@out="$$($(STANDALONE_BIN) --load target/standalone-reader-ffi-d1.el)"; \
 	case "$$out" in \
@@ -2580,7 +2598,8 @@ standalone-reader-ffi-smoke:
 	    echo "[ffi-smoke F4 transform] FAIL: -> $$out (expected 2x width >= 55)"; exit 1; \
 	  fi; \
 	fi
-	@echo "[standalone-reader-ffi-smoke] PASS: libc + libm(f64) + GnuTLS(D1) + FreeType(F1/F2/F3/F4) via nl-ffi-call"
+endif
+	@echo "[standalone-reader-ffi-smoke] PASS: platform-mapped libc + libm(f64), with optional GnuTLS/FreeType, via nl-ffi-call"
 
 # 2026-08-23: `standalone-reader-ffi-smoke' above force-rebuilds with
 # NELISP_READER_DYNAMIC=1, so it only ever tests that one opt-in variant --
@@ -2607,7 +2626,8 @@ standalone-reader-ffi-smoke:
 # literal (see that function's own commentary for why a first version of
 # this fix, which put a string-carrying `defun' in the prelude instead,
 # tripped `unsafe-inventory').
-# This gate must build the STATIC default (hence `-u NELISP_READER_DYNAMIC')
+# On targets without a native import-backed FFI this gate must build the STATIC
+# default (hence `-u NELISP_READER_DYNAMIC')
 # and then assert against it.  It used to unset NELISP_STANDALONE_TARGET as
 # well, which made the build fall back to linux-x86_64 -- so on a Windows
 # host it cross-built an ELF into `target/nelisp' and then ran
@@ -2615,6 +2635,9 @@ standalone-reader-ffi-smoke:
 # as a gate failure.  The target is passed explicitly now; only the dynamic
 # flag is unset, which is the one thing this gate is actually about.
 standalone-reader-ffi-unsupported-smoke:
+ifeq ($(STANDALONE_GATE_TARGET),windows-x86_64)
+	@echo "[standalone-reader-ffi-unsupported-smoke] PASS: not applicable; windows-x86_64 has an unconditional PE-import-backed FFI subset (covered by ffi-smoke)"
+else
 	@mkdir -p target
 	@env -u NELISP_READER_DYNAMIC NELISP_STANDALONE_TARGET=$(STANDALONE_GATE_TARGET) $(EMACS) --batch -Q -L lisp -L src -L scripts \
 	  --eval '(setq load-prefer-newer t)' \
@@ -2674,6 +2697,7 @@ standalone-reader-ffi-unsupported-smoke:
 	  echo "[ffi-unsupported-smoke compiled-artifact] FAIL: -> $$out (expected nl-ffi-call)"; exit 1; \
 	fi
 	@echo "[standalone-reader-ffi-unsupported-smoke] PASS: nl-ffi-call is fboundp and raises nelisp-unsupported-primitive (never void) on the static default build, across bare FILE / --load / --eval / eval-elisp-source / REPL / compiled artifact"
+endif
 
 # Phase 47.D D2: REAL TLS 1.3 handshake from the pure-elisp reader.  Opens a raw
 # TCP socket (syscall-direct socket/connect to 1.1.1.1:443), then drives a full

@@ -673,3 +673,12 @@ standalone-reader-regexp-lead-filter-smoke|lisp/nelisp-stdlib-regexp.el|s/(lead 
 #   [regexp-lead-filter-smoke] PASS: got=(2 nil 2 nil 2 0 nil 0 nil) ...
 #     lead=0.281 nolead=5.899 ratio=0.048 pass=t
 standalone-reader-regexp-lead-filter-smoke|lisp/nelisp-stdlib-regexp.el|s/^(defun nlre--leading-lit-char (nodes)$/(defun nlre--leading-lit-char (nodes) (setq nodes nil)/|the leading-character filter never fires, putting the scan back to full work at every start position
+# Stage D1 (2026-09-03).  The Windows-scoped FFI gate must execute the PE
+# import-backed arm, not merely find the builtin name.  Replacing the mapped
+# system DLL with a nonexistent name leaves the generated dispatch intact but
+# makes the PE loader reject the binary, a structural failure independent of
+# timing or installed developer tools.  Evidence, windows-x86_64, 2026-09-03:
+# the filtered harness reported "went red as it should" and
+# `GATE-COUNT checked=1 findings=0 passed=1 failed=0 skipped=0`; restored GREEN
+# is `[standalone-reader-ffi-smoke] PASS` with toupper, s32 and f64 checks green.
+standalone-reader-ffi-smoke|scripts/nelisp-standalone-build.el|s/("libm.so.6" . "ucrtbase.dll")/("libm.so.6" . "ucrtbase-broken.dll")/|the Windows libm mapping names a nonexistent DLL, so the PE-import-backed FFI binary cannot load|windows-x86_64

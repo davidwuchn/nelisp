@@ -11881,14 +11881,14 @@ ash/logand/logior/logxor/lognot + string<.")
   "Builtin names added by Wave-1 (B) breadth glue; appended to
 `nelisp-standalone--reader-builtins'.")
 
-;; --- Phase 47.D Step C: dynamic-only external FFI (nl-ffi-call over PLT) ---
-;; These arms call shared-library symbols through the linker's PLT stubs (Step C):
+;; --- Phase 47.D Step C: fixed-table external FFI (nl-ffi-call) -------------
+;; On ELF these arms call shared-library symbols through the linker's PLT stubs:
 ;; an `extern-call SYM' to a bare import name resolves (pc32) to its in-binary PLT
 ;; stub, which jumps through the ld.so-filled GOT.  They are appended to the
 ;; reader dispatch table ONLY when NELISP_READER_DYNAMIC is set, because a
-;; static/freestanding reader has no PLT/GOT and the imports would be unresolved
-;; symbols at link time.  The SONAME/symbol set here MUST match the import list
-;; passed to `nelisp-link-units-dynamic' in `nelisp-standalone-build-reader'.
+;; static/freestanding ELF reader has no PLT/GOT.  Windows x86_64 instead routes
+;; the supported subset through the PE import directory unconditionally; its
+;; ordinary reader is already dynamically bound to Windows system DLLs.
 ;; The FFI surface is a declarative table: (SYMBOL SONAME ARITY).  Both the
 ;; import list (-> ld.so DT_NEEDED + PLT/GOT) and the `nl-ffi-call' dispatch
 ;; chain are derived from it, so adding a GnuTLS/FreeType call is one row.
@@ -11901,8 +11901,11 @@ ash/logand/logior/logxor/lognot + string<.")
 ;; marshalling emacs-tls-ffi.el / emacs-font-ffi.el need (D1/F1).
 (defconst nelisp-standalone--reader-extern-table
   '(;; libc — kept as the always-available FFI smoke / regression anchor.
-    ("toupper"              "libc.so.6"        1)
-    ("tolower"              "libc.so.6"        1)
+    ;; Win64 C `int' results arrive through EAX and therefore appear
+    ;; zero-extended in RAX.  :windows-ret s32 asks the generated dispatcher to
+    ;; restore the language-level signed value before boxing it.
+    ("toupper"              "libc.so.6"        1 (:windows-ret s32))
+    ("tolower"              "libc.so.6"        1 (:windows-ret s32))
     ;; --- D1 TLS (libgnutls): full client handshake surface. ---------------
     ;; Unversioned undefined refs bind to each symbol's default version
     ;; (@@GNUTLS_3_4) via ld.so.  Pointer-out-params (credentials/session
@@ -11969,10 +11972,30 @@ ash/logand/logior/logxor/lognot + string<.")
 `nelisp-standalone--reader-extern-imports' and
 `nelisp-standalone--applyfn-extern-arms'.  ARITY counts C arguments (max 4
 here).  Without SIG every argument and the return are i64 (ints + pointers);
-SIG = (:args (CLASS ...) :ret CLASS) with CLASS in {i64,f64} opts a call into
-double-precision XMM marshalling (see `nelisp-standalone--build-ffi-dispatch').")
+SIG = (:args (CLASS ...) :ret CLASS :windows-ret CLASS), with argument CLASS in
+{i64,f64}, return CLASS in {i64,f64,s32}, and :windows-ret overriding :ret only
+for Win64.  The s32 return class repairs EAX zero-extension before Lisp boxing.")
 
-(defun nelisp-standalone--build-ffi-dispatch (table)
+(defconst nelisp-standalone--windows-reader-extern-dll-map
+  '(("libc.so.6" . "ucrtbase.dll")
+    ("libm.so.6" . "ucrtbase.dll"))
+  "ELF SONAME to Windows system-DLL mapping for the supported FFI subset.
+
+The SONAME remains the table's stable library identity, so the existing Linux
+rows and generated dispatch stay unchanged.  A mapping opts every row for that
+library into both the Windows dispatcher and PE import list; absence means that
+library is unsupported on Windows.  This deliberately maps only libc/libm to
+the inbox Universal CRT.  GnuTLS and FreeType remain external-dependency policy
+decisions, not accidental loader requirements of every Windows reader.")
+
+(defun nelisp-standalone--windows-reader-extern-table ()
+  "Return TABLE rows whose SONAME has a Windows DLL mapping."
+  (seq-filter
+   (lambda (row)
+     (assoc (nth 1 row) nelisp-standalone--windows-reader-extern-dll-map))
+   nelisp-standalone--reader-extern-table))
+
+(defun nelisp-standalone--build-ffi-dispatch (table &optional target)
   "Build the `nl-ffi-call' dispatch IR (a nested-if over the NAME arg) from
 TABLE rows (SYMBOL SONAME ARITY &optional SIG).
 
@@ -11997,15 +12020,21 @@ into double-precision (f64) marshalling:
     grammar head), reinterprets it to i64 bits with `f64-bits', then boxes it
     back into a fresh Lisp float with `nl_sexp_write_float'.  Omitted -> i64.
 
-This is what lets the dynamic reader call libm (sqrt/pow/...) and any other
-`double'-ABI shared-library entry point directly from elisp."
+  * :windows-ret s32, when TARGET is `windows-x86_64', sign-extends the low
+    32 bits returned in EAX before boxing.  Other targets ignore this override.
+
+This is what lets the reader call libm/UCRT (sqrt/pow/...) and any other
+fixed-table shared-library entry point directly from elisp."
   (let ((chain '(seq (wf_write_nil out) 0)))
     (dolist (row (reverse table))
       (let* ((sym (nth 0 row))
              (arity (nth 2 row))
              (sig (nth 3 row))
              (arg-classes (or (plist-get sig :args) (make-list arity 'i64)))
-             (ret-class (or (plist-get sig :ret) 'i64))
+             (ret-class (or (and (eq target 'windows-x86_64)
+                                 (plist-get sig :windows-ret))
+                            (plist-get sig :ret)
+                            'i64))
              (f64-binds nil)
              (argforms
               (let (acc)
@@ -12029,7 +12058,13 @@ This is what lets the dynamic reader call libm (sqrt/pow/...) and any other
                   ;; cannot emit a `bits-to-f64' value arg; the grammar op can.)
                   `(let* ((frb (f64-bits (extern-call-f64 ,(intern sym) ,@argforms))))
                      (seq (sexp-write-float out (bits-to-f64 frb)) 0))
-                `(wf_write_int out (extern-call ,(intern sym) ,@argforms))))
+                (if (eq ret-class 's32)
+                    `(let* ((irv (extern-call ,(intern sym) ,@argforms)))
+                       (wf_write_int out
+                                     (if (> irv 2147483647)
+                                         (- irv 4294967296)
+                                       irv)))
+                  `(wf_write_int out (extern-call ,(intern sym) ,@argforms)))))
              (arm (if f64-binds
                       `(let* ,(nreverse f64-binds) ,body)
                     body)))
@@ -12052,9 +12087,16 @@ in `nelisp-standalone-build-reader'.")
   (list (cons '(:lit "nl-ffi-call")
               (nelisp-standalone--build-ffi-dispatch
                nelisp-standalone--reader-extern-table)))
-  "Dynamic-only `nl-ffi-call' dispatch arm (Step C / D1 / F1).  Appended to the
-reader table iff NELISP_READER_DYNAMIC is set; it dispatches by name to an
-`extern-call' on each imported symbol, routed through its PLT stub -> GOT.")
+  "Linux dynamic `nl-ffi-call' dispatch arm (Step C / D1 / F1).
+It dispatches by name to every table symbol through its PLT stub -> GOT.  The
+Windows subset is built separately from the same table plus its DLL map.")
+
+(defun nelisp-standalone--applyfn-windows-extern-arms ()
+  "Return the PE-import-backed Windows x86_64 `nl-ffi-call' dispatch arm."
+  (list (cons '(:lit "nl-ffi-call")
+              (nelisp-standalone--build-ffi-dispatch
+               (nelisp-standalone--windows-reader-extern-table)
+               'windows-x86_64))))
 
 (defun nelisp-standalone--reader-dynamic-p ()
   "Non-nil when building the dynamically-linked reader (NELISP_READER_DYNAMIC).
@@ -12064,29 +12106,20 @@ static answer into the .elc (breaking the dynamic build that loads it)."
   (and (getenv "NELISP_READER_DYNAMIC") t))
 
 (defun nelisp-standalone--reader-ffi-live-p ()
-  "Non-nil only where the real `nl-ffi-call' extern dispatcher can actually
-link: `nelisp-standalone--reader-dynamic-p' AND the linux-x86_64 target --
-`nelisp-standalone-build-reader''s target `pcase' sends every OTHER target
-(windows-x86_64/-aarch64 to `nelisp-link-units-pe32', macos-aarch64/
-linux-aarch64 to their own static branches) down a path that never
-consults NELISP_READER_DYNAMIC at all, so forcing the flag there used to
-still try to emit the extern-call units and fail the LINK with
-`nelisp-link--unresolved-symbol' (no PE/Mach-O import-table machinery for
-them yet -- confirmed 2026-08-23, see
-docs/design/100-phase-47-dynamic-link-elisp.org section 7).  This predicate
-is what `nelisp-standalone--applyfn-reader-table' below uses to choose the
-`nl-ffi-call' arm, so that combination now degrades to the
-`nelisp-unsupported-primitive' arm at BUILD time instead of failing the
-link -- `nelisp-standalone--reader-dynamic-p' itself is unchanged (it still
-drives the ELF PT_INTERP/PT_DYNAMIC path and the unit-cache split for the
-one target where dynamic linking is real)."
-  (and (nelisp-standalone--reader-dynamic-p)
-       (eq nelisp-standalone--target 'linux-x86_64)))
+  "Non-nil where the real `nl-ffi-call' dispatcher can link.
+
+Linux x86_64 keeps its existing opt-in NELISP_READER_DYNAMIC contract exactly.
+Windows x86_64 is always live for the subset mapped to system DLLs because the
+PE writer already emits an import directory; the ELF-only flag has no meaning
+on that target.  Other targets keep the catchable unsupported arm."
+  (or (eq nelisp-standalone--target 'windows-x86_64)
+      (and (nelisp-standalone--reader-dynamic-p)
+           (eq nelisp-standalone--target 'linux-x86_64))))
 
 (defun nelisp-standalone--applyfn-ffi-unsupported-form ()
   "Codegen IR for the `nl-ffi-call' dispatch arm when the real extern
 dispatcher is not linked in (`nelisp-standalone--reader-ffi-live-p' nil --
-the static default build, any non-linux-x86_64 target, or both): raises the
+the static Linux build or a target without native import support): raises the
 catchable `nelisp-unsupported-primitive' condition with data `(nl-ffi-call)'
 instead of falling through to an unhandled `void-function', so `fboundp'
 answers `t' uniformly and a caller can `condition-case' on WHY instead of
@@ -12211,8 +12244,8 @@ into whatever the index happened to select."
 `car'/`cdr'/`eq' arms REPLACED (nil-safe car/cdr + tag-aware eq) and `length'
 made vector-aware, then the B-foundation breadth arms APPENDED.  The Step C
 `nl-ffi-call' arm is ALWAYS appended now (2026-08-23 fix): the real
-PLT/GOT-backed dispatcher when `nelisp-standalone--reader-ffi-live-p' (the
-dynamic linux-x86_64 build), else the `nelisp-unsupported-primitive'-
+native-import dispatcher when `nelisp-standalone--reader-ffi-live-p' (dynamic
+linux-x86_64 or PE-import-backed windows-x86_64), else the unsupported-
 signalling arm -- never simply absent, so `fboundp' cannot go void again."
   (append
    (mapcar
@@ -12263,10 +12296,12 @@ signalling arm -- never simply absent, so `fboundp' cannot go void again."
    ;; broader `reader-dynamic-p' (fix/ffi-surface-availability, merge 7/9):
    ;; dynamic-but-not-linux-x86_64 builds used to still try to emit the
    ;; extern-call units under plain `reader-dynamic-p' and fail the link
-   ;; with `nelisp-link--unresolved-symbol'; `reader-ffi-live-p' narrows to
-   ;; the target that can actually link them.
+   ;; with `nelisp-link--unresolved-symbol'.  The target-aware live predicate
+   ;; now selects either the full Linux table or the mapped Windows subset.
    (if (nelisp-standalone--reader-ffi-live-p)
-       nelisp-standalone--applyfn-extern-arms
+       (if (eq nelisp-standalone--target 'windows-x86_64)
+           (nelisp-standalone--applyfn-windows-extern-arms)
+         nelisp-standalone--applyfn-extern-arms)
      (nelisp-standalone--applyfn-extern-arms-unsupported))))
 
 (defun nelisp-standalone--applyfn-assemble (helper-groups table &optional default-form)
@@ -16678,7 +16713,19 @@ dispatch arm in `nelisp-standalone--applyfn-dispatch-table'.")
 
 (defun nelisp-standalone--reader-pe-imports ()
   "Return PE imports for the current Windows-native standalone reader."
-  nelisp-standalone--windows-reader-imports)
+  (append
+   nelisp-standalone--windows-reader-imports
+   (when (eq nelisp-standalone--target 'windows-x86_64)
+     (let (groups)
+       (dolist (row (nelisp-standalone--windows-reader-extern-table))
+         (let* ((dll (cdr (assoc (nth 1 row)
+                                 nelisp-standalone--windows-reader-extern-dll-map)))
+                (group (assoc dll groups)))
+           (if group
+               (setcdr group (append (cdr group) (list (nth 0 row))))
+             (setq groups
+                   (append groups (list (cons dll (list (nth 0 row)))))))))
+       groups))))
 
 (defun nelisp-standalone--reader-tree-load-path ()
   "Return the tree directories `require' should search, newest build wins.

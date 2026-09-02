@@ -14588,7 +14588,12 @@ same branch and emit the same byte count."
                                      WSAStartup WSAGetLastError socket
                                      ioctlsocket setsockopt bind listen accept
                                      connect send recv WSAPoll getsockopt
-                                     closesocket))))
+                                     closesocket
+                                     ;; Stage D: generated `nl-ffi-call' arms
+                                     ;; reach every UCRT import from a deeply
+                                     ;; nested dispatch/let* chain.
+                                     toupper tolower sqrt pow sin cos hypot
+                                     ldexp))))
          (call-temp-save-count 0)
          (call-needs-align needs-align))
     (when (and (not win64-p)

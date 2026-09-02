@@ -645,6 +645,46 @@ A dispatch arm nothing installs is dead code that still links."
     (should (memq 'MultiByteToWideChar source-tree))
     (should-not (memq 'CreateFileA source-tree))))
 
+(ert-deftest nelisp-standalone-target-windows-reader-ffi-uses-ucrt-imports ()
+  "Windows FFI derives its UCRT imports and typed dispatch from one table."
+  (let* ((nelisp-standalone--target 'windows-x86_64)
+         (imports (cdr (assoc "ucrtbase.dll"
+                              (nelisp-standalone--reader-pe-imports))))
+         (dispatch (nelisp-standalone--applyfn-windows-extern-arms))
+         (printed (prin1-to-string dispatch)))
+    (should (nelisp-standalone--reader-ffi-live-p))
+    (should (equal imports
+                   '("toupper" "tolower" "sqrt" "pow" "sin" "cos"
+                     "hypot" "ldexp")))
+    (should-not (member "gnutls_global_init" imports))
+    ;; The table's sqrt signature must survive into this exact Win64 path;
+    ;; generic emitter-only XMM tests do not establish that wiring.
+    (should (string-match-p
+             "(extern-call-f64 sqrt (:f64 (bits-to-f64 fa1)))"
+             printed))
+    ;; toupper(EOF) returns a C int through zero-extending EAX.  Pin the
+    ;; generated signed repair as well as the end-to-end smoke's result.
+    (should (string-match-p
+             "(if (> irv 2147483647) (- irv 4294967296) irv)"
+             printed))))
+
+(ert-deftest nelisp-standalone-target-reader-ffi-availability-is-target-aware ()
+  "Windows PE FFI is unconditional; Linux dynamic FFI remains opt-in."
+  (let ((old (getenv "NELISP_READER_DYNAMIC")))
+    (unwind-protect
+        (progn
+          (setenv "NELISP_READER_DYNAMIC" nil)
+          (let ((nelisp-standalone--target 'windows-x86_64))
+            (should (nelisp-standalone--reader-ffi-live-p)))
+          (let ((nelisp-standalone--target 'linux-x86_64))
+            (should-not (nelisp-standalone--reader-ffi-live-p)))
+          (setenv "NELISP_READER_DYNAMIC" "1")
+          (let ((nelisp-standalone--target 'linux-x86_64))
+            (should (nelisp-standalone--reader-ffi-live-p)))
+          (let ((nelisp-standalone--target 'linux-aarch64))
+            (should-not (nelisp-standalone--reader-ffi-live-p))))
+      (setenv "NELISP_READER_DYNAMIC" old))))
+
 (ert-deftest nelisp-standalone-target-macos-reader-uses-darwin-syscalls ()
   "macOS reader file/stdin/stdout helpers use Darwin syscall numbers."
   (let ((nelisp-standalone--target 'macos-aarch64))
