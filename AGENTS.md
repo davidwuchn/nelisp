@@ -15,10 +15,31 @@ For this repository:
   `build-notes-p2.md`, `build-notes-p3ab.md`, `build-notes-p3c.md`,
   `build-notes-p4b.md`, and `build-notes-p4c.md`.
 - Record nelisp work through `anvil-worklog` only, and verify searchability before deleting any migrated file-based log.
-- When MCP worklog tools are not available, write the DB directly with
-  `sqlite3` — inserting into **both** `worklog_entry` and `worklog_fts`, since
-  nothing keeps them in sync for you.  Do not use `emacsclient` as the
-  fallback command path for nelisp work.
+- When MCP worklog tools are not available, use `emacs --batch` with
+  `anvil-worklog.el` and **the database path pinned explicitly**:
+
+  ```
+  emacs --batch -L <anvil.el dir> \
+    --eval '(progn (require (quote anvil-worklog))
+                   (setq anvil-worklog-db-path "<Notes>/.anvil-worklog/anvil-worklog-index.db")
+                   (anvil-worklog-add "TITLE" "BODY"))'
+  ```
+
+  Do not use `emacsclient` — that is the daemon path this rule has always
+  been about, and it is not the same thing as `emacs --batch`.
+
+  Pinning is not optional, and it is the whole trap.  Left unpinned on this
+  Windows host, `anvil-worklog--db` resolves to
+  `~/.emacs.d/anvil-worklog-index.db`, which is a DIFFERENT database — 59
+  entries, last written 2026-08-16 — while the canonical
+  `Notes/.anvil-worklog/anvil-worklog-index.db` holds 2013.  Linux avoids
+  this by symlinking the former to the latter; Windows has no such link, so
+  an unpinned write lands somewhere nothing else reads.  Measured 2026-09-02.
+
+  Writing the DB by hand with `sqlite3` also works and was used for a whole
+  session before the above was found, but it means inserting into **both**
+  `worklog_entry` and `worklog_fts` yourself, because nothing keeps them in
+  sync outside `anvil-worklog.el`.  Prefer the elisp path.
 
   This bullet used to name `bin/anvil standalone-db` (via the local `nelisp`
   command) as the fallback.  That path has not been able to work since
