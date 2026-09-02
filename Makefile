@@ -2998,6 +2998,20 @@ standalone-reader-network-process-smoke: standalone-reader
 # OS's own multi-second/minute connect timeout), falls through cleanly to
 # a caught `file-error' -- never a hang (wall-clock bounded well under
 # the smoke's own timeout), never a wrong-address connect.
+#
+# The "immediate ECONNREFUSED" in that sentence is a POSIX fact.  Windows
+# takes ~2.03s to report a refused loopback connect (measured on this branch
+# while writing the socket arm), so the 5000ms bound that is generous on
+# POSIX is marginal here: measured 3353-3781ms over 8 quiet runs, but
+# 5612-5850ms in 6 of 8 runs under eight-way CPU load.  That is not a rare
+# flake, it is a gate that fails whenever the machine is busy.  The windows
+# bound is therefore 8000ms -- 2150ms above the loaded maximum, and 2000ms
+# below the `timeout 10' on the fallthrough run.
+#
+# Raising it costs no hang detection, which is the reason it is safe: a real
+# hang is caught by that `timeout 10' and shows up as a non-zero `fall_rc',
+# not by this comparison.  What this bound guards is "slow but not hung", and
+# 8000ms still catches that on windows.
 standalone-reader-hosts-file-smoke: standalone-reader
 	@mkdir -p target
 	@printf '%s\n' \
@@ -3030,7 +3044,7 @@ standalone-reader-hosts-file-smoke: standalone-reader
 	elapsed_ms=$$(( (end - start) / 1000000 )); \
 	if [ "$$pos_out" = "(open t \"127.0.0.1\")" ] && \
 	   [ "$$fall_rc" = "0" ] && [ "$$fall_out" = "caught-file-error" ] && \
-	   [ "$$elapsed_ms" -lt "5000" ]; then \
+	   [ "$$elapsed_ms" -lt "$(if $(filter windows%,$(STANDALONE_GATE_TARGET)),8000,5000)" ]; then \
 	  echo "[standalone-reader-hosts-file-smoke] PASS: positive(status,roundtrip,alias-lookup)=$$pos_out fallthrough(caught,elapsed_ms)=$$fall_out,$${elapsed_ms}ms (never a hang)"; \
 	else \
 	  echo "[standalone-reader-hosts-file-smoke] FAIL: positive=$$pos_out fallthrough_rc=$$fall_rc fallthrough=$$fall_out elapsed_ms=$$elapsed_ms"; \
