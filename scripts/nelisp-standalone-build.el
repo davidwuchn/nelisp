@@ -234,19 +234,18 @@ link-unit names, and build logs."
 The dynamically-linked reader (NELISP_READER_DYNAMIC) uses a SEPARATE `-dyn'
 cache so its env-dependent units — the applyfn carrying `nl-ffi-call'
 `extern-call's and the builtin-install driver — never collide with the static
-reader's same-named units.  The unit cache is keyed on name + dependency file
-mtimes (see `nelisp-standalone--cached-unit'), NOT on source content, so without
-this split a prior dynamic build's `applyfn-reader.o' (with unresolved extern
-symbols) would be reused by the static link and fail with
-`nelisp-link--unresolved-symbol'."
+reader's same-named units.  The unit cache is keyed on name plus source and
+toolchain content (see `nelisp-standalone--cached-unit'), but not on
+build-mode environment variables.  Keep modes in separate directories so an
+environment-only mode switch cannot reuse units compiled under another mode."
   (let* ((target (or target nelisp-standalone--target))
          (base (if (eq target 'windows-x86_64)
                    (format "windows-x86_64-arena-%x"
                            nelisp-standalone--windows-arena-base)
                  (symbol-name target)))
          (base (if (getenv "NELISP_READER_DYNAMIC") (concat base "-dyn") base))
-         ;; Doc 171 G2: the TCO pass changes unit bytes but the cache is
-         ;; keyed on mtimes only, so NELISP_TCO=1 builds get their own
+         ;; Doc 171 G2: the TCO pass changes unit bytes but the content key
+         ;; does not include this environment flag, so NELISP_TCO=1 gets its own
          ;; cache (same split rationale as `-dyn' above) -- otherwise a
          ;; flag flip silently links stale objects from the other mode.
          (base (if (equal (getenv "NELISP_TCO") "1") (concat base "-tco") base)))
@@ -24483,31 +24482,44 @@ loader when it is absent."
                  (nelisp-standalone--reader-src) code expected)
         (kill-emacs 1)))))
 
+(defun nelisp-standalone--run-focused-reader-test (label smoke)
+  "Build the native reader and run focused SMOKE, reported under LABEL.
+
+Focused entry points must use the exact path returned by the build.  On
+Windows, passing the extensionless Linux output path to `call-process' can
+resolve the sibling `.exe' instead, which made a cross-target build test a
+stale binary.  The full `nelisp-standalone-reader-test' already has both this
+binding and the runnable-host guard; keep focused gates under the same
+contract."
+  (if (not (nelisp-standalone--target-runnable-on-host-p))
+      (progn
+        (message "GATE-SKIP target %S cannot run on host %S"
+                 nelisp-standalone--target system-configuration)
+        (message "[standalone-reader] SKIP: target %S cannot run on host %S"
+                 nelisp-standalone--target system-configuration)
+        (kill-emacs 0))
+    (let ((out (nelisp-standalone-build-reader)))
+      (let ((nelisp-standalone--reader-out out))
+        (condition-case err
+            (progn
+              (funcall smoke)
+              (kill-emacs 0))
+          (error
+           (message "[standalone-reader] FAIL: %s smoke: %s"
+                    label (error-message-string err))
+           (kill-emacs 1)))))))
+
 ;;;###autoload
 (defun nelisp-standalone-reader-repl-test ()
   "Build the reader binary and run only the REPL smoke.  Exits 0/1."
-  (nelisp-standalone-build-reader)
-  (condition-case err
-      (progn
-        (nelisp-standalone--reader-repl-smoke)
-        (kill-emacs 0))
-    (error
-     (message "[standalone-reader] FAIL: repl smoke: %s"
-              (error-message-string err))
-     (kill-emacs 1))))
+  (nelisp-standalone--run-focused-reader-test
+   "repl" #'nelisp-standalone--reader-repl-smoke))
 
 ;;;###autoload
 (defun nelisp-standalone-reader-malformed-input-test ()
   "Build the reader binary and run only the malformed-input smoke.  Exits 0/1."
-  (nelisp-standalone-build-reader)
-  (condition-case err
-      (progn
-        (nelisp-standalone--reader-malformed-input-smoke)
-        (kill-emacs 0))
-    (error
-     (message "[standalone-reader] FAIL: malformed-input smoke: %s"
-              (error-message-string err))
-     (kill-emacs 1))))
+  (nelisp-standalone--run-focused-reader-test
+   "malformed-input" #'nelisp-standalone--reader-malformed-input-smoke))
 
 (defun nelisp-standalone--reader-doc200-mutation-smoke ()
   "Assert Doc 200 mutation, printing, presence, and reader literals."
@@ -26099,15 +26111,8 @@ the one line just read, not a running session count)."
 ;;;###autoload
 (defun nelisp-standalone-reader-form-location-test ()
   "Build the reader binary and run only the form-location smoke.  Exits 0/1."
-  (nelisp-standalone-build-reader)
-  (condition-case err
-      (progn
-        (nelisp-standalone--reader-form-location-smoke)
-        (kill-emacs 0))
-    (error
-     (message "[standalone-reader] FAIL: form-location smoke: %s"
-              (error-message-string err))
-     (kill-emacs 1))))
+  (nelisp-standalone--run-focused-reader-test
+   "form-location" #'nelisp-standalone--reader-form-location-smoke))
 
 (defun nelisp-standalone--reader-stage3-rootstack-smoke ()
   "Doc 152 Stage 3: collect/poison and non-local-exit proof for rooted GAPs.
@@ -26275,15 +26280,9 @@ matching push's own 1/0 return): DEPTH=1024."
 (defun nelisp-standalone-reader-frame-stack-pop-desync-test ()
   "Build the reader binary and run only the frame-stack pop-desync smoke.
 Exits 0/1."
-  (nelisp-standalone-build-reader)
-  (condition-case err
-      (progn
-        (nelisp-standalone--reader-frame-stack-pop-desync-smoke)
-        (kill-emacs 0))
-    (error
-     (message "[standalone-reader] FAIL: frame-stack pop-desync smoke: %s"
-              (error-message-string err))
-     (kill-emacs 1))))
+  (nelisp-standalone--run-focused-reader-test
+   "frame-stack pop-desync"
+   #'nelisp-standalone--reader-frame-stack-pop-desync-smoke))
 
 (defun nelisp-standalone--reader-bounded-backtrace-smoke ()
   "Doc 180 Phase 2 item 3: against-the-bug proof for the bounded backtrace.
@@ -26366,15 +26365,8 @@ pair, not just a positive assertion."
 (defun nelisp-standalone-reader-bounded-backtrace-test ()
   "Build the reader binary and run only the bounded-backtrace smoke.
 Exits 0/1."
-  (nelisp-standalone-build-reader)
-  (condition-case err
-      (progn
-        (nelisp-standalone--reader-bounded-backtrace-smoke)
-        (kill-emacs 0))
-    (error
-     (message "[standalone-reader] FAIL: bounded-backtrace smoke: %s"
-              (error-message-string err))
-     (kill-emacs 1))))
+  (nelisp-standalone--run-focused-reader-test
+   "bounded-backtrace" #'nelisp-standalone--reader-bounded-backtrace-smoke))
 
 (defun nelisp-standalone--reader-socket-smoke ()
   "Against-the-bug proof for the socket primitives (Doc 184 follow-on) AND
@@ -26478,15 +26470,8 @@ nelisp-unsupported-primitive, stdout=%S" out))
 ;;;###autoload
 (defun nelisp-standalone-reader-socket-test ()
   "Build the reader binary and run only the socket smoke.  Exits 0/1."
-  (nelisp-standalone-build-reader)
-  (condition-case err
-      (progn
-        (nelisp-standalone--reader-socket-smoke)
-        (kill-emacs 0))
-    (error
-     (message "[standalone-reader] FAIL: socket smoke: %s"
-              (error-message-string err))
-     (kill-emacs 1))))
+  (nelisp-standalone--run-focused-reader-test
+   "socket" #'nelisp-standalone--reader-socket-smoke))
 
 (defun nelisp-standalone--reader-ipv6-socket-smoke ()
   "Against-the-bug proof for the Doc 194 IPv6 phase (P7), exercised in ONE
@@ -26746,15 +26731,8 @@ stdout=%S" out))
 (defun nelisp-standalone-reader-ipv6-socket-test ()
   "Build the reader binary and run only the Doc 194 IPv6 phase (P7)
 smoke.  Exits 0/1."
-  (nelisp-standalone-build-reader)
-  (condition-case err
-      (progn
-        (nelisp-standalone--reader-ipv6-socket-smoke)
-        (kill-emacs 0))
-    (error
-     (message "[standalone-reader] FAIL: ipv6 socket smoke: %s"
-              (error-message-string err))
-     (kill-emacs 1))))
+  (nelisp-standalone--run-focused-reader-test
+   "ipv6 socket" #'nelisp-standalone--reader-ipv6-socket-smoke))
 
 (defconst nelisp-standalone--prelude-file
   (expand-file-name "scripts/nelisp-stdlib-prelude.el"

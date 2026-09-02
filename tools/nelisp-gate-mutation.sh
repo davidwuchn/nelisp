@@ -21,11 +21,24 @@ cd "$(dirname "$0")/.." || exit 1
 # harness reads "the gate failed" as "the row is lethal", i.e. it would
 # report every row as proved without any of them having been exercised.
 MUTATION_TARGET_ARG=""
-MUTATION_TARGET=${NELISP_STANDALONE_TARGET:-linux-x86_64}
-if [ -n "${NELISP_STANDALONE_TARGET:-}" ]; then
-  MUTATION_TARGET_ARG="NELISP_STANDALONE_TARGET=$NELISP_STANDALONE_TARGET"
-  printf 'gate-mutation: target %s\n' "$NELISP_STANDALONE_TARGET"
+MUTATION_TARGET=${NELISP_STANDALONE_TARGET:-}
+if [ -z "$MUTATION_TARGET" ]; then
+  # Do not inherit Make's platform default implicitly.  On this Windows host
+  # the harness runs under Git Bash while `make' runs an MSYS2 recipe shell;
+  # relying on OS crossing that boundary selected linux-x86_64 in one process
+  # and windows-x86_64 in another.  Focused reader gates then linked
+  # target/nelisp but Windows process lookup ran the pre-existing
+  # target/nelisp.exe, so two mutations repeatedly tested the wrong binary.
+  case "$(uname -s 2>/dev/null || true)" in
+    MINGW*|MSYS*|CYGWIN*) MUTATION_TARGET=windows-x86_64 ;;
+    *) MUTATION_TARGET=linux-x86_64 ;;
+  esac
 fi
+# Always restate the resolved target as a make COMMAND-LINE variable.  The
+# environment-only spelling is known not to cross this repository's
+# Cygwin/MSYS2 make boundary reliably.
+MUTATION_TARGET_ARG="NELISP_STANDALONE_TARGET=$MUTATION_TARGET"
+printf 'gate-mutation: target %s\n' "$MUTATION_TARGET"
 
 rebuild_checked() {
   make standalone-reader $MUTATION_TARGET_ARG >/dev/null 2>&1 && return 0
