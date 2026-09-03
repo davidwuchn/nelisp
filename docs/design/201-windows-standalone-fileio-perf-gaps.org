@@ -1556,8 +1556,12 @@ Rewritten after §6.8's later rounds; three of its earlier items are simply
 done, and leaving them standing would have been the same kind of stale
 claim this document keeps finding elsewhere.
 
-1. **2 windows-native gate failures** (§6.7's table): FFI (2 --
-   `ffi-smoke` and `tls-smoke`, both waiting on PE dynamic linking).
+1. **0 windows-native gate failures** (§6.7's table).  The last two stale
+   FFI/TLS entries are closed: `ffi-smoke` went green on the target-mapped
+   UCRT arm, and `tls-smoke` went green on Winsock -> Schannel handshake,
+   send, receive, graceful close, and an `HTTP` response assertion.  The TLS
+   smoke is network-gated on live reachability of 1.1.1.1:443 and is not part
+   of the hermetic set.
    **No gate is waiting on socket, process, or arena work any more.**
    `repl-smoke` left the list 2026-09-03; see item 2 for what it actually
    was.
@@ -1584,6 +1588,12 @@ claim this document keeps finding elsewhere.
      names dispatched unconditionally on windows and fell through to POSIX
      stubs, so `start` returned nil rather than refusing and
      `async-ready-p` answered `t`.  Availability there is per name now.
+
+   - Stage D1's PE/UCRT mapping then closed `ffi-smoke`; the Schannel slices
+     closed the TLS surface itself.  Slice 3 added the documented
+     `SCHANNEL_SHUTDOWN` close sequence and turned the final `tls-smoke`
+     green through its live path.  The windows aggregate now reports
+     `checked=47 findings=0`.
 
    Doc 138's work brief opened by saying six gates waited on the socket arm
    "and nothing else".  Measured, two of them also needed the async-process

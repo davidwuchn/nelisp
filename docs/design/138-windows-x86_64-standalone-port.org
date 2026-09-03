@@ -4,6 +4,11 @@
 
 * Status
 
+- 2026-09-03: Every windows-native reader smoke is green.  The socket,
+  process, FFI, and TLS arms all run their target-native paths, and
+  `standalone-reader-smokes NELISP_STANDALONE_TARGET=windows-x86_64` reports
+  `checked=47 findings=0`.
+
 - *State*: STAGE 151 Windows inotify native pump
   2026-06-03.  The first de-risk slices now exist in
   =lisp/nelisp-pe-write.el=:

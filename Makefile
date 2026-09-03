@@ -6,7 +6,7 @@
         standalone-tarball standalone-tarball-verify \
         verify-elisp-fixtures \
         standalone-eval standalone-eval-clean standalone-eval-test standalone-eval-j \
-        standalone-reader standalone-reader-test standalone-reader-load-smoke standalone-reader-checked standalone-reader-fmt-smoke standalone-reader-prelude-equal-reload-smoke standalone-reader-declare-strip-smoke standalone-reader-nested-backquote-macro-smoke standalone-reader-derived-mode-shape-smoke standalone-reader-pcase-quote-literal-smoke standalone-reader-catch-throw-tag-smoke standalone-reader-cond-let-shape-smoke standalone-reader-ffi-smoke standalone-reader-tls-smoke standalone-reader-process-smoke standalone-reader-realrt-smoke standalone-reader-repl-smoke standalone-reader-prelude-test standalone-reader-intern-soft-smoke standalone-reader-intern-soft-loop-smoke standalone-reader-number-token-smoke standalone-reader-getenv-smoke standalone-selfhost-test standalone-selfhost-mt-test standalone-parallel-compile-test standalone-chunk-growth-test \
+        standalone-reader standalone-reader-test standalone-reader-load-smoke standalone-reader-checked standalone-reader-fmt-smoke standalone-reader-prelude-equal-reload-smoke standalone-reader-declare-strip-smoke standalone-reader-nested-backquote-macro-smoke standalone-reader-derived-mode-shape-smoke standalone-reader-pcase-quote-literal-smoke standalone-reader-catch-throw-tag-smoke standalone-reader-cond-let-shape-smoke standalone-reader-ffi-smoke standalone-reader-tls-smoke standalone-reader-tls-smoke-linux standalone-reader-tls-smoke-windows standalone-reader-process-smoke standalone-reader-realrt-smoke standalone-reader-repl-smoke standalone-reader-prelude-test standalone-reader-intern-soft-smoke standalone-reader-intern-soft-loop-smoke standalone-reader-number-token-smoke standalone-reader-getenv-smoke standalone-selfhost-test standalone-selfhost-mt-test standalone-parallel-compile-test standalone-chunk-growth-test \
         standalone-reader-mod-float-smoke standalone-reader-match-data-smoke standalone-reader-current-time-smoke standalone-reader-require-provide-smoke \
         alloc-check-collect standalone-reader-checked-soak standalone-reader-shadow-smoke standalone-reader-elt-smoke \
         nelisp-performance-gate nelisp-nelix-command-gate nelisp-native-artifact-gate nelisp-nelix-native-hot-gate \
@@ -2708,7 +2708,8 @@ else
 	@echo "[standalone-reader-ffi-unsupported-smoke] PASS: nl-ffi-call is fboundp and raises nelisp-unsupported-primitive (never void) on the static default build, across bare FILE / --load / --eval / eval-elisp-source / REPL / compiled artifact"
 endif
 
-# Phase 47.D D2: REAL TLS 1.3 handshake from the pure-elisp reader.  Opens a raw
+# Phase 47.D D2: REAL TLS 1.3 handshake from the pure-elisp reader.  The Linux
+# recipe below remains the original GnuTLS dynamic-build probe: it opens a raw
 # TCP socket (syscall-direct socket/connect to 1.1.1.1:443), then drives a full
 # GnuTLS client handshake via nl-ffi-call: global_init -> allocate credentials ->
 # init(CLIENT) -> server_name_set(SNI) -> set_default_priority -> credentials_set
@@ -2721,7 +2722,10 @@ endif
 # unrolled form is the robust shape and is what we ship.  Then bye -> deinit.
 # Asserts TLS1.x negotiated AND a real HTTPS response.  NETWORK-GATED: skips if
 # 1.1.1.1:443 is not reachable (not part of the hermetic gate).
-standalone-reader-tls-smoke:
+standalone-reader-tls-smoke: $(if $(filter windows%,$(STANDALONE_GATE_TARGET)),standalone-reader-tls-smoke-windows,standalone-reader-tls-smoke-linux)
+	@:
+
+standalone-reader-tls-smoke-linux:
 	@mkdir -p target
 	@if ! timeout 6 bash -c 'exec 3<>/dev/tcp/1.1.1.1/443' 2>/dev/null; then \
 	  echo "[tls-smoke D2] SKIP: no egress to 1.1.1.1:443"; exit 0; \
@@ -2736,6 +2740,37 @@ standalone-reader-tls-smoke:
 	  '(0 "TLS'*'"HTTP")') echo "[tls-smoke D2+D3] PASS: real handshake + HTTPS GET -> $$out (handshake, proto, bytes-sent, response)";; \
 	  *) echo "[tls-smoke D2+D3] FAIL: -> $$out (expected (0 \"TLS..\" <sent> \"HTTP\"))"; exit 1;; \
 	esac
+
+# windows-x86_64 uses the target-native Winsock -> Schannel primitive family.
+# The first DecryptMessage from this Cloudflare endpoint has returned
+# SEC_I_RENEGOTIATE in the live slice-2 probe, so the post-handshake path and
+# its SECBUFFER_EXTRA carry-over are part of what the "HTTP" assertion covers.
+# A second run drains through the peer's close_notify/TCP EOF, then proves the
+# close edge contract: post-EOF close succeeds, the caller can still close the
+# socket, and every context-taking primitive rejects closed and never-issued
+# handles with a catchable error.
+# NETWORK-GATED exactly like the Linux recipe; not part of the hermetic set.
+standalone-reader-tls-smoke-windows:
+	@mkdir -p target
+	@if ! timeout 6 bash -c 'exec 3<>/dev/tcp/1.1.1.1/443' 2>/dev/null; then \
+	  echo "[tls-smoke D2] SKIP: no egress to 1.1.1.1:443"; exit 0; \
+	fi; \
+	NELISP_STANDALONE_TARGET=$(STANDALONE_GATE_TARGET) $(EMACS) --batch -Q -L lisp -L src -L scripts \
+	  --eval '(setq load-prefer-newer t)' \
+	  -l nelisp-standalone-build -f nelisp-standalone-build-reader; \
+	printf '%s\n' '(let* ((fd (nelisp-socket-connect "1.1.1.1" 443)) (ctx (nelisp-tls-connect fd "one.one.one.one")) (req "GET / HTTP/1.1\r\nHost: one.one.one.one\r\nConnection: close\r\n\r\n") (sent (nelisp-tls-send ctx req)) (resp (nelisp-tls-recv ctx 512)) (st (if (>= (length resp) 4) (unibyte-string (aref resp 0) (aref resp 1) (aref resp 2) (aref resp 3)) "?")) (proto (nelisp-tls-protocol ctx))) (nelisp-tls-close ctx) (nelisp-socket-close fd) (list 0 proto sent st))' > target/standalone-reader-tls-smoke.el; \
+	out="$$(timeout $(STANDALONE_SMOKE_TIMEOUT) $(STANDALONE_BIN) --load target/standalone-reader-tls-smoke.el 2>/dev/null)"; \
+	case "$$out" in \
+	  '(0 "TLS'*'"HTTP")') echo "[tls-smoke D2+D3 windows] PASS: Winsock + Schannel HTTPS GET + close -> $$out";; \
+	  *) echo "[tls-smoke D2+D3 windows] FAIL: -> $$out (expected (0 \"TLS..\" <sent> \"HTTP\"))"; exit 1;; \
+	esac; \
+	printf '%s\n' '(let* ((fd (nelisp-socket-connect "1.1.1.1" 443)) (ctx (nelisp-tls-connect fd "one.one.one.one")) (req "GET / HTTP/1.1\r\nHost: one.one.one.one\r\nConnection: close\r\n\r\n") (sent (nelisp-tls-send ctx req)) (part (nelisp-tls-recv ctx 4096))) (while (> (length part) 0) (setq part (nelisp-tls-recv ctx 4096))) (let ((closed (nelisp-tls-close ctx)) (socket-closed (nelisp-socket-close fd)) (twice (condition-case e (progn (nelisp-tls-close ctx) (quote missed)) (nelisp-tls-error (car e)))) (never (condition-case e (progn (nelisp-tls-close 0) (quote missed)) (nelisp-tls-error (car e)))) (closed-protocol (condition-case e (progn (nelisp-tls-protocol ctx) (quote missed)) (nelisp-tls-error (car e)))) (closed-send (condition-case e (progn (nelisp-tls-send ctx "x") (quote missed)) (nelisp-tls-error (car e)))) (closed-recv (condition-case e (progn (nelisp-tls-recv ctx 16) (quote missed)) (nelisp-tls-error (car e)))) (never-protocol (condition-case e (progn (nelisp-tls-protocol 424242) (quote missed)) (nelisp-tls-error (car e)))) (never-send (condition-case e (progn (nelisp-tls-send 424242 "x") (quote missed)) (nelisp-tls-error (car e)))) (never-recv (condition-case e (progn (nelisp-tls-recv 424242 8) (quote missed)) (nelisp-tls-error (car e))))) (list closed socket-closed twice never (list closed-protocol closed-send closed-recv never-protocol never-send never-recv))))' > target/standalone-reader-tls-close-edges.el; \
+	edges="$$(timeout $(STANDALONE_SMOKE_TIMEOUT) $(STANDALONE_BIN) --load target/standalone-reader-tls-close-edges.el 2>/dev/null)"; \
+	if [ "$$edges" = "(nil nil nelisp-tls-error nelisp-tls-error (nelisp-tls-error nelisp-tls-error nelisp-tls-error nelisp-tls-error nelisp-tls-error nelisp-tls-error))" ]; then \
+	  echo "[tls-smoke close edges windows] PASS: ownership plus closed/never-issued protocol/send/recv -> $$edges"; \
+	else \
+	  echo "[tls-smoke close edges windows] FAIL: -> $$edges"; exit 1; \
+	fi
 
 # Runtime smoke for the reader's process substrate (call-process /
 # start-process / pipe read, scripts/nelisp-standalone-build.el).  The host ERT

@@ -471,6 +471,14 @@ standalone-reader-nonblocking-socket-smoke|scripts/nelisp-standalone-build.el|s/
 # Clean: PASS, elapsed2=2.040.  Injected: FAIL, elapsed2=5.009, beyond the
 # relaxed 3.0s refusal bound.  Restored: PASS again.
 standalone-reader-nonblocking-socket-smoke|scripts/nelisp-standalone-build.el|s/(events (if (= want_write 1) 16 768))/(events 0)/|the Windows WSAPoll arm requests no events, so refusal readiness waits the full 5s timeout and violates the deliberately relaxed 3s bound|windows-x86_64
+# Schannel slice 3: structural carry-over defect.  The first live Cloudflare
+# read enters SEC_I_RENEGOTIATE; throwing away its SECBUFFER_EXTRA suffix
+# removes the following application record, so the gate cannot observe HTTP.
+# This row rebuilds because the injected helper is baked into nelisp.exe.
+# Proved 2026-09-03 on windows-x86_64: the restricted harness printed "went
+# red as it should" for this row, restored/rebuilt, then reported
+# `checked=1 findings=0 passed=1 failed=0 skipped=0`.
+standalone-reader-tls-smoke|scripts/nelisp-standalone-build.el|s/(ptr-write-u64 ctx 56 extra)/(ptr-write-u64 ctx 56 0)/|Schannel discards every SECBUFFER_EXTRA encrypted suffix instead of carrying it into the next decrypt, so the live HTTPS response loses the HTTP record|windows-x86_64
 # Doc 194 P4 (feat/network-process-p345): manually verified RED-with-
 # injection / GREEN-with-injection-reverted before adding -- the async
 # connect-completion status machine's own success/failure branch is

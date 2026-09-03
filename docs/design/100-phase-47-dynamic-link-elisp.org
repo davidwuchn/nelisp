@@ -518,7 +518,9 @@ Codegen wiring (nelisp-standalone-build.el):
   derived from the original row table plus that map.  This preserves the
   linux-x86_64 dispatch bytes while allowing platform policy to omit libraries
   that are not part of Windows.  `libc.so.6' and `libm.so.6' map to the in-box
-  Universal CRT, `ucrtbase.dll'; GnuTLS and FreeType are deliberately unmapped.
+  Universal CRT, `ucrtbase.dll'; FreeType is deliberately unmapped.  GnuTLS is
+  deliberately unmapped on windows: the target-native TLS surface uses
+  Schannel instead.
 
   `NELISP_READER_DYNAMIC' remains the opt-in switch for linux-x86_64 only.
   Windows does not reinterpret an ELF-linkage flag: windows-x86_64 installs the
@@ -543,3 +545,10 @@ Codegen wiring (nelisp-standalone-build.el):
   | windows-x86_64, flag unset or set | t / real UCRT libc+libm subset |
   | windows-aarch64 / linux-aarch64 / macos-aarch64 | t / `nelisp-unsupported-primitive' |
   | host Emacs | nil / `void-function' (unchanged) |
+
+  TLS on windows-x86_64 is a separate, target-native primitive family rather
+  than an `nl-ffi-call' library mapping: `nelisp-tls-connect',
+  `nelisp-tls-send', `nelisp-tls-recv', `nelisp-tls-close', and
+  `nelisp-tls-protocol' drive Schannel through the PE SECUR32 imports.  The
+  family covers handshake, encrypted record I/O, negotiated-protocol query,
+  and graceful close; it is live in the ordinary Windows reader build.

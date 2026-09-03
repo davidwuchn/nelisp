@@ -76,6 +76,7 @@ gate_needs_rebuild() {
     nelisp-thread-mirror-guard-standalone-smoke) return 0 ;;
     standalone-midform-gc-bounded) return 0 ;;
     standalone-reader-nonblocking-socket-smoke) return 0 ;;
+    standalone-reader-tls-smoke) return 0 ;;
   esac
   # Doc 200: an `ert-full' row is only binary-sensitive when it mutates the
   # standalone build script itself.

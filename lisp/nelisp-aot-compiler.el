@@ -14376,7 +14376,8 @@ their own restore, so the slot is never live across another save.")
     GetLastError GetEnvironmentStringsW FreeEnvironmentStringsW
     WSAStartup WSAGetLastError socket ioctlsocket setsockopt bind listen accept
     connect send recv WSAPoll getsockopt closesocket
-    AcquireCredentialsHandleW InitializeSecurityContextW CompleteAuthToken
+    AcquireCredentialsHandleW InitializeSecurityContextW ApplyControlToken
+    CompleteAuthToken
     QueryContextAttributesW EncryptMessage DecryptMessage
     FreeContextBuffer DeleteSecurityContext
     FreeCredentialsHandle
