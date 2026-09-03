@@ -277,7 +277,7 @@
 # access this generator's OS layer already performs, not a new kind of unsafe
 # operation, and not calls that should be moved into an `nl-unsafe' block merely
 # to evade this inventory.
-unsafe-call 750
+unsafe-call 759
 
 # `pinned-kernel-call FILE COUNT' pins the per-file unquoted `unsafe-call'
 # count behind `total' above -- the three kernel files that actually carry
@@ -346,4 +346,12 @@ pinned-kernel-call scripts/nelisp-flat-arena-probe.el 6
 # out at the `unsafe-call 702' note above.
 # 621 -> 668 on 2026-08-31: the 47 Windows stat/directory/getcwd raw-buffer
 # sites from 260710ab, reconstructed and itemised at `unsafe-call 750' above.
-pinned-kernel-call scripts/nelisp-standalone-build.el 668
+# 668 -> 677 on 2026-09-03: the Schannel TLS arm (ae71d015).  Two of its
+# units are backquoted because they splice compile-time byte constants --
+# `nl_tls_package_name' writes the UTF-16 "Microsoft Unified Security
+# Protocol Provider" package name into scratch for AcquireCredentialsHandleW,
+# and `nl_tls_signal_error' builds the nelisp-tls-error signal the way the
+# already-pinned `nl_socket_signal_error' does -- so their 9 raw writes are
+# visible to this gate where the rest of the arm's quoted units are not.
+# Same shape as the socket signaller entry above; nothing to wrap.
+pinned-kernel-call scripts/nelisp-standalone-build.el 677
