@@ -1,5 +1,33 @@
 # NeLisp Release Notes
 
+## v1.2.0 — 2026-09-04
+
+Full notes: [`release/v1.2.0/RELEASE.md`](release/v1.2.0/RELEASE.md).
+
+Windows x86_64 is a full standalone target: all 47 reader smokes green,
+from 11 red, with the four missing subsystems implemented over what Windows
+ships -- no MSYS2, no bundled runtime.
+
+- **Sockets over Winsock 2**, all eight `nelisp-socket-*` names, with the
+  real differences written down (`AF_INET6` 23, `closesocket`, `ioctlsocket
+  FIONBIO`, a 16-byte `WSAPOLLFD`, `SOL_SOCKET` `#xffff`) and common
+  `WSAE*` codes mapped to POSIX errno at the boundary.
+- **Async processes over `CreateProcessW`** -- `make-process` had answered
+  nil on this target and `async-ready-p` had answered `t`.
+- **`nl-ffi-call` through the PE import table**, `libc`/`libm` mapped to
+  `ucrtbase.dll`, `f64` through the positional XMM path.
+- **TLS over Schannel**: TLS 1.3 to real servers, OS certificate
+  validation, `SECBUFFER_EXTRA` carry-over, post-handshake messages, and a
+  liveness registry so a dead handle is a signal rather than a crash.
+- **Gates that were saying something false, fixed**: a committed mutation
+  injection that had broken Linux `nelisp-socket-poll`; focused gates
+  running a binary they did not build; a local `compile` weaker than
+  CI's; namespace hashes taken in the host buffer's coding system; timing
+  rows replaced by structural ones; three CRLFs.
+
+Verified: CI green on every job including `verify`, `ert-full` 5535 with
+0 unexpected, 47/47 on windows-x86_64 and linux-x86_64.
+
 ## v1.1.2 — 2026-08-30
 
 Full notes: [`release/v1.1.2/RELEASE.md`](release/v1.1.2/RELEASE.md).
