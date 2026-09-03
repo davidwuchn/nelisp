@@ -14369,6 +14369,19 @@ this file, never a re-entrant dispatch back into `nl_eval_inner'.
 Consecutive extern calls each do their own save immediately before
 their own restore, so the slot is never live across another save.")
 
+(defconst nelisp-aot-compiler--win64-dynamic-align-names
+  '(CreateFileW ReadFile WriteFile CloseHandle
+    CreateProcessW WaitForSingleObject GetExitCodeProcess
+    VirtualAlloc VirtualFree CreatePipe SetHandleInformation PeekNamedPipe
+    GetLastError GetEnvironmentStringsW FreeEnvironmentStringsW
+    WSAStartup WSAGetLastError socket ioctlsocket setsockopt bind listen accept
+    connect send recv WSAPoll getsockopt closesocket
+    AcquireCredentialsHandleW InitializeSecurityContextW CompleteAuthToken
+    QueryContextAttributesW FreeContextBuffer DeleteSecurityContext
+    FreeCredentialsHandle
+    toupper tolower sqrt pow sin cos hypot ldexp)
+  "Win64 imports whose generated nested call sites realign rsp dynamically.")
+
 (defun nelisp-aot-compiler--emit-extern-call (node buf)
   "Emit a SysV AMD64 call to an extern symbol NODE.
 Doc 100 §100.A introduced the all-i64 form; Doc 122 §122.C extends
@@ -14546,11 +14559,18 @@ same branch and emit the same byte count."
           (if win64-p
               ;; Win64 extern calls dynamically align rsp immediately before
               ;; reserving the outgoing area below, so only the outgoing stack
-              ;; arguments disturb the aligned base.
-              (= (logand (+ nelisp-aot-compiler--rsp-temp-depth
-                             (length stack-args))
-                          1)
-                 1)
+              ;; arguments disturb the aligned base.  In particular, do NOT
+              ;; count the temporary argument saves here: `and rsp,-16'
+              ;; discards their parity.  AcquireCredentialsHandleW's nine-arg
+              ;; call (five stack args) exposed the old formula: it counted
+              ;; nine temp saves too, omitted the required pad, and entered
+              ;; SspiCli with rsp misaligned.
+              (if (memq name nelisp-aot-compiler--win64-dynamic-align-names)
+                  (= (logand (length stack-args) 1) 1)
+                (= (logand (+ nelisp-aot-compiler--rsp-temp-depth
+                                (length stack-args))
+                             1)
+                   1))
             (= (logand (+ nelisp-aot-compiler--rsp-temp-depth
                           (length stack-args))
                        1)
@@ -14563,37 +14583,17 @@ same branch and emit the same byte count."
          (spill-needs-align
           ;; Same invariant: count only the pushed temps + outgoing stack
           ;; args, not the enclosing arity (matches the win64 branch).
-          (= (logand (+ nelisp-aot-compiler--rsp-temp-depth
-                        (length stack-args)
-                        arg-count)
-                     1)
-             1))
+          (if (and win64-p
+                   (memq name nelisp-aot-compiler--win64-dynamic-align-names))
+              (= (logand (length stack-args) 1) 1)
+            (= (logand (+ nelisp-aot-compiler--rsp-temp-depth
+                           (length stack-args)
+                           arg-count)
+                        1)
+               1)))
          (win64-dynamic-align-p
-          (and win64-p (memq name '(CreateFileW ReadFile WriteFile CloseHandle
-                                     CreateProcessW WaitForSingleObject
-                                     GetExitCodeProcess VirtualAlloc VirtualFree
-                                     CreatePipe SetHandleInformation PeekNamedPipe
-                                     GetLastError
-                                     ;; fix/windows-env-inherit: startup
-                                     ;; `nl_os_environ_init' reaches these from a
-                                     ;; nested `let*' -- same corruption-risk
-                                     ;; depth as the CreateFileW/... entries
-                                     ;; above (see nelisp-standalone-build.el's
-                                     ;; windows os-base-forms comment).
-                                     GetEnvironmentStringsW
-                                     FreeEnvironmentStringsW
-                                     ;; Doc 138 socket slice 1: each import is
-                                     ;; reachable from a generated nested
-                                     ;; `let*', the same silent-corruption risk.
-                                     WSAStartup WSAGetLastError socket
-                                     ioctlsocket setsockopt bind listen accept
-                                     connect send recv WSAPoll getsockopt
-                                     closesocket
-                                     ;; Stage D: generated `nl-ffi-call' arms
-                                     ;; reach every UCRT import from a deeply
-                                     ;; nested dispatch/let* chain.
-                                     toupper tolower sqrt pow sin cos hypot
-                                     ldexp))))
+          (and win64-p
+               (memq name nelisp-aot-compiler--win64-dynamic-align-names)))
          (call-temp-save-count 0)
          (call-needs-align needs-align))
     (when (and (not win64-p)

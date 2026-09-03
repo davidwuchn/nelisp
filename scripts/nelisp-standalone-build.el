@@ -12282,6 +12282,9 @@ signalling arm -- never simply absent, so `fboundp' cannot go void again."
    ;; catchable `nelisp-unsupported-primitive' signal everywhere else -- see
    ;; `nelisp-standalone--socket-dispatch-arms''s docstring.
    (nelisp-standalone--socket-dispatch-arms)
+   ;; Schannel slice 1: handshake/protocol are real only on windows-x86_64;
+   ;; record I/O and graceful close remain explicit unsupported arms.
+   (nelisp-standalone--tls-dispatch-arms)
    ;; Doc 199 Tier 2 Shape B: fixed-registry, GC-free native workers.  Real
    ;; clone(2) implementations on linux-x86_64, the same catchable unsupported
    ;; signal as the socket family everywhere else.
@@ -16708,7 +16711,16 @@ dispatch arm in `nelisp-standalone--applyfn-dispatch-table'.")
         (cons "WS2_32.dll"
               (list "WSAStartup" "WSAGetLastError" "socket" "ioctlsocket"
                     "setsockopt" "bind" "listen" "accept" "connect"
-                    "send" "recv" "WSAPoll" "getsockopt" "closesocket")))
+                    "send" "recv" "WSAPoll" "getsockopt" "closesocket"))
+        ;; Schannel slice 1: credential acquisition, the client handshake
+        ;; state machine, negotiated-protocol query, and rollback cleanup.
+        ;; Secur32 forwards these exports to Sspicli on current Windows; import
+        ;; the documented public DLL rather than the implementation detail.
+        (cons "SECUR32.dll"
+              (list "AcquireCredentialsHandleW" "InitializeSecurityContextW"
+                    "CompleteAuthToken" "QueryContextAttributesW"
+                    "FreeContextBuffer" "DeleteSecurityContext"
+                    "FreeCredentialsHandle")))
   "PE imports needed by the Windows-native standalone reader.")
 
 (defun nelisp-standalone--reader-pe-imports ()
@@ -19368,8 +19380,9 @@ with a FULL-LENGTH name buffer (ceil(len/8) u64 words), fixing >8-byte names."
                  (setq w (1+ w)))
                (nreverse forms))
            (nl_install_one globals unbound b ,len builtin_sym)))))
-   ;; Base builtins + (dynamic builds only) the Step C external FFI name(s).
+   ;; Base builtins + target-specific TLS names + the Step C external FFI name.
    (append nelisp-standalone--reader-builtins
+           (nelisp-standalone--tls-builtin-names)
            (nelisp-standalone--reader-extern-builtin-names))))
 
 (defun nelisp-standalone--os-syscall-xlat-forms ()
@@ -20620,6 +20633,332 @@ instead of referencing an implementation that was never emitted."
      entries)))
 
 ;; ===================================================================
+;; Schannel TLS client -- Windows x86_64, slice 1 (handshake only).
+;;
+;; The public boundary is deliberately above SSPI's raw structures:
+;;   (nelisp-tls-connect SOCKET SERVER-NAME) -> opaque native context
+;;   (nelisp-tls-protocol CONTEXT)           -> "TLS1.2" / "TLS1.3"
+;; Record send/recv and graceful close are installed names but remain routed
+;; to `nelisp-unsupported-primitive' until their own slices.  The input carry
+;; buffer is retained in VirtualAlloc memory because an `alloc-bytes' pointer
+;; returned as a Lisp integer would be reclaimed at the next top-level reader
+;; boundary.  SSPI's transient descriptors remain arena allocations because
+;; they never escape this call.
+;;
+;; Win64 layouts measured with MSVC 19.44 against Windows SDK 10.0.26100.0:
+;;   SecHandle: 16, dwLower@0 dwUpper@8
+;;   SecBuffer: 16, cbBuffer@0 BufferType@4 pvBuffer@8
+;;   SecBufferDesc: 16, ulVersion@0 cBuffers@4 pBuffers@8
+;;   SCH_CREDENTIALS: 72, fields @0,4,8,16,24,32,40,48,52,56,64
+;;   SecPkgContext_ConnectionInfo: 28, dwProtocol@0
+;;   SecPkgContext_StreamSizes: 20, fields @0,4,8,12,16 (slice 2)
+;; ===================================================================
+
+(defun nelisp-standalone--utf16-ascii-write-forms (buf-sym string)
+  "Return raw writes of ASCII STRING as a NUL-terminated Win32 WCHAR string."
+  (append
+   (cl-loop for c across string
+            for i from 0
+            append `((ptr-write-u8 ,buf-sym ,(* i 2) ,c)
+                     (ptr-write-u8 ,buf-sym ,(1+ (* i 2)) 0)))
+   `((ptr-write-u8 ,buf-sym ,(* (length string) 2) 0)
+     (ptr-write-u8 ,buf-sym ,(1+ (* (length string) 2)) 0))))
+
+(defun nelisp-standalone--tls-forms ()
+  "Return the Windows x86_64 Schannel handshake native units for slice 1."
+  (when (eq nelisp-standalone--target 'windows-x86_64)
+    (list
+     '(defun nl_tls_status_s32 (status)
+        (if (> status 2147483647) (- status 4294967296) status))
+     '(defun nl_tls_zero (ptr count)
+        (let* ((i 0))
+          (seq
+           (while (< i count)
+             (seq (ptr-write-u8 ptr i 0) (setq i (+ i 1))))
+           ptr)))
+     '(defun nl_tls_copy (dst src count)
+        (let* ((i 0))
+          (seq
+           (while (< i count)
+             (seq (ptr-write-u8 dst i (ptr-read-u8 src i))
+                  (setq i (+ i 1))))
+           count)))
+     ;; SERVER-NAME is intentionally ASCII at this low-level boundary.  DNS
+     ;; IDNA conversion belongs above it; every current smoke name is ASCII.
+     '(defun nl_tls_ascii_to_wide (src len)
+        (let* ((dst (alloc-bytes (* (+ len 1) 2) 2))
+               (i 0))
+          (seq
+           (while (< i len)
+             (seq (ptr-write-u8 dst (* i 2) (ptr-read-u8 src i))
+                  (ptr-write-u8 dst (+ (* i 2) 1) 0)
+                  (setq i (+ i 1))))
+           (ptr-write-u8 dst (* len 2) 0)
+           (ptr-write-u8 dst (+ (* len 2) 1) 0)
+           dst)))
+     `(defun nl_tls_package_name ()
+        (let* ((buf (alloc-bytes 90 2)))
+          (seq
+           ,@(nelisp-standalone--utf16-ascii-write-forms
+              'buf "Microsoft Unified Security Protocol Provider")
+           buf)))
+     `(defun nl_tls_signal_error (status)
+        (let* ((tagbuf (alloc-bytes 16 1))
+               (nilslot (alloc-bytes 32 8))
+               (data (alloc-bytes 32 8)))
+          (seq
+           ,@(nelisp-standalone--byte-write-forms 'tagbuf "nelisp-tls-error")
+           (nl_alloc_symbol tagbuf 16 268435480)
+           (wf_write_nil nilslot)
+           (wf_cons_int status nilslot data)
+           (bf_sig_copy32 268435512 data)
+           (ptr-write-u64 268435472 0 1)
+           (atomic-fetch-add 268435544 1)
+           1)))
+     ;; SecBuffer and SecBufferDesc constructors.  Every field is written
+     ;; explicitly; the four-byte hole before each Win64 pointer is zeroed by
+     ;; the containing allocation's initialization below.
+     '(defun nl_tls_secbuf_set (buf type ptr len)
+        (seq (ptr-write-u32 buf 0 len)
+             (ptr-write-u32 buf 4 type)
+             (ptr-write-u64 buf 8 ptr)
+             0))
+     '(defun nl_tls_secdesc_set (desc buffers count)
+        (seq (ptr-write-u32 desc 0 0)
+             (ptr-write-u32 desc 4 count)
+             (ptr-write-u64 desc 8 buffers)
+             0))
+     '(defun nl_tls_output_reset (desc buffers)
+        (seq (nl_tls_zero buffers 32)
+             (nl_tls_secbuf_set buffers 2 0 0)
+             (nl_tls_secbuf_set (+ buffers 16) 17 0 0)
+             (nl_tls_secdesc_set desc buffers 2)
+             0))
+     '(defun nl_tls_input_reset (ctx desc buffers)
+        (seq (nl_tls_zero buffers 32)
+             (nl_tls_secbuf_set buffers 2
+                                (ptr-read-u64 ctx 48)
+                                (ptr-read-u64 ctx 56))
+             (nl_tls_secbuf_set (+ buffers 16) 0 0 0)
+             (nl_tls_secdesc_set desc buffers 2)
+             0))
+     '(defun nl_tls_send_all (sock ptr len sent)
+        (if (= sent len)
+            0
+          (let* ((n (extern-call send sock (+ ptr sent) (- len sent) 0)))
+            (if (= (nl_socket_windows_socket_error_p n) 1)
+                (nl_socket_windows_error)
+              (if (= n 0)
+                  (- 0 10001)
+                (nl_tls_send_all sock ptr len (+ sent n)))))))
+     '(defun nl_tls_send_secbuf (sock buf)
+        (let* ((len (ptr-read-u32 buf 0))
+               (ptr (ptr-read-u64 buf 8)))
+          (if (if (> len 0) (> ptr 0) 0)
+              (nl_tls_send_all sock ptr len 0)
+            0)))
+     ;; Send TOKEN and (when Schannel produced one) ALERT, then release both
+     ;; provider-owned buffers required by ISC_REQ_ALLOCATE_MEMORY.
+     '(defun nl_tls_output_finish (ctx buffers)
+        (let* ((sock (ptr-read-u64 ctx 0))
+               (token_ptr (ptr-read-u64 buffers 8))
+               (alert_ptr (ptr-read-u64 buffers 24))
+               (token_rc (nl_tls_send_secbuf sock buffers))
+               (alert_rc (nl_tls_send_secbuf sock (+ buffers 16))))
+          (seq
+           (if (> token_ptr 0) (extern-call FreeContextBuffer token_ptr) 0)
+           (if (> alert_ptr 0) (extern-call FreeContextBuffer alert_ptr) 0)
+           (if (< token_rc 0) token_rc alert_rc))))
+     '(defun nl_tls_read_more (ctx)
+        (let* ((len (ptr-read-u64 ctx 56))
+               (cap (ptr-read-u64 ctx 64)))
+          (if (>= len cap)
+              (- 0 10002)
+            (let* ((n (extern-call recv (ptr-read-u64 ctx 0)
+                                    (+ (ptr-read-u64 ctx 48) len)
+                                    (- cap len) 0)))
+              (if (= (nl_socket_windows_socket_error_p n) 1)
+                  (nl_socket_windows_error)
+                (if (= n 0)
+                    (- 0 10001)
+                  (seq (ptr-write-u64 ctx 56 (+ len n)) 0)))))))
+     ;; The EXTRA buffer's pvBuffer is not a copy.  Its cbBuffer is the tail
+     ;; length within the original token, so compact exactly that suffix.
+     '(defun nl_tls_preserve_extra (ctx input_buffers)
+        (let* ((kind (ptr-read-u32 (+ input_buffers 16) 4))
+               (extra (if (= kind 5)
+                          (ptr-read-u32 (+ input_buffers 16) 0)
+                        0))
+               (oldlen (ptr-read-u64 ctx 56)))
+          (if (> extra 0)
+              (seq (nl_tls_copy (ptr-read-u64 ctx 48)
+                                (+ (ptr-read-u64 ctx 48) (- oldlen extra))
+                                extra)
+                   (ptr-write-u64 ctx 56 extra)
+                   extra)
+            (seq (ptr-write-u64 ctx 56 0) 0))))
+     '(defun nl_tls_cleanup_failed (ctx)
+        (seq
+         (if (= (ptr-read-u64 ctx 72) 1)
+             (extern-call DeleteSecurityContext (+ ctx 24)) 0)
+         (if (= (ptr-read-u64 ctx 80) 1)
+             (extern-call FreeCredentialsHandle (+ ctx 8)) 0)
+         (extern-call VirtualFree ctx 0 32768)
+         0))
+     '(defun nl_tls_fail (ctx status)
+        (seq (nl_tls_cleanup_failed ctx) (nl_tls_signal_error status)))
+     ;; Schannel normally needs no CompleteAuthToken step, but ISC documents
+     ;; both completion statuses.  Normalize them so the loop remains correct
+     ;; if a provider returns either one.
+     '(defun nl_tls_complete_status (ctx status output_desc)
+        (if (if (= status 590611) 1 (= status 590612))
+            (let* ((rc (nl_tls_status_s32
+                        (extern-call CompleteAuthToken (+ ctx 24) output_desc))))
+              (if (< rc 0) rc (if (= status 590612) 590610 0)))
+          (nl_tls_status_s32 status)))
+     '(defun nl_tls_finish_handshake (ctx out)
+        (let* ((info (alloc-bytes 28 4))
+               (rc (nl_tls_status_s32
+                    (extern-call QueryContextAttributesW (+ ctx 24) 90 info))))
+          (if (< rc 0)
+              (nl_tls_fail ctx rc)
+            (let* ((protocol (ptr-read-u32 info 0)))
+              ;; System defaults may negotiate TLS 1.2 or 1.3.  Older protocol
+              ;; values are rejected even if local policy were to enable them.
+              (if (if (= protocol 2048) 1 (= protocol 8192))
+                  (seq (ptr-write-u64 ctx 40 protocol)
+                       (wf_write_int out ctx)
+                       0)
+                (nl_tls_fail ctx (- 0 10003)))))))
+     '(defun nl_tls_handshake_loop
+          (ctx target input_desc input_buffers output_desc output_buffers attrs out)
+        (let* ((read_rc (if (= (ptr-read-u64 ctx 56) 0)
+                            (nl_tls_read_more ctx) 0)))
+          (if (< read_rc 0)
+              (nl_tls_fail ctx read_rc)
+            (seq
+             (nl_tls_input_reset ctx input_desc input_buffers)
+             (nl_tls_output_reset output_desc output_buffers)
+             (let* ((raw_status
+                     (extern-call InitializeSecurityContextW
+                                  (+ ctx 8) (+ ctx 24) target 49436 0 0
+                                  input_desc 0 (+ ctx 24) output_desc attrs 0))
+                    (status (nl_tls_complete_status
+                             ctx raw_status output_desc))
+                    (send_rc (nl_tls_output_finish ctx output_buffers)))
+               (if (< send_rc 0)
+                   (nl_tls_fail ctx send_rc)
+                 (if (= raw_status 2148074264)
+                     ;; SEC_E_INCOMPLETE_MESSAGE retains the complete input
+                     ;; prefix and appends another socket read.
+                     (let* ((more_rc (nl_tls_read_more ctx)))
+                       (if (< more_rc 0)
+                           (nl_tls_fail ctx more_rc)
+                         (nl_tls_handshake_loop
+                          ctx target input_desc input_buffers output_desc
+                          output_buffers attrs out)))
+                   (if (< status 0)
+                       (nl_tls_fail ctx status)
+                     (seq
+                      (nl_tls_preserve_extra ctx input_buffers)
+                      (if (= status 0)
+                          (nl_tls_finish_handshake ctx out)
+                        (if (= status 590610)
+                            (nl_tls_handshake_loop
+                             ctx target input_desc input_buffers output_desc
+                             output_buffers attrs out)
+                          (nl_tls_fail ctx status))))))))))))
+     '(defun nl_tls_connect_impl (args out)
+        (let* ((sock (wf_argval args 0))
+               (host_sx (wf_arg_ptr args 1))
+               (host_ptr (nl_bi_strptr host_sx))
+               (host_len (nl_bi_strlen host_sx))
+               (target (nl_tls_ascii_to_wide host_ptr host_len))
+               ;; 96-byte state followed by a 64 KiB encrypted-input carry
+               ;; buffer.  MEM_COMMIT|MEM_RESERVE, PAGE_READWRITE.
+               (ctx (extern-call VirtualAlloc 0 65632 12288 4)))
+          (if (= ctx 0)
+              (nl_tls_signal_error (- 0 12))
+            (let* ((credentials (alloc-bytes 72 8))
+                   (expiry (alloc-bytes 8 8))
+                   (input_desc (alloc-bytes 16 8))
+                   (input_buffers (alloc-bytes 32 8))
+                   (output_desc (alloc-bytes 16 8))
+                   (output_buffers (alloc-bytes 32 8))
+                   (attrs (alloc-bytes 4 4)))
+              (seq
+               (nl_tls_zero ctx 96)
+               (ptr-write-u64 ctx 0 sock)
+               (ptr-write-u64 ctx 48 (+ ctx 96))
+               (ptr-write-u64 ctx 56 0)
+               (ptr-write-u64 ctx 64 65536)
+               (nl_tls_zero credentials 72)
+               ;; SCH_CREDENTIALS_VERSION=5; no client cert; automatic server
+               ;; validation remains enabled; strong system-default crypto.
+               (ptr-write-u32 credentials 0 5)
+               (ptr-write-u32 credentials 52 4194320)
+               (let* ((cred_rc
+                       (nl_tls_status_s32
+                        (extern-call AcquireCredentialsHandleW
+                                     0 (nl_tls_package_name) 2 0 credentials
+                                     0 0 (+ ctx 8) expiry))))
+                 (if (< cred_rc 0)
+                     (nl_tls_fail ctx cred_rc)
+                   (seq
+                    (ptr-write-u64 ctx 80 1)
+                    (nl_tls_output_reset output_desc output_buffers)
+                    (let* ((raw_status
+                            (extern-call InitializeSecurityContextW
+                                         (+ ctx 8) 0 target 49436 0 0 0 0
+                                         (+ ctx 24) output_desc attrs 0))
+                           (status (nl_tls_complete_status
+                                    ctx raw_status output_desc))
+                           (send_rc
+                            (seq (if (< (nl_tls_status_s32 raw_status) 0)
+                                     0 (ptr-write-u64 ctx 72 1))
+                                 (nl_tls_output_finish ctx output_buffers))))
+                      (if (< send_rc 0)
+                          (nl_tls_fail ctx send_rc)
+                        (if (< status 0)
+                            (nl_tls_fail ctx status)
+                          (if (= status 0)
+                              (nl_tls_finish_handshake ctx out)
+                            (if (= status 590610)
+                                (nl_tls_handshake_loop
+                                 ctx target input_desc input_buffers output_desc
+                                 output_buffers attrs out)
+                              (nl_tls_fail ctx status))))))))))))))
+     '(defun nl_tls_protocol_impl (args out)
+        (let* ((ctx (wf_argval args 0))
+               (protocol (ptr-read-u64 ctx 40))
+               (buf (alloc-bytes 6 1)))
+          (seq
+           (ptr-write-u8 buf 0 84) (ptr-write-u8 buf 1 76)
+           (ptr-write-u8 buf 2 83) (ptr-write-u8 buf 3 49)
+           (ptr-write-u8 buf 4 46)
+           (ptr-write-u8 buf 5 (if (= protocol 8192) 51 50))
+           (nl_alloc_str buf 6 out)
+           0))))))
+
+(defun nelisp-standalone--tls-dispatch-arms ()
+  "Return the five TLS arms, with only slice-1 operations live on Win64."
+  (when (eq nelisp-standalone--target 'windows-x86_64)
+    (let ((sig (nelisp-standalone--applyfn-unsupported-primitive-form)))
+      (list
+       (cons '(:lit "nelisp-tls-connect") '(nl_tls_connect_impl args out))
+       (cons '(:lit "nelisp-tls-send") sig)
+       (cons '(:lit "nelisp-tls-recv") sig)
+       (cons '(:lit "nelisp-tls-close") sig)
+       (cons '(:lit "nelisp-tls-protocol")
+             '(nl_tls_protocol_impl args out))))))
+
+(defun nelisp-standalone--tls-builtin-names ()
+  "Return target-visible TLS names; slice 1 changes only windows-x86_64."
+  (when (eq nelisp-standalone--target 'windows-x86_64)
+    '("nelisp-tls-connect" "nelisp-tls-send" "nelisp-tls-recv"
+      "nelisp-tls-close" "nelisp-tls-protocol")))
+
+;; ===================================================================
 ;; Doc 199 Tier 2 -- interpreter-callable Shape-B clone(2) workers.
 ;;
 ;; This is deliberately a separate surface from the older generic
@@ -20958,6 +21297,7 @@ target the same installed names signal catchable
    (nelisp-standalone--reader-os-base-forms)
    (nelisp-standalone--target-os-code-forms)
    (nelisp-standalone--socket-forms)
+   (nelisp-standalone--tls-forms)
    (nelisp-standalone--thread-forms)))
 
 (defun nelisp-standalone--reader-os-base-forms ()

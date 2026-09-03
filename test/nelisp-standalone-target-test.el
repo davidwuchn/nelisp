@@ -2020,6 +2020,45 @@ real) native call\"."
           (should (eq (cdr arm) shared))
           (should-not (memq (car-safe (cdr arm)) real-impls)))))))
 
+(ert-deftest nelisp-standalone-target-tls-builtins-installed ()
+  "The complete TLS family is visible only in the Win64 reader."
+  (let ((nelisp-standalone--target 'windows-x86_64))
+    (should (equal (nelisp-standalone--tls-builtin-names)
+                   '("nelisp-tls-connect" "nelisp-tls-send"
+                     "nelisp-tls-recv" "nelisp-tls-close"
+                     "nelisp-tls-protocol"))))
+  (dolist (target '(linux-x86_64 linux-aarch64 macos-aarch64 windows-aarch64))
+    (let ((nelisp-standalone--target target))
+      (should-not (nelisp-standalone--tls-builtin-names)))))
+
+(ert-deftest nelisp-standalone-target-windows-tls-slice1-shape ()
+  "Win64 imports Schannel and exposes only handshake/protocol as real arms."
+  (let* ((nelisp-standalone--target 'windows-x86_64)
+         (imports (cdr (assoc "SECUR32.dll"
+                              nelisp-standalone--windows-reader-imports)))
+         (forms (flatten-tree (nelisp-standalone--tls-forms)))
+         (arms (nelisp-standalone--tls-dispatch-arms))
+         (unsupported (cdr (nth 1 arms))))
+    (dolist (name '("AcquireCredentialsHandleW" "InitializeSecurityContextW"
+                    "CompleteAuthToken" "QueryContextAttributesW"
+                    "FreeContextBuffer" "DeleteSecurityContext"
+                    "FreeCredentialsHandle"))
+      (should (member name imports)))
+    (dolist (name '(AcquireCredentialsHandleW InitializeSecurityContextW
+                    QueryContextAttributesW))
+      (should (memq name forms)))
+    (should (equal (cdr (nth 0 arms)) '(nl_tls_connect_impl args out)))
+    (should (equal (cdr (nth 4 arms)) '(nl_tls_protocol_impl args out)))
+    (should (eq (cdr (nth 2 arms)) unsupported))
+    (should (eq (cdr (nth 3 arms)) unsupported))))
+
+(ert-deftest nelisp-standalone-target-tls-non-win64-is-unsupported ()
+  "No non-Win64 target receives Schannel forms or dispatch changes."
+  (dolist (target '(linux-x86_64 linux-aarch64 macos-aarch64 windows-aarch64))
+    (let ((nelisp-standalone--target target))
+      (should-not (nelisp-standalone--tls-forms))
+      (should-not (nelisp-standalone--tls-dispatch-arms)))))
+
 (ert-deftest nelisp-standalone-target-thread-builtins-installed ()
   "All Doc 199 Tier-2 names are installed for uniform `fboundp' behavior."
   (dolist (name '("nelisp-thread-shared-alloc"
