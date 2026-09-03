@@ -2360,6 +2360,19 @@ wider than the one it replaces once the mapping leaves ASCII."
 (defun nelisp--signal-invalid (msg arg)
   (signal 'error (cons msg (if (proper-list-p arg) arg (list arg)))))
 (defun make-hash-table (&rest keys)
+  ;; The validation loop below runs interpreted, and on the standalone that
+  ;; is ~0.5 ms per call -- three times the raw constructor -- paid by every
+  ;; JSON object parsed and every per-reading cache built.  Nearly every
+  ;; caller passes no keys or exactly (:test TEST), so those two shapes are
+  ;; answered here and only the rest go through the loop; a misspelled or
+  ;; dangling keyword still lands in it and still signals.
+  (if (or (null keys)
+          (and (eq (car keys) :test)
+               (memq (cadr keys) '(eq eql equal))
+               (null (cddr keys))))
+      (let ((h (nelisp--hash-table-make-raw)))
+        (aset (car h) 2 (if keys (cadr keys) 'eql))
+        h)
   (let ((ks keys))
     (while ks
       (let ((k (car ks)) (rest (cdr ks)))
@@ -2382,7 +2395,7 @@ wider than the one it replaces once the mapping leaves ASCII."
   (let ((h (nelisp--hash-table-make-raw))
         (test (or (plist-get keys :test) 'eql)))
     (aset (car h) 2 test)
-    h))
+    h)))
 (unless (fboundp 'byte-compile-file)
   (defun byte-compile-file (filename &optional _load)
     "Check FILENAME the way Emacs does and report a missing input file.
