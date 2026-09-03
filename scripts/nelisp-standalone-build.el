@@ -12282,8 +12282,8 @@ signalling arm -- never simply absent, so `fboundp' cannot go void again."
    ;; catchable `nelisp-unsupported-primitive' signal everywhere else -- see
    ;; `nelisp-standalone--socket-dispatch-arms''s docstring.
    (nelisp-standalone--socket-dispatch-arms)
-   ;; Schannel slice 1: handshake/protocol are real only on windows-x86_64;
-   ;; record I/O and graceful close remain explicit unsupported arms.
+   ;; Schannel slices 1-2: handshake, protocol and record I/O are real only on
+   ;; windows-x86_64; graceful close remains an explicit unsupported arm.
    (nelisp-standalone--tls-dispatch-arms)
    ;; Doc 199 Tier 2 Shape B: fixed-registry, GC-free native workers.  Real
    ;; clone(2) implementations on linux-x86_64, the same catchable unsupported
@@ -16712,13 +16712,14 @@ dispatch arm in `nelisp-standalone--applyfn-dispatch-table'.")
               (list "WSAStartup" "WSAGetLastError" "socket" "ioctlsocket"
                     "setsockopt" "bind" "listen" "accept" "connect"
                     "send" "recv" "WSAPoll" "getsockopt" "closesocket"))
-        ;; Schannel slice 1: credential acquisition, the client handshake
-        ;; state machine, negotiated-protocol query, and rollback cleanup.
+        ;; Schannel slices 1-2: credential acquisition, handshake and record
+        ;; state machines, negotiated-context queries, and rollback cleanup.
         ;; Secur32 forwards these exports to Sspicli on current Windows; import
         ;; the documented public DLL rather than the implementation detail.
         (cons "SECUR32.dll"
               (list "AcquireCredentialsHandleW" "InitializeSecurityContextW"
                     "CompleteAuthToken" "QueryContextAttributesW"
+                    "EncryptMessage" "DecryptMessage"
                     "FreeContextBuffer" "DeleteSecurityContext"
                     "FreeCredentialsHandle")))
   "PE imports needed by the Windows-native standalone reader.")
@@ -20633,17 +20634,18 @@ instead of referencing an implementation that was never emitted."
      entries)))
 
 ;; ===================================================================
-;; Schannel TLS client -- Windows x86_64, slice 1 (handshake only).
+;; Schannel TLS client -- Windows x86_64, slices 1-2.
 ;;
 ;; The public boundary is deliberately above SSPI's raw structures:
 ;;   (nelisp-tls-connect SOCKET SERVER-NAME) -> opaque native context
+;;   (nelisp-tls-send CONTEXT STRING)        -> plaintext bytes accepted
+;;   (nelisp-tls-recv CONTEXT MAX-BYTES)     -> unibyte plaintext / EOF ""
 ;;   (nelisp-tls-protocol CONTEXT)           -> "TLS1.2" / "TLS1.3"
-;; Record send/recv and graceful close are installed names but remain routed
-;; to `nelisp-unsupported-primitive' until their own slices.  The input carry
-;; buffer is retained in VirtualAlloc memory because an `alloc-bytes' pointer
-;; returned as a Lisp integer would be reclaimed at the next top-level reader
-;; boundary.  SSPI's transient descriptors remain arena allocations because
-;; they never escape this call.
+;; Graceful close remains routed to `nelisp-unsupported-primitive' until slice
+;; 3.  Encrypted input, plaintext overflow and the UTF-16 SNI target are all
+;; retained in the context's VirtualAlloc block because `alloc-bytes' storage
+;; does not survive the next top-level reader boundary.  SSPI's transient
+;; descriptors remain arena allocations because they never escape a call.
 ;;
 ;; Win64 layouts measured with MSVC 19.44 against Windows SDK 10.0.26100.0:
 ;;   SecHandle: 16, dwLower@0 dwUpper@8
@@ -20665,7 +20667,7 @@ instead of referencing an implementation that was never emitted."
      (ptr-write-u8 ,buf-sym ,(1+ (* (length string) 2)) 0))))
 
 (defun nelisp-standalone--tls-forms ()
-  "Return the Windows x86_64 Schannel handshake native units for slice 1."
+  "Return the Windows x86_64 Schannel handshake and record native units."
   (when (eq nelisp-standalone--target 'windows-x86_64)
     (list
      '(defun nl_tls_status_s32 (status)
@@ -20685,9 +20687,8 @@ instead of referencing an implementation that was never emitted."
            count)))
      ;; SERVER-NAME is intentionally ASCII at this low-level boundary.  DNS
      ;; IDNA conversion belongs above it; every current smoke name is ASCII.
-     '(defun nl_tls_ascii_to_wide (src len)
-        (let* ((dst (alloc-bytes (* (+ len 1) 2) 2))
-               (i 0))
+     '(defun nl_tls_ascii_to_wide_at (src len dst)
+        (let* ((i 0))
           (seq
            (while (< i len)
              (seq (ptr-write-u8 dst (* i 2) (ptr-read-u8 src i))
@@ -20742,6 +20743,16 @@ instead of referencing an implementation that was never emitted."
              (nl_tls_secbuf_set (+ buffers 16) 0 0 0)
              (nl_tls_secdesc_set desc buffers 2)
              0))
+     '(defun nl_tls_record_input_reset (ctx desc buffers)
+        (seq (nl_tls_zero buffers 64)
+             (nl_tls_secbuf_set buffers 1
+                                (ptr-read-u64 ctx 48)
+                                (ptr-read-u64 ctx 56))
+             (nl_tls_secbuf_set (+ buffers 16) 0 0 0)
+             (nl_tls_secbuf_set (+ buffers 32) 0 0 0)
+             (nl_tls_secbuf_set (+ buffers 48) 0 0 0)
+             (nl_tls_secdesc_set desc buffers 4)
+             0))
      '(defun nl_tls_send_all (sock ptr len sent)
         (if (= sent len)
             0
@@ -20780,15 +20791,26 @@ instead of referencing an implementation that was never emitted."
               (if (= (nl_socket_windows_socket_error_p n) 1)
                   (nl_socket_windows_error)
                 (if (= n 0)
-                    (- 0 10001)
+                    ;; EOF between records is an empty receive.  EOF with a
+                    ;; partial record buffered is truncation, never success.
+                    (if (= len 0) 1 (- 0 10001))
                   (seq (ptr-write-u64 ctx 56 (+ len n)) 0)))))))
-     ;; The EXTRA buffer's pvBuffer is not a copy.  Its cbBuffer is the tail
-     ;; length within the original token, so compact exactly that suffix.
-     '(defun nl_tls_preserve_extra (ctx input_buffers)
-        (let* ((kind (ptr-read-u32 (+ input_buffers 16) 4))
-               (extra (if (= kind 5)
-                          (ptr-read-u32 (+ input_buffers 16) 0)
-                        0))
+     '(defun nl_tls_find_buffer_len (buffers count type i)
+        (if (= i count)
+            0
+          (if (= (ptr-read-u32 (+ buffers (* i 16)) 4) type)
+              (ptr-read-u32 (+ buffers (* i 16)) 0)
+            (nl_tls_find_buffer_len buffers count type (+ i 1)))))
+     '(defun nl_tls_find_buffer_ptr (buffers count type i)
+        (if (= i count)
+            0
+          (if (= (ptr-read-u32 (+ buffers (* i 16)) 4) type)
+              (ptr-read-u64 (+ buffers (* i 16)) 8)
+            (nl_tls_find_buffer_ptr buffers count type (+ i 1)))))
+     ;; EXTRA aliases the original input; compact its suffix only after any
+     ;; DATA output has been copied to the context's plaintext carry buffer.
+     '(defun nl_tls_preserve_extra_n (ctx input_buffers count)
+        (let* ((extra (nl_tls_find_buffer_len input_buffers count 5 0))
                (oldlen (ptr-read-u64 ctx 56)))
           (if (> extra 0)
               (seq (nl_tls_copy (ptr-read-u64 ctx 48)
@@ -20797,6 +20819,8 @@ instead of referencing an implementation that was never emitted."
                    (ptr-write-u64 ctx 56 extra)
                    extra)
             (seq (ptr-write-u64 ctx 56 0) 0))))
+     '(defun nl_tls_preserve_extra (ctx input_buffers)
+        (nl_tls_preserve_extra_n ctx input_buffers 2))
      '(defun nl_tls_cleanup_failed (ctx)
         (seq
          (if (= (ptr-read-u64 ctx 72) 1)
@@ -20822,20 +20846,29 @@ instead of referencing an implementation that was never emitted."
                     (extern-call QueryContextAttributesW (+ ctx 24) 90 info))))
           (if (< rc 0)
               (nl_tls_fail ctx rc)
-            (let* ((protocol (ptr-read-u32 info 0)))
+            (let* ((protocol (ptr-read-u32 info 0))
+                   (sizes (alloc-bytes 20 4))
+                   (sizes_rc (nl_tls_status_s32
+                              (extern-call QueryContextAttributesW
+                                           (+ ctx 24) 4 sizes))))
               ;; System defaults may negotiate TLS 1.2 or 1.3.  Older protocol
               ;; values are rejected even if local policy were to enable them.
-              (if (if (= protocol 2048) 1 (= protocol 8192))
-                  (seq (ptr-write-u64 ctx 40 protocol)
-                       (wf_write_int out ctx)
-                       0)
-                (nl_tls_fail ctx (- 0 10003)))))))
+              (if (< sizes_rc 0)
+                  (nl_tls_fail ctx sizes_rc)
+                (if (if (= protocol 2048) 1 (= protocol 8192))
+                    (seq (ptr-write-u64 ctx 40 protocol)
+                         (ptr-write-u64 ctx 128 (ptr-read-u32 sizes 0))
+                         (ptr-write-u64 ctx 136 (ptr-read-u32 sizes 4))
+                         (ptr-write-u64 ctx 144 (ptr-read-u32 sizes 8))
+                         (wf_write_int out ctx)
+                         0)
+                  (nl_tls_fail ctx (- 0 10003))))))))
      '(defun nl_tls_handshake_loop
           (ctx target input_desc input_buffers output_desc output_buffers attrs out)
         (let* ((read_rc (if (= (ptr-read-u64 ctx 56) 0)
                             (nl_tls_read_more ctx) 0)))
-          (if (< read_rc 0)
-              (nl_tls_fail ctx read_rc)
+          (if (not (= read_rc 0))
+              (nl_tls_fail ctx (if (> read_rc 0) (- 0 10001) read_rc))
             (seq
              (nl_tls_input_reset ctx input_desc input_buffers)
              (nl_tls_output_reset output_desc output_buffers)
@@ -20852,8 +20885,10 @@ instead of referencing an implementation that was never emitted."
                      ;; SEC_E_INCOMPLETE_MESSAGE retains the complete input
                      ;; prefix and appends another socket read.
                      (let* ((more_rc (nl_tls_read_more ctx)))
-                       (if (< more_rc 0)
-                           (nl_tls_fail ctx more_rc)
+                       (if (not (= more_rc 0))
+                           (nl_tls_fail ctx
+                                        (if (> more_rc 0)
+                                            (- 0 10001) more_rc))
                          (nl_tls_handshake_loop
                           ctx target input_desc input_buffers output_desc
                           output_buffers attrs out)))
@@ -20873,13 +20908,14 @@ instead of referencing an implementation that was never emitted."
                (host_sx (wf_arg_ptr args 1))
                (host_ptr (nl_bi_strptr host_sx))
                (host_len (nl_bi_strlen host_sx))
-               (target (nl_tls_ascii_to_wide host_ptr host_len))
-               ;; 96-byte state followed by a 64 KiB encrypted-input carry
-               ;; buffer.  MEM_COMMIT|MEM_RESERVE, PAGE_READWRITE.
-               (ctx (extern-call VirtualAlloc 0 65632 12288 4)))
+               ;; 160-byte state, 512-byte persistent target, then independent
+               ;; 64 KiB encrypted-input and plaintext carry buffers.
+               (ctx (if (> host_len 255) 0
+                      (extern-call VirtualAlloc 0 131744 12288 4))))
           (if (= ctx 0)
-              (nl_tls_signal_error (- 0 12))
-            (let* ((credentials (alloc-bytes 72 8))
+              (nl_tls_signal_error (if (> host_len 255) (- 0 10004) (- 0 12)))
+            (let* ((target (nl_tls_ascii_to_wide_at host_ptr host_len (+ ctx 160)))
+                   (credentials (alloc-bytes 72 8))
                    (expiry (alloc-bytes 8 8))
                    (input_desc (alloc-bytes 16 8))
                    (input_buffers (alloc-bytes 32 8))
@@ -20887,11 +20923,14 @@ instead of referencing an implementation that was never emitted."
                    (output_buffers (alloc-bytes 32 8))
                    (attrs (alloc-bytes 4 4)))
               (seq
-               (nl_tls_zero ctx 96)
+               (nl_tls_zero ctx 160)
                (ptr-write-u64 ctx 0 sock)
-               (ptr-write-u64 ctx 48 (+ ctx 96))
+               (ptr-write-u64 ctx 48 (+ ctx 672))
                (ptr-write-u64 ctx 56 0)
                (ptr-write-u64 ctx 64 65536)
+               (ptr-write-u64 ctx 88 (+ ctx 66208))
+               (ptr-write-u64 ctx 96 0)
+               (ptr-write-u64 ctx 112 target)
                (nl_tls_zero credentials 72)
                ;; SCH_CREDENTIALS_VERSION=5; no client cert; automatic server
                ;; validation remains enabled; strong system-default crypto.
@@ -20928,6 +20967,180 @@ instead of referencing an implementation that was never emitted."
                                  ctx target input_desc input_buffers output_desc
                                  output_buffers attrs out)
                               (nl_tls_fail ctx status))))))))))))))
+     '(defun nl_tls_encrypt_all (ctx src len record desc buffers)
+        (let* ((pos 0)
+               (rc 0)
+               (header (ptr-read-u64 ctx 128))
+               (trailer (ptr-read-u64 ctx 136))
+               (maximum (ptr-read-u64 ctx 144)))
+          (seq
+           (while (if (< pos len) (if (= rc 0) 1 0) 0)
+             (let* ((left (- len pos))
+                    (chunk (if (> left maximum) maximum left)))
+               (seq
+                (nl_tls_copy (+ record header) (+ src pos) chunk)
+                (nl_tls_zero buffers 48)
+                (nl_tls_secbuf_set buffers 7 record header)
+                (nl_tls_secbuf_set (+ buffers 16) 1 (+ record header) chunk)
+                (nl_tls_secbuf_set (+ buffers 32) 6
+                                   (+ record header chunk) trailer)
+                (nl_tls_secdesc_set desc buffers 3)
+                (setq rc (nl_tls_status_s32
+                          (extern-call EncryptMessage (+ ctx 24) 0 desc 0)))
+                (if (not (= rc 0))
+                    0
+                  (seq
+                   (setq rc (nl_tls_send_secbuf (ptr-read-u64 ctx 0) buffers))
+                   (if (< rc 0) 0
+                     (setq rc (nl_tls_send_secbuf
+                               (ptr-read-u64 ctx 0) (+ buffers 16))))
+                   (if (< rc 0) 0
+                     (setq rc (nl_tls_send_secbuf
+                               (ptr-read-u64 ctx 0) (+ buffers 32))))
+                   (if (< rc 0) 0 (setq pos (+ pos chunk))))))))
+           rc)))
+     '(defun nl_tls_send_impl (args out)
+        (let* ((ctx (wf_argval args 0))
+               (str_sx (wf_arg_ptr args 1))
+               (src (nl_bi_strptr str_sx))
+               (len (nl_bi_strlen str_sx))
+               (header (ptr-read-u64 ctx 128))
+               (trailer (ptr-read-u64 ctx 136))
+               (maximum (ptr-read-u64 ctx 144))
+               (record (alloc-bytes (+ header maximum trailer) 8))
+               (desc (alloc-bytes 16 8))
+               (buffers (alloc-bytes 48 8))
+               (rc (nl_tls_encrypt_all ctx src len record desc buffers)))
+          (if (not (= rc 0))
+              (nl_tls_signal_error rc)
+            (seq (wf_write_int out len) 0))))
+     '(defun nl_tls_plain_deliver (ctx maxbytes out)
+        (let* ((plain (ptr-read-u64 ctx 88))
+               (have (ptr-read-u64 ctx 96))
+               (take (if (> have maxbytes) maxbytes have))
+               (left (- have take)))
+          (seq
+           (nl_alloc_unibyte_str plain take out)
+           (if (> left 0) (nl_tls_copy plain (+ plain take) left) 0)
+           (ptr-write-u64 ctx 96 left)
+           0)))
+     '(defun nl_tls_post_handshake_loop
+          (ctx input_desc input_buffers output_desc output_buffers attrs)
+        (let* ((read_rc (if (= (ptr-read-u64 ctx 56) 0)
+                            (nl_tls_read_more ctx) 0)))
+          (if (not (= read_rc 0))
+              (if (> read_rc 0) (- 0 10001) read_rc)
+            (seq
+             (nl_tls_input_reset ctx input_desc input_buffers)
+             (nl_tls_output_reset output_desc output_buffers)
+             (let* ((raw_status
+                     (extern-call InitializeSecurityContextW
+                                  (+ ctx 8) (+ ctx 24) (ptr-read-u64 ctx 112)
+                                  49436 0 0 input_desc 0 (+ ctx 24)
+                                  output_desc attrs 0))
+                    (status (nl_tls_complete_status ctx raw_status output_desc))
+                    (send_rc (nl_tls_output_finish ctx output_buffers)))
+               (if (< send_rc 0)
+                   send_rc
+                 (if (= raw_status 2148074264)
+                     (let* ((more_rc (nl_tls_read_more ctx)))
+                       (if (not (= more_rc 0))
+                           (if (> more_rc 0) (- 0 10001) more_rc)
+                         (nl_tls_post_handshake_loop
+                          ctx input_desc input_buffers output_desc
+                          output_buffers attrs)))
+                   (if (< status 0)
+                       status
+                     (seq
+                      (nl_tls_preserve_extra ctx input_buffers)
+                      (if (= status 0)
+                          0
+                        (if (= status 590610)
+                            (nl_tls_post_handshake_loop
+                             ctx input_desc input_buffers output_desc
+                             output_buffers attrs)
+                          status)))))))))))
+     '(defun nl_tls_decrypt_loop (ctx maxbytes out)
+        (let* ((read_rc (if (= (ptr-read-u64 ctx 56) 0)
+                            (nl_tls_read_more ctx) 0)))
+          (if (> read_rc 0)
+              (seq (ptr-write-u64 ctx 152 1)
+                   (nl_alloc_unibyte_str (ptr-read-u64 ctx 88) 0 out)
+                   0)
+              (if (< read_rc 0)
+                  (nl_tls_signal_error read_rc)
+                (let* ((desc (alloc-bytes 16 8))
+                       (buffers (alloc-bytes 64 8))
+                       (qop (alloc-bytes 4 4)))
+                  (seq
+                   (nl_tls_record_input_reset ctx desc buffers)
+                   (let* ((raw_status
+                       (extern-call DecryptMessage (+ ctx 24) desc 0 qop))
+                      (status (nl_tls_status_s32 raw_status)))
+                 (if (= raw_status 2148074264)
+                     (let* ((more_rc (nl_tls_read_more ctx)))
+                       (if (not (= more_rc 0))
+                           (nl_tls_signal_error
+                            (if (> more_rc 0) (- 0 10001) more_rc))
+                         (nl_tls_decrypt_loop ctx maxbytes out)))
+                   (if (= status 0)
+                       (let* ((data_len
+                               (nl_tls_find_buffer_len buffers 4 1 0))
+                              (data_ptr
+                               (nl_tls_find_buffer_ptr buffers 4 1 0))
+                              (extra_len
+                               (nl_tls_find_buffer_len buffers 4 5 0)))
+                         (seq
+                          ;; Diagnostic counters are context-local too: probe
+                          ;; code can prove that a large response crossed real
+                          ;; records and exercised EXTRA, without global state.
+                          (ptr-write-u32 ctx 104 (+ (ptr-read-u32 ctx 104) 1))
+                          (if (> extra_len 0)
+                              (ptr-write-u32 ctx 108
+                                             (+ (ptr-read-u32 ctx 108) 1)) 0)
+                          (if (> data_len 0)
+                              (nl_tls_copy (ptr-read-u64 ctx 88)
+                                           data_ptr data_len) 0)
+                          (ptr-write-u64 ctx 96 data_len)
+                          (nl_tls_preserve_extra_n ctx buffers 4)
+                          (if (> data_len 0)
+                              (nl_tls_plain_deliver ctx maxbytes out)
+                            (nl_tls_decrypt_loop ctx maxbytes out))))
+                     (if (= status 590625)
+                         (let* ((input_desc (alloc-bytes 16 8))
+                                (input_buffers (alloc-bytes 32 8))
+                                (output_desc (alloc-bytes 16 8))
+                                (output_buffers (alloc-bytes 32 8))
+                                (attrs (alloc-bytes 4 4))
+                                (saved
+                                 (seq
+                                  (ptr-write-u64 ctx 120
+                                                 (+ (ptr-read-u64 ctx 120) 1))
+                                  (nl_tls_preserve_extra_n ctx buffers 4)))
+                                (reneg_rc
+                                 (nl_tls_post_handshake_loop
+                                  ctx input_desc input_buffers output_desc
+                                  output_buffers attrs)))
+                           (if (not (= reneg_rc 0))
+                               (nl_tls_signal_error reneg_rc)
+                             (nl_tls_decrypt_loop ctx maxbytes out)))
+                       (if (= status 590615)
+                           (seq (ptr-write-u64 ctx 56 0)
+                                (ptr-write-u64 ctx 152 1)
+                                (nl_alloc_unibyte_str
+                                 (ptr-read-u64 ctx 88) 0 out)
+                                0)
+                         (nl_tls_signal_error status))))))))))))
+     '(defun nl_tls_recv_impl (args out)
+        (let* ((ctx (wf_argval args 0))
+               (maxbytes (wf_argval args 1)))
+          (if (= maxbytes 0)
+              (seq (nl_alloc_unibyte_str (ptr-read-u64 ctx 88) 0 out) 0)
+            (if (> (ptr-read-u64 ctx 96) 0)
+                (nl_tls_plain_deliver ctx maxbytes out)
+              (if (= (ptr-read-u64 ctx 152) 1)
+                  (seq (nl_alloc_unibyte_str (ptr-read-u64 ctx 88) 0 out) 0)
+                (nl_tls_decrypt_loop ctx maxbytes out))))))
      '(defun nl_tls_protocol_impl (args out)
         (let* ((ctx (wf_argval args 0))
                (protocol (ptr-read-u64 ctx 40))
@@ -20941,19 +21154,19 @@ instead of referencing an implementation that was never emitted."
            0))))))
 
 (defun nelisp-standalone--tls-dispatch-arms ()
-  "Return the five TLS arms, with only slice-1 operations live on Win64."
+  "Return the five TLS arms, with slices 1-2 live on Win64."
   (when (eq nelisp-standalone--target 'windows-x86_64)
     (let ((sig (nelisp-standalone--applyfn-unsupported-primitive-form)))
       (list
        (cons '(:lit "nelisp-tls-connect") '(nl_tls_connect_impl args out))
-       (cons '(:lit "nelisp-tls-send") sig)
-       (cons '(:lit "nelisp-tls-recv") sig)
+       (cons '(:lit "nelisp-tls-send") '(nl_tls_send_impl args out))
+       (cons '(:lit "nelisp-tls-recv") '(nl_tls_recv_impl args out))
        (cons '(:lit "nelisp-tls-close") sig)
        (cons '(:lit "nelisp-tls-protocol")
              '(nl_tls_protocol_impl args out))))))
 
 (defun nelisp-standalone--tls-builtin-names ()
-  "Return target-visible TLS names; slice 1 changes only windows-x86_64."
+  "Return target-visible TLS names; slices 1-2 change only windows-x86_64."
   (when (eq nelisp-standalone--target 'windows-x86_64)
     '("nelisp-tls-connect" "nelisp-tls-send" "nelisp-tls-recv"
       "nelisp-tls-close" "nelisp-tls-protocol")))

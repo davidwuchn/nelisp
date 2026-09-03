@@ -2031,25 +2031,27 @@ real) native call\"."
     (let ((nelisp-standalone--target target))
       (should-not (nelisp-standalone--tls-builtin-names)))))
 
-(ert-deftest nelisp-standalone-target-windows-tls-slice1-shape ()
-  "Win64 imports Schannel and exposes only handshake/protocol as real arms."
+(ert-deftest nelisp-standalone-target-windows-tls-slice2-shape ()
+  "Win64 imports Schannel and exposes handshake plus record I/O arms."
   (let* ((nelisp-standalone--target 'windows-x86_64)
          (imports (cdr (assoc "SECUR32.dll"
                               nelisp-standalone--windows-reader-imports)))
          (forms (flatten-tree (nelisp-standalone--tls-forms)))
          (arms (nelisp-standalone--tls-dispatch-arms))
-         (unsupported (cdr (nth 1 arms))))
+         (unsupported (cdr (nth 3 arms))))
     (dolist (name '("AcquireCredentialsHandleW" "InitializeSecurityContextW"
                     "CompleteAuthToken" "QueryContextAttributesW"
+                    "EncryptMessage" "DecryptMessage"
                     "FreeContextBuffer" "DeleteSecurityContext"
                     "FreeCredentialsHandle"))
       (should (member name imports)))
     (dolist (name '(AcquireCredentialsHandleW InitializeSecurityContextW
-                    QueryContextAttributesW))
+                    QueryContextAttributesW EncryptMessage DecryptMessage))
       (should (memq name forms)))
     (should (equal (cdr (nth 0 arms)) '(nl_tls_connect_impl args out)))
+    (should (equal (cdr (nth 1 arms)) '(nl_tls_send_impl args out)))
+    (should (equal (cdr (nth 2 arms)) '(nl_tls_recv_impl args out)))
     (should (equal (cdr (nth 4 arms)) '(nl_tls_protocol_impl args out)))
-    (should (eq (cdr (nth 2 arms)) unsupported))
     (should (eq (cdr (nth 3 arms)) unsupported))))
 
 (ert-deftest nelisp-standalone-target-tls-non-win64-is-unsupported ()

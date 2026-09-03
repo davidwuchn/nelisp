@@ -14377,7 +14377,8 @@ their own restore, so the slot is never live across another save.")
     WSAStartup WSAGetLastError socket ioctlsocket setsockopt bind listen accept
     connect send recv WSAPoll getsockopt closesocket
     AcquireCredentialsHandleW InitializeSecurityContextW CompleteAuthToken
-    QueryContextAttributesW FreeContextBuffer DeleteSecurityContext
+    QueryContextAttributesW EncryptMessage DecryptMessage
+    FreeContextBuffer DeleteSecurityContext
     FreeCredentialsHandle
     toupper tolower sqrt pow sin cos hypot ldexp)
   "Win64 imports whose generated nested call sites realign rsp dynamically.")
