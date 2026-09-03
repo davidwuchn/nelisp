@@ -211,6 +211,12 @@
 # lisp/nelisp-stdlib-plist-str.el is untouched.  The two copies already
 # differed (the prelude checks its arguments first), so this is the same
 # divergence with a new shape, not a new one.
+#
+# make-hash-table's divergent pin re-digested on 2026-09-04: the prelude
+# copy answers the no-keys and (:test TEST) shapes before its validation
+# loop, so its shape moved; the host copy in lisp/nelisp-stdlib-hash.el
+# is untouched.  Same divergence as before with a new shape, not a new
+# one -- the standalone-only fast path has no host counterpart.
 ns-collision 246
 # 97 -> 96 on 2026-08-19: `string-equal' no longer differs between the two
 # files -- the prelude's now signals for a non-string instead of falling
@@ -925,7 +931,7 @@ pinned-collision ns-collision-divergent	lsh	lisp/nelisp-stdlib-misc.el scripts/n
 pinned-collision ns-collision-divergent	macroexp-parse-body	lisp/nelisp-stdlib.el scripts/nelisp-stdlib-prelude.el	92dc977d56a1
 pinned-collision ns-collision-divergent	macroexpand-1	lisp/nelisp-stdlib.el scripts/nelisp-stdlib-prelude.el	35290347dca5
 pinned-collision ns-collision-divergent	make-directory	lisp/nelisp-build-host.el scripts/nelisp-stdlib-prelude.el	3c6cc7b600f2
-pinned-collision ns-collision-divergent	make-hash-table	lisp/nelisp-stdlib-hash.el scripts/nelisp-stdlib-prelude.el	e053cb15a128
+pinned-collision ns-collision-divergent	make-hash-table	lisp/nelisp-stdlib-hash.el scripts/nelisp-stdlib-prelude.el	d5c3bea86c37
 pinned-collision ns-collision-divergent	make-process	packages/nelisp-process-adapter/src/nelisp-process-adapter.el scripts/nelisp-stdlib-prelude.el	263817b13682
 pinned-collision ns-collision-divergent	mapc	lisp/nelisp-stdlib-hof.el scripts/nelisp-stdlib-prelude.el	4e87f4a62eba
 pinned-collision ns-collision-divergent	mapcar	lisp/nelisp-stdlib-hof.el scripts/nelisp-stdlib-prelude.el	219ed3e7df2f
