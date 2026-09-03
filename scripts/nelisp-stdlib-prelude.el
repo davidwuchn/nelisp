@@ -1862,6 +1862,18 @@ Pure-elisp impl: int parse drives a digit loop; float branch uses
 `(/ frac 1.0 ...)' for promote-on-mixed semantics and a multiply
 loop for the exponent (= no `expt' / `float' primitive needed)."
   (nelisp--check-string s)
+  ;; A bare optionally-signed decimal integer -- the shape JSON ids, indices
+  ;; and most counters arrive in -- goes to the native bignum-aware reader
+  ;; entry on the standalone, where the loop below costs ~2 ms per call
+  ;; interpreted.  Anything else (whitespace, a float, a radix, trailing
+  ;; text) keeps the full walk, and the host, which has neither native, is
+  ;; unchanged.
+  (if (and (null radix) (fboundp 'nl--int-token-p) (nl--int-token-p s))
+      (nl--read-int s)
+    (nelisp--string-to-number-walk s radix)))
+
+(defun nelisp--string-to-number-walk (s &optional radix)
+  "The full leading-portion parse behind `string-to-number'."
   (when radix
     (unless (integerp radix) (signal 'wrong-type-argument (list 'fixnump radix)))
     (when (or (< radix 2) (> radix 16))

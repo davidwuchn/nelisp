@@ -9165,6 +9165,23 @@ baked build's own `<'/`>'/`=' arms need it too.")
             (if (= c0 45) (- 0 (m5_s2n_mag s 1 n 0))
               (if (= c0 43) (m5_s2n_mag s 1 n 0)
                 (m5_s2n_mag s 0 n 0)))))))
+    ;; 1 when S is exactly [+-]?[0-9]+ -- the shape `string-to-number' can
+    ;; hand to `nl_read_int_or_bignum' instead of walking its interpreted
+    ;; digit loop.  A while, not a recursion: `m5_s2n_mag' takes one native
+    ;; frame per digit, which is fine for a number and not for an arbitrary
+    ;; string a caller passes to `string-to-number'.
+    (defun m5_int_token_p (s)
+      (let* ((n (m5_strlen s)) (i 0) (ok 1))
+        (if (> n 0)
+            (let* ((c0 (m5_byte_at s 0)))
+              (if (= c0 45) (setq i 1) (if (= c0 43) (setq i 1) 0)))
+          0)
+        (if (>= i n) (setq ok 0) 0)
+        (while (< i n)
+          (let* ((c (m5_byte_at s i)))
+            (if (< c 48) (setq ok 0) (if (> c 57) (setq ok 0) 0)))
+          (setq i (+ i 1)))
+        ok))
     (defun m5_streq_bytes (a b i n)
       (if (>= i n) 1
         (if (= (m5_byte_at a i) (m5_byte_at b i))
@@ -11616,6 +11633,12 @@ Wave-2 (C) appends bf_ash (shl/sar compose) + bf_str_lt (byte-lexicographic).")
     ;; checked here, matching `m5_s2n''s own convention for the same
     ;; reason.
     ((:lit "nl--read-int") . (seq (nl_read_int_or_bignum (wf_arg_ptr args 0) out) 0))
+    ;; Same reader-only contract as `nl--read-int': ARG0 is a string, checked
+    ;; by the one prelude caller (`string-to-number', after
+    ;; `nelisp--check-string').  Answers t when the string is a bare
+    ;; optionally-signed decimal integer, so that caller can route it to
+    ;; `nl--read-int' rather than its interpreted digit loop.
+    ((:lit "nl--int-token-p") . (if (= (m5_int_token_p (wf_arg_ptr args 0)) 1) (wf_write_t out) (wf_write_nil out)))
     ;; The float arm was missing, so (zerop 0.0) answered nil -- and a
     ;; non-number answered nil too, instead of signalling.  Masking the sign
     ;; bit is what makes -0.0 zero as well, which is what `=' reports.
@@ -11865,7 +11888,7 @@ ash/logand/logior/logxor/lognot + string<.")
 
 (defconst nelisp-standalone--applyfn-bf-builtins
   '("consp" "atom" "stringp" "symbolp" "integerp" "bignump" "natnump" "numberp" "floatp"
-    "nl--read-int"
+    "nl--read-int" "nl--int-token-p"
     "vectorp" "listp" "zerop" "set" "symbol-value" "fboundp" "boundp" "featurep" "provide" "require"
     "symbol-name" "intern" "make-symbol" "nelisp--intern-lookup" "unibyte-string"
     "make-vector" "vector" "aref" "elt" "aset" "record" "recordp" "make-record"
@@ -16625,7 +16648,7 @@ value (matches the binary's M8 read+eval-loop driver)."
     ;; Wave-1 (B) breadth: predicates / symbol+vector ops / equal / setcar-setcdr
     ;; / signal-error (the names back the breadth arms in the reader applyfn).
     "consp" "atom" "stringp" "symbolp" "integerp" "bignump" "natnump" "numberp" "floatp"
-    "nl--read-int"
+    "nl--read-int" "nl--int-token-p"
     "vectorp" "listp" "zerop" "set" "symbol-value" "fboundp" "boundp" "featurep" "provide" "require"
     "symbol-name" "intern" "make-symbol" "nelisp--intern-lookup" "unibyte-string"
     "make-vector" "vector" "aref" "elt" "aset" "record" "recordp" "make-record"
