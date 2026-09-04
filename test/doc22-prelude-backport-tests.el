@@ -1,6 +1,75 @@
 (require 'cl-lib)
 (require 'ert)
 
+(defun nelisp-doc22--prelude-defun-form (name)
+  "Read the definition of NAME from the standalone prelude."
+  (with-temp-buffer
+    (insert-file-contents
+     (expand-file-name "scripts/nelisp-stdlib-prelude.el" default-directory))
+    (goto-char (point-min))
+    (re-search-forward
+     (concat "^(defun " (regexp-quote (symbol-name name)) "\\_>"))
+    (beginning-of-line)
+    (read (current-buffer))))
+
+(ert-deftest nelisp-doc22-read-from-string-decodes-gnu-string-escapes ()
+  "The prelude string decoder matches GNU's escape values and byte shape."
+  (let* ((names '(nelisp--rd-hex-digit-value
+                  nelisp--rd-octal-escape
+                  nelisp--rd-unicode-escape
+                  nelisp--rd-named-unicode-escape
+                  nelisp--rd-string-ctrl-char
+                  nelisp--rd-basic-string-escape
+                  nelisp--rd-modified-string-escape
+                  nelisp--rd-string-escape
+                  nelisp--rd-unescape))
+         (old (mapcar (lambda (name)
+                        (list name (fboundp name)
+                              (and (fboundp name) (symbol-function name))))
+                      names)))
+    (unwind-protect
+        (progn
+          (dolist (name names)
+            (eval (nelisp-doc22--prelude-defun-form name) t))
+          (should
+           (equal
+            (mapcar
+             #'string-to-list
+             (list (nelisp--rd-unescape "x\\0y")
+                   (nelisp--rd-unescape "\\012")
+                   (nelisp--rd-unescape "\\101")
+                   (nelisp--rd-unescape "\\x41")
+                   (nelisp--rd-unescape "\\x41\\ ")
+                   (nelisp--rd-unescape "é")
+                   (nelisp--rd-unescape "\\u00e9")
+                   (nelisp--rd-unescape "\\U0001F600")
+                   (nelisp--rd-unescape "\\N{U+1F600}")
+                   (nelisp--rd-unescape "\\C-a")
+                   (nelisp--rd-unescape "\\^a")
+                   (nelisp--rd-unescape "\\s")
+                   (nelisp--rd-unescape "\\d")
+                   (nelisp--rd-unescape "\\e")
+                   (nelisp--rd-unescape "\\a")
+                   (nelisp--rd-unescape "\\b")
+                   (nelisp--rd-unescape "\\f")
+                   (nelisp--rd-unescape "\\n")
+                   (nelisp--rd-unescape "\\r")
+                   (nelisp--rd-unescape "\\t")
+                   (nelisp--rd-unescape "\\v")
+                   (nelisp--rd-unescape (apply #'string '(120 92 10 121)))
+                   (nelisp--rd-unescape "x\\ y")
+                   (nelisp--rd-unescape "\\q")))
+            '((120 0 121) (10) (65) (65) (65) (233) (233) (128512)
+              (128512) (1) (1) (32) (127) (27) (7) (8) (12) (10)
+              (13) (9) (11) (120 121) (120 121) (113))))
+          (let ((meta (nelisp--rd-unescape "\\M-a")))
+            (should (equal (string-to-list meta) '(225)))
+            (should-not (multibyte-string-p meta))))
+      (dolist (entry old)
+        (if (nth 1 entry)
+            (fset (car entry) (nth 2 entry))
+          (fmakunbound (car entry)))))))
+
 (ert-deftest nelisp-doc22-cl-dolist-dotimes-establish-anonymous-block ()
   "The guarded prelude shims retain GNU's anonymous `cl-block'."
   (let ((old-dolist (symbol-function 'cl-dolist))

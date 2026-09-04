@@ -8332,17 +8332,164 @@ are numbers; `1.' is the integer 1."
       (setq i (1+ i)))
     plain))
 
+(defun nelisp--rd-hex-digit-value (c)
+  "Return the numeric value of hexadecimal digit C, or nil."
+  (cond
+   ((and (>= c 48) (<= c 57)) (- c 48))
+   ((and (>= c 97) (<= c 102)) (+ 10 (- c 97)))
+   ((and (>= c 65) (<= c 70)) (+ 10 (- c 65)))
+   (t nil)))
+
+(defun nelisp--rd-octal-escape (body pos n)
+  "Decode one to three octal digits in BODY at POS."
+  (let ((end pos) (cap (min n (+ pos 3))))
+    (while (and (< end cap)
+                (let ((c (aref body end))) (and (>= c 48) (<= c 55))))
+      (setq end (1+ end)))
+    (let ((code (string-to-number (substring body pos end) 8)))
+      ;; Octal values through 255 denote bytes.  In particular, keeping
+      ;; meta and high-octal escapes unibyte is observable in GNU Emacs.
+      (cons (if (<= code 255) (unibyte-string code) (char-to-string code))
+            end))))
+
+(defun nelisp--rd-unicode-escape (body pos n digits)
+  "Decode exactly DIGITS hexadecimal characters in BODY at POS."
+  (when (< (- n pos) digits)
+    (signal 'invalid-read-syntax (list "Short Unicode escape")))
+  (let ((end (+ pos digits)) (i pos) (valid t))
+    (while (< i end)
+      (unless (nelisp--rd-hex-digit-value (aref body i)) (setq valid nil))
+      (setq i (1+ i)))
+    (unless valid
+      (signal 'invalid-read-syntax (list "Invalid Unicode escape")))
+    (cons (char-to-string (string-to-number (substring body pos end) 16))
+          end)))
+
+(defun nelisp--rd-named-unicode-escape (body pos n)
+  "Decode GNU's numeric `\\N{U+HEX}' form in BODY at POS."
+  (unless (and (< (1+ pos) n) (= (aref body (1+ pos)) 123))
+    (signal 'invalid-read-syntax (list "Invalid \\N escape")))
+  (let ((end (+ pos 2)))
+    (while (and (< end n) (not (= (aref body end) 125)))
+      (setq end (1+ end)))
+    (when (>= end n)
+      (signal 'invalid-read-syntax (list "Unterminated \\N escape")))
+    (let ((digit-start (+ pos 4)) (i (+ pos 4)) (valid t))
+      ;; Full Unicode character-name lookup needs Emacs's name database,
+      ;; which the standalone does not carry.  The U+ notation is numeric
+      ;; and can be decoded locally without broadening that runtime surface.
+      (unless (and (< digit-start end)
+                   (= (aref body (+ pos 2)) 85)
+                   (= (aref body (+ pos 3)) 43))
+        (signal 'invalid-read-syntax (list "Unknown character name")))
+      (while (< i end)
+        (unless (nelisp--rd-hex-digit-value (aref body i)) (setq valid nil))
+        (setq i (1+ i)))
+      (unless valid
+        (signal 'invalid-read-syntax (list "Invalid character code")))
+      (cons (char-to-string
+             (string-to-number (substring body digit-start end) 16))
+            (1+ end)))))
+
+(defun nelisp--rd-string-ctrl-char (c)
+  "Return GNU's control-code collapse of C, or nil when invalid."
+  (cond
+   ((and (>= c 65) (<= c 90)) (1+ (- c 65)))
+   ((and (>= c 97) (<= c 122)) (1+ (- c 97)))
+   ((= c 63) 127)
+   ((or (= c 64) (= c 32)) 0)
+   ((and (>= c 91) (<= c 95)) (- c 64))
+   (t nil)))
+
+(defun nelisp--rd-basic-string-escape (body pos n)
+  "Decode one non-modifier string escape in BODY at POS."
+  (let ((e (aref body pos)))
+    (cond
+     ((= e 97)  (cons (char-to-string 7) (1+ pos)))
+     ((= e 98)  (cons (char-to-string 8) (1+ pos)))
+     ((= e 100) (cons (char-to-string 127) (1+ pos)))
+     ((= e 101) (cons (char-to-string 27) (1+ pos)))
+     ((= e 102) (cons (char-to-string 12) (1+ pos)))
+     ((= e 110) (cons (char-to-string 10) (1+ pos)))
+     ((= e 114) (cons (char-to-string 13) (1+ pos)))
+     ((= e 115) (cons (char-to-string 32) (1+ pos)))
+     ((= e 116) (cons (char-to-string 9) (1+ pos)))
+     ((= e 118) (cons (char-to-string 11) (1+ pos)))
+     ;; Backslash-newline and backslash-space are continuations in strings.
+     ((or (= e 10) (= e 32)) (cons "" (1+ pos)))
+     ((and (>= e 48) (<= e 55)) (nelisp--rd-octal-escape body pos n))
+     ((= e 120)
+      (let ((end (1+ pos)))
+        (while (and (< end n) (nelisp--rd-hex-digit-value (aref body end)))
+          (setq end (1+ end)))
+        (when (= end (1+ pos))
+          (signal 'invalid-read-syntax (list "Empty hex escape")))
+        (let ((code (string-to-number (substring body (1+ pos) end) 16)))
+          (cons (if (<= code 255) (unibyte-string code) (char-to-string code))
+                end))))
+     ((= e 117) (nelisp--rd-unicode-escape body (1+ pos) n 4))
+     ((= e 85) (nelisp--rd-unicode-escape body (1+ pos) n 8))
+     ((= e 78) (nelisp--rd-named-unicode-escape body pos n))
+     ;; GNU drops the backslash on unknown escapes, retaining the character.
+     (t (cons (char-to-string e) (1+ pos))))))
+
+(defun nelisp--rd-modified-string-escape (body pos n meta ctrl)
+  "Decode a control or meta string escape target in BODY at POS."
+  (when (>= pos n)
+    (signal 'invalid-read-syntax (list "Invalid modifier in string")))
+  (let ((r
+         (if (= (aref body pos) 92)
+             (progn
+               (when (>= (1+ pos) n)
+                 (signal 'invalid-read-syntax
+                         (list "Invalid modifier in string")))
+               (let ((e (aref body (1+ pos))))
+                 (cond
+                  ((and (or (= e 67) (= e 77))
+                        (< (+ pos 2) n) (= (aref body (+ pos 2)) 45))
+                   (nelisp--rd-modified-string-escape
+                    body (+ pos 3) n (or meta (= e 77)) (or ctrl (= e 67))))
+                  ((= e 94)
+                   (nelisp--rd-modified-string-escape
+                    body (+ pos 2) n meta t))
+                  (t (nelisp--rd-basic-string-escape body (1+ pos) n)))))
+           (cons (char-to-string (aref body pos)) (1+ pos)))))
+    (let ((chunk (car r)))
+      (unless (= (length chunk) 1)
+        (signal 'invalid-read-syntax (list "Invalid modifier in string")))
+      (let ((code (aref chunk 0)))
+        (when ctrl
+          (setq code (nelisp--rd-string-ctrl-char code))
+          (unless code
+            (signal 'invalid-read-syntax (list "Invalid modifier in string"))))
+        (when meta
+          ;; GNU permits meta only on an ASCII target and represents it by
+          ;; setting bit 7 in an otherwise-unibyte string.
+          (when (> code 127)
+            (signal 'invalid-read-syntax (list "Invalid modifier in string")))
+          (setq code (logior code 128)))
+        (cons (if meta (unibyte-string code) (char-to-string code))
+              (cdr r))))))
+
+(defun nelisp--rd-string-escape (body pos n)
+  "Decode one GNU-compatible string escape in BODY at POS."
+  (let ((e (aref body pos)))
+    (cond
+     ((and (or (= e 67) (= e 77))
+           (< (1+ pos) n) (= (aref body (1+ pos)) 45))
+      (nelisp--rd-modified-string-escape
+       body (+ pos 2) n (= e 77) (= e 67)))
+     ((= e 94) (nelisp--rd-modified-string-escape body (1+ pos) n nil t))
+     (t (nelisp--rd-basic-string-escape body pos n)))))
+
 (defun nelisp--rd-unescape (body)
   (let ((out "") (i 0) (n (length body)))
     (while (< i n)
       (let ((c (aref body i)))
         (if (and (= c 92) (< (1+ i) n))
-            (let ((d (aref body (1+ i))))
-              (setq out (concat out (cond ((= d 110) "\n") ((= d 116) "\t")
-                                          ((= d 114) "\r") (t (char-to-string d)))))
-              (setq i (+ i 2)))
-          (setq out (concat out (char-to-string c)))
-          (setq i (1+ i)))))
+            (let ((r (nelisp--rd-string-escape body (1+ i) n)))
+              (setq out (concat out (car r)) i (cdr r)))
+          (setq out (concat out (char-to-string c)) i (1+ i)))))
     out))
 
 (defun nelisp--rd-one (s i n)

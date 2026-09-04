@@ -1096,6 +1096,7 @@ STANDALONE_READER_SMOKES = \
   standalone-reader-repl-idle-pump-smoke \
   standalone-reader-repl-smoke \
   standalone-reader-require-provide-smoke \
+  standalone-reader-read-string-escapes-smoke \
   standalone-reader-shadow-smoke \
   standalone-reader-splitstring-perf-smoke \
   standalone-reader-tls-smoke \
@@ -1564,6 +1565,22 @@ standalone-reader-reader-parity-smoke: $(if $(wildcard target/nelisp target/neli
 	  *"pass=t"*) echo "[reader-parity-smoke] PASS: $$out";; \
 	  *) echo "[reader-parity-smoke] FAIL: $$out (expected pass=t -- the native reader and nelisp--rd-one disagree)"; exit 1;; \
 	esac
+
+# The standalone has a second, interpreted reader behind `read-from-string'.
+# Its string decoder used to recognize only \n, \r, and \t, so source loaded
+# through it silently changed \0 to the digit 0 and missed the other GNU
+# string escapes.  Construct the reader inputs from character codes so this
+# smoke tests `read-from-string' itself, not the native reader that loads the
+# smoke expression.
+.PHONY: standalone-reader-read-string-escapes-smoke
+standalone-reader-read-string-escapes-smoke: standalone-reader
+	@out="$$($(STANDALONE_BIN) --eval '(list (string-to-list (car (read-from-string (apply (function string) (quote (34 120 92 48 121 34)))))) (string-to-list (car (read-from-string (apply (function string) (quote (34 92 48 49 50 34)))))) (string-to-list (car (read-from-string (apply (function string) (quote (34 92 120 52 49 34)))))) (let ((s (car (read-from-string (apply (function string) (quote (34 233 34))))))) (list (string-to-list s) (multibyte-string-p s))) (string-to-list (car (read-from-string (apply (function string) (quote (34 92 67 45 97 34)))))) (string-to-list (car (read-from-string (apply (function string) (quote (34 92 115 34)))))) (string-to-list (car (read-from-string (apply (function string) (quote (34 120 92 10 121 34)))))))')"; \
+	if [ "$$out" = "((120 0 121) (10) (65) ((233) t) (1) (32) (120 121))" ]; then \
+	  echo "[read-string-escapes-smoke] PASS: -> $$out"; \
+	else \
+	  echo "[read-string-escapes-smoke] FAIL: -> $$out"; \
+	  exit 1; \
+	fi
 
 # Doc 201 §5.3: §5.1 replaced `nl_sf_defvar'/`nl_sf_defconst''s per-call AST
 # synthesis (intern 5 symbols, build 9 cons cells, re-enter the interpreter
