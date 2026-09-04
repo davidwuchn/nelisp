@@ -112,6 +112,22 @@ Each symbolic op is replaced with its opcode byte via
   (should-error (nelisp-bc-compile '(defvar v 1))
                 :type 'nelisp-bc-unimplemented))
 
+(ert-deftest nelisp-bc-3b2-refuses-unexpanded-macro ()
+  ;; A macro the compiler has no arm for used to reach the generic call
+  ;; arm, where the head compiled fine and the BINDING SPEC became a
+  ;; call: `(dotimes (i 3) ...)' turned into a call to `i', which only
+  ;; failed once the bytecode ran.  Callers wrap compilation in
+  ;; `condition-case' precisely so they can fall back, so the refusal has
+  ;; to happen here, at compile time.
+  (should-error (nelisp-bc-compile '(dotimes (i 3) i))
+                :type 'nelisp-bc-unimplemented)
+  (should-error (nelisp-bc-compile '(dolist (x '(1)) x))
+                :type 'nelisp-bc-unimplemented)
+  ;; `when' and `unless' have their own arms and keep working.
+  (should (= (nelisp-bc-run (nelisp-bc-compile '(when t 7))) 7))
+  ;; An ordinary function call is still a call.
+  (should (= (nelisp-bc-run (nelisp-bc-compile '(+ 1 2))) 3)))
+
 (ert-deftest nelisp-bc-3b2-compile-captures-env ()
   ;; ENV is carried verbatim — not yet consulted, just preserved.
   (let* ((env '((a . 1) (b . 2)))

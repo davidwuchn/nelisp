@@ -59,6 +59,35 @@ the NeLisp runtime, not the host."
       (when (file-directory-p temp-dir)
         (delete-directory temp-dir t)))))
 
+(ert-deftest nelisp-artifact/nelc-defun-body-with-loop-macros ()
+  "A defun whose body uses `dotimes' or `dolist' must survive the round trip.
+It did not: this lane handed the body straight to `nelisp-bc-compile',
+which knows neither macro, so `(dotimes (i 3) ...)' compiled as a CALL
+whose first argument was the binding spec `(i 3)'.  That compiled
+cleanly and only failed when the bytecode ran, as `void-function i', so
+the caller's fall-back-to-replay path never saw a reason to fire.  Every
+gate fixture used loop-free bodies, which is why it went unnoticed."
+  (let* ((temp-dir (make-temp-file "nelisp-artifact-loop-" t))
+         (source-path (expand-file-name "loops.el" temp-dir))
+         (artifact-path (concat source-path ".nelc"))
+         (source
+          "(defun nelisp-artifact-test--dotimes-sum (n)
+  (let ((acc 0)) (dotimes (i n) (setq acc (+ acc i))) acc))
+(defun nelisp-artifact-test--dolist-sum (xs)
+  (let ((acc 0)) (dolist (x xs) (setq acc (+ acc x))) acc))
+"))
+    (unwind-protect
+        (progn
+          (write-region source nil source-path nil 'silent)
+          (nelisp-artifact-compile-file source-path artifact-path)
+          (nelisp--reset)
+          (setq nelisp-artifact--loaded nil)
+          (nelisp-artifact-load-file artifact-path)
+          (should (= (nelisp-eval '(nelisp-artifact-test--dotimes-sum 4)) 6))
+          (should (= (nelisp-eval '(nelisp-artifact-test--dolist-sum '(1 2 3))) 6)))
+      (when (file-directory-p temp-dir)
+        (delete-directory temp-dir t)))))
+
 (ert-deftest nelisp-artifact/gate-4-load-time-table-materialization ()
   "Doc 142 §3 / gate 4: an artifact must reproduce load-time table
 materialization.  The literal `#s(hash-table ...)' reader syntax is

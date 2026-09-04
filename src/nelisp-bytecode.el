@@ -410,6 +410,21 @@ Returns a cons (CODE-VECTOR . RESOLVED-LABELS-PLIST)."
 
 ;;; Form compilation --------------------------------------------------
 
+(defun nelisp-bc--macro-p (sym)
+  "Return non-nil when SYM currently names a macro.
+Follows an alias chain where the runtime provides `indirect-function',
+so an aliased macro is recognised as one."
+  (and sym
+       (symbolp sym)
+       (fboundp sym)
+       (eq (car-safe
+            (condition-case nil
+                (if (fboundp 'indirect-function)
+                    (indirect-function sym)
+                  (symbol-function sym))
+              (error nil)))
+           'macro)))
+
 (defun nelisp-bc--compile-form (ctx form)
   "Compile FORM, leaving exactly one value on the operand stack."
   (cond
@@ -501,6 +516,14 @@ Returns a cons (CODE-VECTOR . RESOLVED-LABELS-PLIST)."
     ;; ((lambda PARAMS BODY) ARGS...) — inline call to a literal
     ;; lambda.  Compile the lambda then invoke via CALL.
     (nelisp-bc--compile-call ctx (car form) (cdr form)))
+   ((and (consp form) (symbolp (car form)) (nelisp-bc--macro-p (car form)))
+    ;; A macro the arms above did not rewrite.  Compiling it as a call is
+    ;; what turned `(dotimes (i 3) ...)' into a call to `i': the head was
+    ;; fine and the BINDING SPEC became the call.  It compiled cleanly and
+    ;; only failed when the bytecode ran, so every caller's fallback was
+    ;; dead code.  Signal for the same reason the `defun' arm above does.
+    (signal 'nelisp-bc-unimplemented
+            (list "macro reached the compiler unexpanded" (car form))))
    ((and (consp form) (symbolp (car form)))
     (nelisp-bc--compile-call ctx (car form) (cdr form)))
    (t

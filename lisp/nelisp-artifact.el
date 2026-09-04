@@ -968,6 +968,15 @@ return `nelisp-artifact--missing-key' instead of signaling."
       plist
     (append plist (list key value))))
 
+(defun nelisp-artifact--macroexpand-body (form)
+  "Return FORM with macros expanded, or FORM when the runtime cannot.
+The `.elc' lane has always expanded before handing a body to the bytecode
+compiler (`nelisp-bc--compile-defun-to-elc-form'); this lane did not, so
+`dolist' and `dotimes' reached a compiler that does not know them."
+  (if (fboundp 'macroexpand-all)
+      (condition-case nil (macroexpand-all form) (error form))
+    form))
+
 (defun nelisp-artifact--try-compile-defun (form)
   "Return (:fn NAME BCL) when FORM is a `defun' the bytecode VM accepts.
 Compiling the body `(lambda ARGS . BODY)' through `nelisp-bc-compile' +
@@ -986,7 +995,9 @@ a form the VM cannot yet lower, so the caller can fall back to replay."
           (body (nthcdr 3 form)))
       (condition-case nil
           (let ((bcl (nelisp-bc-run
-                      (nelisp-bc-compile (cons 'lambda (cons arglist body))))))
+                      (nelisp-bc-compile
+                       (nelisp-artifact--macroexpand-body
+                        (cons 'lambda (cons arglist body)))))))
             (and (consp bcl) (eq (car bcl) 'nelisp-bcl)
                  (list :fn name bcl)))
         (error nil)))))
