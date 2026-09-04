@@ -224,6 +224,14 @@
 # rows above: byte-identical in lisp/nelisp-cl-macros.el and in the
 # prelude, which is what the two copies are for, and `make ns-gate' is
 # what keeps them that way.
+#
+# make-directory's divergent pin re-digested on 2026-09-04: v1.2.1 changed
+# the prelude side of an already accepted divergence and shipped without
+# moving the pin, so ns-inventory and substrate-presence-corpus-check were
+# both red on 0d7418b0 before this branch touched anything.  Verified by
+# running the two gates on a clean worktree of that commit.  Corrected
+# here because this merge has to be green either way, not because the
+# change belongs to this branch.
 ns-collision 250
 # 97 -> 96 on 2026-08-19: `string-equal' no longer differs between the two
 # files -- the prelude's now signals for a non-string instead of falling
@@ -937,7 +945,7 @@ pinned-collision ns-collision-divergent	last	lisp/nelisp-stdlib-list.el scripts/
 pinned-collision ns-collision-divergent	lsh	lisp/nelisp-stdlib-misc.el scripts/nelisp-stdlib-prelude.el	da4995e603d0
 pinned-collision ns-collision-divergent	macroexp-parse-body	lisp/nelisp-stdlib.el scripts/nelisp-stdlib-prelude.el	92dc977d56a1
 pinned-collision ns-collision-divergent	macroexpand-1	lisp/nelisp-stdlib.el scripts/nelisp-stdlib-prelude.el	35290347dca5
-pinned-collision ns-collision-divergent	make-directory	lisp/nelisp-build-host.el scripts/nelisp-stdlib-prelude.el	3c6cc7b600f2
+pinned-collision ns-collision-divergent	make-directory	lisp/nelisp-build-host.el scripts/nelisp-stdlib-prelude.el	0a017756f0b7
 pinned-collision ns-collision-divergent	make-hash-table	lisp/nelisp-stdlib-hash.el scripts/nelisp-stdlib-prelude.el	d5c3bea86c37
 pinned-collision ns-collision-divergent	make-process	packages/nelisp-process-adapter/src/nelisp-process-adapter.el scripts/nelisp-stdlib-prelude.el	263817b13682
 pinned-collision ns-collision-divergent	mapc	lisp/nelisp-stdlib-hof.el scripts/nelisp-stdlib-prelude.el	4e87f4a62eba
