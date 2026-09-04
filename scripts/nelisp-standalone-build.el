@@ -4732,6 +4732,17 @@ argument (reachability + in-arena bounds checks).")
     ;; hardcoding (syscall-direct 35 ...) which is io_setup on arm64.
     ((:lit "nl-nanosleep") . (wf_write_int out (nl_os_nanosleep (wf_argval args 0))))
     ;; REPL/process termination.  Store code+1 so slot 0 remains "no exit".
+    ;; nelisp--exit-process CODE: terminate NOW (exit_group / ExitProcess).
+    ;; `exit' below is the status-only sibling the driver's top-level loop is
+    ;; built on; this is the one `kill-emacs' needs.
+    ((:lit "nelisp--exit-process")
+     . (let* ((code (if (= args 0)
+                        0
+                      (if (= (ptr-read-u64 args 0) 7)
+                          (ptr-read-u64 (nl_cons_car_ptr args) 8)
+                        0))))
+         (seq (nl_os_exit_process code)
+              (wf_write_int out code))))
     ((:u8 "exit") . (let* ((code (if (= args 0)
                                      0
                                    (if (= (ptr-read-u64 args 0) 7)
@@ -11204,12 +11215,106 @@ baked build's own `<'/`>'/`=' arms need it too.")
       (if (= (bf_require_arg_present_p args 1) 1)
           (if (= (ptr-read-u64 (wf_arg_ptr args 1) 0) 0) 0 1)
         0))
+    ;; The symbol `load-file-name', built byte-wise for the same reason
+    ;; `bf_load_path_symbol' is: there is no symbol literal in this grammar.
+    (defun bf_load_file_name_symbol (out)
+      (let* ((buf (alloc-bytes 16 1)))
+        (seq
+         (ptr-write-u8 buf 0 108) (ptr-write-u8 buf 1 111)   ; l o
+         (ptr-write-u8 buf 2 97)  (ptr-write-u8 buf 3 100)   ; a d
+         (ptr-write-u8 buf 4 45)  (ptr-write-u8 buf 5 102)   ; - f
+         (ptr-write-u8 buf 6 105) (ptr-write-u8 buf 7 108)   ; i l
+         (ptr-write-u8 buf 8 101) (ptr-write-u8 buf 9 45)    ; e -
+         (ptr-write-u8 buf 10 110) (ptr-write-u8 buf 11 97)  ; n a
+         (ptr-write-u8 buf 12 109) (ptr-write-u8 buf 13 101) ; m e
+         (nl_alloc_symbol buf 14 out)
+         0)))
+    ;; `load' binds `load-file-name' to the file it is loading, and restores
+    ;; the previous value afterwards (v1.2.0 parity gap 1).  Emacs sources
+    ;; are full of `(or load-file-name buffer-file-name)' -- nelisp-emacs's
+    ;; own `emacs-init.el' uses it to put its directory on `load-path', and
+    ;; with the variable always nil that step was a silent no-op and the very
+    ;; next `require' died file-missing.
+    ;;
+    ;; The restore is NOT an unwind-protect and does not need to be: a signal
+    ;; in this runtime is a flag plus a stash (@268435472), not a stack
+    ;; unwind, so `bf_load_readable' returns a code either way and the restore
+    ;; below always runs.
+    (defun bf_load_with_lfn (args env out)
+      (let* ((sym (alloc-bytes 32 8))
+             (old (alloc-bytes 32 8)))
+        (seq
+         (bf_load_file_name_symbol sym)
+         (if (= (nelisp_env_lookup_value (+ env 0) (+ env 32) sym old) 0)
+             0
+           (wf_write_nil old))
+         (nl_env_set_value env sym (wf_arg_ptr args 0))
+         (let* ((rc (bf_load_readable args env out)))
+           (seq (nl_env_set_value env sym old) rc)))))
+    ;; Non-nil when the name carries its own root, so `load-path' must not be
+    ;; consulted: a leading `/' or `\\', or a `X:' drive prefix.
+    (defun bf_load_abs_p (sx)
+      (let* ((p (nl_bi_strptr sx))
+             (n (nl_bi_strlen sx)))
+        (if (= n 0) 0
+          (if (= (ptr-read-u8 p 0) 47) 1
+            (if (= (ptr-read-u8 p 0) 92) 1
+              (if (< n 2) 0
+                (if (= (ptr-read-u8 p 1) 58) 1 0)))))))
+    ;; DIR + "/" + NAME, with no suffix -- `bf_require_candidate' is the same
+    ;; shape but always appends ".el".
+    (defun bf_load_candidate_plain (name dir out)
+      (let* ((dptr (nl_bi_strptr dir))
+             (dlen (nl_bi_strlen dir))
+             (nptr (nl_bi_strptr name))
+             (nlen (nl_bi_strlen name))
+             (total (+ (+ dlen 1) nlen))
+             (buf (alloc-bytes total 1)))
+        (seq
+         (bf_rq_copy dptr buf 0 0 dlen)
+         (ptr-write-u8 buf dlen 47)
+         (bf_rq_copy nptr buf (+ dlen 1) 0 nlen)
+         (nl_alloc_str buf total out)
+         0)))
+    ;; Walk `load-path', trying DIR/NAME.el then DIR/NAME, and leave the first
+    ;; readable one in OUT.  Emacs tries the suffixed name first too.
+    (defun bf_load_search (name dirs out)
+      (if (= (ptr-read-u64 dirs 0) 7)
+          (let* ((cand (alloc-bytes 32 8)))
+            (seq
+             (bf_require_candidate name (nl_cons_car_ptr dirs) cand)
+             (if (= (bf_require_file_readable_p cand) 1)
+                 (seq (wf_copy32 out cand) 1)
+               (seq
+                (bf_load_candidate_plain name (nl_cons_car_ptr dirs) cand)
+                (if (= (bf_require_file_readable_p cand) 1)
+                    (seq (wf_copy32 out cand) 1)
+                  (bf_load_search name (nl_cons_cdr_ptr dirs) out))))))
+        0))
+    ;; The literal name named no readable file.  `require' has always fallen
+    ;; back to `load-path' here; `load' did not, so `(load "subr-x")' failed
+    ;; where `(require 'subr-x)' worked (v1.2.0 parity gap 2).  A name that
+    ;; carries its own root is never searched, as in Emacs.
+    (defun bf_load_searched (args env out)
+      (let* ((dirs (alloc-bytes 32 8))
+             (found (alloc-bytes 32 8)))
+        (seq
+         (bf_load_path_get env dirs)
+         (if (= (bf_load_abs_p (wf_arg_ptr args 0)) 1)
+             (if (= (bf_load_noerror_p args) 1)
+                 (seq (wf_write_nil out) 0)
+               (bf_require_file_missing (wf_arg_ptr args 0)))
+           (if (= (bf_load_search (wf_arg_ptr args 0) dirs found) 1)
+               ;; Re-enter through the ordinary path so the hit gets the same
+               ;; `load-file-name' binding and the same reader loop.
+               (bf_require_load_file found env out)
+             (if (= (bf_load_noerror_p args) 1)
+                 (seq (wf_write_nil out) 0)
+               (bf_require_file_missing (wf_arg_ptr args 0))))))))
     (defun bf_load (args env out)
       (if (= (bf_require_file_readable_p (wf_arg_ptr args 0)) 1)
-          (bf_load_readable args env out)
-        (if (= (bf_load_noerror_p args) 1)
-            (seq (wf_write_nil out) 0)
-          (bf_require_file_missing (wf_arg_ptr args 0)))))
+          (bf_load_with_lfn args env out)
+        (bf_load_searched args env out)))
     (defun bf_load_readable (args env out)
       ;; Doc 147 Phase 1.5 Group P — the reader parse pool is now a RAW
       ;; 32B-slot buffer (cap*32 bytes) instead of a GC-managed
@@ -11859,6 +11964,11 @@ Wave-2 (C) appends bf_ash (shl/sar compose) + bf_str_lt (byte-lexicographic).")
     ((:lit "ptr-read-u64") . (wf_write_int out (ptr-read-u64 (wf_argval args 0) (wf_argval args 1))))
     ((:lit "ptr-write-u64") . (seq (ptr-write-u64 (wf_argval args 0) (wf_argval args 1) (wf_argval args 2)) (wf_write_int out 0)))
     ((:lit "alloc-bytes") . (wf_write_int out (alloc-bytes (wf_argval args 0) (wf_argval args 1))))
+    ;; Bulk byte transfer between raw memory and Lisp strings (Doc 138,
+    ;; SQLite arm): the native counterparts of an interpreted per-byte
+    ;; `ptr-read-u8' / `ptr-write-u8' walk.
+    ((:lit "ptr-read-bytes") . (nl_bi_ptr_read_bytes args out))
+    ((:lit "ptr-write-bytes") . (nl_bi_ptr_write_bytes args out))
     ((:lit "garbage-collect") . (seq (nl_gc_collect_from_recorded_roots 0)
                                      (bf_arena_stats out)))
     )
@@ -11903,6 +12013,7 @@ ash/logand/logior/logxor/lognot + string<.")
     "syscall-direct" "atomic-fetch-add" "garbage-collect"
     "ptr-read-u8" "ptr-write-u8" "ptr-read-u32" "ptr-write-u32"
     "ptr-read-u64" "ptr-write-u64" "alloc-bytes"
+    "ptr-read-bytes" "ptr-write-bytes" "nelisp--exit-process"
     "nelisp-process-call-process" "nelisp-process-start"
     "nelisp-process-start-process" "nelisp-process-object-p"
     "nelisp-process-async-ready-p" "nelisp-process-pid"
@@ -11999,7 +12110,39 @@ ash/logand/logior/logxor/lognot + string<.")
     ("cos"   "libm.so.6" 1 (:args (f64)     :ret f64))
     ("hypot" "libm.so.6" 2 (:args (f64 f64) :ret f64))
     ;; ldexp(x, exp) = x * 2^exp : a mixed f64 + i64 arg signature.
-    ("ldexp" "libm.so.6" 2 (:args (f64 i64) :ret f64)))
+    ("ldexp" "libm.so.6" 2 (:args (f64 i64) :ret f64))
+    ;; --- S1 SQLite (libsqlite3 / winsqlite3): the Emacs `sqlite-*' surface. --
+    ;; Consumed by nelisp-emacs/src/emacs-sqlite-ffi.el, which builds Emacs's
+    ;; sqlite-open / -execute / -select on these rows so anvil.el's memory and
+    ;; worklog tools run on the standalone reader (Doc 138, SQLite arm,
+    ;; 2026-09-04).  Handles (sqlite3* / sqlite3_stmt*) and C strings travel
+    ;; as i64 addresses; out-params use a caller `alloc-bytes' slot read back
+    ;; with `ptr-read-u64'.  Every C `int' result is :windows-ret s32 so a
+    ;; SQLITE_* code is never read zero-extended.  SQLITE_TRANSIENT for
+    ;; bind_text is (void*)-1, passed as the i64 -1.
+    ("sqlite3_libversion"        "libsqlite3.so.0" 0)
+    ("sqlite3_open_v2"           "libsqlite3.so.0" 4 (:windows-ret s32))
+    ("sqlite3_close_v2"          "libsqlite3.so.0" 1 (:windows-ret s32))
+    ("sqlite3_errmsg"            "libsqlite3.so.0" 1)
+    ("sqlite3_exec"              "libsqlite3.so.0" 5 (:windows-ret s32))
+    ("sqlite3_prepare_v2"        "libsqlite3.so.0" 5 (:windows-ret s32))
+    ("sqlite3_step"              "libsqlite3.so.0" 1 (:windows-ret s32))
+    ("sqlite3_reset"             "libsqlite3.so.0" 1 (:windows-ret s32))
+    ("sqlite3_finalize"          "libsqlite3.so.0" 1 (:windows-ret s32))
+    ("sqlite3_changes"           "libsqlite3.so.0" 1 (:windows-ret s32))
+    ("sqlite3_last_insert_rowid" "libsqlite3.so.0" 1)
+    ("sqlite3_column_count"      "libsqlite3.so.0" 1 (:windows-ret s32))
+    ("sqlite3_column_type"       "libsqlite3.so.0" 2 (:windows-ret s32))
+    ("sqlite3_column_name"       "libsqlite3.so.0" 2)
+    ("sqlite3_column_int64"      "libsqlite3.so.0" 2)
+    ("sqlite3_column_double"     "libsqlite3.so.0" 2 (:args (i64 i64) :ret f64))
+    ("sqlite3_column_text"       "libsqlite3.so.0" 2)
+    ("sqlite3_column_blob"       "libsqlite3.so.0" 2)
+    ("sqlite3_column_bytes"      "libsqlite3.so.0" 2 (:windows-ret s32))
+    ("sqlite3_bind_null"         "libsqlite3.so.0" 2 (:windows-ret s32))
+    ("sqlite3_bind_int64"        "libsqlite3.so.0" 3 (:windows-ret s32))
+    ("sqlite3_bind_double"       "libsqlite3.so.0" 3 (:args (i64 i64 f64) :windows-ret s32))
+    ("sqlite3_bind_text"         "libsqlite3.so.0" 5 (:windows-ret s32)))
   "Declarative FFI surface for the dynamic reader's `nl-ffi-call': rows of
 (SYMBOL SONAME ARITY &optional SIG).  Drives both
 `nelisp-standalone--reader-extern-imports' and
@@ -12011,7 +12154,12 @@ for Win64.  The s32 return class repairs EAX zero-extension before Lisp boxing."
 
 (defconst nelisp-standalone--windows-reader-extern-dll-map
   '(("libc.so.6" . "ucrtbase.dll")
-    ("libm.so.6" . "ucrtbase.dll"))
+    ("libm.so.6" . "ucrtbase.dll")
+    ;; SQLite ships in the Windows inbox as System32\\winsqlite3.dll
+    ;; (Windows 10 1607+ / Server 2016+; 3.51.1 measured 2026-09-04), with
+    ;; the ordinary sqlite3_* export names.  Same rule as ucrtbase / secur32:
+    ;; a DLL Windows itself carries, not a redistributable.
+    ("libsqlite3.so.0" . "winsqlite3.dll"))
   "ELF SONAME to Windows system-DLL mapping for the supported FFI subset.
 
 The SONAME remains the table's stable library identity, so the existing Linux
@@ -12515,9 +12663,23 @@ extern arms in dynamic builds."
          (nl_bi_rf_copy4k head buf n0)
          (let* ((n1 (nl_os_read_file_handle fd (+ buf n0) (- 8388608 n0))))
            (nl_seq2 (nl_alloc_str buf (+ n0 (if (< n1 0) 0 n1)) out) 0)))))
+    ;; A file that could not be opened answers nil, NOT the empty string.
+    ;; `rdf' handing back "" made a missing file indistinguishable from an
+    ;; empty one: `bf_load' reported success for a path that does not exist
+    ;; (fixed there by probing first, see its comment), and Layer 2's
+    ;; `emacs-fileio-rdf-file-exists-p' -- which asks exactly
+    ;; `(stringp (rdf F))' -- answered t for every name, so `require' took
+    ;; its literal-path branch and every feature after it failed with
+    ;; file-missing (measured 2026-09-04, v1.2.0 parity gap 5).
     (defun nl_bi_rf_withfd (fd buf out)
       (if (< fd 0)
-          (wf_copy32_strnil out)
+          ;; `0' is the builtin calling convention's "no raise"; the arm used
+          ;; to end in `wf_copy32_strnil', whose own value happened to be 0.
+          ;; Returning `wf_write_nil's value instead made every rdf of a
+          ;; missing file report a RAISE, which surfaced whatever error was
+          ;; last stashed -- an `arrayp' wrong-type from somewhere else
+          ;; entirely, in seven otherwise unrelated smokes.
+          (nl_seq2 (wf_write_nil out) 0)
         (let* ((n (nl_os_read_file_handle fd buf 4096)))
           (nl_seq2
            (if (< n 4096)
@@ -12551,6 +12713,41 @@ extern arms in dynamic builds."
             (if (= (ptr-read-u8 ptr i) 10) (setq acc (+ acc 1)) 0)
             (setq i (+ i 1))))
          (wf_write_int out acc))))
+    ;; ptr-read-bytes ADDR N -> a unibyte string of the N bytes at ADDR.
+    ;; ptr-write-bytes ADDR STRING -> copy STRING's bytes to ADDR (a
+    ;; multibyte string's internal UTF-8, a unibyte string's raw bytes),
+    ;; answering the byte count.  Native counterparts of the interpreted
+    ;; per-byte `ptr-read-u8' / `ptr-write-u8' walks the FFI consumers
+    ;; otherwise need (nelisp-emacs emacs-sqlite-ffi.el, Doc 138 SQLite
+    ;; arm): measured 2026-09-04 on windows-x86_64, the interpreted walk
+    ;; took 17 s to bring back 50 KB of column text, the whole budget of an
+    ;; MCP request.  The UTF-8 step stays in Lisp: pair these with
+    ;; `string-as-unibyte' / `string-as-multibyte'.
+    (defun nl_bi_ptr_read_bytes (args out)
+      (let* ((src (wf_argval args 0))
+             (n (wf_argval args 1))
+             (ms (alloc-bytes 32 8))
+             (i 0))
+        (seq
+         (nl_alloc_unibyte_mut_str (if (< n 0) 0 n) ms)
+         (while (< i n)
+           (seq
+            (mut-str-push-byte ms (ptr-read-u8 src i))
+            (setq i (+ i 1))))
+         (mut-str-finalize ms out)
+         0)))
+    (defun nl_bi_ptr_write_bytes (args out)
+      (let* ((dst (wf_argval args 0))
+             (sx (wf_arg_ptr args 1))
+             (src (nl_bi_strptr sx))
+             (n (nl_bi_strlen sx))
+             (i 0))
+        (seq
+         (while (< i n)
+           (seq
+            (ptr-write-u8 dst i (ptr-read-u8 src i))
+            (setq i (+ i 1))))
+         (wf_write_int out n))))
     ;; str-kv-line SOURCE KEY -> for the first line of SOURCE whose text
     ;; before the first TAB equals KEY, return everything after that TAB;
     ;; "" when no line matches.  Native scan for the nemacs GUI bridge
@@ -16663,6 +16860,7 @@ value (matches the binary's M8 read+eval-loop driver)."
     "syscall-direct" "atomic-fetch-add"
     "ptr-read-u8" "ptr-write-u8" "ptr-read-u32" "ptr-write-u32"
     "ptr-read-u64" "ptr-write-u64" "alloc-bytes"
+    "ptr-read-bytes" "ptr-write-bytes" "nelisp--exit-process"
     "nelisp-process-call-process" "nelisp-process-start"
     "nelisp-process-start-process" "nelisp-process-object-p"
     "nelisp-process-async-ready-p" "nelisp-process-pid"
@@ -16736,7 +16934,14 @@ dispatch arm in `nelisp-standalone--applyfn-dispatch-table'.")
                     "FindFirstFileW" "FindNextFileW" "FindClose"
                     ;; `nl_os_getcwd' (windows os-base-forms): backs
                     ;; `default-directory', which was nil on this target.
-                    "GetCurrentDirectoryW"))
+                    "GetCurrentDirectoryW"
+                    ;; `nl_os_win_mkdir' / `nl_os_win_rmdir' / `nl_os_win_unlink'
+                    ;; (same windows case): back `nelisp--syscall-path-int' NR=83
+                    ;; and `nelisp--syscall-path' NR=84/87, i.e. `make-directory',
+                    ;; `delete-directory' and `delete-file'.  All three answered
+                    ;; -ENOSYS on this target, and `make-directory' silently
+                    ;; created nothing (v1.2.0 parity gap 4).
+                    "CreateDirectoryW" "RemoveDirectoryW" "DeleteFileW"))
         (cons "SHELL32.dll" (list "CommandLineToArgvW"))
         ;; Doc 138 socket slices 1-2: Winsock startup plus the connected-client,
         ;; listening, readiness and connect-status operations implemented by
@@ -19442,7 +19647,16 @@ boundary (Doc 151 Phase B):
   path syscalls stay -ENOSYS stubs."
   (pcase nelisp-standalone--target
     ('linux-aarch64
-     `((defun nl_os_syscall_path (nr cpath)
+     `(;; Immediate process exit with a caller-chosen status -- what
+       ;; `kill-emacs' means.  The reader's own `exit' only RECORDS a status
+       ;; and lets the current form, and the rest of the file, run to
+       ;; completion (v1.2.0 parity gap 3).  Defined here, in the per-target
+       ;; syscall translation layer, rather than beside `nl_os_alloc_fail':
+       ;; the arena source's own stub for a new name wins over the platform
+       ;; block there, so the first attempt linked the identity and
+       ;; `kill-emacs' returned instead of exiting (measured).
+       (defun nl_os_exit_process (code) (syscall-direct 94 code 0 0 0 0 0))
+       (defun nl_os_syscall_path (nr cpath)
          (if (= nr 87) (syscall-direct 35 (- 0 100) cpath 0 0 0 0)      ; unlink -> unlinkat
            (if (= nr 84) (syscall-direct 35 (- 0 100) cpath 512 0 0 0)  ; rmdir -> unlinkat+AT_REMOVEDIR
              (if (= nr 80) (syscall-direct 49 cpath 0 0 0 0 0)          ; chdir (native 49)
@@ -19493,7 +19707,8 @@ boundary (Doc 151 Phase B):
        (defun nl_os_nanosleep (ts)
          (syscall-direct 101 ts 0 0 0 0 0))))
     ('linux-x86_64
-     `((defun nl_os_syscall_path (nr cpath) (syscall-direct nr cpath 0 0 0 0 0))
+     `((defun nl_os_exit_process (code) (syscall-direct 60 code 0 0 0 0 0))
+       (defun nl_os_syscall_path (nr cpath) (syscall-direct nr cpath 0 0 0 0 0))
        (defun nl_os_syscall_path_int (nr cpath iarg) (syscall-direct nr cpath iarg 0 0 0 0))
        (defun nl_os_syscall_path2 (nr c1 c2) (syscall-direct nr c1 c2 0 0 0 0))
        (defun nl_os_stat_path (cpath buf) (syscall-direct 4 cpath buf 0 0 0 0))
@@ -19534,13 +19749,43 @@ boundary (Doc 151 Phase B):
      ;; `readlink'/`statx'/`nanosleep'.  Reading a Windows filesystem
      ;; wrongly costs a wrong answer; writing one wrongly costs the file,
      ;; so those want their own change with their own gate.
-     `((defun nl_os_win_access (cpath)
+     `((defun nl_os_exit_process (code) (extern-call ExitProcess code))
+       (defun nl_os_win_access (cpath)
          (let* ((wpath (nl_win_utf8_wcs_dup cpath))
                 (attrs (extern-call GetFileAttributesW wpath)))
            (if (or (= attrs 4294967295) (= attrs -1)) (- 0 2) 0)))
-       (defun nl_os_syscall_path (_nr _cpath) (- 0 38))
+       ;; Map the Win32 error of a just-failed call onto the POSIX errno the
+       ;; portable callers above expect.  183 = ERROR_ALREADY_EXISTS, 80 =
+       ;; ERROR_FILE_EXISTS -> EEXIST(17); 2 = FILE_NOT_FOUND, 3 =
+       ;; PATH_NOT_FOUND -> ENOENT(2); 5 = ACCESS_DENIED -> EACCES(13); 145 =
+       ;; ERROR_DIR_NOT_EMPTY -> ENOTEMPTY(39).  Anything else is EACCES,
+       ;; which is what an unclassified refusal already looked like here.
+       (defun nl_os_win_errno ()
+         (let* ((e (extern-call GetLastError)))
+           (if (= e 183) (- 0 17)
+             (if (= e 80) (- 0 17)
+               (if (= e 2) (- 0 2)
+                 (if (= e 3) (- 0 2)
+                   (if (= e 145) (- 0 39)
+                     (- 0 13))))))))
+       (defun nl_os_win_mkdir (cpath)
+         (let* ((wpath (nl_win_utf8_wcs_dup cpath))
+                (ok (extern-call CreateDirectoryW wpath 0)))
+           (if (= ok 0) (nl_os_win_errno) 0)))
+       (defun nl_os_win_rmdir (cpath)
+         (let* ((wpath (nl_win_utf8_wcs_dup cpath))
+                (ok (extern-call RemoveDirectoryW wpath)))
+           (if (= ok 0) (nl_os_win_errno) 0)))
+       (defun nl_os_win_unlink (cpath)
+         (let* ((wpath (nl_win_utf8_wcs_dup cpath))
+                (ok (extern-call DeleteFileW wpath)))
+           (if (= ok 0) (nl_os_win_errno) 0)))
+       (defun nl_os_syscall_path (nr cpath)
+         (if (= nr 84) (nl_os_win_rmdir cpath)
+           (if (= nr 87) (nl_os_win_unlink cpath) (- 0 38))))
        (defun nl_os_syscall_path_int (nr cpath iarg)
-         (if (= nr 21) (nl_os_win_access cpath) (- 0 38)))
+         (if (= nr 21) (nl_os_win_access cpath)
+           (if (= nr 83) (nl_os_win_mkdir cpath) (- 0 38))))
        (defun nl_os_syscall_path2 (_nr _c1 _c2) (- 0 38))
        ;; stat(2) shim.  `GetFileAttributesExW' (not
        ;; `GetFileInformationByHandleEx') because it needs no open handle,
@@ -19702,7 +19947,10 @@ boundary (Doc 151 Phase B):
        (defun nl_os_statx_path (_cpath _flags _buf) (- 0 38))
        (defun nl_os_nanosleep (_ts) (- 0 38))))
     (_
-     `((defun nl_os_syscall_path (_nr _cpath) (- 0 38))
+     `(;; macos-aarch64 and any future target: BSD exit(2) is syscall 1,
+       ;; which is also what this repo's darwin `nl_os_alloc_fail' uses.
+       (defun nl_os_exit_process (code) (syscall-direct 1 code 0 0 0 0 0))
+       (defun nl_os_syscall_path (_nr _cpath) (- 0 38))
        (defun nl_os_syscall_path_int (_nr _cpath _iarg) (- 0 38))
        (defun nl_os_syscall_path2 (_nr _c1 _c2) (- 0 38))
        (defun nl_os_stat_path (_cpath _buf) (- 0 38))

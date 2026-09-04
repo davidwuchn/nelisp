@@ -277,7 +277,12 @@
 # access this generator's OS layer already performs, not a new kind of unsafe
 # operation, and not calls that should be moved into an `nl-unsafe' block merely
 # to evade this inventory.
-unsafe-call 759
+# 759 -> 762 on 2026-09-04 (v1.2.1 host parity, gap 4): the three Windows
+# file arms itemised at the `pinned-kernel-call' line for
+# scripts/nelisp-standalone-build.el below.  Same shape as the Schannel
+# entry above -- backquoted units splicing raw calls, visible to this gate
+# where the surrounding quoted ones are not.  Nothing to wrap.
+unsafe-call 762
 
 # `pinned-kernel-call FILE COUNT' pins the per-file unquoted `unsafe-call'
 # count behind `total' above -- the three kernel files that actually carry
@@ -354,4 +359,13 @@ pinned-kernel-call scripts/nelisp-flat-arena-probe.el 6
 # already-pinned `nl_socket_signal_error' does -- so their 9 raw writes are
 # visible to this gate where the rest of the arm's quoted units are not.
 # Same shape as the socket signaller entry above; nothing to wrap.
-pinned-kernel-call scripts/nelisp-standalone-build.el 677
+# 677 -> 680 on 2026-09-04 (v1.2.1 host parity, gap 4).  Three raw
+# `extern-call's in the Windows file arms this release adds:
+# `nl_os_win_mkdir' (CreateDirectoryW), `nl_os_win_rmdir'
+# (RemoveDirectoryW) and `nl_os_win_unlink' (DeleteFileW), each one call.
+# They sit in the same backquoted per-target unit as `nl_os_win_access',
+# which this gate has always counted, so the three become visible for the
+# same reason that one is -- nothing new in KIND, only in number.  Before
+# them NR=83/84/87 were an unconditional -ENOSYS on that target and
+# `make-directory' silently created nothing.
+pinned-kernel-call scripts/nelisp-standalone-build.el 680

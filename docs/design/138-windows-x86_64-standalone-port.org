@@ -2422,6 +2422,155 @@ anticipate: =network-process-smoke= and =-nowait-= also required the windows
 async-process arm, and went green only once =make-process= worked.  Their
 socket halves passed before that.
 
+* SQLite arm — winsqlite3.dll through the declarative FFI table (2026-09-04)
+
+Twenty-three =sqlite3_*= rows were added to
+=nelisp-standalone--reader-extern-table= under the SONAME
+=libsqlite3.so.0=, and =nelisp-standalone--windows-reader-extern-dll-map=
+sends that SONAME to =winsqlite3.dll=.  No new primitive, no new
+dispatcher: the existing name-dispatch =nl-ffi-call= grows arms from the
+same declarative rows the libc / libm / GnuTLS / FreeType entries use.
+
+** Why
+
+anvil.el's standalone MCP server (=bin/anvil-runtime=, running this
+reader) could load only its discovery / bench tools: every DB-backed
+tool (=memory-*=, =worklog-*=, =org-index-*=, =sqlite-query=) needs
+Emacs's =sqlite-open= / =sqlite-execute= / =sqlite-select=, and the
+Rust-era backend those went through was deleted with the Rust runtime
+(=b76cc5ea=, 2026-06-02).  =nelisp-emacs/src/emacs-sqlite-ffi.el= now
+builds that Emacs API on these rows -- handles and C strings travel as
+i64 addresses, out-params through a caller =alloc-bytes= slot read back
+with =ptr-read-u64=, exactly the marshalling the FreeType rows already
+use.
+
+** Import policy
+
+=winsqlite3.dll= ships in the Windows inbox (=System32=, Windows 10
+1607+ / Server 2016+; 3.51.1 measured here) with the ordinary
+=sqlite3_*= export names, so the DLL map applies the same rule as
+=ucrtbase.dll= and =secur32.dll=: a library Windows itself carries.  The
+default windows-x86_64 reader therefore imports one more DLL than the
+five listed in the v1.2.0 release notes.  On Linux the rows are live only
+under =NELISP_READER_DYNAMIC=, exactly like the GnuTLS rows, so the
+default static reader is unchanged and =libsqlite3.so.0= is a dependency
+of the dynamic build alone.
+
+** How it is verified
+
+=standalone-reader-ffi-smoke= gained a target-independent =[ffi-smoke S1
+sqlite]= block: open =:memory:=, prepare =select 6*7, 2.5, 'ok'=, step,
+read =column_int64= / =column_double= / =column_text=, finalize, close,
+expecting =(0 0 100 42 t "ok")=.  It exercises a 4-arg call, a 5-arg
+call (=sqlite3_prepare_v2=, the first row past four arguments on this
+table), an =f64= return with =i64= arguments, and the =:windows-ret s32=
+repair on every =int= result.
+
+** Two bulk byte primitives
+
+The Emacs adapter moves column text and bound strings between Lisp
+strings and C memory.  With only =ptr-read-u8= / =ptr-write-u8= that is
+an interpreted per-byte walk, measured here at 17 s for 50 KB of text --
+the whole budget of an MCP request.  Two reader builtins were added
+beside =alloc-bytes= in the breadth dispatch arms, implemented in
+=nelisp-standalone--fileio-forms-part1= next to =rdf=:
+
+- =(ptr-read-bytes ADDR N)= -> a unibyte string of the N bytes at ADDR
+  (=nl_alloc_unibyte_mut_str= + =mut-str-push-byte=, the same
+  construction =unibyte-string= uses).
+- =(ptr-write-bytes ADDR STRING)= -> copies STRING's payload bytes to
+  ADDR and answers the count.  A multibyte string's payload is already
+  its UTF-8, so no encode step precedes the copy.
+
+The UTF-8 conversion itself stays in Lisp and is native on the reader:
+=string-as-unibyte= (Lisp string -> UTF-8 bytes) and
+=string-as-multibyte= (bytes -> Lisp string) both do the real
+conversion, where =encode-coding-string= / =decode-coding-string= are
+identities on this reader.  Both names are registered in
+=nelisp-standalone--applyfn-bf-builtins= and =--reader-builtins=; the
+unit is quoted, so =unsafe-inventory= does not move.
+
+** Known limits
+
+- =alloc-bytes= has no free: each C string and out-param slot is leaked
+  for the process lifetime.  Acceptable for the MCP driver's request
+  volume; a long-lived daemon would want a scratch arena.
+- Whether the inbox =winsqlite3.dll= carries FTS5 (anvil's trigram
+  indexes) is not asserted by this smoke; anvil probes for it at runtime
+  and falls back.
+- The rows are data, so =unsafe-inventory= and the namespace baseline do
+  not move; the Windows binary grows by its import entries only.
+
+* Host parity — six gaps closed in v1.2.1 (2026-09-04)
+
+Found by anvil.el's standalone MCP server, which is this repository's most
+demanding downstream: it loads a hundred-odd elisp files through Layer 2
+before serving a request, so it reaches parts of the host contract nothing
+else here does.  Every one of these answered something PLAUSIBLE rather
+than failing, which is why they survived a release and why each was first
+diagnosed somewhere far from its cause.
+
+| # | Gap | Where |
+|---+-----+-------|
+| 1 | =load= did not bind =load-file-name= | =bf_load_with_lfn= |
+| 2 | =load= did not search =load-path= | =bf_load_searched= |
+| 3 | no immediate process exit | =nl_os_exit_process= |
+| 4 | =make-directory= created nothing on Windows | =nl_os_win_mkdir= |
+| 5 | =rdf= answered "" for a missing file | =nl_bi_rf_withfd= |
+| 6 | coding functions were the identity | prelude |
+
+** Why each mattered
+
+1. =(or load-file-name buffer-file-name)= is the idiom Emacs sources use to
+   find their own directory.  Layer 2's =emacs-init.el= uses it to put its
+   =src/= on =load-path=; with the variable nil that step was a silent
+   no-op and the next =require= died =file-missing= -- a failure three
+   files away from the cause.  The binding is the RESOLVED path, and the
+   restore needs no unwind-protect: a signal here is a flag plus a stash
+   (@268435472), not a stack unwind, so the loop returns a code either way.
+2. Only =require= searched =load-path=, so =(load "subr-x")= failed where
+   =(require 'subr-x)= worked.  Now =DIR/NAME.el= then =DIR/NAME=; a name
+   with its own root (=/=, =\=, or =X:=) is never searched, as in Emacs.
+3. =exit= only RECORDS a status -- execution continues to the end of the
+   form and through the rest of the file.  =nelisp--exit-process= is the
+   immediate one; =exit='s contract is untouched because the driver's own
+   top-level loop is built on it.  Defined in the per-target syscall
+   translation layer, NOT beside =nl_os_alloc_fail=: the arena source's
+   own stub for a new name wins over the platform block there, so the
+   first attempt linked the identity and =kill-emacs= returned instead of
+   exiting (measured).
+4. Three defects at once, the first two hiding the third: the PARENTS walk
+   rebuilt every path as absolute-POSIX (=C:/x= became =/C:/x=), results
+   were discarded, and Windows' NR=83 was an unconditional =-ENOSYS=.
+   Windows gains =CreateDirectoryW= / =RemoveDirectoryW= / =DeleteFileW=
+   with =GetLastError= mapped to POSIX errno (183/80 -> EEXIST, 2/3 ->
+   ENOENT, 145 -> ENOTEMPTY, else EACCES).
+5. =rdf= answering "" made a missing file indistinguishable from an empty
+   one.  Layer 2's =emacs-fileio-rdf-file-exists-p= asks exactly
+   =(stringp (rdf F))=, so it answered t for EVERY name.
+6. The conversion is genuinely a no-op -- a string's payload is already
+   UTF-8 -- but the RESULT KIND is the whole observable difference.
+
+** The gate
+
+=standalone-reader-host-parity-smoke= holds all six in one target, so a
+regression is one red line naming which.  It asserts VALUES, not exit
+status, for the reason above.  Two =tools/gate-mutations.txt= rows restore
+v1.2.0's behaviour for gaps 1 and 6 -- the gate must notice a regression
+TO THE PREVIOUS RELEASE, not just an arbitrary edit -- and both were run
+individually with a controlled restore, each turning the gate red.
+
+** Also fixed, in nelisp-emacs
+
+Layer 2's =emacs-process-builtins= force-installs its own =processp= on
+the standalone reader, and that one does not know the process adapter's
+=[network-process ...]= shape (its own commentary defers network
+processes) while the reader's prelude =processp= does.  The prelude's
+=process-put= / =process-get= then signalled =wrong-type-argument
+processp= on a listener, killing anvil's socket daemon the moment it bound
+one.  Same stale-guard family as the four fixed on 2026-09-04: a Layer 2
+override that is LESS capable than the runtime it overrides.
+
 * One-line summary
 
 macOS was a triple burden — new ISA (arm64, 75 ops) + exec format + signing.

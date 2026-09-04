@@ -6418,7 +6418,16 @@ Rust-min migration (= moved out of build-tool/src/eval/special_forms.rs)."
       (signal 'error
               (list (format "encode-coding-string stub: only utf-8 supported, got %S"
                             coding))))
-    str))
+    ;; NOT the identity.  A string's payload is already its UTF-8 bytes, so
+    ;; the CONVERSION is a no-op -- but the RESULT must be a unibyte string,
+    ;; because that is the whole observable difference: `length' counts
+    ;; bytes, `aref' answers a byte, and `multibyte-string-p' answers nil.
+    ;; Returning STR unchanged made `(length (encode-coding-string "\u65e5"
+    ;; 'utf-8 t))' answer 1 where Emacs answers 3, and left every consumer
+    ;; that round-trips through this pair (nelisp-emacs's write-region and
+    ;; sqlite adapter among them) reaching for `string-as-unibyte' directly
+    ;; instead (v1.2.0 parity gap 6).
+    (if (fboundp 'string-as-unibyte) (string-as-unibyte str) str)))
 (unless (fboundp 'decode-coding-string)
   (defun decode-coding-string (str coding &optional _nocopy)
     (nelisp--check-string str)
@@ -6433,7 +6442,10 @@ Rust-min migration (= moved out of build-tool/src/eval/special_forms.rs)."
       (signal 'error
               (list (format "decode-coding-string stub: only utf-8 supported, got %S"
                             coding))))
-    str))
+    ;; The mirror of `encode-coding-string' above: no byte conversion, but
+    ;; the result is a MULTIBYTE string, so `length' counts characters and
+    ;; `aref' answers a codepoint.
+    (if (fboundp 'string-as-multibyte) (string-as-multibyte str) str)))
 ;; `bufferp' used to be a permanent, unconditional `nil' here (Doc 188
 ;; §1.4 -- "no Sexp is a buffer" was true before this file had a buffer
 ;; object).  The real definition lives in the Doc 188 P1 buffer section
@@ -8888,14 +8900,80 @@ and only running both says which."
                               out)))))
         (nreverse out)))))
 (unless (fboundp 'make-directory)
+  ;; Three defects fixed together (v1.2.0 parity gap 4), because the first
+  ;; two hid the third:
+  ;;
+  ;; 1. The PARENTS walk rebuilt every path as absolute-POSIX: `acc' started
+  ;;    "" and each component was appended after a "/", so a relative "a/b"
+  ;;    became "/a" + "/a/b" and a Windows "C:/x" became "/C:" + "/C:/x" --
+  ;;    it created (or failed to create) something other than what it was
+  ;;    asked for.
+  ;; 2. Every result was discarded and DIR returned, so a failure was
+  ;;    indistinguishable from success.  On windows-x86_64 the underlying
+  ;;    NR=83 was an unconditional -ENOSYS until this same change, which is
+  ;;    why `make-directory' there was a silent no-op that still answered
+  ;;    its own argument.
+  ;; 3. Emacs returns nil, not DIR.
+  (defun nelisp--make-directory-1 (path)
+    "mkdir PATH once; return the kernel result (0 ok, negative -errno)."
+    (nelisp--syscall-path-int 83 path 511))
+  (defun nelisp--make-directory-prefixes (dir)
+    "Return DIR's ancestor paths, outermost first, then DIR itself.
+Keeps DIR's own root: an absolute POSIX path keeps its leading slash, a
+Windows drive path keeps `C:', and a relative path stays relative."
+    (let* ((abs (and (> (length dir) 0) (eq (aref dir 0) ?/)))
+           (parts (nelisp--split-on-char dir 47 t))
+           (acc (if abs "" nil))
+           (out nil))
+      (while parts
+        (setq acc (cond ((null acc) (car parts))
+                        ((equal acc "") (concat "/" (car parts)))
+                        (t (concat acc "/" (car parts)))))
+        (setq out (cons acc out))
+        (setq parts (cdr parts)))
+      (nreverse out)))
   (defun make-directory (dir &optional parents)
+    (nelisp--check-string dir)
     (if parents
-        (let ((acc ""))
-          (dolist (component (nelisp--split-on-char dir 47 t))
-            (setq acc (concat acc "/" component))
-            (nelisp--syscall-path-int 83 acc 511)))
-      (nelisp--syscall-path-int 83 dir 511))
-    dir))
+        ;; Ancestors may already exist; only the final component's failure
+        ;; is worth reporting, and even that is fine when it exists.
+        (let ((paths (nelisp--make-directory-prefixes dir)))
+          (while paths
+            (let ((rc (nelisp--make-directory-1 (car paths))))
+              (when (and (null (cdr paths)) (< rc 0)
+                         (not (file-directory-p (car paths))))
+                (signal 'file-error
+                        (list "Creating directory" "No such file or directory"
+                              dir))))
+            (setq paths (cdr paths))))
+      ;; Emacs distinguishes the two failures, and so does the errno the
+      ;; substrate hands back: -EEXIST is `file-already-exists', anything
+      ;; else (a missing parent, a permission refusal) is `file-error'.
+      (let ((rc (nelisp--make-directory-1 dir)))
+        (when (< rc 0)
+          (if (= rc -17)
+              (signal 'file-already-exists
+                      (list "Creating directory" "File exists" dir))
+            (signal 'file-error
+                    (list "Creating directory" "No such file or directory"
+                          dir))))))
+    nil))
+
+;; `kill-emacs' -- terminate the process now (v1.2.0 parity gap 3).  The
+;; reader's own `exit' only records an exit STATUS: execution continues to
+;; the end of the current form and on through the rest of the file, which
+;; is not what any caller of `kill-emacs' means.  `nelisp--exit-process'
+;; is the immediate one; keep `exit''s status-only contract untouched,
+;; since the driver's own top-level loop is built on it.
+(unless (fboundp 'kill-emacs)
+  (defun kill-emacs (&optional arg _restart)
+    "Exit the process immediately with status ARG (default 0)."
+    (let ((code (if (integerp arg) arg 0)))
+      (if (fboundp 'nelisp--exit-process)
+          (nelisp--exit-process code)
+        ;; No immediate-exit primitive: fall back to the status-only `exit'
+        ;; so at least the exit code is right when the form returns.
+        (exit code)))))
 ;; Native-store file builtins via direct syscalls (pure elisp, no Rust).
 ;; x86_64 Linux numbers, matching the access=21/unlink=87/mkdir=83/rmdir=84
 ;; convention above: rename=82, symlink=88, chmod=90, access(X_OK)=21.
