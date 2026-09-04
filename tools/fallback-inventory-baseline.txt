@@ -104,7 +104,17 @@
 # nl-thread-mirror-guard-smoke.el asserts that a worker's global write is
 # refused, so every such assertion must catch the signalled condition to
 # inspect it.  Each site is pinned individually below.
-silent-fallback        60
+# 60 -> 61 on 2026-09-04: `nelisp-artifact--macroexpand-body' falls back to
+# the unexpanded form when `macroexpand-all' is absent or signals.  The fall
+# is not silent in the sense this gate is about: the unexpanded body then
+# reaches `nelisp-bc--compile-form', which now REFUSES a macro rather than
+# compiling it as a call, so the caller falls back to source replay and the
+# artifact is correct either way.  Recording the fall here would mean
+# printing on a runtime that legitimately has no `macroexpand-all'.  The
+# `--try-compile-defun' bare-handler pin is re-digested in the same commit:
+# its body changed, the handler did not.
+#
+silent-fallback        61
 # 41 -> 42 on 2026-08-23: one new site, reviewed and pinned below (the
 # presence-sweep auto-note's defensive shape-extraction for a report-only
 # string, falls back to "?" on a malformed corpus form -- never on a
@@ -242,7 +252,7 @@ pinned-site bare-handler	nelisp-artifact.el	defun nelisp-artifact--read-private-
 pinned-site bare-handler	nelisp-artifact.el	defun nelisp-artifact--read-top-level-forms	1d7e99bd1b73 1
 pinned-site bare-handler	nelisp-artifact.el	defun nelisp-artifact--read-top-level-forms-fallback	71d15e8c0768 1
 pinned-site bare-handler	nelisp-artifact.el	defun nelisp-artifact--read-top-level-forms-fallback	b873df99ad1f 2
-pinned-site bare-handler	nelisp-artifact.el	defun nelisp-artifact--try-compile-defun	ad0f8c0349d0 1
+pinned-site bare-handler	nelisp-artifact.el	defun nelisp-artifact--try-compile-defun	9243df2d9a11 1
 pinned-site bare-handler	nelisp-artifact.el	defun nelisp-artifact-load-file	d9c246c1c754 1
 pinned-site bare-handler	nelisp-artifact.el	defun nelisp-artifact-load-or-compile-source-file	d391fab5bd29 1
 pinned-site bare-handler	nelisp-artifact.el	defun nelisp-artifact-load-source-file	0f32e67fc6ec 1
@@ -337,6 +347,8 @@ pinned-site silent-fallback	nelisp-artifact.el	defun nelisp-artifact--read-priva
 pinned-site silent-fallback	nelisp-artifact.el	defun nelisp-artifact--read-top-level-forms	fcb884d38bb8 1
 pinned-site silent-fallback	nelisp-artifact.el	defun nelisp-artifact--read-top-level-forms-fallback	266858e83e6e 2
 pinned-site silent-fallback	nelisp-artifact.el	defun nelisp-artifact--try-compile-defun	e3f2648caa3a 1
+pinned-site bare-handler	nelisp-artifact.el	defun nelisp-artifact--macroexpand-body	a2362d0037ed 1
+pinned-site silent-fallback	nelisp-artifact.el	defun nelisp-artifact--macroexpand-body	4390030120d7 1
 pinned-site silent-fallback	nelisp-artifact.el	defun nelisp-artifact-load-file	7de6ee2c5875 1
 pinned-site silent-fallback	nelisp-artifact.el	defun nelisp-artifact-load-or-compile-source-file	e3f2648caa3a 1
 pinned-site silent-fallback	nelisp-artifact.el	defun nelisp-artifact-load-source-file	7cbdc7443659 1
