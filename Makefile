@@ -1054,6 +1054,7 @@ STANDALONE_READER_SMOKES = \
   standalone-reader-async-core-smoke \
   standalone-reader-bignum-smoke \
   standalone-reader-catch-throw-tag-smoke \
+  standalone-reader-cl-dolist-return-smoke \
   standalone-reader-checked \
   standalone-reader-checked-soak \
   standalone-reader-cond-let-shape-smoke \
@@ -2457,6 +2458,23 @@ standalone-reader-catch-throw-tag-smoke: standalone-reader
 	  echo "[standalone-reader-catch-throw-tag-smoke] PASS: -> $$out"; \
 	else \
 	  echo "[standalone-reader-catch-throw-tag-smoke] FAIL: -> $$out (expected (a b c 42 inner outer))"; \
+	  exit 1; \
+	fi
+
+# GNU `cl-dolist' and `cl-dotimes' establish an anonymous `cl-block'.  The
+# prelude shims used to drop that wrapper, so a body-level `cl-return' escaped
+# as `no-catch: (cl-block-anon VALUE)'.  Cover value returns, fall-through
+# results, and nested anonymous blocks (the outer loop must keep iterating).
+standalone-reader-cl-dolist-return-smoke: standalone-reader
+	@mkdir -p target
+	@printf '%s\n' \
+	  '(list (cl-dolist (x (quote (1 2 3)) (quote missed)) (if (= x 2) (cl-return (list (quote dolist) x)))) (cl-dolist (x (quote (1 2)) (quote done))) (cl-dotimes (i 3 (quote missed)) (if (= i 2) (cl-return (list (quote dotimes) i)))) (cl-dotimes (i 3)) (let ((seen nil)) (cl-dolist (x (quote (1 2))) (setq seen (cons (cl-dolist (y (quote (3 4)) (quote missed)) (cl-return (list x y))) seen))) (reverse seen)))' \
+	  > target/standalone-reader-cl-dolist-return-smoke.el
+	@out="$$($(STANDALONE_BIN) --load target/standalone-reader-cl-dolist-return-smoke.el)"; \
+	if [ "$$out" = "((dolist 2) done (dotimes 2) nil ((1 3) (2 3)))" ]; then \
+	  echo "[standalone-reader-cl-dolist-return-smoke] PASS: -> $$out"; \
+	else \
+	  echo "[standalone-reader-cl-dolist-return-smoke] FAIL: -> $$out"; \
 	  exit 1; \
 	fi
 

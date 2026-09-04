@@ -1,4 +1,58 @@
+(require 'cl-lib)
 (require 'ert)
+
+(ert-deftest nelisp-doc22-cl-dolist-dotimes-establish-anonymous-block ()
+  "The guarded prelude shims retain GNU's anonymous `cl-block'."
+  (let ((old-dolist (symbol-function 'cl-dolist))
+        (old-dotimes (symbol-function 'cl-dotimes))
+        dolist-form
+        dotimes-form)
+    (with-temp-buffer
+      (insert-file-contents
+       (expand-file-name "scripts/nelisp-stdlib-prelude.el"
+                         default-directory))
+      (goto-char (point-min))
+      (search-forward "(unless (fboundp 'cl-dolist)")
+      (beginning-of-line)
+      (setq dolist-form (read (current-buffer)))
+      (search-forward "(unless (fboundp 'cl-dotimes)")
+      (beginning-of-line)
+      (setq dotimes-form (read (current-buffer))))
+    (unwind-protect
+        (progn
+          (fmakunbound 'cl-dolist)
+          (fmakunbound 'cl-dotimes)
+          (eval dolist-form t)
+          (eval dotimes-form t)
+          (should
+           (equal (macroexpand-1
+                   '(cl-dolist (x '(1 2) 'done) (cl-return x)))
+                  '(cl-block nil
+                     (dolist (x '(1 2) 'done) (cl-return x)))))
+          (should
+           (equal (macroexpand-1
+                   '(cl-dotimes (i 3 'done) (cl-return i)))
+                  '(cl-block nil
+                     (dotimes (i 3 'done) (cl-return i)))))
+          (should
+           (equal (eval
+                   '(list
+                     (cl-dolist (x '(1 2 3) 'miss)
+                       (when (= x 2) (cl-return x)))
+                     (cl-dolist (x '(1 2) 'done))
+                     (cl-dotimes (i 3 'miss)
+                       (when (= i 2) (cl-return i)))
+                     (cl-dotimes (i 3))
+                     (let ((seen nil))
+                       (cl-dolist (x '(1 2))
+                         (push (cl-dolist (y '(3 4) 'miss)
+                                 (cl-return (list x y)))
+                               seen))
+                       (nreverse seen)))
+                   t)
+                  '(2 done 2 nil ((1 3) (2 3))))))
+      (fset 'cl-dolist old-dolist)
+      (fset 'cl-dotimes old-dotimes))))
 
 (ert-deftest nelisp-doc22-copy-sequence-copies-string-and-vector ()
   (let ((s "abc")
