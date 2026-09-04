@@ -1377,7 +1377,42 @@
        ;; printed output on both sides" regardless, and these are the
        ;; doc's own §6.2 parity forms.
        (char-table-p (make-char-table 'test))
-       (aref (make-char-table 'test 'D) ?a))
+       (aref (make-char-table 'test 'D) ?a)
+       ;; `float-time' TIME.  The standalone's arm took no argument at all
+       ;; and answered the wall clock for every call, so (float-time 5) was
+       ;; ~1.79e9 here and 5.0 in Emacs -- a cross-substrate divergence that
+       ;; only a live comparison catches, since host Emacs has a correct
+       ;; `float-time' of its own and any host-only test stays green either
+       ;; way.  Not a native/prelude shadow case (there is no prelude
+       ;; `float-time' to shadow); the gate's contract is byte-identical
+       ;; printed output on both sides regardless.
+       ;;
+       ;; No form here reads the clock: a wall-clock answer cannot be
+       ;; compared against another process's wall-clock answer, and the one
+       ;; thing this file must NOT do is print a value that differs on every
+       ;; run.  `(float-time)' with no argument is covered by
+       ;; test/nelisp-float-time-arg-test.el instead.
+       (float-time 5) (float-time 0) (float-time -1) (float-time 0.25)
+       (float-time '(0 5 0 0)) (float-time '(0 5)) (float-time '(1 0))
+       (float-time '(0 -5)) (float-time '(0 5 500000))
+       (float-time '(0 5 -500000)) (float-time '(0 0 0 500000000000))
+       ;; Elements past index 3 are ignored without being type-checked; a
+       ;; non-cons tail simply ends the list rather than signalling.
+       (float-time '(1 2 3 4)) (float-time '(1 2 3 4 5))
+       (float-time '(1 2 3 . 4))
+       (float-time '(27278 123 456789 987654))
+       ;; (TICKS . HZ), the `current-time-list' = nil shape.
+       (float-time '(1 . 4)) (float-time '(3 . 1))
+       (float-time '(1 . 1000000000000))
+       ;; A TIME that cannot be decoded signals; it does not answer.
+       (condition-case e (float-time "x") (error e))
+       (condition-case e (float-time t) (error e))
+       (condition-case e (float-time [1 2]) (error e))
+       (condition-case e (float-time '(1)) (error e))
+       (condition-case e (float-time '(1 . -4)) (error e))
+       (condition-case e (float-time '(1 . 0)) (error e))
+       (condition-case e (float-time '(1 . 2.0)) (error e))
+       (condition-case e (float-time '(0 5.0)) (error e)))
 )
 
 ;;; nelisp-shadow-differential-cases.el ends here
