@@ -631,6 +631,111 @@ artifact, while `inspect-elisp-artifact' can show remaining coverage gaps."
       (when (file-directory-p temp-dir)
         (delete-directory temp-dir t)))))
 
+(ert-deftest nelisp-artifact/neln-fn-entries-carry-source-defun-fallback ()
+  "A `.neln' `:fn' entry records the `defun' it was compiled from.
+
+Which lane a loader can take is a property of the LOADER, not of this
+compile.  An embedder maps the native section only when it exposes the
+native call boundary AND can resolve every extern the section names, and
+it installs the bytecode closure only when it has a bytecode substrate.
+Measured on one such embedder (nelisp-emacs-lib, 2026-09-05), neither
+held: all 21 natively-compiled defuns of a real module arrived with no
+installable lane and replay signaled `no native or BCL replay path'.  The
+fourth element is the lane that needs nothing from the loader -- the
+source `defun', evaluated.  Checked for a module whose defuns DO enter
+the native section, for one compiled for a target with no native lane at
+all, and against the three-element shape the opt-out still emits, which
+is the shape that could not be replayed."
+  (let* ((temp-dir (make-temp-file "nelisp-artifact-sdf-" t))
+         (source-path (expand-file-name "sdf.el" temp-dir))
+         (artifact-path (concat source-path ".neln"))
+         (nonnative-path (expand-file-name "sdf-nonnative.el" temp-dir))
+         (nonnative-artifact (concat nonnative-path ".neln"))
+         (legacy-path (expand-file-name "sdf-legacy.el" temp-dir))
+         (legacy-artifact (concat legacy-path ".neln"))
+         (source
+          "(defun nat-sdf-sq (x) (* x x))
+(defun nat-sdf-add (x) (+ x nat-sdf-base))
+(defvar nat-sdf-base 10)
+(provide 'nat-sdf-feat)\n"))
+    (unwind-protect
+        (progn
+          (write-region source nil source-path nil 'silent)
+          (write-region source nil nonnative-path nil 'silent)
+          (write-region source nil legacy-path nil 'silent)
+          ;; 1. Native lane available: the entries still carry the fallback,
+          ;;    and the fallback alone is a complete definition.
+          (let* ((manifest (nelisp-artifact-compile-file
+                            source-path artifact-path nil nil nil nil nil
+                            'neln))
+                 (payload (nelisp-artifact--read-payload artifact-path))
+                 (module (plist-get payload :module-init))
+                 (fns (cl-remove-if-not
+                       (lambda (item) (and (consp item) (eq (car item) :fn)))
+                       module)))
+            (should (plist-get manifest :native))
+            (should (= (length fns) 2))
+            (dolist (item fns)
+              (should (= (length item) 4))
+              (let ((fallback (nth 3 item)))
+                (should (consp fallback))
+                (should (eq (car fallback) 'defun))
+                (should (eq (nth 1 fallback) (nth 1 item)))))
+            ;; Replay the module the way a loader with neither lane must:
+            ;; take the recorded defun for every `:fn', nothing else.
+            (nelisp--reset)
+            (setq nelisp-artifact--loaded nil)
+            (dolist (item module)
+              (cond
+               ((and (consp item) (eq (car item) :fn))
+                (nelisp-eval (nth 3 item)))
+               ((and (consp item) (eq (car item) :eval))
+                (nelisp-eval (nth 1 item)))
+               (t (nelisp-eval item))))
+            ;; Recursion-free, but `nat-sdf-add' reads a global the `:eval'
+            ;; lane defined, so this also proves the two lanes interleave in
+            ;; source order.
+            (should (= (nelisp-eval '(nat-sdf-sq 9)) 81))
+            (should (= (nelisp-eval '(nat-sdf-add 7)) 17)))
+          ;; 2. No native lane at all: same shape, same guarantee.
+          (let* ((manifest (nelisp-artifact-compile-file
+                            nonnative-path nonnative-artifact nil
+                            "wasm32-unknown" nil nil nil 'neln))
+                 (module (plist-get (nelisp-artifact--read-payload
+                                     nonnative-artifact)
+                                    :module-init))
+                 (fns (cl-remove-if-not
+                       (lambda (item) (and (consp item) (eq (car item) :fn)))
+                       module)))
+            (should-not (plist-get manifest :native))
+            (should (= (length fns) 2))
+            (dolist (item fns)
+              (should (= (length item) 4))
+              (should (eq (car (nth 3 item)) 'defun))
+              (should (eq (nth 1 (nth 3 item)) (nth 1 item)))))
+          ;; 3. The opt-out reproduces the un-replayable three-element shape.
+          (let ((nelisp-artifact--neln-source-defun-fallback nil))
+            (nelisp-artifact-compile-file
+             legacy-path legacy-artifact nil nil nil nil nil 'neln)
+            (let ((fns (cl-remove-if-not
+                        (lambda (item) (and (consp item) (eq (car item) :fn)))
+                        (plist-get (nelisp-artifact--read-payload
+                                    legacy-artifact)
+                                   :module-init))))
+              (should (= (length fns) 2))
+              (dolist (item fns)
+                (should (= (length item) 3)))))
+          ;; 4. The wider entry does not disturb the ordinary load path.
+          (rename-file source-path (concat source-path ".gone") t)
+          (nelisp--reset)
+          (setq nelisp-artifact--loaded nil)
+          (nelisp-artifact-load-file artifact-path)
+          (should (= (nelisp-eval '(nat-sdf-sq 9)) 81))
+          (should (= (nelisp-eval '(nat-sdf-add 7)) 17))
+          (should (nelisp-eval '(featurep 'nat-sdf-feat))))
+      (when (file-directory-p temp-dir)
+        (delete-directory temp-dir t)))))
+
 (ert-deftest nelisp-artifact/neln-native-policy-required-fails-on-gaps ()
   "`--native-policy required' fails before writing a partial `.neln'.
 The default `.neln' lane is deliberately opportunistic so any `.el' can be

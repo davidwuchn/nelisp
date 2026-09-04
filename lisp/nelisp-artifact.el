@@ -180,6 +180,27 @@ to NeLisp bytecode closures and other forms replay through `nelisp-eval'.
 It is intended for very large bootstrap substrates where proving the cache
 boundary matters before the bytecode compiler is fast enough for CI.")
 
+(defvar nelisp-artifact--neln-source-defun-fallback t
+  "Non-nil means `.neln' `:fn' entries also carry their source `defun'.
+
+A `.neln' module instruction for an eligible top-level defun is
+`(:fn NAME BCL)': the name, and the NeLisp bytecode closure a loader
+installs when it cannot use the native section.  That shape assumes a
+loader with a bytecode substrate, and a loader without one has nothing
+left to install -- it can only fail the whole artifact.  Whether the
+native section is usable is a property of the LOADER, not of this
+compile: an embedder resolves the extern symbols the section names
+against its own runtime and declines the whole section when it cannot
+(measured: a consumer whose allowlist holds 7 runtime externs refused a
+section naming 33, so all 21 natively-compiled defuns arrived with no
+installable lane and replay signaled \"no native or BCL replay path\").
+The compiler cannot predict that answer, so it appends the fourth
+element the format already allows -- `(:fn NAME BCL SOURCE-DEFUN)' --
+and every loader keeps a lane it can take: native, then bytecode, then
+evaluating the recorded defun.  Costs the printed source of each
+eligible defun in the artifact.  Set to nil to emit the historical
+three-element entries.")
+
 (defvar nelisp-artifact-profile-stages nil
   "Non-nil means artifact compile commands emit stage timings to stderr.")
 
@@ -1006,11 +1027,45 @@ a form the VM cannot yet lower, so the caller can fall back to replay."
   "Lower FORM into a `.nelc' module instruction (Doc 142 §6.1).
 An eligible top-level `defun' becomes a precompiled (:fn NAME BCL)
 install; every other form (and any defun the bytecode VM cannot lower)
-becomes (:eval FORM) replayed through `nelisp-eval' at load."
+becomes (:eval FORM) replayed through `nelisp-eval' at load.
+For `.neln', `nelisp-artifact-compile-file' then widens each (:fn NAME BCL)
+to (:fn NAME BCL SOURCE-DEFUN) -- see
+`nelisp-artifact--neln-source-defun-fallback'."
   (if (eq (nelisp-artifact--normalize-module-policy module-policy) 'eval-only)
       (list :eval form)
     (or (nelisp-artifact--try-compile-defun form)
         (list :eval form))))
+
+(defun nelisp-artifact--fn-entry-with-source-defun (entry form)
+  "Return ENTRY with FORM appended as its source-defun fallback.
+ENTRY is a `(:fn NAME BCL)' module instruction and FORM is the top-level
+form it was compiled from.  The pair is appended only when FORM really is
+`(defun NAME ...)' for the same NAME and ENTRY is still the historical
+three-element shape, so a consumer that validates the fallback against
+the entry name never sees a mismatched one."
+  (if (and (consp entry)
+           (eq (car entry) :fn)
+           (null (nthcdr 3 entry))
+           (symbolp (nth 1 entry))
+           (consp form)
+           (eq (car form) 'defun)
+           (eq (nth 1 form) (nth 1 entry)))
+      (append entry (list form))
+    entry))
+
+(defun nelisp-artifact--attach-source-defun-fallbacks (module forms)
+  "Return MODULE with a source-defun fallback on every `:fn' entry.
+MODULE and FORMS are parallel: `nelisp-artifact-compile-file' builds the
+module by mapping `nelisp-artifact--compile-top-level-form' over FORMS, so
+the Nth instruction came from the Nth form."
+  (let ((out nil)
+        (rest forms))
+    (dolist (entry module)
+      (setq out (cons (nelisp-artifact--fn-entry-with-source-defun
+                       entry (car rest))
+                      out))
+      (setq rest (cdr rest)))
+    (nreverse out)))
 
 (defun nelisp-artifact--extract-provided-feature (form)
   "Return the feature symbol provided by FORM, or nil."
@@ -2158,6 +2213,23 @@ native object for the standalone runtime, Doc 142 §6.4)."
     (nelisp-artifact--profile-log
      "module-build" stage-start
      (list :forms (length forms) :module-policy module-policy))
+    (when (and (eq kind 'neln)
+               nelisp-artifact--neln-source-defun-fallback)
+      ;; A `.neln' loader chooses its lane at replay time, and the choice it
+      ;; can make is not knowable here: the native section is offered to an
+      ;; embedder that resolves its extern symbols against its own runtime and
+      ;; refuses the section as a whole when any name is outside what it can
+      ;; resolve.  Refused, `(:fn NAME BCL)' leaves such a loader with only the
+      ;; bytecode closure, which an embedder without a bytecode substrate
+      ;; cannot install either -- so the artifact that compiled cleanly is the
+      ;; one that cannot be replayed.  Record the defun the entry came from as
+      ;; the last lane.  Costs source bytes; buys an artifact that no loader
+      ;; has to reject.
+      (setq stage-start (nelisp-artifact--profile-time))
+      (setq module (nelisp-artifact--attach-source-defun-fallbacks module forms))
+      (nelisp-artifact--profile-log
+       "module-source-defun-fallback" stage-start
+       (list :items (length module))))
     (setq stage-start (nelisp-artifact--profile-time))
     (setq provided-features (nelisp-artifact--collect-features forms))
     (nelisp-artifact--profile-log
