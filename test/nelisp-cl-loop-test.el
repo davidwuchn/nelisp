@@ -30,6 +30,15 @@
 (require 'cl-lib)
 (require 'nelisp-cl-macros)
 
+(defun nelisp-cl-loop-test--walk (form fn)
+  "Call FN on FORM and every cons inside it."
+  (when (consp form)
+    (funcall fn form)
+    (let ((rest form))
+      (while (consp rest)
+        (nelisp-cl-loop-test--walk (car rest) fn)
+        (setq rest (cdr rest))))))
+
 (defmacro nelisp-cl-loop-test--subset (&rest clauses)
   "Evaluate CLAUSES through the subset expander under test."
   (nelisp-cl-macros--loop-build clauses))
@@ -37,6 +46,8 @@
 (defvar nelisp-cl-loop-test--a '(10 20 30))
 (defvar nelisp-cl-loop-test--b '(x y z))
 (defvar nelisp-cl-loop-test--v [1 2 3])
+(defvar nelisp-cl-loop-test--plist '(:a 1 :b 2))
+(defvar nelisp-cl-loop-test--i 0)
 
 (defconst nelisp-cl-loop-test--cases
   '(;; one list iterator, every accumulator and both guards
@@ -86,15 +97,39 @@
     (for a in nelisp-cl-loop-test--a while (< a 30) collect a)
     (for a in nelisp-cl-loop-test--a until (> a 25) collect a)
     (with k = 5 for a in nelisp-cl-loop-test--a collect (+ a k))
-    (repeat 3 collect 1))
+    (repeat 3 collect 1)
+    ;; A loop with no iterator at all is still a loop.  The branch for it
+    ;; was lost when the iterators were generalised and nothing caught it,
+    ;; because no form in this tree is written this way.
+    (while (< nelisp-cl-loop-test--i 3)
+           do (setq nelisp-cl-loop-test--i (1+ nelisp-cl-loop-test--i)))
+    (until (> nelisp-cl-loop-test--i 2)
+           do (setq nelisp-cl-loop-test--i (1+ nelisp-cl-loop-test--i)))
+    ;; counting down from an explicit start, whatever the limit keyword
+    (for i downfrom 4 to 2 collect i)
+    (for i downfrom 4 above 1 collect i)
+    (for i downfrom 8 to 2 by 3 collect i)
+    ;; a list walked with something other than `cdr'
+    (for k in nelisp-cl-loop-test--plist by #'cddr collect k)
+    (for k in nelisp-cl-loop-test--plist by #'cddr always (keywordp k))
+    ;; `and' continues the guarded clause rather than ending it
+    (for i from 0 to 5 when (= i 2) do (ignore i) and return i)
+    (for i from 0 to 3 when (= i 1) do (ignore i) and do (ignore i)))
   "Clause lists evaluated through both the subset and the host macro.")
 
 (ert-deftest nelisp-cl-loop/subset-agrees-with-host ()
   "Every supported shape must answer exactly what the host's `cl-loop' does."
   (dolist (clauses nelisp-cl-loop-test--cases)
-    (let ((subset (eval (cons 'nelisp-cl-loop-test--subset clauses) t))
-          (host (eval (cons 'cl-loop clauses) t)))
-      (should (equal subset host)))))
+    (let* ((nelisp-cl-loop-test--i 0)
+           (subset (eval (cons 'nelisp-cl-loop-test--subset clauses) t))
+           (subset-i nelisp-cl-loop-test--i)
+           (nelisp-cl-loop-test--i 0)
+           (host (eval (cons 'cl-loop clauses) t))
+           (host-i nelisp-cl-loop-test--i))
+      ;; Both the value and the side effect have to agree: a loop that does
+      ;; not run answers nil for `do', which equals what the host answers.
+      (should (equal subset host))
+      (should (equal subset-i host-i)))))
 
 (ert-deftest nelisp-cl-loop/parallel-for-is-modelled ()
   "A second `for' used to make the whole shape unrecognised, and an
@@ -123,6 +158,49 @@ declined and silently did nothing."
                          for i from 2 downto 0 collect i)
                        t)
                  '(2 1 0))))
+
+(ert-deftest nelisp-cl-loop/unsupported-shape-signals-when-it-runs ()
+  "An unbuildable shape must not quietly become nil.
+That is the whole defect this subset had: a loop nobody could build did
+not fail, it did not run, and nothing said so.  The signal is deferred to
+run time so vendor Elisp that merely CONTAINS an exotic loop still loads."
+  (let* ((clauses '(for k being the hash-keys of (make-hash-table) collect k))
+         (expansion (nelisp-cl-macros--loop-build clauses)))
+    (should (nelisp-cl-macros--loop-unbuildable-p clauses))
+    ;; It is a form, so a file containing one still reads and loads ...
+    (should (consp expansion))
+    ;; ... and it fails, loudly, only when it runs.
+    (should-error (eval expansion t) :type 'error)
+    ;; A shape the subset does model is not caught by the same predicate.
+    (should-not (nelisp-cl-macros--loop-unbuildable-p
+                 '(for a in '(1 2) collect a)))))
+
+(ert-deftest nelisp-cl-loop/every-loop-in-the-tree-is-buildable ()
+  "No `cl-loop' in this repository may fall to the unsupported arm.
+The arm signals now, so a form that reaches it is a runtime failure
+rather than a quiet nil, and the tree must not contain one."
+  (let ((root (or (getenv "NELISP_ROOT") default-directory))
+        (unbuildable nil))
+    (dolist (f (append (file-expand-wildcards (expand-file-name "lisp/*.el" root))
+                       (file-expand-wildcards (expand-file-name "src/*.el" root))
+                       (file-expand-wildcards (expand-file-name "scripts/*.el" root))
+                       (file-expand-wildcards (expand-file-name "packages/*/src/*.el" root))))
+      (with-temp-buffer
+        (insert-file-contents f)
+        (goto-char (point-min))
+        (condition-case nil
+            (while t
+              (let ((form (read (current-buffer))))
+                (nelisp-cl-loop-test--walk
+                 form
+                 (lambda (sub)
+                   (when (and (eq (car-safe sub) 'cl-loop)
+                              (condition-case _
+                                  (nelisp-cl-macros--loop-unbuildable-p (cdr sub))
+                                (error t)))
+                     (push (cons (file-name-nondirectory f) sub) unbuildable))))))
+          (error nil))))
+    (should-not unbuildable)))
 
 (provide 'nelisp-cl-loop-test)
 ;;; nelisp-cl-loop-test.el ends here

@@ -3885,27 +3885,33 @@ together, which is what CL does."
           (rest (cdr (cdr (cdr cur)))))
       (cond
        ((eq kw 'in)
-        (cons (list :kind 'in :pat pat :seq (car rest)) (cdr rest)))
+        ;; `by STEPFN' walks the list with something other than `cdr', which
+        ;; is how a plist is iterated two cells at a time.
+        (let ((seq (car rest)) (by nil) (tail (cdr rest)))
+          (when (eq (car tail) 'by)
+            (setq by (car (cdr tail)) tail (cdr (cdr tail))))
+          (cons (list :kind 'in :pat pat :seq seq :by by) tail)))
        ((eq kw 'on)
         (cons (list :kind 'on :pat pat :seq (car rest)) (cdr rest)))
        ((eq kw 'across)
         (cons (list :kind 'across :pat pat :seq (car rest)) (cdr rest)))
-       ((memq kw '(from to below downto above by))
+       ((memq kw '(from downfrom upfrom to below downto above by))
         ;; [from N] to|below|downto|above M [by S].  `from' is optional --
         ;; CL lets `for i below N' start at 0, and this tree writes seven
         ;; loops that way.
         (let ((from 0)
-              (limit-kw nil) (limit nil) (by nil)
+              (limit-kw nil) (limit nil) (by nil) (down nil)
               (tail nil))
-          (if (eq kw 'from)
-              (setq from (car rest) tail (cdr rest))
+          (if (memq kw '(from downfrom upfrom))
+              (setq from (car rest) tail (cdr rest)
+                    down (eq kw 'downfrom))
             (setq tail (cdr (cdr cur))))
           (when (memq (car tail) '(to below downto above))
             (setq limit-kw (car tail) limit (car (cdr tail)) tail (cdr (cdr tail))))
           (when (eq (car tail) 'by)
             (setq by (car (cdr tail)) tail (cdr (cdr tail))))
           (cons (list :kind 'num :pat pat :from from
-                      :limit-kw limit-kw :limit limit :by by)
+                      :limit-kw limit-kw :limit limit :by by :down down)
                 tail)))
        ((eq kw '=)
         (let ((init (car rest)) (then nil) (tail (cdr rest)))
@@ -3938,7 +3944,13 @@ non-nil during the first iteration only, for `= INIT then UPDATE'."
                             (if (symbolp pat)
                                 (list (list pat src))
                               (nelisp-cl-macros--loop-destructure-bindings pat src)))))
-            (setq steps (append steps (list (list 'setq cur (list 'cdr cur)))))))
+            (setq steps
+                  (append steps
+                          (list (list 'setq cur
+                                      (let ((by (plist-get it :by)))
+                                        (if by
+                                            (list 'funcall by cur)
+                                          (list 'cdr cur)))))))))
          ((eq kind 'across)
           (let ((vec (make-symbol "--loop-vec--"))
                 (idx (make-symbol "--loop-idx--")))
@@ -3951,14 +3963,16 @@ non-nil during the first iteration only, for `= INIT then UPDATE'."
           (let* ((n (make-symbol "--loop-n--"))
                  (by (or (plist-get it :by) 1))
                  (limit-kw (plist-get it :limit-kw))
-                 (down (memq limit-kw '(downto above)))
+                 ;; `downfrom' counts down whatever the limit keyword is, so
+                 ;; `for i downfrom N to M' walks N, N-1, ... M inclusive.
+                 (down (or (plist-get it :down) (memq limit-kw '(downto above))))
                  (limit (plist-get it :limit)))
             (setq binds (append binds (list (list n (plist-get it :from)))))
             (when limit-kw
               (setq tests
                     (append tests
-                            (list (list (cond ((eq limit-kw 'to) '<=)
-                                              ((eq limit-kw 'below) '<)
+                            (list (list (cond ((eq limit-kw 'to) (if down '>= '<=))
+                                              ((eq limit-kw 'below) (if down '> '<))
                                               ((eq limit-kw 'downto) '>=)
                                               (t '>))
                                         n limit)))))
@@ -3985,6 +3999,30 @@ non-nil during the first iteration only, for `= INIT then UPDATE'."
   (cond ((null cond) form)
         (negate (list 'if cond nil form))
         (t (list 'if cond form nil))))
+
+(defun nelisp-cl-macros--loop-unsupported (clauses)
+  "Return the expansion for CLAUSES, a shape this subset does not model.
+
+It signals when it RUNS rather than expanding to nil, and rather than
+signalling at expansion time.  Expanding to nil is what made the gap
+dangerous: a loop nobody could build did not fail, it silently did not
+run, and 48 of this repository's 62 `cl-loop' forms were in that state at
+once -- the AOT compiler's stack-argument push loop among them, which
+therefore emitted nothing at all.  Every host test stayed green, because
+the host has the real macro.
+
+Deferring to run time is deliberate: vendor Elisp that merely CONTAINS an
+exotic loop still loads, and only a loop that actually executes fails."
+  (list 'signal (list 'quote 'error)
+        (list 'list "cl-loop: unsupported clause shape" (list 'quote clauses))))
+
+(defun nelisp-cl-macros--loop-unsupported-form-p (form)
+  "Return non-nil when FORM is what `nelisp-cl-macros--loop-unsupported' builds."
+  (and (consp form)
+       (eq (car form) 'signal)
+       (equal (car (cdr (cdr form)))
+              (list 'list "cl-loop: unsupported clause shape"
+                    (car (cdr (cdr (car (cdr (cdr form)))))))) ))
 
 (defun nelisp-cl-macros--loop-build (clauses)
   "Build expansion for `cl-loop' CLAUSES.
@@ -4038,6 +4076,22 @@ this subset does not model expands to nil, as it always has."
                                          when unless while until repeat
                                          finally return named always and))))
               (setq forms (append forms (list (car cur))) cur (cdr cur)))
+            ;; `and do' / `and return' continue the same guarded clause, so
+            ;; `when C do X and return Y' returns Y rather than dropping it.
+            (while (and cur (eq (car cur) 'and)
+                        (memq (car (cdr cur)) '(do return)))
+              (if (eq (car (cdr cur)) 'return)
+                  (progn
+                    (setq forms (append forms
+                                        (list (list 'cl-return (car (cdr (cdr cur)))))))
+                    (setq cur (cdr (cdr (cdr cur)))))
+                (setq cur (cdr (cdr cur)))
+                (while (and cur
+                            (not (memq (car cur)
+                                       '(for with do collect append sum count
+                                             when unless while until repeat
+                                             finally return named always and))))
+                  (setq forms (append forms (list (car cur))) cur (cdr cur)))))
             (setq do-forms
                   (append do-forms
                           (list (nelisp-cl-macros--loop-guard
@@ -4065,10 +4119,16 @@ this subset does not model expands to nil, as it always has."
           (setq cur (cdr (cdr cur))))
          (t (setq recognised nil)))))
     (cond
-     ((not recognised) nil)
+     ((not recognised) (nelisp-cl-macros--loop-unsupported clauses))
      (bodyless-forms
       (list 'cl-block nil (cons 'while (cons t bodyless-forms))))
-     ((and (null iters) (null repeat-count)) nil)
+     ;; `cl-loop while COND do ...' has no iterator and is still a loop.  The
+     ;; branch for it was lost when the iterators were generalised, and
+     ;; nothing caught that: no form in this tree is written that way, so the
+     ;; body simply stopped running -- the same silent shape this rewrite
+     ;; existed to remove.
+     ((and (null iters) (null repeat-count) (null extra-tests))
+      (nelisp-cl-macros--loop-unsupported clauses))
      (t
       (when repeat-count
         (setq iters (append iters
@@ -4140,15 +4200,26 @@ this subset does not model expands to nil, as it always has."
                                        (if result (list result) nil))))))))))
 
 (defun nelisp-cl-macros--loop-unbuildable-p (clauses)
-  "Return non-nil when CLAUSES are a shape `cl-loop' here expands to nil."
-  (null (nelisp-cl-macros--loop-build clauses)))
+  "Return non-nil when CLAUSES are a shape this subset does not model."
+  (nelisp-cl-macros--loop-unsupported-form-p
+   (nelisp-cl-macros--loop-build clauses)))
 
 
 (defmacro cl-loop (&rest clauses)
   "Loop CLAUSES — minimal CL-style iteration macro.
 
 See `nelisp-cl-macros--loop-build' commentary for supported shapes.
-Patterns this stub does not recognise expand to nil."
+A shape this subset does not model expands to a form that SIGNALS when
+it runs, rather than to nil.
+
+Expanding to nil is what made this dangerous: a loop nobody could build
+did not fail, it silently did not run, and 48 of the 62 `cl-loop' forms
+in this repository were in that state at once -- including the AOT
+compiler's stack-argument push loop, which therefore emitted nothing.
+Every host test stayed green throughout, because the host has the real
+macro.  The signal is at run time and not at expansion time on purpose:
+vendor Elisp that merely CONTAINS an exotic loop still loads, and only a
+loop that actually executes can fail."
   (declare (debug (&rest sexp)))
   (nelisp-cl-macros--loop-build clauses))
 
@@ -7680,7 +7751,10 @@ No-ops on substrates without `nelisp--syscall-path-int' (the historic stub)."
   (put (car row) 'error-message (car (cdr row)))
   (unless (get (car row) 'error-conditions)
     (put (car row) 'error-conditions (list (car row) 'file-error 'error))))
-(defmacro cl-loop (&rest clauses) (nelisp-cl-macros--loop-build clauses))
+(defmacro cl-loop (&rest clauses)
+  ;; Same contract as the definition above: an unbuildable shape signals
+  ;; when it runs instead of quietly becoming nil.
+  (nelisp-cl-macros--loop-build clauses))
 
 ;; --- Doc 143: wire the elisp Sexp printer into the reader runtime ---------
 ;; prin1-to-string / prin1 were void in the reader (lisp/nelisp-stdlib-prn.el
