@@ -6433,6 +6433,99 @@ leave symbols unresolved at link time."
     (defun wf_float_time (out)
       (let* ((sc (alloc-bytes 32 8)))
         (seq (nl_os_float_time sc) (wf_copy32 out sc))))
+    ;; `float-time' TIME.  The wrapper above answers the CLOCK; these answer
+    ;; the ARGUMENT, which the dispatch arm used to drop on the floor -- it
+    ;; took no argument at all, so (float-time 5) returned the wall clock and
+    ;; every (float-time (time-subtract (current-time) start)), the standard
+    ;; elapsed-seconds idiom, reported ~1.79e9 instead of the interval.
+    ;;
+    ;; Emacs 30/31 `decode_lisp_time' semantics, each read off a real Emacs
+    ;; before it was written here:
+    ;;   integer / float           -> that number of seconds
+    ;;   (HIGH LOW [USEC [PSEC]])  -> HIGH*65536 + LOW + USEC*1e-6 + PSEC*1e-12
+    ;;   (TICKS . HZ)              -> TICKS/HZ, HZ a positive integer
+    ;; Every element of the list form that EXISTS at index 0..3 must be an
+    ;; INTEGER -- (float-time '(0 5.0)) is "Invalid time specification" in
+    ;; Emacs, not 5.0 -- while an element past index 3 is ignored without
+    ;; being type-checked ((float-time '(1 2 3 4 "x")) is 65538.00000300001
+    ;; there) and a non-cons tail simply ends the list ((float-time
+    ;; '(1 2 3 . 4)) is 65538.000003, i.e. PSEC absent, not an error).
+    ;;
+    ;; Bignum (tag 13) TIME is out of scope and reports the invalid-spec
+    ;; error rather than an answer: this substrate's own `float' already
+    ;; answers 0.0 for a bignum, so converting one here could only invent a
+    ;; number, and inventing one is the failure shape this whole change is
+    ;; about.
+    (defun wf_ft_nth (list_ptr n)
+      (if (= (ptr-read-u64 list_ptr 0) 7)
+          (if (= n 0)
+              (nl_cons_car_ptr list_ptr)
+            (wf_ft_nth (nl_cons_cdr_ptr list_ptr) (- n 1)))
+        0))
+    (defun wf_ft_int_at (list_ptr n)
+      (let* ((p (wf_ft_nth list_ptr n)))
+        (if (= p 0) 0 (ptr-read-u64 p 8))))
+    (defun wf_ft_ints_ok (list_ptr n)
+      (if (= n 0)
+          1
+        (let* ((p (wf_ft_nth list_ptr (- n 1))))
+          (if (= p 0)
+              (wf_ft_ints_ok list_ptr (- n 1))
+            (if (= (ptr-read-u64 p 0) 2)
+                (wf_ft_ints_ok list_ptr (- n 1))
+              0)))))
+    ;; SEC + FRAC/1e12 in TWO f64 roundings, not four: FRAC is the exact
+    ;; integer USEC*1e6 + PSEC (both fixnums, so the product and sum are
+    ;; exact), which reproduces Emacs's own single correctly-rounded
+    ;; ticks/hz division for every timestamp whose whole seconds fit a
+    ;; double exactly.  Verified equal to `float-time' on 22 shapes.
+    ;; Every `bits-to-f64' below wraps a REFERENCE and never a call -- see
+    ;; the `+' arm's note on the extern-call f64-arg classifier.
+    (defun wf_ft_secs_bits (sec frac scratch)
+      (let* ((sb (wf_int_fbits sec scratch))
+             (fb (wf_int_fbits frac scratch))
+             (hz (wf_int_fbits 1000000000000 scratch))
+             (qb (f64-bits (f64-div (bits-to-f64 fb) (bits-to-f64 hz)))))
+        (f64-bits (f64-add (bits-to-f64 sb) (bits-to-f64 qb)))))
+    (defun wf_ft_div_bits (num den scratch)
+      (let* ((nb (wf_int_fbits num scratch))
+             (db (wf_int_fbits den scratch)))
+        (f64-bits (f64-div (bits-to-f64 nb) (bits-to-f64 db)))))
+    (defun wf_ft_write (bits out scratch)
+      (seq (sexp-write-float scratch (bits-to-f64 bits)) (wf_copy32 out scratch)))
+    ;; 0 = wrote OUT, 1 = P is not a time specification.  The CALLER raises
+    ;; the signal: the message string needs `nl_alloc_str'/`bf_error', which
+    ;; are reader-only, and this group is linked into the baked applyfn too.
+    (defun wf_ft_convert (p out)
+      (let* ((tg (ptr-read-u64 p 0)) (sc (alloc-bytes 32 8)))
+        (if (= tg 3)
+            (wf_copy32 out p)
+          (if (= tg 2)
+              (wf_ft_write (wf_int_fbits (ptr-read-u64 p 8) sc) out sc)
+            (if (= tg 7)
+                (let* ((d (nl_cons_cdr_ptr p)))
+                  (if (= (ptr-read-u64 d 0) 7)
+                      (if (= (wf_ft_ints_ok p 4) 1)
+                          (wf_ft_write
+                           (wf_ft_secs_bits
+                            (+ (* (wf_ft_int_at p 0) 65536) (wf_ft_int_at p 1))
+                            (+ (* (wf_ft_int_at p 2) 1000000) (wf_ft_int_at p 3))
+                            sc)
+                           out sc)
+                        1)
+                    (let* ((a (nl_cons_car_ptr p)))
+                      (if (= (ptr-read-u64 a 0) 2)
+                          (if (= (ptr-read-u64 d 0) 2)
+                              (if (> (ptr-read-u64 d 8) 0)
+                                  (wf_ft_write
+                                   (wf_ft_div_bits (ptr-read-u64 a 8)
+                                                   (ptr-read-u64 d 8)
+                                                   sc)
+                                   out sc)
+                                1)
+                            1)
+                        1))))
+              1)))))
     (defun bf_sig_copy32 (dst src)
       (seq (ptr-write-u64 dst 0 (ptr-read-u64 src 0))
            (ptr-write-u64 dst 8 (ptr-read-u64 src 8))
@@ -10361,6 +10454,26 @@ baked build's own `<'/`>'/`=' arms need it too.")
          (wf_write_nil nil-slot)
          (nelisp_cons_construct msg nil-slot head)
          (bf_error head out))))
+    ;; `(error "Invalid time specification")' -- the exact signal Emacs
+    ;; raises for a TIME argument `float-time' cannot decode.  Same shape as
+    ;; `bf_aset_fixed_width_rejected' above: pack the 26-byte message, cons
+    ;; it with nil, hand it to `bf_error'.  Reader-only, because
+    ;; `nl_alloc_str'/`bf_error' are; `wf_ft_convert' (core) therefore
+    ;; REPORTS the failure and this arm-side helper raises it.
+    (defun bf_invalid_time_spec (out)
+      (let* ((mbuf (alloc-bytes 32 1))
+             (msg (alloc-bytes 32 8))
+             (nil-slot (alloc-bytes 32 8))
+             (head (alloc-bytes 32 8)))
+        (seq
+         (ptr-write-u64 mbuf 0 2334106421097295433)        ; "Invalid "
+         (ptr-write-u64 (+ mbuf 8) 0 7309468778200131956)  ; "time spe"
+         (ptr-write-u64 (+ mbuf 16) 0 7598805550878845283) ; "cificati"
+         (ptr-write-u64 (+ mbuf 24) 0 28271)               ; "on"
+         (nl_alloc_str mbuf 26 msg)
+         (wf_write_nil nil-slot)
+         (nelisp_cons_construct msg nil-slot head)
+         (bf_error head out))))
     (defun bf_wrong_type_consp (offender)
       (let* ((wbuf (alloc-bytes 24 1))
              (cbuf (alloc-bytes 8 1))
@@ -11895,7 +12008,25 @@ Wave-2 (C) appends bf_ash (shl/sar compose) + bf_str_lt (byte-lexicographic).")
     ;; nl_os_float_time extern (so the AOT never emits a syscall<->f64 sequence,
     ;; which aborts).  Dispatched here in bf-arms (where :lit works) via the
     ;; wf_float_time helper (an inline extern call from a dispatch arm aborts).
-    ((:lit "float-time") . (wf_float_time out))
+    ;;
+    ;; TIME is honoured (it used to be dropped, so (float-time 5) answered the
+    ;; wall clock).  The no-argument path is unchanged apart from two tag
+    ;; reads of the argument list itself: the clock still comes from the same
+    ;; asm extern, and nothing on the argument path touches the clock, so no
+    ;; syscall<->f64 sequence appears anywhere new.  Conversion lives in
+    ;; `wf_ft_convert' (core helpers); the invalid-spec signal lives in
+    ;; `bf_invalid_time_spec' (bf helpers), which is why the arm and not the
+    ;; converter raises it.
+    ((:lit "float-time") . (if (= args 0)
+                               (wf_float_time out)
+                             (if (= (ptr-read-u64 args 0) 7)
+                                 (let* ((tm (nl_cons_car_ptr args)))
+                                   (if (= (ptr-read-u64 tm 0) 0)
+                                       (wf_float_time out)
+                                     (if (= (wf_ft_convert tm out) 0)
+                                         0
+                                       (bf_invalid_time_spec out))))
+                               (wf_float_time out))))
     ;; nl-unix-time-usec: microseconds since the epoch as a single INTEGER via
     ;; gettimeofday(2) (__NR_gettimeofday=96): sec*1e6 + usec.  Pure integer math
     ;; after the syscall (no f64), which is the half that works -- f64 production
