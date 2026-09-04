@@ -11859,6 +11859,11 @@ Wave-2 (C) appends bf_ash (shl/sar compose) + bf_str_lt (byte-lexicographic).")
     ((:lit "ptr-read-u64") . (wf_write_int out (ptr-read-u64 (wf_argval args 0) (wf_argval args 1))))
     ((:lit "ptr-write-u64") . (seq (ptr-write-u64 (wf_argval args 0) (wf_argval args 1) (wf_argval args 2)) (wf_write_int out 0)))
     ((:lit "alloc-bytes") . (wf_write_int out (alloc-bytes (wf_argval args 0) (wf_argval args 1))))
+    ;; Bulk byte transfer between raw memory and Lisp strings (Doc 138,
+    ;; SQLite arm): the native counterparts of an interpreted per-byte
+    ;; `ptr-read-u8' / `ptr-write-u8' walk.
+    ((:lit "ptr-read-bytes") . (nl_bi_ptr_read_bytes args out))
+    ((:lit "ptr-write-bytes") . (nl_bi_ptr_write_bytes args out))
     ((:lit "garbage-collect") . (seq (nl_gc_collect_from_recorded_roots 0)
                                      (bf_arena_stats out)))
     )
@@ -11903,6 +11908,7 @@ ash/logand/logior/logxor/lognot + string<.")
     "syscall-direct" "atomic-fetch-add" "garbage-collect"
     "ptr-read-u8" "ptr-write-u8" "ptr-read-u32" "ptr-write-u32"
     "ptr-read-u64" "ptr-write-u64" "alloc-bytes"
+    "ptr-read-bytes" "ptr-write-bytes"
     "nelisp-process-call-process" "nelisp-process-start"
     "nelisp-process-start-process" "nelisp-process-object-p"
     "nelisp-process-async-ready-p" "nelisp-process-pid"
@@ -11999,7 +12005,39 @@ ash/logand/logior/logxor/lognot + string<.")
     ("cos"   "libm.so.6" 1 (:args (f64)     :ret f64))
     ("hypot" "libm.so.6" 2 (:args (f64 f64) :ret f64))
     ;; ldexp(x, exp) = x * 2^exp : a mixed f64 + i64 arg signature.
-    ("ldexp" "libm.so.6" 2 (:args (f64 i64) :ret f64)))
+    ("ldexp" "libm.so.6" 2 (:args (f64 i64) :ret f64))
+    ;; --- S1 SQLite (libsqlite3 / winsqlite3): the Emacs `sqlite-*' surface. --
+    ;; Consumed by nelisp-emacs/src/emacs-sqlite-ffi.el, which builds Emacs's
+    ;; sqlite-open / -execute / -select on these rows so anvil.el's memory and
+    ;; worklog tools run on the standalone reader (Doc 138, SQLite arm,
+    ;; 2026-09-04).  Handles (sqlite3* / sqlite3_stmt*) and C strings travel
+    ;; as i64 addresses; out-params use a caller `alloc-bytes' slot read back
+    ;; with `ptr-read-u64'.  Every C `int' result is :windows-ret s32 so a
+    ;; SQLITE_* code is never read zero-extended.  SQLITE_TRANSIENT for
+    ;; bind_text is (void*)-1, passed as the i64 -1.
+    ("sqlite3_libversion"        "libsqlite3.so.0" 0)
+    ("sqlite3_open_v2"           "libsqlite3.so.0" 4 (:windows-ret s32))
+    ("sqlite3_close_v2"          "libsqlite3.so.0" 1 (:windows-ret s32))
+    ("sqlite3_errmsg"            "libsqlite3.so.0" 1)
+    ("sqlite3_exec"              "libsqlite3.so.0" 5 (:windows-ret s32))
+    ("sqlite3_prepare_v2"        "libsqlite3.so.0" 5 (:windows-ret s32))
+    ("sqlite3_step"              "libsqlite3.so.0" 1 (:windows-ret s32))
+    ("sqlite3_reset"             "libsqlite3.so.0" 1 (:windows-ret s32))
+    ("sqlite3_finalize"          "libsqlite3.so.0" 1 (:windows-ret s32))
+    ("sqlite3_changes"           "libsqlite3.so.0" 1 (:windows-ret s32))
+    ("sqlite3_last_insert_rowid" "libsqlite3.so.0" 1)
+    ("sqlite3_column_count"      "libsqlite3.so.0" 1 (:windows-ret s32))
+    ("sqlite3_column_type"       "libsqlite3.so.0" 2 (:windows-ret s32))
+    ("sqlite3_column_name"       "libsqlite3.so.0" 2)
+    ("sqlite3_column_int64"      "libsqlite3.so.0" 2)
+    ("sqlite3_column_double"     "libsqlite3.so.0" 2 (:args (i64 i64) :ret f64))
+    ("sqlite3_column_text"       "libsqlite3.so.0" 2)
+    ("sqlite3_column_blob"       "libsqlite3.so.0" 2)
+    ("sqlite3_column_bytes"      "libsqlite3.so.0" 2 (:windows-ret s32))
+    ("sqlite3_bind_null"         "libsqlite3.so.0" 2 (:windows-ret s32))
+    ("sqlite3_bind_int64"        "libsqlite3.so.0" 3 (:windows-ret s32))
+    ("sqlite3_bind_double"       "libsqlite3.so.0" 3 (:args (i64 i64 f64) :windows-ret s32))
+    ("sqlite3_bind_text"         "libsqlite3.so.0" 5 (:windows-ret s32)))
   "Declarative FFI surface for the dynamic reader's `nl-ffi-call': rows of
 (SYMBOL SONAME ARITY &optional SIG).  Drives both
 `nelisp-standalone--reader-extern-imports' and
@@ -12011,7 +12049,12 @@ for Win64.  The s32 return class repairs EAX zero-extension before Lisp boxing."
 
 (defconst nelisp-standalone--windows-reader-extern-dll-map
   '(("libc.so.6" . "ucrtbase.dll")
-    ("libm.so.6" . "ucrtbase.dll"))
+    ("libm.so.6" . "ucrtbase.dll")
+    ;; SQLite ships in the Windows inbox as System32\\winsqlite3.dll
+    ;; (Windows 10 1607+ / Server 2016+; 3.51.1 measured 2026-09-04), with
+    ;; the ordinary sqlite3_* export names.  Same rule as ucrtbase / secur32:
+    ;; a DLL Windows itself carries, not a redistributable.
+    ("libsqlite3.so.0" . "winsqlite3.dll"))
   "ELF SONAME to Windows system-DLL mapping for the supported FFI subset.
 
 The SONAME remains the table's stable library identity, so the existing Linux
@@ -12551,6 +12594,41 @@ extern arms in dynamic builds."
             (if (= (ptr-read-u8 ptr i) 10) (setq acc (+ acc 1)) 0)
             (setq i (+ i 1))))
          (wf_write_int out acc))))
+    ;; ptr-read-bytes ADDR N -> a unibyte string of the N bytes at ADDR.
+    ;; ptr-write-bytes ADDR STRING -> copy STRING's bytes to ADDR (a
+    ;; multibyte string's internal UTF-8, a unibyte string's raw bytes),
+    ;; answering the byte count.  Native counterparts of the interpreted
+    ;; per-byte `ptr-read-u8' / `ptr-write-u8' walks the FFI consumers
+    ;; otherwise need (nelisp-emacs emacs-sqlite-ffi.el, Doc 138 SQLite
+    ;; arm): measured 2026-09-04 on windows-x86_64, the interpreted walk
+    ;; took 17 s to bring back 50 KB of column text, the whole budget of an
+    ;; MCP request.  The UTF-8 step stays in Lisp: pair these with
+    ;; `string-as-unibyte' / `string-as-multibyte'.
+    (defun nl_bi_ptr_read_bytes (args out)
+      (let* ((src (wf_argval args 0))
+             (n (wf_argval args 1))
+             (ms (alloc-bytes 32 8))
+             (i 0))
+        (seq
+         (nl_alloc_unibyte_mut_str (if (< n 0) 0 n) ms)
+         (while (< i n)
+           (seq
+            (mut-str-push-byte ms (ptr-read-u8 src i))
+            (setq i (+ i 1))))
+         (mut-str-finalize ms out)
+         0)))
+    (defun nl_bi_ptr_write_bytes (args out)
+      (let* ((dst (wf_argval args 0))
+             (sx (wf_arg_ptr args 1))
+             (src (nl_bi_strptr sx))
+             (n (nl_bi_strlen sx))
+             (i 0))
+        (seq
+         (while (< i n)
+           (seq
+            (ptr-write-u8 dst i (ptr-read-u8 src i))
+            (setq i (+ i 1))))
+         (wf_write_int out n))))
     ;; str-kv-line SOURCE KEY -> for the first line of SOURCE whose text
     ;; before the first TAB equals KEY, return everything after that TAB;
     ;; "" when no line matches.  Native scan for the nemacs GUI bridge
@@ -16663,6 +16741,7 @@ value (matches the binary's M8 read+eval-loop driver)."
     "syscall-direct" "atomic-fetch-add"
     "ptr-read-u8" "ptr-write-u8" "ptr-read-u32" "ptr-write-u32"
     "ptr-read-u64" "ptr-write-u64" "alloc-bytes"
+    "ptr-read-bytes" "ptr-write-bytes"
     "nelisp-process-call-process" "nelisp-process-start"
     "nelisp-process-start-process" "nelisp-process-object-p"
     "nelisp-process-async-ready-p" "nelisp-process-pid"

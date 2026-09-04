@@ -2567,6 +2567,13 @@ endif
 	else \
 	  echo "[ffi-smoke f64 mixed] FAIL: -> $$out (expected (t t t))"; exit 1; \
 	fi
+	@printf '%s\n' '(let* ((cs (lambda (s) (let ((p (alloc-bytes (1+ (length s)) 1)) (i 0)) (while (< i (length s)) (ptr-write-u8 p i (aref s i)) (setq i (1+ i))) (ptr-write-u8 p (length s) 0) p))) (dbp (alloc-bytes 8 8)) (rc (nl-ffi-call "sqlite3_open_v2" (funcall cs ":memory:") dbp 6 0)) (db (ptr-read-u64 dbp 0)) (stp (alloc-bytes 8 8)) (rp (nl-ffi-call "sqlite3_prepare_v2" db (funcall cs "select 6*7, 2.5, '"'"'ok'"'"'") -1 stp 0)) (st (ptr-read-u64 stp 0)) (step (nl-ffi-call "sqlite3_step" st)) (v (nl-ffi-call "sqlite3_column_int64" st 0)) (d (nl-ffi-call "sqlite3_column_double" st 1)) (tp (nl-ffi-call "sqlite3_column_text" st 2)) (txt (unibyte-string (ptr-read-u8 tp 0) (ptr-read-u8 tp 1)))) (nl-ffi-call "sqlite3_finalize" st) (nl-ffi-call "sqlite3_close_v2" db) (list rc rp step v (= d 2.5) txt))' > target/standalone-reader-ffi-sqlite.el
+	@out="$$($(STANDALONE_BIN) --load target/standalone-reader-ffi-sqlite.el)"; \
+	if [ "$$out" = '(0 0 100 42 t "ok")' ]; then \
+	  echo "[ffi-smoke S1 sqlite] PASS: open(:memory:)+prepare+step+column_{int64,double,text} -> $$out"; \
+	else \
+	  echo "[ffi-smoke S1 sqlite] FAIL: -> $$out (expected (0 0 100 42 t \"ok\"))"; exit 1; \
+	fi
 ifeq ($(STANDALONE_GATE_TARGET),windows-x86_64)
 	@echo "[ffi-smoke D1 gnutls] SKIP: Windows external TLS policy is Stage D2"
 	@echo "[ffi-smoke FreeType] SKIP: no Windows DLL mapping in Stage D1"
