@@ -704,3 +704,10 @@ standalone-reader-regexp-lead-filter-smoke|lisp/nelisp-stdlib-regexp.el|s/^(defu
 # `GATE-COUNT checked=1 findings=0 passed=1 failed=0 skipped=0`; restored GREEN
 # is `[standalone-reader-ffi-smoke] PASS` with toupper, s32 and f64 checks green.
 standalone-reader-ffi-smoke|scripts/nelisp-standalone-build.el|s/("libm.so.6" . "ucrtbase.dll")/("libm.so.6" . "ucrtbase-broken.dll")/|the Windows libm mapping names a nonexistent DLL, so the PE-import-backed FFI binary cannot load|windows-x86_64
+# v1.2.1 host-parity gate.  Two rows, one per half of what it holds: the
+# `load' semantics (gap 1) and the coding pair (gap 6).  Both defects are the
+# state v1.2.0 shipped in, so each row restores that release exactly -- which
+# is the point: the gate has to notice a REGRESSION to the previous release,
+# not just an arbitrary edit.
+standalone-reader-host-parity-smoke|scripts/nelisp-standalone-build.el|s/(bf_load_with_lfn args env out)/(bf_load_readable args env out)/|`load' stops binding `load-file-name', as in v1.2.0 -- every (or load-file-name buffer-file-name) idiom silently sees nil
+standalone-reader-host-parity-smoke|scripts/nelisp-stdlib-prelude.el|s/(if (fboundp .string-as-multibyte) (string-as-multibyte str) str)))/str))/|`decode-coding-string' is the identity again, as in v1.2.0 -- decoded text stays unibyte and `length' counts bytes

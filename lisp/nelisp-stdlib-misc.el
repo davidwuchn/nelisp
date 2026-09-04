@@ -682,7 +682,12 @@ or signals otherwise.  Replaces the deleted Rust `bi_require'."
       (signal 'error
               (list (format "encode-coding-string stub: only utf-8 supported, got %S"
                             coding))))
-    str))
+    ;; Not the identity: the CONVERSION is a no-op (a string's payload is
+    ;; already UTF-8) but the RESULT KIND is the whole observable
+    ;; difference -- `length' must count bytes here.  Same change as the
+    ;; prelude's own copy of this function; they are read by different
+    ;; consumers and both were wrong (v1.2.1 parity gap 6).
+    (if (fboundp 'string-as-unibyte) (string-as-unibyte str) str)))
 
 (unless (fboundp 'decode-coding-string)
   (defun decode-coding-string (str coding &optional _nocopy)
@@ -698,7 +703,9 @@ or signals otherwise.  Replaces the deleted Rust `bi_require'."
       (signal 'error
               (list (format "decode-coding-string stub: only utf-8 supported, got %S"
                             coding))))
-    str))
+    ;; The mirror of `encode-coding-string' above: no byte conversion, but
+    ;; the result is multibyte, so `length' counts characters.
+    (if (fboundp 'string-as-multibyte) (string-as-multibyte str) str)))
 
 ;; Doc 188 P1 (2026-08-23) removed this file's `bufferp' stub.  It was
 ;; permanently, unconditionally `nil' ("no Sexp is a buffer") and dead in

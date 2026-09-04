@@ -2501,6 +2501,76 @@ unit is quoted, so =unsafe-inventory= does not move.
 - The rows are data, so =unsafe-inventory= and the namespace baseline do
   not move; the Windows binary grows by its import entries only.
 
+* Host parity — six gaps closed in v1.2.1 (2026-09-04)
+
+Found by anvil.el's standalone MCP server, which is this repository's most
+demanding downstream: it loads a hundred-odd elisp files through Layer 2
+before serving a request, so it reaches parts of the host contract nothing
+else here does.  Every one of these answered something PLAUSIBLE rather
+than failing, which is why they survived a release and why each was first
+diagnosed somewhere far from its cause.
+
+| # | Gap | Where |
+|---+-----+-------|
+| 1 | =load= did not bind =load-file-name= | =bf_load_with_lfn= |
+| 2 | =load= did not search =load-path= | =bf_load_searched= |
+| 3 | no immediate process exit | =nl_os_exit_process= |
+| 4 | =make-directory= created nothing on Windows | =nl_os_win_mkdir= |
+| 5 | =rdf= answered "" for a missing file | =nl_bi_rf_withfd= |
+| 6 | coding functions were the identity | prelude |
+
+** Why each mattered
+
+1. =(or load-file-name buffer-file-name)= is the idiom Emacs sources use to
+   find their own directory.  Layer 2's =emacs-init.el= uses it to put its
+   =src/= on =load-path=; with the variable nil that step was a silent
+   no-op and the next =require= died =file-missing= -- a failure three
+   files away from the cause.  The binding is the RESOLVED path, and the
+   restore needs no unwind-protect: a signal here is a flag plus a stash
+   (@268435472), not a stack unwind, so the loop returns a code either way.
+2. Only =require= searched =load-path=, so =(load "subr-x")= failed where
+   =(require 'subr-x)= worked.  Now =DIR/NAME.el= then =DIR/NAME=; a name
+   with its own root (=/=, =\=, or =X:=) is never searched, as in Emacs.
+3. =exit= only RECORDS a status -- execution continues to the end of the
+   form and through the rest of the file.  =nelisp--exit-process= is the
+   immediate one; =exit='s contract is untouched because the driver's own
+   top-level loop is built on it.  Defined in the per-target syscall
+   translation layer, NOT beside =nl_os_alloc_fail=: the arena source's
+   own stub for a new name wins over the platform block there, so the
+   first attempt linked the identity and =kill-emacs= returned instead of
+   exiting (measured).
+4. Three defects at once, the first two hiding the third: the PARENTS walk
+   rebuilt every path as absolute-POSIX (=C:/x= became =/C:/x=), results
+   were discarded, and Windows' NR=83 was an unconditional =-ENOSYS=.
+   Windows gains =CreateDirectoryW= / =RemoveDirectoryW= / =DeleteFileW=
+   with =GetLastError= mapped to POSIX errno (183/80 -> EEXIST, 2/3 ->
+   ENOENT, 145 -> ENOTEMPTY, else EACCES).
+5. =rdf= answering "" made a missing file indistinguishable from an empty
+   one.  Layer 2's =emacs-fileio-rdf-file-exists-p= asks exactly
+   =(stringp (rdf F))=, so it answered t for EVERY name.
+6. The conversion is genuinely a no-op -- a string's payload is already
+   UTF-8 -- but the RESULT KIND is the whole observable difference.
+
+** The gate
+
+=standalone-reader-host-parity-smoke= holds all six in one target, so a
+regression is one red line naming which.  It asserts VALUES, not exit
+status, for the reason above.  Two =tools/gate-mutations.txt= rows restore
+v1.2.0's behaviour for gaps 1 and 6 -- the gate must notice a regression
+TO THE PREVIOUS RELEASE, not just an arbitrary edit -- and both were run
+individually with a controlled restore, each turning the gate red.
+
+** Also fixed, in nelisp-emacs
+
+Layer 2's =emacs-process-builtins= force-installs its own =processp= on
+the standalone reader, and that one does not know the process adapter's
+=[network-process ...]= shape (its own commentary defers network
+processes) while the reader's prelude =processp= does.  The prelude's
+=process-put= / =process-get= then signalled =wrong-type-argument
+processp= on a listener, killing anvil's socket daemon the moment it bound
+one.  Same stale-guard family as the four fixed on 2026-09-04: a Layer 2
+override that is LESS capable than the runtime it overrides.
+
 * One-line summary
 
 macOS was a triple burden — new ISA (arm64, 75 ops) + exec format + signing.

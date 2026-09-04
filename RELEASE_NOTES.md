@@ -1,5 +1,39 @@
 # NeLisp Release Notes
 
+## v1.2.1 — 2026-09-04
+
+Full notes: [`release/v1.2.1/RELEASE.md`](release/v1.2.1/RELEASE.md).
+
+A parity release: six places where the standalone reader answered
+something plausible instead of what host Emacs answers, each already
+having cost a consumer a day somewhere far from its cause.
+
+- **`load` binds `load-file-name`** (and restores it, nesting included),
+  and **searches `load-path`** for a relative name, `.el` first.  Layer 2's
+  own `emacs-init.el` keys its `load-path` setup on the first of those, so
+  with it nil that step was a silent no-op and the next `require` died.
+- **`kill-emacs` stops the process.**  There was no immediate-exit
+  primitive; `exit` only records a status and execution carried on.
+- **`make-directory` creates what it was asked for** -- the PARENTS walk
+  had been rewriting every path as absolute-POSIX, every result was
+  discarded, and windows-x86_64's `mkdir` was an `-ENOSYS` no-op.  That
+  target gains real `CreateDirectoryW` / `RemoveDirectoryW` /
+  `DeleteFileW` arms with Win32 errors mapped to POSIX errno.
+- **`rdf` answers nil for a file it cannot open**, not the empty string a
+  real empty file produces.
+- **`encode-coding-string` / `decode-coding-string` are a real
+  unibyte/multibyte pair**, not the identity.
+- Alongside, in `nelisp-emacs`: Layer 2's `processp` now recognises the
+  process adapter's network-process shape, which is what had been killing
+  anvil's socket daemon at bind time.
+
+Verified: one new gate, `standalone-reader-host-parity-smoke`, holding all
+six and asserting values rather than exit status, with two mutation rows
+that restore v1.2.0's behaviour and were each shown to turn it red.
+`standalone-reader-smokes` 47/47 on windows-x86_64, ffi-smoke green on
+both targets, `unsafe-inventory` 759 = baseline, `ns-gate` 0 findings,
+`compile` 117/0.
+
 ## v1.2.0 — 2026-09-04
 
 Full notes: [`release/v1.2.0/RELEASE.md`](release/v1.2.0/RELEASE.md).
