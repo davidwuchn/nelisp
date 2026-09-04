@@ -232,7 +232,15 @@
 # running the two gates on a clean worktree of that commit.  Corrected
 # here because this merge has to be green either way, not because the
 # change belongs to this branch.
-ns-collision 250
+#
+# 250 -> 252 on 2026-09-04: the two helpers that carry the unsupported-shape
+# policy (`--loop-unsupported', `--loop-unsupported-form-p').  The policy
+# moved out of the two `cl-loop' macros and into the builder so a test can
+# reach it without depending on which `cl-loop' the host has bound; that is
+# also why `cl-loop' itself is re-digested in scripts/nl-ns-accepted.el in
+# the same commit.  Byte-identical in both copies, same benign kind as the
+# four loop helpers above.
+ns-collision 252
 # 97 -> 96 on 2026-08-19: `string-equal' no longer differs between the two
 # files -- the prelude's now signals for a non-string instead of falling
 # through to `equal', and the lisp copy was brought with it.  Ratcheted down
@@ -1118,6 +1126,8 @@ pinned-collision ns-collision	nelisp-cl-generic--same-specializer-p	lisp/nelisp-
 pinned-collision ns-collision	nelisp-cl-generic--struct-depth	lisp/nelisp-cl-macros.el scripts/nelisp-stdlib-prelude.el
 pinned-collision ns-collision	nelisp-cl-generic--struct-parent	lisp/nelisp-cl-macros.el scripts/nelisp-stdlib-prelude.el
 pinned-collision ns-collision	nelisp-cl-generic--type-match	lisp/nelisp-cl-macros.el scripts/nelisp-stdlib-prelude.el
+pinned-collision ns-collision	nelisp-cl-macros--loop-unsupported	lisp/nelisp-cl-macros.el scripts/nelisp-stdlib-prelude.el
+pinned-collision ns-collision	nelisp-cl-macros--loop-unsupported-form-p	lisp/nelisp-cl-macros.el scripts/nelisp-stdlib-prelude.el
 pinned-collision ns-collision	nelisp-cl-macros--loop-guard	lisp/nelisp-cl-macros.el scripts/nelisp-stdlib-prelude.el
 pinned-collision ns-collision	nelisp-cl-macros--loop-iter-parse	lisp/nelisp-cl-macros.el scripts/nelisp-stdlib-prelude.el
 pinned-collision ns-collision	nelisp-cl-macros--loop-iter-plan	lisp/nelisp-cl-macros.el scripts/nelisp-stdlib-prelude.el

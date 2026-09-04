@@ -1655,3 +1655,113 @@ them: the E2E budget gap (§6.8 -- the harness passes 5/5, entry
 4.75-5.89s against 10s); the `bin=./target/nelisp; [ -f ...] ||` idiom
 (all 15 remaining sites now use `STANDALONE_BIN`, zero left); and the six
 gate-side defects §6.7 inventoried.
+
+** §6.10 Option 6 answered: native AOT does not pay off, measured on Linux
+
+§6.8's ranked list left option 6 -- native AOT on windows-x86_64 -- open,
+with an explicit way to close it: "run the same source-vs-nelc-vs-neln
+comparison on linux-x86_64, where native emission IS available.  If `neln'
+is a large win there, the PE work is justified [...] if the workload is
+dominated by runtime primitives that stay interpreted either way, it is
+not.  That experiment is one afternoon and it decides a subsystem-sized
+investment."
+
+It has been run.  The answer is *not justified*, and the number that says
+so is not the one the doc expected.
+
+*** What was measured
+
+linux-x86_64, `origin/main' at the time (5b8f0b0e), three workloads whose
+hot code lives in `defun's, each loaded three ways: the source, a `.nelc'
+(bytecode) artifact, and a `.neln' compiled with `--native-policy
+required' so the native section is really there.  Wall time, best of two,
+`load-elisp-source' for the artifacts.
+
+| workload                           | source | neln (native) | native fns |
+|------------------------------------+--------+---------------+------------|
+| split / format over 214 entries    | 20.49s |        23.70s |          4 |
+| hash + substring + cost sort       | 13.55s |        11.88s |          6 |
+| literal table + linear lookup      |  3.49s |       145.85s |          4 |
+
+Best case 12% faster.  Worst case 42x SLOWER.  Nothing here is the "large
+win" that would justify the PE emitter, and the shape closest to what the
+IME actually does -- the middle row -- is the one that gained 12%.  The
+reading §6.8 offered as the alternative outcome is the one that happened:
+these workloads are dominated by runtime primitives that stay interpreted
+whichever way the file is loaded.
+
+The `.nelc' column is left out of the table because it says nothing new:
+it tracked the source within a few percent on the first two workloads and
+timed out past 150s on the third, which is §6.8's own Windows finding
+reproducing on Linux.
+
+*** A wrong turn worth recording, because the next person will take it
+
+The first run of this experiment reported `:native-report nil' and
+`:module-policy bytecode' on every `neln', on Linux, and was read as
+"native emission is unavailable here too, so §6.8's premise is wrong".
+That conclusion was wrong and the measurement was mine to blame: all
+three workloads put their work in TOP-LEVEL forms.  The native path
+compiles `defun's, `nelisp-artifact--native-compile-required-section'
+answers `(if (null defuns) ... nil)', and a file with no defuns therefore
+has nothing to compile.  Native emission on linux-x86_64 works; the
+workloads had to be rewritten around functions before the experiment
+measured anything at all.
+
+Related, and not a defect: `--native-policy required' succeeds on a file
+with no defuns.  Every top-level defun did enter the native section,
+vacuously.  `tools/nelisp-native-artifact-gate.sh' asserts real coverage
+on a fixture that has defuns and has a negative case that must fail, so
+the gate is not making a false claim -- but a `required' compile that
+proves nothing still exits 0, and that is what made the wrong turn easy.
+
+*** Three defects the experiment surfaced, all fixed
+
+1. *A `.nelc' or `.neln' artifact of any file whose defun body used
+   `dotimes' or `dolist' could not be loaded*, failing with
+   `void-function' naming the loop variable, on both linux-x86_64 and
+   windows-x86_64.  `nelisp-artifact--try-compile-defun' handed the body
+   straight to `nelisp-bc-compile' without the `macroexpand-all' the
+   `.elc' lane has always done, and `nelisp-bc--compile-form' then took
+   the unexpanded macro through its generic call arm, where the BINDING
+   SPEC `(i 3)' became a call to `i'.  It compiled cleanly and failed only
+   when the bytecode ran, so the caller's fall-back-to-replay never fired.
+   Both gate fixtures use loop-free bodies, which is why nothing caught
+   it.  Fixed in `96689e36'.
+
+2. *The opportunistic native path compiled nothing on Linux* while
+   `required' compiled everything, reporting `void-variable a' per defun.
+   The root cause is not in the artifact or AOT code at all: the
+   standalone's own `cl-loop' subset expanded an unrecognised clause shape
+   to nil, and `nelisp-aot-compiler--emit-extern-call' is written with
+   parallel `for a in args for target in arg-targets ... unless ...
+   collect'.  The parser kept one iterator, the whole form became nil, and
+   the probe failed on a loop that had never been built.
+
+3. *48 of this repository's 62 `cl-loop' forms were in that state*, 33 of
+   them in the AOT compiler, the rest across the GC verifier, the cc
+   backends, textprop-display, sys, jit, http and the standalone builder.
+   They emitted nothing on the standalone and every host test stayed green,
+   because the host has the real macro.  One of them,
+   `emit-extern-call''s `for idx downfrom (1- n) to reg-budget do ... push',
+   is the loop that places arguments which do not fit in registers.  The
+   subset now models parallel iterators, `on', `across', the numeric
+   directions, `= then', `unless', `append' and `always', the tree is at
+   zero unbuildable forms, and an unsupported shape signals when it runs
+   instead of expanding to nil.  `75880ab0' and `108012a7'.
+
+*** What this closes and what it leaves
+
+Option 6 is closed: PE native emission is not justified by performance,
+and should be revisited only if something other than speed needs it.
+`ffi-smoke' remains its own reason to want that machinery, and is
+unaffected by this measurement.
+
+Option 5 -- the interpreter's own per-operation cost, §6.8's 262us -- is
+untouched by all of this and remains the only lever that helps every
+workload.  The IME numbers make the scale concrete: one keystroke through
+the JSON-RPC boundary costs 312ms with a compact snapshot and 742ms
+without, against the 50ms a usable IME needs.  The two primitive
+regressions fixed alongside this work (`string-to-number' 5.8x,
+`make-hash-table' 2.2x) did not move that number measurably, and neither
+would native AOT at 12%.
