@@ -1448,6 +1448,42 @@ directory tracks the tree rather than accumulating every key ever built."
     ;; within the scan window).  Iterative so list length no longer bounds
     ;; native recursion depth.  All setqs stay in the single outer let
     ;; scope (AOT nested-let+outer-setq pitfall).
+    ;; SPLIT-ON-REUSE (large-block fallback list).  Blocks with BLOCK_TOTAL
+    ;; > 472 all share ONE mixed LIFO list, and `nl_freelist_scan' used to
+    ;; serve them by EXACT fit only, so a freed 31 KiB block could never
+    ;; answer an 8 KiB request.  Measured on this tree (repeat-loading one
+    ;; 118 KiB package source four times through `bin/nemacs
+    ;; --driver=nelisp --batch'): every repetition freed ~7.9k large blocks
+    ;; worth 67.5 MB, reused ~2.0k of them, bump-allocated the other ~7.9k,
+    ;; and mapped exactly one more 64 MiB chunk -- +67.58 MB of arena and
+    ;; +59.5 MB of RSS per identical load, with the small-block (<= 472)
+    ;; buckets meanwhile reusing 121 M allocations per load and growing not
+    ;; at all.  Compaction, which used to give this memory back, is off by
+    ;; policy (268435608 = 0, Doc 152 §11.21) and `nl_gc_reclaim_empty_chunks'
+    ;; can only unmap a chunk that is 100% free, so nothing else reclaims it.
+    ;;
+    ;; Split the free block whose header is HDR (BLOCK_TOTAL BT, already
+    ;; unlinked from its list by the caller) into an allocated head of
+    ;; exactly WANT bytes and a fresh FREE remainder [HDR+WANT, HDR+BT).
+    ;; Both halves keep the block invariants the sweep/census/compaction
+    ;; header walks rely on: 8-aligned (BT and WANT both are), >= 16 bytes
+    ;; (the caller requires BT >= WANT + 16), contiguous, and self-describing,
+    ;; so every walk still reaches the chunk end exactly.  The remainder goes
+    ;; onto the size-appropriate list with the same {BT, mark 2, next-link at
+    ;; +8} shape `nl_gc_free_block_link' writes.  It is linked here rather
+    ;; than through `nl_gc_free_block' on purpose: that path runs the checked
+    ;; allocator's redzone verify and the poison fill, and a remainder that
+    ;; was never handed out carries neither a guard word nor an owner.
+    (defun nl_freelist_split_tail (hdr bt want)
+      (let* ((rem (+ hdr want))
+             (rembt (- bt want))
+             (head (if (< 472 rembt) 268435552 (+ 268435696 (- rembt 16)))))
+        (seq
+         (ptr-write-u64 hdr 0 want)          ; head: BT = want, mark 0 (live)
+         (ptr-write-u64 rem 0 (+ rembt 2))   ; tail: BT = rembt, mark 2 (FREE)
+         (ptr-write-u64 (+ rem 8) 0 (ptr-read-u64 head 0))
+         (ptr-write-u64 head 0 (+ rem 8))
+         0)))
     (defun nl_freelist_scan (prev cur want)
       (let* ((p prev)
              (c cur)
@@ -1481,10 +1517,21 @@ directory tracks the tree rather than accumulating every key ever built."
                                (nl_hdr_set_mark (- c 8) 0)
                                (setq res (nl_alloc_diag_linear c))
                                (setq done 1))
-                            (seq
-                             (setq p c)
-                             (setq c (ptr-read-u64 c 0))
-                             (setq steps (+ steps 1)))))
+                            ;; Oversized by at least one minimum block: unlink
+                            ;; it, keep WANT, and give the rest back as a free
+                            ;; block (see `nl_freelist_split_tail').
+                            (if (< (+ want 15) bt)
+                                (seq
+                                 (if (= p 0)
+                                     (ptr-write-u64 268435552 0 (ptr-read-u64 c 0))
+                                   (ptr-write-u64 p 0 (ptr-read-u64 c 0)))
+                                 (nl_freelist_split_tail (- c 8) bt want)
+                                 (setq res (nl_alloc_diag_linear c))
+                                 (setq done 1))
+                              (seq
+                               (setq p c)
+                               (setq c (ptr-read-u64 c 0))
+                               (setq steps (+ steps 1))))))
                        (nl_seq2 (nl_freelist_scan_drop_tail p c (nl_hdr_bt (- c 8)) want)
                                 (setq done 1)))
                    (nl_seq2 (nl_freelist_scan_drop_tail p c 0 want)
@@ -1504,38 +1551,82 @@ directory tracks the tree rather than accumulating every key ever built."
                  (ptr-write-u64 (data-addr nl_gc_diag) 24 want))
           0)
         0))
+    ;; Validate and pop the head of the exact-size bucket for BLOCK_TOTAL B.
+    ;; Doc 152 §11.37 complete free-list integrity guard.  ROOT (traced):
+    ;; nl_alloc_symbol writes a Symbol Sexp onto a block still linked in
+    ;; bucket[24] (a block double-linked across buckets via inconsistent
+    ;; bt), clobbering its next-link (tag byte 4).  Only return cur if it
+    ;; is a genuine free block of the right size: in-arena, 8-aligned,
+    ;; mark==2 (still FREE), bt==b.  Any failure => the chain is corrupt;
+    ;; drop it (clear bucket head) and answer 0.  Later frees rebuild a
+    ;; clean bucket.  Dropping a clobbered/double-linked entry is the
+    ;; correct repair (the block is live elsewhere; only the stale link dies).
+    ;; The block is returned still marked FREE: the caller chooses between
+    ;; claiming it whole and splitting it.  WANT is only carried for the
+    ;; diagnostic record.
+    (defun nl_freelist_bucket_pop (b want)
+      (let* ((head (+ 268435696 (- b 16)))
+             (cur (ptr-read-u64 head 0)))
+        (if (= cur 0) 0
+          (if (= (nl_gc_in_arena cur) 0)
+              (nl_seq2 (nl_fl_record_trip cur 0 want)
+                       (nl_seq2 (ptr-write-u64 head 0 0) 0))
+            (if (= (logand cur 7) 0)
+                (if (= (nl_hdr_mark (- cur 8)) 2)
+                    (if (= (nl_hdr_bt (- cur 8)) b)
+                        (nl_seq2 (ptr-write-u64 head 0 (ptr-read-u64 cur 0)) cur)
+                      (nl_seq2 (nl_fl_record_trip cur (nl_hdr_bt (- cur 8)) want)
+                               (nl_seq2 (ptr-write-u64 head 0 0) 0)))
+                  (nl_seq2 (nl_fl_record_trip cur (nl_hdr_bt (- cur 8)) want)
+                           (nl_seq2 (ptr-write-u64 head 0 0) 0)))
+              (nl_seq2 (nl_fl_record_trip cur 0 want)
+                       (nl_seq2 (ptr-write-u64 head 0 0) 0)))))))
+    ;; Small-request fallback: walk the exact-size buckets ABOVE WANT for the
+    ;; first block big enough to split.  Bounded by the bucket array itself
+    ;; (at most 57 head reads), so it can never degrade into a list walk.
+    ;; Gated on 268435632, the cumulative dead-block counter the sweep bumps:
+    ;; before the first collection every bucket is empty by construction, and
+    ;; boot allocates hundreds of millions of blocks, so the scan must not run
+    ;; then.
+    (defun nl_freelist_bucket_split (want)
+      (let* ((b (+ want 16))
+             (res 0)
+             (obj 0))
+        (seq
+         (while (and (= res 0) (< b 473))
+           (seq
+            (setq obj (nl_freelist_bucket_pop b want))
+            (if (= obj 0) 0
+              (seq (nl_freelist_split_tail (- obj 8) b want)
+                   (setq res obj)))
+            (setq b (+ b 8))))
+         res)))
     ;; Pop an exact-fit block for WANT (BLOCK_TOTAL): O(1) bucket pop for
-    ;; 24<=WANT<=480, else scan the fallback list.  Clears the FREE sentinel
+    ;; 16<=WANT<=472, else scan the fallback list.  Clears the FREE sentinel
     ;; (mark 0) and returns the object pointer, or 0 if none.
+    ;;
+    ;; An empty bucket used to mean "bump" outright.  Exact-fit buckets alone
+    ;; cannot recycle a heap whose block-size mix drifts, and this heap never
+    ;; compacts (268435608 = 0, Doc 152 §11.21) and never coalesces, so the
+    ;; unmatched sizes are retained for the life of the process.  Measured on
+    ;; the repeat-load reproducer, each identical load of one 118 KiB package
+    ;; source stranded another ~67 MB and mapped one more 64 MiB chunk.  Fall
+    ;; through instead: a larger bucket first (bounded, and it keeps the big
+    ;; blocks whole), then the large-block list, splitting either way.
     (defun nl_freelist_take (want)
       (if (< want 16)
           (nl_freelist_scan 0 (ptr-read-u64 268435552 0) want)
         (if (< 472 want)
             (nl_freelist_scan 0 (ptr-read-u64 268435552 0) want)
-          (let* ((head (+ 268435696 (- want 16)))
-                 (cur (ptr-read-u64 head 0)))
+          (let* ((cur (nl_freelist_bucket_pop want want)))
             (if (= cur 0)
-                0
-              ;; Doc 152 §11.37 complete free-list integrity guard.  ROOT (traced):
-              ;; nl_alloc_symbol writes a Symbol Sexp onto a block still linked in
-              ;; bucket[24] (a block double-linked across buckets via inconsistent
-              ;; bt), clobbering its next-link (tag byte 4).  Only return cur if it
-              ;; is a genuine free block of the right size: in-arena, 8-aligned,
-              ;; mark==2 (still FREE), bt==want.  Any failure => the chain is
-              ;; corrupt; drop it (clear bucket head) and bump.  Later frees rebuild
-              ;; a clean bucket.  Dropping a clobbered/double-linked entry is the
-              ;; correct repair (the block is live elsewhere; only the stale link dies).
-              (if (= (nl_gc_in_arena cur) 0)
-                  (nl_seq2 (nl_fl_record_trip cur 0 want) (nl_seq2 (ptr-write-u64 head 0 0) 0))
-                (if (= (logand cur 7) 0)
-                    (if (= (nl_hdr_mark (- cur 8)) 2)
-                        (if (= (nl_hdr_bt (- cur 8)) want)
-                            (nl_seq2 (ptr-write-u64 head 0 (ptr-read-u64 cur 0))
-                                     (nl_seq2 (nl_hdr_set_mark (- cur 8) 0)
-                                              (nl_alloc_diag_bucket cur)))
-                          (nl_seq2 (nl_fl_record_trip cur (nl_hdr_bt (- cur 8)) want) (nl_seq2 (ptr-write-u64 head 0 0) 0)))
-                      (nl_seq2 (nl_fl_record_trip cur (nl_hdr_bt (- cur 8)) want) (nl_seq2 (ptr-write-u64 head 0 0) 0)))
-                  (nl_seq2 (nl_fl_record_trip cur 0 want) (nl_seq2 (ptr-write-u64 head 0 0) 0)))))))))
+                (if (= (ptr-read-u64 268435632 0) 0) 0
+                  (let* ((r (nl_freelist_bucket_split want)))
+                    (if (= r 0)
+                        (nl_freelist_scan 0 (ptr-read-u64 268435552 0) want)
+                      (nl_alloc_diag_bucket r))))
+              (nl_seq2 (nl_hdr_set_mark (- cur 8) 0)
+                       (nl_alloc_diag_bucket cur)))))))
     ;; Zero NBYTES (step 8) of the reused block's payload at OBJ.
     ;;
     ;; ROOT-CAUSE FIX (reuse correctness).  The tracing mark+sweep is sound:
