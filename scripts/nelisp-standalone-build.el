@@ -2434,7 +2434,7 @@ arm64 Linux has no legacy x86 numbering)."
                     (let ((box (ptr-read-u64 sp 8)))
                       (if (= (nl_gc_mark_block box) 0) 0
                         (nl_gc_mark_buf (ptr-read-u64 box 8))))
-                  (if (or (= tag 5) (= tag 140))
+                  (if (or (= tag 5) (= tag 14))
                       (nl_gc_mark_buf (ptr-read-u64 sp 16)) ; Str/UnibyteStr
                     (if (= tag 4) (nl_gc_mark_buf (ptr-read-u64 sp 16)) ; Symbol
                       ;; Bignum (Doc 190 Phase A, tag 13): sign@sp+8,
