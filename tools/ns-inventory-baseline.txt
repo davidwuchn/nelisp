@@ -217,7 +217,14 @@
 # loop, so its shape moved; the host copy in lisp/nelisp-stdlib-hash.el
 # is untouched.  Same divergence as before with a new shape, not a new
 # one -- the standalone-only fast path has no host counterpart.
-ns-collision 246
+#
+# 246 -> 250 on 2026-09-04: the four helpers the general `cl-loop' builder
+# needs (`--loop-iter-parse', `--loop-iter-plan', `--loop-guard',
+# `--loop-unbuildable-p').  Same benign shape as the eleven cl-generic
+# rows above: byte-identical in lisp/nelisp-cl-macros.el and in the
+# prelude, which is what the two copies are for, and `make ns-gate' is
+# what keeps them that way.
+ns-collision 250
 # 97 -> 96 on 2026-08-19: `string-equal' no longer differs between the two
 # files -- the prelude's now signals for a non-string instead of falling
 # through to `equal', and the lisp copy was brought with it.  Ratcheted down
@@ -1103,4 +1110,8 @@ pinned-collision ns-collision	nelisp-cl-generic--same-specializer-p	lisp/nelisp-
 pinned-collision ns-collision	nelisp-cl-generic--struct-depth	lisp/nelisp-cl-macros.el scripts/nelisp-stdlib-prelude.el
 pinned-collision ns-collision	nelisp-cl-generic--struct-parent	lisp/nelisp-cl-macros.el scripts/nelisp-stdlib-prelude.el
 pinned-collision ns-collision	nelisp-cl-generic--type-match	lisp/nelisp-cl-macros.el scripts/nelisp-stdlib-prelude.el
+pinned-collision ns-collision	nelisp-cl-macros--loop-guard	lisp/nelisp-cl-macros.el scripts/nelisp-stdlib-prelude.el
+pinned-collision ns-collision	nelisp-cl-macros--loop-iter-parse	lisp/nelisp-cl-macros.el scripts/nelisp-stdlib-prelude.el
+pinned-collision ns-collision	nelisp-cl-macros--loop-iter-plan	lisp/nelisp-cl-macros.el scripts/nelisp-stdlib-prelude.el
+pinned-collision ns-collision	nelisp-cl-macros--loop-unbuildable-p	lisp/nelisp-cl-macros.el scripts/nelisp-stdlib-prelude.el
 pinned-collision ns-collision	nelisp--split-on-char	lisp/nelisp-stdlib-regexp.el scripts/nelisp-stdlib-prelude.el
