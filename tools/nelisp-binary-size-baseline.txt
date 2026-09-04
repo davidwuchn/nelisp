@@ -464,5 +464,24 @@
 # CI checks out clean, so the cold number is the one this gate should be
 # pinned against.  Do not compare a warm local build to this line.
 #
-size 8143256
+# 8143256 -> 8382448 on 2026-09-04 (+239192, 2.9%), from the CI cold build
+# on 33df11eb as this file's own instruction requires -- not from a local
+# warm tree.
+#
+# The growth is the fix working.  The standalone's `cl-loop' subset
+# expanded an unrecognised clause shape to nil, and 48 of the tree's 62
+# `cl-loop' forms were unrecognised: 33 in the AOT compiler, the rest
+# spread over the GC verifier, the cc backends, textprop-display, sys,
+# jit, http and the standalone builder itself.  Those loops emitted
+# nothing at all.  The builder now models parallel `for' clauses,
+# `unless', `downto'/`above'/`by', `on', `across', `= then', `append' and
+# `always', so 45 of them compile to real code for the first time and
+# that code is in the binary.
+#
+# A ratchet cannot tell growth from bloat, so the number to check against
+# is what the loops are worth: an opportunistic native compile went from
+# 0 natively compiled functions to 4 on the same input, because
+# `nelisp-aot-compiler--emit-extern-call' is written with parallel `for'
+# clauses and had been compiling to nothing.
+size 8382448
 slack-pct 2
