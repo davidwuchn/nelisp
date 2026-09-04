@@ -14,19 +14,26 @@
 ;;
 ;; cl-loop の対応 clause:
 ;;   for VAR in LIST                      list iterator
-;;   for VAR from N to M                  numeric inclusive
-;;   for VAR from N below M               numeric exclusive
-;;   for VAR = INIT then UPDATE          accumulator (deferred)
+;;   for VAR on LIST                      tail iterator
+;;   for VAR across VECTOR                vector iterator
+;;   for VAR [from N] to|below|downto|above M [by S]   numeric iterator
+;;   for VAR = INIT [then UPDATE]         stepped value
 ;;   with VAR = VAL                       binding
+;;   repeat N                             counted iteration
 ;;   do FORM …                            unconditional side-effect
-;;   collect FORM                         accumulate into list
-;;   sum FORM                             accumulate sum
-;;   count FORM                           count truthy
-;;   when COND return FORM                early-exit with FORM
-;;   when COND do FORM                    conditional side-effect
+;;   collect / append / sum / count FORM  accumulators
+;;   always FORM                          t unless FORM is ever nil
+;;   when COND CLAUSE / unless COND CLAUSE  guard the clause that follows
+;;   return FORM                          exit with FORM
 ;;   while COND                           continue while COND non-nil
 ;;   until COND                           continue until COND non-nil
 ;;   bodyless (= no for/with/do keyword)  infinite loop with cl-return
+;;
+;; Several `for' clauses run IN PARALLEL and the loop ends with the first
+;; iterator that runs out, which is what CL does.  That was written once as
+;; `nelisp-cl-macros--loop-build-parallel' and never wired up: the parser
+;; kept one iterator, so a second `for' made the whole shape unrecognised
+;; and -- see below -- unrecognised means nil.
 ;;
 ;; cl-loop は最終的に `cl-block nil (... while ...)' に展開され、
 ;; `cl-return' で抜ける。
@@ -125,235 +132,275 @@ wiring DO-FORMS."
                   (cons 'progn rev)
                   step-incr))))))
 
+(defun nelisp-cl-macros--loop-iter-parse (cur)
+  "Parse one `for' clause from CUR, or return nil when it is not one.
+Returns (ITER . REST).  ITER is (:kind KIND :pat PAT ...) describing one
+iterator; parallel `for' clauses each produce one and are stepped
+together, which is what CL does."
+  (when (eq (car cur) 'for)
+    (let ((pat (car (cdr cur)))
+          (kw (car (cdr (cdr cur))))
+          (rest (cdr (cdr (cdr cur)))))
+      (cond
+       ((eq kw 'in)
+        (cons (list :kind 'in :pat pat :seq (car rest)) (cdr rest)))
+       ((eq kw 'on)
+        (cons (list :kind 'on :pat pat :seq (car rest)) (cdr rest)))
+       ((eq kw 'across)
+        (cons (list :kind 'across :pat pat :seq (car rest)) (cdr rest)))
+       ((memq kw '(from to below downto above by))
+        ;; [from N] to|below|downto|above M [by S].  `from' is optional --
+        ;; CL lets `for i below N' start at 0, and this tree writes seven
+        ;; loops that way.
+        (let ((from 0)
+              (limit-kw nil) (limit nil) (by nil)
+              (tail nil))
+          (if (eq kw 'from)
+              (setq from (car rest) tail (cdr rest))
+            (setq tail (cdr (cdr cur))))
+          (when (memq (car tail) '(to below downto above))
+            (setq limit-kw (car tail) limit (car (cdr tail)) tail (cdr (cdr tail))))
+          (when (eq (car tail) 'by)
+            (setq by (car (cdr tail)) tail (cdr (cdr tail))))
+          (cons (list :kind 'num :pat pat :from from
+                      :limit-kw limit-kw :limit limit :by by)
+                tail)))
+       ((eq kw '=)
+        (let ((init (car rest)) (then nil) (tail (cdr rest)))
+          (when (eq (car tail) 'then)
+            (setq then (car (cdr tail)) tail (cdr (cdr tail))))
+          (cons (list :kind 'eq :pat pat :init init :then then) tail)))
+       (t nil)))))
+
+(defun nelisp-cl-macros--loop-iter-plan (iters first-sym)
+  "Return (BINDS TESTS VARBINDS STEPS) for ITERS.
+BINDS are outer state bindings, TESTS the exhaustion tests, VARBINDS the
+bindings for one step, STEPS the end-of-iteration updates.  VARBINDS are
+sequential: a `for VAR = FORM' clause may read a variable an earlier
+clause bound this iteration, which is what CL promises and the only way
+`for a in L for s = (* a 2)' can work.  FIRST-SYM names the flag that is
+non-nil during the first iteration only, for `= INIT then UPDATE'."
+  (let ((binds nil) (tests nil) (varbinds nil) (steps nil))
+    (while iters
+      (let* ((it (car iters))
+             (kind (plist-get it :kind))
+             (pat (plist-get it :pat)))
+        (cond
+         ((memq kind '(in on))
+          (let ((cur (make-symbol "--loop-cur--")))
+            (setq binds (append binds (list (list cur (plist-get it :seq)))))
+            (setq tests (append tests (list cur)))
+            (setq varbinds
+                  (append varbinds
+                          (let ((src (if (eq kind 'on) cur (list 'car cur))))
+                            (if (symbolp pat)
+                                (list (list pat src))
+                              (nelisp-cl-macros--loop-destructure-bindings pat src)))))
+            (setq steps (append steps (list (list 'setq cur (list 'cdr cur)))))))
+         ((eq kind 'across)
+          (let ((vec (make-symbol "--loop-vec--"))
+                (idx (make-symbol "--loop-idx--")))
+            (setq binds (append binds (list (list vec (plist-get it :seq))
+                                            (list idx 0))))
+            (setq tests (append tests (list (list '< idx (list 'length vec)))))
+            (setq varbinds (append varbinds (list (list pat (list 'aref vec idx)))))
+            (setq steps (append steps (list (list 'setq idx (list '1+ idx)))))))
+         ((eq kind 'num)
+          (let* ((n (make-symbol "--loop-n--"))
+                 (by (or (plist-get it :by) 1))
+                 (limit-kw (plist-get it :limit-kw))
+                 (down (memq limit-kw '(downto above)))
+                 (limit (plist-get it :limit)))
+            (setq binds (append binds (list (list n (plist-get it :from)))))
+            (when limit-kw
+              (setq tests
+                    (append tests
+                            (list (list (cond ((eq limit-kw 'to) '<=)
+                                              ((eq limit-kw 'below) '<)
+                                              ((eq limit-kw 'downto) '>=)
+                                              (t '>))
+                                        n limit)))))
+            (setq varbinds (append varbinds (list (list pat n))))
+            (setq steps (append steps
+                                (list (list 'setq n
+                                            (list (if down '- '+) n by)))))))
+         ((eq kind 'eq)
+          ;; No outer state and no test: the value is computed each
+          ;; iteration, in scope, so it can read the clauses before it.
+          (setq varbinds
+                (append varbinds
+                        (list (list pat
+                                    (if (plist-get it :then)
+                                        (list 'if first-sym
+                                              (plist-get it :init)
+                                              (plist-get it :then))
+                                      (plist-get it :init)))))))))
+      (setq iters (cdr iters)))
+    (list binds tests varbinds steps)))
+
+(defun nelisp-cl-macros--loop-guard (cond negate form)
+  "Wrap FORM in COND, negated when NEGATE, or return FORM when COND is nil."
+  (cond ((null cond) form)
+        (negate (list 'if cond nil form))
+        (t (list 'if cond form nil))))
+
 (defun nelisp-cl-macros--loop-build (clauses)
   "Build expansion for `cl-loop' CLAUSES.
 
-See header for supported shapes.  Returns a form that, when the
-shape is unrecognised, expands to nil (= caller gets a no-op
-expansion rather than a runtime error)."
-  (let ((var nil) (list-form nil) (do-forms nil) (collect-form nil)
-        (sum-form nil) (count-form nil) (with-bindings nil)
-        (when-return-cond nil) (when-return-form nil)
-        (when-do-cond nil) (when-do-forms nil)
-        (when-collect-cond nil) (when-collect-form nil)
-        (numeric-from nil) (numeric-to nil) (numeric-below nil)
+Iterators (`for' in / on / across / from ... to|below|downto|above [by] /
+= [then]) are stepped in parallel and the loop ends with the first one
+that runs out.  `when' / `unless' guard the clause that follows.  A shape
+this subset does not model expands to nil, as it always has."
+  (let ((iters nil) (with-bindings nil) (do-forms nil)
+        (acc-kind nil) (acc-form nil)
+        (guard nil) (guard-negate nil)
+        (extra-tests nil) (bodyless-forms nil)
         (repeat-count nil)
-        (while-cond nil) (until-cond nil)
-        (bodyless-forms nil)
+        (first-sym (make-symbol "--loop-first--"))
         (cur clauses) (recognised t))
-    ;; Detect bodyless form: first clause is NOT a known keyword.
     (when (and clauses
                (not (memq (car clauses)
-                          '(for with do collect sum count when
-                                while until repeat finally return
-                                named))))
-      (setq bodyless-forms clauses
-            cur nil
-            recognised t))
+                          '(for with do collect append sum count when unless
+                                while until repeat finally return named
+                                always))))
+      (setq bodyless-forms clauses cur nil))
     (while (and cur recognised)
-      (let ((kw (car cur)))
+      (let ((kw (car cur))
+            (parsed nil))
         (cond
-         ((eq kw 'for)
-          (setq var (car (cdr cur)))
-          (cond
-           ((eq (car (cdr (cdr cur))) 'in)
-            (setq list-form (car (cdr (cdr (cdr cur)))))
-            (setq cur (cdr (cdr (cdr (cdr cur))))))
-           ((eq (car (cdr (cdr cur))) 'from)
-            (setq numeric-from (car (cdr (cdr (cdr cur)))))
-            (let ((kw2 (car (cdr (cdr (cdr (cdr cur))))))
-                  (val2 (car (cdr (cdr (cdr (cdr (cdr cur))))))))
-              (cond
-               ((eq kw2 'to)
-                (setq numeric-to val2)
-                (setq cur (cdr (cdr (cdr (cdr (cdr (cdr cur))))))))
-               ((eq kw2 'below)
-                (setq numeric-below val2)
-                (setq cur (cdr (cdr (cdr (cdr (cdr (cdr cur))))))))
-               (t (setq recognised nil)))))
-           (t (setq recognised nil))))
+         ((and (eq kw 'for)
+               (setq parsed (nelisp-cl-macros--loop-iter-parse cur)))
+          (setq iters (append iters (list (car parsed))) cur (cdr parsed)))
+         ((eq kw 'for) (setq recognised nil))
          ((eq kw 'repeat)
-          (setq repeat-count (car (cdr cur)))
-          (setq cur (cdr (cdr cur))))
-         ((eq kw 'do)
-          (setq do-forms (cons (car (cdr cur)) do-forms))
-          (setq cur (cdr (cdr cur))))
-         ((eq kw 'collect)
-          (setq collect-form (car (cdr cur)))
-          (setq cur (cdr (cdr cur))))
-         ((eq kw 'sum)
-          (setq sum-form (car (cdr cur)))
-          (setq cur (cdr (cdr cur))))
-         ((eq kw 'count)
-          (setq count-form (car (cdr cur)))
-          (setq cur (cdr (cdr cur))))
+          (setq repeat-count (car (cdr cur)) cur (cdr (cdr cur))))
          ((eq kw 'with)
-          (let ((wname (car (cdr cur))))
-            (when (eq (car (cdr (cdr cur))) '=)
-              (setq with-bindings
-                    (append with-bindings
-                            (list (list wname (car (cdr (cdr (cdr cur))))))))
-              (setq cur (cdr (cdr (cdr (cdr cur))))))))
+          (if (eq (car (cdr (cdr cur))) '=)
+              (progn
+                (setq with-bindings
+                      (append with-bindings
+                              (list (list (car (cdr cur))
+                                          (car (cdr (cdr (cdr cur))))))))
+                (setq cur (cdr (cdr (cdr (cdr cur))))))
+            (setq recognised nil)))
+         ((memq kw '(when unless))
+          (setq guard (car (cdr cur))
+                guard-negate (eq kw 'unless)
+                cur (cdr (cdr cur))))
+         ((eq kw 'do)
+          (setq cur (cdr cur))
+          (let ((forms nil))
+            (while (and cur
+                        (not (memq (car cur)
+                                   '(for with do collect append sum count
+                                         when unless while until repeat
+                                         finally return named always and))))
+              (setq forms (append forms (list (car cur))) cur (cdr cur)))
+            (setq do-forms
+                  (append do-forms
+                          (list (nelisp-cl-macros--loop-guard
+                                 guard guard-negate (cons 'progn forms)))))
+            (setq guard nil guard-negate nil)))
+         ((memq kw '(collect append sum count))
+          (if (and acc-kind (not (eq acc-kind kw)))
+              (setq recognised nil)
+            (setq acc-kind kw acc-form (car (cdr cur)) cur (cdr (cdr cur)))))
+         ((eq kw 'always)
+          (setq acc-kind 'always acc-form (car (cdr cur)) cur (cdr (cdr cur))))
+         ((eq kw 'return)
+          (setq do-forms
+                (append do-forms
+                        (list (nelisp-cl-macros--loop-guard
+                               guard guard-negate
+                               (list 'cl-return (car (cdr cur)))))))
+          (setq guard nil guard-negate nil cur (cdr (cdr cur))))
          ((eq kw 'while)
-          (setq while-cond (car (cdr cur)))
+          (setq extra-tests (append extra-tests (list (car (cdr cur)))))
           (setq cur (cdr (cdr cur))))
          ((eq kw 'until)
-          (setq until-cond (car (cdr cur)))
+          (setq extra-tests
+                (append extra-tests (list (list 'not (car (cdr cur))))))
           (setq cur (cdr (cdr cur))))
-         ((eq kw 'when)
-          (let ((cond-form (car (cdr cur)))
-                (next-kw (car (cdr (cdr cur))))
-                (next-form (car (cdr (cdr (cdr cur))))))
-            (cond
-             ((eq next-kw 'return)
-              (setq when-return-cond cond-form
-                    when-return-form next-form
-                    cur (cdr (cdr (cdr (cdr cur))))))
-             ((eq next-kw 'do)
-              (setq when-do-cond cond-form
-                    when-do-forms (cons next-form when-do-forms)
-                    cur (cdr (cdr (cdr (cdr cur)))))
-              (while (and cur (eq (car cur) 'and))
-                (let ((and-kw (car (cdr cur)))
-                      (and-form (car (cdr (cdr cur)))))
-                  (cond
-                   ((eq and-kw 'do)
-                    (setq when-do-forms (cons and-form when-do-forms)
-                          cur (cdr (cdr (cdr cur)))))
-                   ((eq and-kw 'collect)
-                    (setq when-collect-cond cond-form
-                          when-collect-form and-form
-                          cur (cdr (cdr (cdr cur)))))
-                   (t (setq recognised nil
-                            cur nil))))))
-             ((eq next-kw 'collect)
-              (setq when-collect-cond cond-form
-                    when-collect-form next-form
-                    cur (cdr (cdr (cdr (cdr cur))))))
-             (t (setq recognised nil)))))
          (t (setq recognised nil)))))
     (cond
      ((not recognised) nil)
-     ;; Bodyless infinite loop wrapped in cl-block nil.
      (bodyless-forms
-      (list 'cl-block nil
-            (cons 'while
-                  (cons t bodyless-forms))))
-     ;; Numeric `for VAR from N {to,below} M' [do/collect/sum/count FORM ...]
-     ((and numeric-from (or numeric-to numeric-below))
-      (let ((cmp (if numeric-to '<= '<))
-            (limit (or numeric-to numeric-below)))
-        (nelisp-cl-macros--loop-build-counted
-         (list var numeric-from) (list cmp var limit)
-         (list 'setq var (list '1+ var))
-         collect-form sum-form count-form do-forms with-bindings)))
-     ;; `repeat N' [do/collect/sum/count FORM ...] -- unconditional count,
-     ;; no loop variable.
-     (repeat-count
-      (let ((n-sym (make-symbol "--loop-n--")))
-        (nelisp-cl-macros--loop-build-counted
-         (list n-sym repeat-count) (list '> n-sym 0)
-         (list 'setq n-sym (list '1- n-sym))
-         collect-form sum-form count-form do-forms with-bindings)))
-     ;; While / until plain loops (= no iterator).
-     (while-cond
-      (let ((rev nil))
-        (while do-forms (setq rev (cons (car do-forms) rev))
-               (setq do-forms (cdr do-forms)))
-        (list 'let with-bindings
-              (cons 'while (cons while-cond rev)))))
-     (until-cond
-      (let ((rev nil))
-        (while do-forms (setq rev (cons (car do-forms) rev))
-               (setq do-forms (cdr do-forms)))
-        (list 'let with-bindings
-              (cons 'while (cons (list 'not until-cond) rev)))))
-     ;; `for VAR in LIST when COND return FORM' — early exit pattern.
-     (when-return-cond
-      (let ((tag-sym (make-symbol "--loop-tag--"))
-            (result-sym (make-symbol "--loop-r--"))
-            (loop-var (if (symbolp var) var (make-symbol "--loop-item--"))))
-        (list 'let (cons (list result-sym nil) with-bindings)
-              (list 'catch (list 'quote tag-sym)
-                    (list 'dolist (list loop-var list-form)
-                          (nelisp-cl-macros--loop-wrap-body
-                           var loop-var
-                           (list (list 'when when-return-cond
-                                       (list 'setq result-sym when-return-form)
-                                       (list 'throw (list 'quote tag-sym) nil))))))
-              result-sym)))
-     ;; `for VAR in LIST collect FORM'
-     ((or collect-form when-collect-cond)
-      (let ((acc-sym (make-symbol "--loop-acc--"))
-            (loop-var (if (symbolp var) var (make-symbol "--loop-item--")))
-            (body nil)
-            (rev nil))
-        (when collect-form
-          (setq body
-                (append body
-                        (list (list 'setq acc-sym
-                                    (list 'cons collect-form acc-sym))))))
-        (when when-do-cond
-          (while when-do-forms
-            (setq rev (cons (car when-do-forms) rev))
-            (setq when-do-forms (cdr when-do-forms)))
-          (setq body
-                (append body
-                        (list (cons 'when
-                                    (cons when-do-cond rev))))))
-        (when when-collect-cond
-          (setq body
-                (append body
-                        (list (list 'when when-collect-cond
-                                    (list 'setq acc-sym
-                                          (list 'cons when-collect-form acc-sym)))))))
-        (list 'let (cons (list acc-sym nil) with-bindings)
-              (list 'dolist (list loop-var list-form)
-                    (nelisp-cl-macros--loop-wrap-body var loop-var body))
-              (list 'nreverse acc-sym))))
-     ;; `for VAR in LIST sum FORM'
-     (sum-form
-      (let ((acc-sym (make-symbol "--loop-sum--"))
-            (loop-var (if (symbolp var) var (make-symbol "--loop-item--"))))
-        (list 'let (cons (list acc-sym 0) with-bindings)
-              (list 'dolist (list loop-var list-form)
-                    (nelisp-cl-macros--loop-wrap-body
-                     var loop-var
-                     (list (list 'setq acc-sym (list '+ acc-sym sum-form)))))
-              acc-sym)))
-     ;; `for VAR in LIST count FORM'
-     (count-form
-      (let ((acc-sym (make-symbol "--loop-count--"))
-            (loop-var (if (symbolp var) var (make-symbol "--loop-item--"))))
-        (list 'let (cons (list acc-sym 0) with-bindings)
-              (list 'dolist (list loop-var list-form)
-                    (nelisp-cl-macros--loop-wrap-body
-                     var loop-var
-                     (list (list 'when count-form
-                                 (list 'setq acc-sym (list '+ acc-sym 1))))))
-              acc-sym)))
-     ;; `for VAR in LIST when COND do FORM …'
-     (when-do-cond
-      (let ((rev nil)
-            (loop-var (if (symbolp var) var (make-symbol "--loop-item--"))))
-        (while when-do-forms
-          (setq rev (cons (car when-do-forms) rev))
-          (setq when-do-forms (cdr when-do-forms)))
-        (list 'let with-bindings
-              (list 'dolist (list loop-var list-form)
-                    (nelisp-cl-macros--loop-wrap-body
-                     var loop-var
-                     (list (cons 'when (cons when-do-cond rev))))))))
-     ;; `for VAR in LIST do FORM …'
-     (do-forms
-      (let ((rev nil)
-            (loop-var (if (symbolp var) var (make-symbol "--loop-item--"))))
-        (while do-forms (setq rev (cons (car do-forms) rev))
-               (setq do-forms (cdr do-forms)))
-        (list 'let with-bindings
-              (list 'dolist (list loop-var list-form)
-                    (nelisp-cl-macros--loop-wrap-body var loop-var rev)))))
-     (t (list 'let with-bindings nil)))))
+      (list 'cl-block nil (cons 'while (cons t bodyless-forms))))
+     ((and (null iters) (null repeat-count)) nil)
+     (t
+      (when repeat-count
+        (setq iters (append iters
+                            (list (list :kind 'num
+                                        :pat (make-symbol "--loop-r--")
+                                        :from 1 :limit-kw 'to
+                                        :limit repeat-count :by nil)))))
+      (let* ((plan (nelisp-cl-macros--loop-iter-plan iters first-sym))
+             (binds (nth 0 plan))
+             (tests (nth 1 plan))
+             (varbinds (nth 2 plan))
+             (steps (nth 3 plan))
+             (going (and extra-tests (make-symbol "--loop-going--")))
+             (acc (and acc-kind (make-symbol "--loop-acc--")))
+             (acc-init (cond ((memq acc-kind '(sum count)) 0)
+                             ((eq acc-kind 'always) t)
+                             (t nil)))
+             (acc-body
+              (cond
+               ((eq acc-kind 'collect) (list 'setq acc (list 'cons acc-form acc)))
+               ((eq acc-kind 'append)
+                (list 'setq acc (list 'cons (list 'append acc-form nil) acc)))
+               ((eq acc-kind 'sum) (list 'setq acc (list '+ acc acc-form)))
+               ((eq acc-kind 'count)
+                (list 'when acc-form (list 'setq acc (list '+ acc 1))))
+               ((eq acc-kind 'always)
+                (list 'unless acc-form (list 'cl-return nil)))))
+             (body (append (if acc-body
+                               (list (nelisp-cl-macros--loop-guard
+                                      guard guard-negate acc-body))
+                             nil)
+                           do-forms))
+             ;; `while' / `until' read the iteration variables, so they are
+             ;; tested inside the per-iteration bindings, not in the `while'
+             ;; head where those names do not exist yet.
+             (guarded-body
+              (if extra-tests
+                  (list (list 'if (cons 'and extra-tests)
+                              (cons 'progn (or body (list nil)))
+                              (list 'setq going nil)))
+                body))
+             (result (cond ((eq acc-kind 'collect) (list 'nreverse acc))
+                           ((eq acc-kind 'append)
+                            (list 'apply (list 'quote 'append) (list 'nreverse acc)))
+                           ((memq acc-kind '(sum count)) acc)
+                           ((eq acc-kind 'always) t)
+                           (t nil)))
+             (all-binds (append (if acc (list (list acc acc-init)) nil)
+                                (if going (list (list going t)) nil)
+                                (list (list first-sym t))
+                                binds with-bindings))
+             (head (if going
+                       (cons 'and (cons going tests))
+                     (if tests (cons 'and tests) t)))
+             (loop-form
+              (cons 'while
+                    (cons head
+                          (append
+                           (list (cons 'let* (cons varbinds guarded-body)))
+                           (if going
+                               (list (cons 'when
+                                           (cons going
+                                                 (append steps
+                                                         (list (list 'setq first-sym nil))))))
+                             (append steps (list (list 'setq first-sym nil)))))))))
+        (list 'cl-block nil
+              (cons 'let (cons all-binds
+                               (append (list loop-form)
+                                       (if result (list result) nil))))))))))
+
+(defun nelisp-cl-macros--loop-unbuildable-p (clauses)
+  "Return non-nil when CLAUSES are a shape `cl-loop' here expands to nil."
+  (null (nelisp-cl-macros--loop-build clauses)))
+
 
 (defmacro cl-loop (&rest clauses)
   "Loop CLAUSES — minimal CL-style iteration macro.
