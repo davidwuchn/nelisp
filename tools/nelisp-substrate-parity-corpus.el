@@ -300,6 +300,25 @@
     ;; express; the NeLisp-only tag check (`bignump') lives in
     ;; `scripts/standalone-bignum-smoke.el' instead.
     (47 shared (if (= (- (+ most-positive-fixnum 1) 1) most-positive-fixnum) 1 0))
+
+    ;; -- `random' REPEATED (2026-09-04).  Entry 21 above calls it ONCE,
+    ;; and once is what let this through: the prelude LCG multiplied its
+    ;; 31-bit state by 1103515245 in one step, and the product only leaves
+    ;; the fixnum range for states above 2089573565 -- reached on the 24th
+    ;; call of a fresh process, from the fixed seed, every time.  Past that
+    ;; the intermediate is a tag-13 bignum and `logand' refuses it, so
+    ;; `random' SIGNALLED rather than returning a bad number: every AOT
+    ;; artifact compile big enough to name 24 temp files died with
+    ;; `Wrong type argument: integer-or-marker-p, 2349124342504958400'.
+    ;; 64 calls crosses that boundary with margin on every substrate.
+    (48 shared (let ((ok 1) (i 0) (r nil))
+                 (while (< i 64)
+                   (setq r (random 1000000))
+                   (if (and (integerp r) (>= r 0) (< r 1000000))
+                       nil
+                     (setq ok 0))
+                   (setq i (1+ i)))
+                 ok))
     ))
 
 (provide 'nelisp-substrate-parity-corpus)

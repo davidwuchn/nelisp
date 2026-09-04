@@ -18406,10 +18406,19 @@ runtime cache does not replay source file loads on every command invocation."
    "(unless (fboundp 'emacs-pid)\n"
    "  (defun emacs-pid () 0))\n"
    "(defvar nelisp-artifact--standalone-random-state 0)\n"
+   ;; Split multiplier, for the reason `random' in
+   ;; scripts/nelisp-stdlib-prelude.el carries at length: the state reaches
+   ;; 2^31-1, (* state 1103515245) reaches 2.37e18, and past the 2^61-1
+   ;; fixnum ceiling that promotes to a tag-13 bignum this runtime's `mod'
+   ;; and `logand' both refuse.  1103515245 = 16838 * 65536 + 20077, only
+   ;; the low 31 bits survive, so the sequence is unchanged value for value.
    "(unless (fboundp 'random)\n"
    "  (defun random (&optional limit)\n"
    "    (setq nelisp-artifact--standalone-random-state\n"
-   "          (mod (+ (* nelisp-artifact--standalone-random-state 1103515245) 12345) 2147483648))\n"
+   "          (mod (+ (* (mod (* nelisp-artifact--standalone-random-state 16838) 32768) 65536)\n"
+   "                 (* nelisp-artifact--standalone-random-state 20077)\n"
+   "                 12345)\n"
+   "               2147483648))\n"
    "    (if (and limit (> limit 0))\n"
    "        (mod nelisp-artifact--standalone-random-state limit)\n"
    "      nelisp-artifact--standalone-random-state)))\n"

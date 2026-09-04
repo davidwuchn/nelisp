@@ -2519,8 +2519,14 @@ reseeds from its characters; nil -> a full LCG value."
         (while (< i n)
           (setq s (logand (+ (* s 31) (aref limit i)) 2147483647) i (1+ i)))
         (setq nelisp--random-state (logand (+ s 1) 2147483647) limit nil)))
+    ;; Split multiply: one-step (* state 1103515245) leaves the fixnum
+    ;; range and `logand' has no bignum path.  Same stream; the why is in
+    ;; test/nelisp-prelude-random-fixnum-test.el.
     (setq nelisp--random-state
-          (logand (+ (* nelisp--random-state 1103515245) 12345) 2147483647))
+          (logand (+ (* (logand (* nelisp--random-state 16838) 32767) 65536)
+                     (* nelisp--random-state 20077)
+                     12345)
+                  2147483647))
     (if (and (integerp limit) (> limit 0))
         (mod nelisp--random-state limit)
       nelisp--random-state)))
