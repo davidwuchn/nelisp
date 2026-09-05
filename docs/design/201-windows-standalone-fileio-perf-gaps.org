@@ -2055,7 +2055,7 @@ Exactly 64 MiB per collection, never less, and the pause tracks the heap.  Six
 minutes of typing one phrase reached 933 MiB and a 2.4-second freeze, still
 climbing.  Nothing here plateaus.
 
-*** Why: collection does not free anything on this target
+*** Why: empty chunks are returned to the OS on linux-x86_64 and nowhere else
 
 The first reading was that the IME retains something per keystroke.  It does
 not: over ten passes every cache stayed exactly the size it started
@@ -2073,9 +2073,43 @@ On =windows-x86_64=, four rounds of 200000 discarded conses each:
 
 `used' never goes down.  An explicit `garbage-collect' changes nothing at all
 -- not the used figure, not even the collection counter, so it is a no-op.  And
-the last two lines are the whole finding: keeping 200000 conses alive costs
-exactly what throwing 200000 conses away costs.  The collector is not
-distinguishing them.
+keeping 200000 conses alive costs exactly what throwing 200000 conses away
+costs.
+
+That last line reads like a collector that cannot tell garbage from live data,
+and it is not.  `nelisp--arena-walk-verify' on the Windows build reports
+7925210 free objects against 245353 live: the mark phase is finding the live
+set and the sweep is finding the garbage.  `nl_alloc_diag' (switch 24, Doc 152
+Stage 4c) shows the free list being taken from, tens of millions of times a
+round, on both targets.  Marking, sweeping and free-list reuse all work here.
+
+One column differs, and it is the whole difference:
+
+| counter, over two rounds of 200k | windows-x86_64 | linux-x86_64 |
+|----------------------------------+----------------+--------------|
+| bucket (free-list) allocations   | 24.3M -> 52.4M | 22.6M -> 50.8M |
+| bump allocations                 |  5.5M ->  7.2M |  7.2M ->  8.9M |
+| chunks reclaimed                 |      0 ->    0 |      1 ->    2 |
+| bytes returned to the OS         |      0 ->    0 | 64 -> 128 MiB |
+| failed OS releases               |              0 |            0 |
+
+Windows returns nothing and does not fail trying: it never tries.  The reason
+is one line in the emitter.  Each target's chunk-allocator form defines
+
+: (defun nl_os_empty_chunk_reclaim_p () ...)
+
+and only the linux-x86_64 form returns 1 -- "ordinary mark/sweep may release
+proven-empty growth chunks on Linux x86_64", as its own comment says.
+windows-x86_64, macos and linux-aarch64 all return 0, with a stub
+`nl_os_reclaim_empty_chunk' beside it.  So on every target but one, the arena
+grows a chunk when the free list cannot satisfy a request and never gives one
+back, and the mark phase walks all of it forever after.
+
+This is unimplemented rather than broken, which is why no gate catches it: the
+predicate is doing exactly what it says.  What is missing is the record that
+its consequence on Windows is unbounded heap growth and an unbounded collection
+pause -- fatal for a process meant to live as long as a typing session, which
+is what an IME is.
 
 The same file, on =linux-x86_64=, built from a tree containing the same
 allocator commit (`ac378b8a', "split oversized free blocks on reuse instead of
