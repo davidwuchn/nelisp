@@ -3162,20 +3162,52 @@ path, which asks for a NUMBER first and only then for an integer."
 
 (defun append (&rest args)
   "Concatenate sequences ARGS into a fresh proper-list spine.\nNon-final args may be list / vector / string / nil.  The FINAL arg\nis used as the tail (= unchanged, can be any value).  Single-arg\ncall returns the arg unchanged (= no copy)."
-  (nelisp--doc200-check-string-mix args)
-  (cond ((null args) nil) ((null (cdr args)) (car args))
-	(t
-	 (let ((cur args) (acc nil) (tail nil))
-	   (while (cdr cur)
-	     (nelisp--check-seq-list (car cur))
-	     (setq acc (nelisp--append-collect acc (car cur)))
-	     (setq cur (cdr cur)))
-	   (setq tail (car cur))
-	   (let ((result tail))
-	     (while acc
-	       (setq result (cons (car acc) result))
-	       (setq acc (cdr acc)))
-	     result)))))
+  (cond
+   ((null args) nil)
+   ((null (cdr args)) (car args))
+   (t
+    ;; Fast path: every non-final arg is nil or a cons -- the shape
+    ;; almost every hot caller uses (cl-lib, seq, pcase, regexp-opt,
+    ;; keymaps).  One pass per arg, consing straight onto the shared
+    ;; tail: no separate properness pre-scan, no per-arg helper-
+    ;; function call, and no string-mix scan.  Skipping the mix scan
+    ;; is safe here because it only ever fires between TWO strings
+    ;; (`nelisp--doc200-check-string-mix' needs one raw-byte-unibyte
+    ;; string and one multibyte string among the arguments), and this
+    ;; branch requires every non-final arg to be list-shaped, so at
+    ;; most the final (tail) argument can be a string -- one string
+    ;; can never trigger a two-string mix.
+    (let ((probe args) (fast t))
+      (while (and fast (cdr probe))
+        (unless (let ((a (car probe))) (or (null a) (consp a)))
+          (setq fast nil))
+        (setq probe (cdr probe)))
+      (if fast
+          (let ((cur args) (acc nil))
+            (while (cdr cur)
+              (let ((seq (car cur)))
+                (while (consp seq)
+                  (setq acc (cons (car seq) acc))
+                  (setq seq (cdr seq)))
+                (when seq (signal 'wrong-type-argument (list 'listp seq))))
+              (setq cur (cdr cur)))
+            (let ((result (car cur)))
+              (while acc
+                (setq result (cons (car acc) result))
+                (setq acc (cdr acc)))
+              result))
+        (nelisp--doc200-check-string-mix args)
+        (let ((cur args) (acc nil) (tail nil))
+          (while (cdr cur)
+            (nelisp--check-seq-list (car cur))
+            (setq acc (nelisp--append-collect acc (car cur)))
+            (setq cur (cdr cur)))
+          (setq tail (car cur))
+          (let ((result tail))
+            (while acc
+              (setq result (cons (car acc) result))
+              (setq acc (cdr acc)))
+            result)))))))
 
 (defun caar (x) (car (car x)))
 

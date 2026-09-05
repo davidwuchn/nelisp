@@ -922,7 +922,7 @@ pinned-collision ns-collision-divergent	abs	lisp/nelisp-stdlib.el scripts/nelisp
 pinned-collision ns-collision-divergent	accept-process-output	packages/nelisp-process-adapter/src/nelisp-process-adapter.el scripts/nelisp-stdlib-prelude.el	d1b3b715b5b0
 pinned-collision ns-collision-divergent	add-to-list	lisp/nelisp-build-host.el scripts/nelisp-stdlib-prelude.el	2e959e15e953
 pinned-collision ns-collision-divergent	alist-get	lisp/nelisp-stdlib-misc.el scripts/nelisp-stdlib-prelude.el	7f1faf26747a
-pinned-collision ns-collision-divergent	append	lisp/nelisp-stdlib-list.el scripts/nelisp-stdlib-prelude.el	76c79da8f4e9
+pinned-collision ns-collision-divergent	append	lisp/nelisp-stdlib-list.el scripts/nelisp-stdlib-prelude.el	2277910d2ecd
 pinned-collision ns-collision-divergent	arrayp	lisp/nelisp-stdlib.el scripts/nelisp-stdlib-prelude.el	79c6a8dba449
 pinned-collision ns-collision-divergent	assoc	lisp/nelisp-stdlib-search.el scripts/nelisp-stdlib-prelude.el	1c6f31b6324b
 pinned-collision ns-collision-divergent	butlast	lisp/nelisp-stdlib-list.el scripts/nelisp-stdlib-prelude.el	7d0524ad6c34
