@@ -10284,6 +10284,43 @@ baked build's own `<'/`>'/`=' arms need it too.")
         0))
     ;; A NEGATIVE index on a list is index zero -- `nth' clamps, and
     ;; answering nil said "past the end" about the first element.
+    ;; `nthcdr' is the last list primitive still walked by the prelude, one
+    ;; interpreted iteration per element: a test, a `consp', a `cdr', two
+    ;; `setq's and a `1-' each time round.  Measured on windows-x86_64 at
+    ;; 5931f980, `(nthcdr 5 LIST)' cost 330-520us and `(nth 5 LIST)' 399-521,
+    ;; against 1-31us for every other basic operation in the same run -- the
+    ;; largest outlier in the interpreter, and `nth' is written all over
+    ;; ordinary elisp.
+    ;;
+    ;; Iterative on purpose.  `bf_elt_list_walk2' above recurses, which costs
+    ;; one native frame per element; that is the shape which made `length'
+    ;; die silently at a few million elements before `m5_list_len' was made
+    ;; a loop.
+    (defun bf_nthcdr_walk (n node out)
+      (let* ((p node) (i n) (stop 0))
+        (seq
+         (while (= stop 0)
+           (if (> i 0)
+               (if (= (ptr-read-u64 p 0) 7)
+                   (seq (setq p (nl_cons_cdr_ptr p)) (setq i (- i 1)))
+                 (setq stop 1))
+             (setq stop 1)))
+         (if (> i 0)
+             ;; Ran out early: nil is "past the end", anything else is an
+             ;; improper list and names the WHOLE list, as `nth' reports it.
+             (if (= (ptr-read-u64 p 0) 0)
+                 (seq (wf_write_nil out) 0)
+               (bf_wrong_type_listp node))
+           (seq (wf_copy32 out p) 0)))))
+    ;; Fixnum counts only (tag 2).  A bignum count is left to the prelude's
+    ;; own loop, which is where it was: reading a bignum's magnitude here
+    ;; would be guessing at a representation this arm has no other reason to
+    ;; know, for an index no list in memory can reach.
+    (defun bf_nthcdr (args out)
+      (let* ((np (wf_arg_ptr args 0)))
+        (if (= (ptr-read-u64 np 0) 2)
+            (bf_nthcdr_walk (ptr-read-u64 np 8) (wf_arg_ptr args 1) out)
+          (bf_wrong_type_integerp np))))
     (defun bf_elt_list_walk (node idx0 out)
       (bf_elt_list_walk2 node (if (< idx0 0) 0 idx0) out node))
     ;; Running off an IMPROPER list is an error naming the WHOLE list, the
@@ -11942,6 +11979,7 @@ Wave-2 (C) appends bf_ash (shl/sar compose) + bf_str_lt (byte-lexicographic).")
     ;; checked here, matching `m5_s2n''s own convention for the same
     ;; reason.
     ((:lit "nl--read-int") . (seq (nl_read_int_or_bignum (wf_arg_ptr args 0) out) 0))
+    ((:lit "nl--nthcdr") . (bf_nthcdr args out))
     ;; Same reader-only contract as `nl--read-int': ARG0 is a string, checked
     ;; by the one prelude caller (`string-to-number', after
     ;; `nelisp--check-string').  Answers t when the string is a bare
@@ -12220,7 +12258,7 @@ ash/logand/logior/logxor/lognot + string<.")
 
 (defconst nelisp-standalone--applyfn-bf-builtins
   '("consp" "atom" "stringp" "symbolp" "integerp" "bignump" "natnump" "numberp" "floatp"
-    "nl--read-int" "nl--int-token-p"
+    "nl--read-int" "nl--int-token-p" "nl--nthcdr"
     "vectorp" "listp" "zerop" "set" "symbol-value" "fboundp" "boundp" "featurep" "provide" "require"
     "symbol-name" "intern" "make-symbol" "nelisp--intern-lookup" "unibyte-string"
     "make-vector" "vector" "aref" "elt" "aset" "record" "recordp" "make-record"
@@ -17067,7 +17105,7 @@ value (matches the binary's M8 read+eval-loop driver)."
     ;; Wave-1 (B) breadth: predicates / symbol+vector ops / equal / setcar-setcdr
     ;; / signal-error (the names back the breadth arms in the reader applyfn).
     "consp" "atom" "stringp" "symbolp" "integerp" "bignump" "natnump" "numberp" "floatp"
-    "nl--read-int" "nl--int-token-p"
+    "nl--read-int" "nl--int-token-p" "nl--nthcdr"
     "vectorp" "listp" "zerop" "set" "symbol-value" "fboundp" "boundp" "featurep" "provide" "require"
     "symbol-name" "intern" "make-symbol" "nelisp--intern-lookup" "unibyte-string"
     "make-vector" "vector" "aref" "elt" "aset" "record" "recordp" "make-record"

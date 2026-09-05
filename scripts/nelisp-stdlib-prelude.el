@@ -599,12 +599,20 @@ from `(defvar X nil)'."
 ;; Stopping exactly ON the non-list tail is not an error at all --
 ;; (nthcdr 1 '(1 . 2)) is 2 -- so the check belongs after the walk.
 (defun nthcdr (n list)
-  (unless (integerp n) (signal 'wrong-type-argument (list 'integerp n)))
-  (let ((i n) (l list))
-    (while (and (> i 0) (consp l)) (setq l (cdr l)) (setq i (1- i)))
-    (cond ((<= i 0) l)
-          ((null l) nil)
-          (t (signal 'wrong-type-argument (list 'listp list))))))
+  ;; The walk itself is `nl--nthcdr', a reader builtin, because doing it here
+  ;; costs an interpreted iteration per element and this is the hottest such
+  ;; loop in the runtime: 330-520us for five elements against 1-31us for a
+  ;; basic operation.  A bignum count keeps the loop below -- the builtin
+  ;; takes fixnums, and no list in memory has a bignum's worth of elements
+  ;; anyway.
+  (if (and (fboundp 'nl--nthcdr) (not (bignump n)))
+      (nl--nthcdr n list)
+    (unless (integerp n) (signal 'wrong-type-argument (list 'integerp n)))
+    (let ((i n) (l list))
+      (while (and (> i 0) (consp l)) (setq l (cdr l)) (setq i (1- i)))
+      (cond ((<= i 0) l)
+            ((null l) nil)
+            (t (signal 'wrong-type-argument (list 'listp list)))))))
 
 ;;; nelisp-stdlib-list.el --- Sweep 9 G1 list operations  -*- lexical-binding: t; -*-
 
