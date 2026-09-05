@@ -95,32 +95,19 @@ needs escaping because the reader consumes it as an escape prefix."
       (nelisp--prn-chunks-string chunks))))
 
 (defun nelisp--prn-float (x)
-  "Return a compact, round-trip-safe string for float X.
-Built on `(number-to-string X)' (= `%g' which in NeLisp is fixed
-6-decimal `%f', e.g. `1.5' → `1.500000').  Trims trailing zeros
-after the decimal point — `1.500000' → `1.5' — keeping at least one
-digit so the form re-reads as a float (= `1.0' stays `1.0', not `1').
-Integer-valued bodies without `.' / `e' / `E' get `.0' appended for
-round-trip identity.  `inf' / `-inf' / `NaN' pass through unchanged."
-  (let ((s (number-to-string x)))
-    (cond
-     ((string= s "inf") s)
-     ((string= s "-inf") s)
-     ((string= s "NaN") s)
-     (t
-      (let ((dot (string-search "." s))
-            (eee (or (string-search "e" s) (string-search "E" s))))
-        (cond
-         ;; Exponent form passes through (= already minimal).
-         (eee s)
-         ;; No `.' and no exponent → append `.0' for round-trip.
-         ((null dot) (concat s ".0"))
-         (t
-          ;; Trim trailing zeros after `.', keep at least 1 digit.
-          (let ((i (1- (length s))))
-            (while (and (> i (1+ dot)) (eq (aref s i) ?0))
-              (setq i (1- i)))
-            (substring s 0 (1+ i))))))))))
+  "Return the printed representation of float X.
+`number-to-string' already produces Emacs's exact `prin1'/`princ'
+spelling for every float -- the trailing `.0', the `e+NN'/`e-NN'
+exponent form, and the `1.0e+INF' / `-1.0e+INF' / `0.0e+NaN' special
+forms included (Doc 159 SS10 forward; that is where `number-to-string'
+became a real shortest-round-trip printer rather than the %g-plus-one-
+digit stub the old version of this docstring described).  This used to
+locate `.'/`e' with `string-search' and hand-trim trailing zeros to
+patch up that stub's output; Doc 159 SS15 found the patch redundant
+and, worse, ~200x the cost of the single `number-to-string' call it
+wrapped -- `string-search' has no native form here and its interpreted
+cost dominates every other part of printing a float."
+  (number-to-string x))
 
 (defun nelisp--prn-reader-macro-abbrev (lst escape)
   "Return abbreviated form for `(TAG ARG)' reader-macro shapes, or nil.

@@ -8203,10 +8203,18 @@ as a likely mistake.")
 ;; function body in `build-tool/src/eval/builtins.rs' are removed in
 ;; the same commit (= Stage 7.1.4 in Doc 64).
 ;;
-;; Float formatting matches the prior Rust `Sexp' Display closely
-;; enough for substrate use: `(number-to-string X)' (= `%g')
-;; followed by a `.0' suffix when the result lacks `.', `e' or `E'.
-;; Edge cases (very large / NaN / inf) are passed through unchanged.
+;; Float formatting is `(number-to-string X)', unchanged (Doc 159 SS15).
+;; `number-to-string' on a float is itself the native shortest-round-trip
+;; printer (Doc 159 SS10 forward): as of that section it already emits
+;; Emacs's exact `prin1'/`princ' spelling, INCLUDING the trailing `.0',
+;; the `e+NN'/`e-NN' exponent form, and the `1.0e+INF' / `-1.0e+INF' /
+;; `0.0e+NaN' special forms.  This file used to run the result through a
+;; second, prelude-level pass (`string-search' for `.'/`e', a manual
+;; trailing-zero trim) to patch up a %g-with-one-digit STUB `number-to-
+;; string' — that stub is long gone, so the second pass had become pure
+;; overhead: `string-search' is prelude Elisp, not a native primitive,
+;; and Doc 159 SS15 measured it at roughly 200x the cost of the single
+;; native `number-to-string' call it was wrapping.
 ;;
 ;; Reader-macro abbreviation: a 2-element cons `(QUOTE-TAG ARG)' whose
 ;; head is one of `quote' / `function' or the punctuation-named symbols
@@ -8312,22 +8320,11 @@ needs escaping because the reader consumes it as an escape prefix."
       (nelisp--prn-chunks-string chunks))))
 
 (defun nelisp--prn-float (x)
-  (let ((s (number-to-string x)))
-    (cond
-     ((string= s "inf") s)
-     ((string= s "-inf") s)
-     ((string= s "NaN") s)
-     (t
-      (let ((dot (string-search "." s))
-            (eee (or (string-search "e" s) (string-search "E" s))))
-        (cond
-         (eee s)
-         ((null dot) (concat s ".0"))
-         (t
-          (let ((i (1- (length s))))
-            (while (and (> i (1+ dot)) (eq (aref s i) ?0))
-              (setq i (1- i)))
-            (substring s 0 (1+ i))))))))))
+  "Return the printed representation of float X.
+`number-to-string' IS this function -- see the Commentary above (Doc 159
+SS15) for why the extra `string-search'-based pass this used to run is
+gone rather than merely made faster."
+  (number-to-string x))
 
 (defun nelisp--prn-reader-macro-abbrev (lst escape)
   (when (and (consp lst) (symbolp (car lst))
@@ -8532,7 +8529,15 @@ claimed to match, only the shape."
           (setq l (cdr l)))))))
 (unless (fboundp 'prin1-to-string)
   (defun prin1-to-string (object &optional noescape overrides)
-    (nelisp--check-print-overrides overrides)
+    ;; OVERRIDES is nil in the overwhelming majority of calls (every
+    ;; unadorned `prin1-to-string'/`prin1'/`princ'/`print' call site) --
+    ;; `nelisp--check-print-overrides' returns nil immediately for that
+    ;; case anyway (its own first `cond' clause), so calling it is a
+    ;; whole extra interpreted function-call layer bought for nothing on
+    ;; the common path.  Doc 159 SS15: skipping it measurably tightens
+    ;; the float-heavy case this file exists to make fast, and changes
+    ;; nothing observable (a non-nil OVERRIDES is still validated).
+    (when overrides (nelisp--check-print-overrides overrides))
     (nelisp--prn-to-string object (not noescape))))
 
 ;; --- Doc 143: minimal read-from-string for the reader runtime -------------

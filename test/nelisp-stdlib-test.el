@@ -674,6 +674,70 @@ tools/print-large-sexp-smoke.el, whose depth guard is `rec_max'
               (should (memq (car err) '(excessive-lisp-nesting error))))))
       (nelisp-stdlib-test--restore-defuns saved))))
 
+(ert-deftest nelisp-stdlib-printer-float-format-and-no-string-search-surgery ()
+  "`nelisp--prn-float' is a direct `number-to-string' passthrough (Doc 159
+SS15) -- `number-to-string' on a float has been a real shortest-round-trip
+printer matching Emacs's exact spelling since Doc 159 SS10, so the
+`string-search'-based trailing-zero-trim/`.0'-append pass this function
+used to run on top of it was redundant, AND (measured, not assumed)
+roughly 200x the cost of the single native call it wrapped -- `string-
+search' has no native form in the standalone runtime, so its cost is
+the interpreted prelude's, not `number-to-string''s.  This pins both the
+exact-spelling contract and a guard against the surgery (or anything
+shaped like it) coming back."
+  (let* ((symbols '(nelisp--prn-float))
+         (saved (mapcar (lambda (sym)
+                          (cons sym
+                                (and (fboundp sym)
+                                     (symbol-function sym))))
+                        symbols))
+         source)
+    (unwind-protect
+        (progn
+          (with-temp-buffer
+            (insert-file-contents
+             (expand-file-name "lisp/nelisp-stdlib-prn.el"
+                               default-directory))
+            (setq source (buffer-string))
+            (goto-char (point-min))
+            (let ((done nil))
+              (while (not done)
+                (condition-case nil
+                    (let ((form (read (current-buffer))))
+                      (when (and (consp form)
+                                 (eq (car form) 'defun)
+                                 (memq (cadr form) symbols))
+                        (eval form t)))
+                  (end-of-file
+                   (setq done t))))))
+          ;; Exact Emacs spellings `number-to-string' must keep producing
+          ;; for this passthrough to stay correct.
+          (should (equal (nelisp--prn-float 5.0) "5.0"))
+          (should (equal (nelisp--prn-float 1.23) "1.23"))
+          (should (equal (nelisp--prn-float -0.0) "-0.0"))
+          (should (equal (nelisp--prn-float 0.1) "0.1"))
+          (should (equal (nelisp--prn-float 1e20) "1e+20"))
+          (should (equal (nelisp--prn-float 1e-20) "1e-20"))
+          (should (equal (nelisp--prn-float (/ 1.0 0.0)) "1.0e+INF"))
+          (should (equal (nelisp--prn-float (/ -1.0 0.0)) "-1.0e+INF"))
+          (should (equal (nelisp--prn-float (/ 0.0 0.0)) "-0.0e+NaN"))
+          ;; `nelisp--prn-float' is exactly `number-to-string' now -- no
+          ;; second interpreted pass over the result.
+          (should (equal (nelisp--prn-float 3.0)
+                         (number-to-string 3.0)))
+          (should (equal (nelisp--prn-float (/ 1.0 3.0))
+                         (number-to-string (/ 1.0 3.0))))
+          ;; Regression guard: the slow surgery this replaced searched the
+          ;; printed string for `.'/`e' with `string-search' and trimmed
+          ;; trailing zeros by hand -- neither should reappear in
+          ;; `nelisp--prn-float's body.
+          (should-not (string-match-p "(string-search" source)))
+      (dolist (entry saved)
+        (if (cdr entry)
+            (fset (car entry) (cdr entry))
+          (when (fboundp (car entry))
+            (fmakunbound (car entry))))))))
+
 (ert-deftest nelisp-stdlib-bit-arithmetic ()
   (should (= 4 (nelisp-eval '(ash 1 2))))
   (should (= 1 (nelisp-eval '(logand 3 5))))

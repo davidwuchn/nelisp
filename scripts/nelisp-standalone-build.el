@@ -28451,6 +28451,28 @@ all combine so a single wrong primitive shifts the result off 42."
    "       (if (string= (nelisp-format-hexfloat 1.5 0) \"0x2p+0\") 0 100)\n"
    "       (if (string= (nelisp-format-hexfloat 1.0 nil t) \"0X1P+0\") 0 100)\n"
    "       (if (string= (nelisp-format-hexfloat 0.0) \"0x0p+0\") 0 100)\n"
+   ;; Doc 159 SS15: `nelisp--prn-float' is now a direct `number-to-string'
+   ;; passthrough (the `string-search'-based surgery it used to run was
+   ;; redundant and ~200x the cost of the single native call it wrapped).
+   ;; These pin the exact Emacs spellings that passthrough depends on
+   ;; staying correct, and the wall-time bound is a regression guard
+   ;; against the surgery (or anything as slow) coming back: 3000 floats
+   ;; through `prin1-to-string' individually took double-digit SECONDS
+   ;; before this fix and comfortably under one after it, so 4s is loose
+   ;; in the direction that matters (never flakes green-to-red on a slow
+   ;; CI runner) while still catching an O(n) 200x-per-value regression.
+   "       (if (string= (prin1-to-string 5.0) \"5.0\") 0 100)\n"
+   "       (if (string= (prin1-to-string 1.23) \"1.23\") 0 100)\n"
+   "       (if (string= (prin1-to-string -0.0) \"-0.0\") 0 100)\n"
+   "       (if (string= (prin1-to-string 1e20) \"1e+20\") 0 100)\n"
+   "       (if (string= (prin1-to-string (/ 1.0 0.0)) \"1.0e+INF\") 0 100)\n"
+   "       (if (string= (prin1-to-string (/ 0.0 0.0)) \"-0.0e+NaN\") 0 100)\n"
+   "       (if (let* ((n 3000) (i 0) (s (float-time)) (acc 0))\n"
+   "             (while (< i n)\n"
+   "               (setq acc (+ acc (length (prin1-to-string (/ (float i) 7.0)))))\n"
+   "               (setq i (1+ i)))\n"
+   "             (and (> acc 0) (< (- (float-time) s) 4.0)))\n"
+   "           0 100)\n"
    "       (if (= (length `(1 ,b ,@c 5)) 5) 42 100))))\n")) ; backquote length 5 -> 42
 
 ;;;###autoload

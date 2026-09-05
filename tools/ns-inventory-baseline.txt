@@ -995,7 +995,7 @@ pinned-collision ns-collision-divergent	plist-get	lisp/nelisp-stdlib-plist-str.e
 pinned-collision ns-collision-divergent	plist-member	lisp/nelisp-stdlib-plist-str.el scripts/nelisp-stdlib-prelude.el	e2a0d4406798
 pinned-collision ns-collision-divergent	plist-put	lisp/nelisp-stdlib-plist-str.el scripts/nelisp-stdlib-prelude.el	ec24000d8b85
 pinned-collision ns-collision-divergent	prin1	lisp/nelisp-stdlib-prn.el scripts/nelisp-stdlib-prelude.el	a915300b8c4f
-pinned-collision ns-collision-divergent	prin1-to-string	lisp/nelisp-stdlib-prn.el scripts/nelisp-stdlib-prelude.el	c9bf2dc60b9e
+pinned-collision ns-collision-divergent	prin1-to-string	lisp/nelisp-stdlib-prn.el scripts/nelisp-stdlib-prelude.el	67ab9e11bc4e
 pinned-collision ns-collision-divergent	princ	lisp/nelisp-stdlib-misc.el scripts/nelisp-stdlib-prelude.el	3975e89c8c57
 pinned-collision ns-collision-divergent	print	lisp/nelisp-stdlib-misc.el scripts/nelisp-stdlib-prelude.el	8d17563aed08
 pinned-collision ns-collision-divergent	read	lisp/nelisp-stdlib-reader.el scripts/nelisp-stdlib-prelude.el	35f6c738cdc9
