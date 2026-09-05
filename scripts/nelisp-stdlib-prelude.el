@@ -4621,16 +4621,23 @@ bodies (= Stage 4 follow-up).  Indent / edebug specs come back when
 ;; (struct dispatch via the already-working `nelisp-cl-macros--struct-isa'
 ;; ancestry walker above, NOT `cl-typep', which knows nothing about
 ;; `cl-defstruct'-generated types -- docs/design/185-cl-generic-subset.org
-;; §1.2/§2.1a), primary methods only plus `cl-call-next-method'/
+;; §1.2/§2.1a), primary methods plus `cl-call-next-method'/
 ;; `cl-next-method-p' (§2.2), a lazily-built per-generic dispatch table
 ;; (§2.3/§3.4 -- this is the direct answer to Doc 157's 280-second eager
 ;; global-prefill wall, §1.4: nothing here does `eval'-based dispatcher
 ;; compilation, and no work happens for a generic until it is first
-;; called).  Every unsupported form -- a method-combination qualifier
-;; (`:before'/`:after'/`:around'/anything but none), a specializer kind
-;; other than type/eql/unspecialized, a specializer on an argument
-;; position other than 0 -- is a loud `error' at `cl-defmethod'
-;; macroexpansion time, never a silent no-dispatch (§3.5).
+;; called).  §2.2 extension: the `:extra STRING' qualifier is also
+;; supported -- several methods can share one specializer, distinguished
+;; by STRING, coexisting and chaining via `cl-call-next-method' ordered
+;; newest-defined-first (matching real Emacs, verified against host
+;; Emacs 31.1 -- see the `cl-defmethod' docstring below); `:extra' may
+;; also combine with exactly one of `:before'/`:after'/`:around', per
+;; real Emacs's own grammar.  A bare `:before'/`:after'/`:around' (no
+;; `:extra') remains out of scope.  Every other unsupported form -- an
+;; unsupported qualifier shape, a specializer kind other than
+;; type/eql/unspecialized, a specializer on an argument position other
+;; than 0 -- is a loud `error' at `cl-defmethod' macroexpansion time,
+;; never a silent no-dispatch (§3.5).
 ;;
 ;; No `declare' in the macro bodies below -- see the `cl-defstruct'
 ;; comment above: the standalone reader does not yet strip `declare'
@@ -4680,7 +4687,13 @@ both copies stay in sync regardless."
     (put 'cl-no-applicable-method 'error-conditions '(cl-no-applicable-method error))
     (put 'cl-no-applicable-method 'error-message "No applicable method")
     (put 'cl-no-next-method 'error-conditions '(cl-no-next-method error))
-    (put 'cl-no-next-method 'error-message "No next method")))
+    (put 'cl-no-next-method 'error-message "No next method")
+    ;; `cl-no-primary-method' (real Emacs's own condition, same name/
+    ;; message): only reachable once `:before'/`:after'/`:around' exist
+    ;; at all (the `:extra' combination extension below) -- a call whose
+    ;; applicable methods are entirely before/after/around, no primary.
+    (put 'cl-no-primary-method 'error-conditions '(cl-no-primary-method error))
+    (put 'cl-no-primary-method 'error-message "No primary method")))
 
 (defun nelisp-cl-generic--parse-specializer (arg-form)
   "Parse one position-0 arglist entry of a `cl-defmethod' form.
@@ -4793,23 +4806,43 @@ avoid, just one level lower than a dispatch decision."
     n))
 
 (defun nelisp-cl-generic--same-specializer-p (a b)
-  "Non-nil iff method entries A and B specialize the same way -- a new
-entry this-equal to an existing one REPLACES it (`cl-defmethod'
-redefinition, not accumulation; Doc 185 §3.4)."
+  "Non-nil iff method entries A and B are the SAME method identity --
+same specializer AND the same qualifiers (the `:extra' string, if any,
+and the before/after/around `:combinator', if any).  A new entry
+this-equal to an existing one REPLACES it (`cl-defmethod' redefinition,
+not accumulation; Doc 185 §3.4).  Entries that share a specializer but
+differ in `:extra' string are a DIFFERENT identity -- they coexist
+instead of replacing each other (Doc 185 §2.2's `:extra' extension:
+\"several `:extra' methods for the same specializers coexist\")."
   (and (eq (plist-get a :kind) (plist-get b :kind))
        (eq (plist-get a :type-name) (plist-get b :type-name))
-       (eql (plist-get a :value) (plist-get b :value))))
+       (eql (plist-get a :value) (plist-get b :value))
+       (equal (plist-get a :extra) (plist-get b :extra))
+       (eq (plist-get a :combinator) (plist-get b :combinator))))
 
 (defun nelisp-cl-generic--register-method (name entry)
-  "Install ENTRY on generic NAME's method list, replacing any existing
-entry with the same specializer (`nelisp-cl-generic--same-specializer-p')
-rather than accumulating a duplicate.  Invalidates NAME's cached
-dispatch table (Doc 185 §3.4) so the next call rebuilds it."
-  (let ((kept nil))
-    (dolist (e (get name 'nelisp-cl-generic--methods))
-      (unless (nelisp-cl-generic--same-specializer-p e entry)
-        (push e kept)))
-    (put name 'nelisp-cl-generic--methods (cons entry (nreverse kept)))
+  "Install ENTRY on generic NAME's method list.  An entry whose full
+identity (`nelisp-cl-generic--same-specializer-p') already exists is
+REPLACED IN PLACE, at its existing list position, never moved -- exactly
+like real Emacs's own `cl-generic-define-method' (\"Keep the ordering;
+important for methods with :extra qualifiers.\"): when several `:extra'
+methods share one specializer, list position IS call order (newest-
+defined-first, Doc 185 §2.2 extension), and redefining one of them must
+not silently reorder its siblings.  A genuinely NEW identity is consed
+onto the FRONT of the list (most-recently-defined-first) -- also matching
+real Emacs.  Invalidates NAME's cached dispatch table (Doc 185 §3.4) so
+the next call rebuilds it."
+  (let* ((methods (get name 'nelisp-cl-generic--methods))
+         (existing
+          (let (hit)
+            (dolist (e methods)
+              (when (and (not hit) (nelisp-cl-generic--same-specializer-p e entry))
+                (setq hit e)))
+            hit)))
+    (put name 'nelisp-cl-generic--methods
+         (if existing
+             (mapcar (lambda (e) (if (eq e existing) entry e)) methods)
+           (cons entry methods)))
     (put name 'nelisp-cl-generic--dispatch-cache nil)))
 
 (defun nelisp-cl-generic--build-dispatch-table (name)
@@ -4818,7 +4851,12 @@ tiers (Doc 185 §3.3) and cache the result on NAME's plist (§3.4).  Struct
 vs. builtin `:type' matching stays a per-call decision
 (`nelisp-cl-generic--type-match') since a struct named by a specializer
 may not have been `cl-defstruct'-registered yet at the time this table is
-first built."
+first built.  `nelisp-cl-generic--methods' is stored most-recently-
+defined-first (`nelisp-cl-generic--register-method'); the `push' below
+reverses that per bucket while partitioning, so each bucket is
+`nreverse'd back afterwards -- several `:extra' methods sharing one
+specializer must stay ordered newest-first within their tier (Doc 185
+§2.2 extension), matching real Emacs."
   (let (eql-methods type-methods unspecialized-methods)
     (dolist (e (get name 'nelisp-cl-generic--methods))
       (let ((k (plist-get e :kind)))
@@ -4826,8 +4864,9 @@ first built."
          ((eq k 'eql) (push e eql-methods))
          ((eq k 'type) (push e type-methods))
          (t (push e unspecialized-methods)))))
-    (let ((table (list :eql eql-methods :type type-methods
-                        :unspecialized unspecialized-methods)))
+    (let ((table (list :eql (nreverse eql-methods)
+                        :type (nreverse type-methods)
+                        :unspecialized (nreverse unspecialized-methods))))
       (put name 'nelisp-cl-generic--dispatch-cache table)
       table)))
 
@@ -4840,14 +4879,18 @@ that one generic's own method count)."
   (or (get name 'nelisp-cl-generic--dispatch-cache)
       (nelisp-cl-generic--build-dispatch-table name)))
 
-(defun nelisp-cl-generic--eql-match (methods value)
-  "The first (only, by construction -- redefinition replaces, never
-duplicates) eql-tier method whose `:value' is `eql' to VALUE, or nil."
-  (let (hit)
+(defun nelisp-cl-generic--eql-matches (methods value)
+  "All `:eql'-tier METHODS whose `:value' is `eql' to VALUE, in METHODS'
+own order.  METHODS arrives newest-defined-first
+(`nelisp-cl-generic--build-dispatch-table'); before the `:extra'
+extension (Doc 185 §2.2), redefinition meant at most one method could
+ever match a given VALUE here.  Several `:extra' variants of the same
+`eql' specializer now coexist and chain via `cl-call-next-method',
+newest first, exactly like a builtin-type or unspecialized tier."
+  (let (hits)
     (dolist (e methods)
-      (when (and (not hit) (eql (plist-get e :value) value))
-        (setq hit e)))
-    hit))
+      (when (eql (plist-get e :value) value) (push e hits)))
+    (nreverse hits)))
 
 (defun nelisp-cl-generic--ordered-type-matches (methods value)
   "The `:type'-tier METHODS applicable to VALUE, most specific first
@@ -4858,57 +4901,142 @@ single-parent only (§6.1), so every applicable struct specializer for a
 given VALUE necessarily lies on that value's one ancestry chain.  Builtin
 `cl-typep' matches carry no such order in this subset (§2.1a does not add
 a type lattice on top of `cl-typep''s ten-symbol contract): two or more
-of them matching the same VALUE is an ambiguous dispatch, signalled
-loudly here rather than guessed at (§3.5)."
-  (let (struct-hits builtin-hits)
+DIFFERENT builtin type-names both matching the same VALUE is an ambiguous
+dispatch, signalled loudly here rather than guessed at (§3.5).
+
+Doc 185 §2.2's `:extra' extension: several methods can now share the
+exact same specializer (struct type-name, or builtin type-name) -- that
+is NOT ambiguous, just several applicable methods at that one
+specificity tier, ordered newest-defined-first.  Grouping by
+type-name/depth (an `assq'-keyed accumulator, each group's own methods
+appended in METHODS' incoming, already newest-first order via `nconc' --
+never `push', which would silently re-reverse an `:extra' group back to
+oldest-first) keeps that distinct from a genuine cross-type-name tie,
+which still errors exactly as before this extension."
+  (let (struct-hits builtin-groups)
     (dolist (e methods)
       (let ((tn (plist-get e :type-name)))
         (when (nelisp-cl-generic--type-match value tn)
           (if (nelisp-cl-generic--builtin-type-p tn)
-              (push e builtin-hits)
-            (push (cons (nelisp-cl-generic--struct-depth
-                         (nelisp--record-type value) tn)
-                        e)
-                  struct-hits)))))
-    (when (> (length builtin-hits) 1)
+              (let ((cell (assq tn builtin-groups)))
+                (if cell
+                    (setcdr cell (nconc (cdr cell) (list e)))
+                  (push (cons tn (list e)) builtin-groups)))
+            (let* ((depth (nelisp-cl-generic--struct-depth
+                           (nelisp--record-type value) tn))
+                   (cell (assq depth struct-hits)))
+              (if cell
+                  (setcdr cell (nconc (cdr cell) (list e)))
+                (push (cons depth (list e)) struct-hits)))))))
+    (when (> (length builtin-groups) 1)
       (error "cl-generic: ambiguous dispatch -- builtin-type methods %S \
 all match %S"
-             (mapcar (lambda (e) (plist-get e :type-name)) builtin-hits)
+             (mapcar #'car builtin-groups)
              value))
     (append
-     (mapcar #'cdr (sort struct-hits (lambda (a b) (< (car a) (car b)))))
-     builtin-hits)))
+     (apply #'append
+            (mapcar #'cdr
+                    (sort struct-hits (lambda (a b) (< (car a) (car b))))))
+     (and builtin-groups (cdr (car builtin-groups))))))
 
 (defun nelisp-cl-generic--applicable-methods (name value)
   "NAME's methods applicable to VALUE, most specific first: an `eql'
 match (if any) outranks every type match, which outranks the
-unspecialized fallback (if any) -- Doc 185 §3.3."
+unspecialized fallback (if any) -- Doc 185 §3.3.  Within one specificity
+tier, several `:extra' variants (Doc 185 §2.2 extension) are newest-
+defined-first, matching real Emacs."
   (let ((table (nelisp-cl-generic--dispatch-table name)))
     (append
-     (let ((hit (nelisp-cl-generic--eql-match (plist-get table :eql) value)))
-       (and hit (list hit)))
+     (nelisp-cl-generic--eql-matches (plist-get table :eql) value)
      (nelisp-cl-generic--ordered-type-matches (plist-get table :type) value)
      (plist-get table :unspecialized))))
 
+(defun nelisp-cl-generic--invoke-combined (name args before after around primary)
+  "Run one generic-function call once `nelisp-cl-generic--invoke' has
+partitioned its applicable methods into BEFORE/AFTER/AROUND/PRIMARY
+lists (each most-specific/most-recently-defined first; Doc 185 §2.2's
+`:extra' extension -- only reachable via `:extra STRING :before'/
+`:after'/`:around', §3.5's table still rejects a bare, non-`:extra'
+before/after/around).  Mirrors real Emacs's own
+`cl--generic-standard-method-combination' exactly: every BEFORE method
+runs first, most-specific first, for effect only; then the PRIMARY chain
+runs (walkable via `cl-call-next-method'/`cl-next-method-p' exactly as
+when there is no combinator at all -- `:extra' primary variants
+included, newest first); then every AFTER method runs, LEAST-specific
+first (the reverse of BEFORE); the whole before/primary/after
+combination's return value is the PRIMARY chain's own value, before/
+after never affect it.  AROUND methods wrap that whole combination, most-
+specific outermost, each able to reach the next (a less-specific
+`:around', or the before/primary/after combination itself) via
+`cl-call-next-method', exactly like a primary method.
+
+The `combined' lambda and the around-chain below are only ever invoked
+SYNCHRONOUSLY, within this function's own dynamic extent (directly, or
+via `cl-call-next-method' called from a running `:around' method's body,
+still inside this same call) -- unlike `nelisp-cl-generic--make-dispatcher'
+\(which must build a lambda as literal DATA because that one is stored
+via `defalias' and invoked arbitrarily later, long after its defining
+call has returned), BEFORE/AFTER/PRIMARY/ARGS/NAME here are ordinary
+function parameters of this call, still live on the stack, so both
+lexical closure (the host-loadable mirror copy of this block at the same
+line in `lisp/nelisp-cl-macros.el', `lexical-binding: t') and dynamic
+scoping (this file, `lexical-binding: nil') resolve them correctly -- no
+data-lambda trick needed here."
+  (let* ((primary-fns (mapcar (lambda (e) (plist-get e :fn)) primary))
+         (combined
+          (lambda (&rest call-args)
+            (let ((use-args (if call-args call-args args)))
+              (dolist (bf before) (apply (plist-get bf :fn) use-args))
+              (prog1
+                  (let ((nelisp-cl-generic--next-methods (cdr primary-fns))
+                        (nelisp-cl-generic--call-args use-args)
+                        (nelisp-cl-generic--current-name name))
+                    (apply (car primary-fns) use-args))
+                (dolist (af (reverse after))
+                  (apply (plist-get af :fn) use-args)))))))
+    (if (null around)
+        (apply combined args)
+      (let ((around-fns (mapcar (lambda (e) (plist-get e :fn)) around)))
+        (let ((nelisp-cl-generic--next-methods
+               (append (cdr around-fns) (list combined)))
+              (nelisp-cl-generic--call-args args)
+              (nelisp-cl-generic--current-name name))
+          (apply (car around-fns) args))))))
+
 (defun nelisp-cl-generic--invoke (name args)
-  "Dispatch a call to generic NAME with ARGS (Doc 185 §3-§3.5): find the
-applicable methods for `(car ARGS)', most specific first, and call the
-first one with `cl-call-next-method'/`cl-next-method-p' able to walk the
-rest.  Signals `cl-no-applicable-method' when nothing matches."
+  "Dispatch a call to generic NAME with ARGS (Doc 185 §3-§3.5, extended
+by §2.2's `:extra' combination): find the applicable methods for
+`(car ARGS)', most specific first, partition them by combinator
+(`:before'/`:after'/`:around'/primary -- only reachable via `:extra
+STRING' plus one of the three, §3.5's table still rejects a bare
+combinator), and run them via `nelisp-cl-generic--invoke-combined'.
+Signals `cl-no-applicable-method' when nothing at all matches, or
+`cl-no-primary-method' when something matches but none of it is a
+primary (or `:extra'-primary) method."
   (let* ((applicable (nelisp-cl-generic--applicable-methods name (car args)))
-         (fns (mapcar (lambda (e) (plist-get e :fn)) applicable)))
-    (if (null fns)
-        ;; Data shape is `(cons name args)' -- `(GENERIC ARG1 ARG2 ...)',
-        ;; flat -- measured against real Emacs 30.1 this session (not the
-        ;; nested `(list generic-name args)' Doc 185 §3.5's table text
-        ;; says; that reading does not match what real `cl-generic'
-        ;; actually signals, confirmed empirically, so this follows the
-        ;; measured behaviour over the doc's imprecise transcription).
-        (signal 'cl-no-applicable-method (cons name args))
-      (let ((nelisp-cl-generic--next-methods (cdr fns))
-            (nelisp-cl-generic--call-args args)
-            (nelisp-cl-generic--current-name name))
-        (apply (car fns) args)))))
+         before after around primary)
+    (dolist (e applicable)
+      (let ((c (plist-get e :combinator)))
+        (cond
+         ((eq c :before) (push e before))
+         ((eq c :after) (push e after))
+         ((eq c :around) (push e around))
+         (t (push e primary)))))
+    (setq before (nreverse before) after (nreverse after)
+          around (nreverse around) primary (nreverse primary))
+    (cond
+     ((null applicable)
+      ;; Data shape is `(cons name args)' -- `(GENERIC ARG1 ARG2 ...)',
+      ;; flat -- measured against real Emacs 30.1 this session (not the
+      ;; nested `(list generic-name args)' Doc 185 §3.5's table text
+      ;; says; that reading does not match what real `cl-generic'
+      ;; actually signals, confirmed empirically, so this follows the
+      ;; measured behaviour over the doc's imprecise transcription).
+      (signal 'cl-no-applicable-method (cons name args)))
+     ((null primary)
+      (signal 'cl-no-primary-method (cons name args)))
+     (t
+      (nelisp-cl-generic--invoke-combined name args before after around primary)))))
 
 (defun cl-call-next-method (&rest new-args)
   "Call the next-most-specific applicable method in the `cl-defmethod'
@@ -4970,19 +5098,43 @@ subset -- declare with no body, add methods via cl-defmethod (Doc 185 \
 
 (defmacro cl-defmethod (name &rest args)
   "Define a method on generic NAME (Doc 185's subset of real
-`cl-defmethod').  No method-combination qualifier is supported --
-`:before'/`:after'/`:around'/anything but none is a loud `error' naming
-the qualifier (§3.5).  Exactly one specializer, on argument position 0
-only: a type name (builtin `cl-typep' symbol or `cl-defstruct' name), an
-`(eql VALUE)' form, or a bare (unspecialized) symbol (§2.1/§3.1).  The
-method body can call `cl-call-next-method'/`cl-next-method-p' (§2.2)."
-  (let (qualifier)
+`cl-defmethod', extended by §2.2's `:extra' qualifier).  The supported
+qualifier grammar is: no qualifier (a primary method); or `:extra
+STRING', optionally followed by exactly one of `:before'/`:after'/
+`:around' -- real Emacs's own grammar (`cl-generic--method-qualifier-p'
+accepts any non-list leading token; `cl--generic-standard-method-
+combination' only ever strips a LEADING `:extra STRING' pair, so
+`:extra' must come first when combined with a combinator -- confirmed
+this session: real Emacs itself rejects `:around :extra \"x\"', only
+`:extra \"x\" :around' works).  Several `:extra' methods for the same
+specializer coexist (rather than one replacing another) and chain via
+`cl-call-next-method', ordered newest-defined-first, then the plain
+\(non-`:extra') primary method if any -- redefining an `:extra' method
+with the SAME string replaces it in place, not accumulating a duplicate
+and not reordering its siblings (`nelisp-cl-generic--register-method').
+A bare `:before'/`:after'/`:around' (no `:extra') remains unsupported and
+loudly rejected exactly as before this extension (§3.5) -- this subset
+still does not implement unscoped method combination, only `:extra' and
+its GNU-mandated combination with a single before/after/around
+qualifier.  Any other leading non-list token is a loud `error' naming it.
+
+Exactly one specializer, on argument position 0 only: a type name
+\(builtin `cl-typep' symbol or `cl-defstruct' name), an `(eql VALUE)'
+form, or a bare (unspecialized) symbol (§2.1/§3.1).  The method body can
+call `cl-call-next-method'/`cl-next-method-p' (§2.2)."
+  (let (extra combinator)
+    (when (and args (eq (car args) :extra))
+      (unless (and (cdr args) (stringp (cadr args)))
+        (error "cl-defmethod %s: :extra must be followed by a string" name))
+      (setq extra (cadr args) args (cddr args)))
     (when (and args (not (listp (car args))))
-      (setq qualifier (car args) args (cdr args)))
-    (when qualifier
-      (error "cl-defmethod %s: unsupported method-combination qualifier \
-%S (Doc 185 subset: primary methods only)"
-             name qualifier))
+      (let ((q (car args)))
+        (unless (and extra (memq q '(:before :after :around)))
+          (error "cl-defmethod %s: unsupported method-combination qualifier \
+%S (Doc 185 subset: primary methods only, or `:extra STRING' optionally \
+combined with one of :before/:after/:around)"
+                 name q))
+        (setq combinator q args (cdr args))))
     (let* ((arglist (car args))
            (body (cdr args))
            (parsed (nelisp-cl-generic--parse-arglist arglist name))
@@ -4996,6 +5148,7 @@ method body can call `cl-call-next-method'/`cl-next-method-p' (§2.2)."
          (nelisp-cl-generic--register-method
           ',name
           (list :kind ',kind :type-name ',type-name :value ,value-form
+                :extra ,extra :combinator ',combinator
                 :fn (lambda ,plain-arglist ,@body)))))))
 
 ;; ---------------------------------------------------------------------------

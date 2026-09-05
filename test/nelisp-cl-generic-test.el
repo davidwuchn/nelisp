@@ -428,5 +428,151 @@ macroexpansion-time error rather than a silently-ignored default method."
   (cl-defmethod cgt-bare-only ((x cgt-bare-thing)) 'bare-ok)
   (should (eq 'bare-ok (cgt-bare-only (make-cgt-bare-thing)))))
 
+;;; §2.2 extension -- `:extra STRING' qualifier.
+;;;
+;;; Every ordering claim below was cross-checked this session against
+;;; real, unmodified Emacs 31.1's own `cl-generic' (a throwaway batch
+;;; process, `(require 'cl-lib)'/`(require 'cl-generic)', no
+;;; `nelisp-cl-macros' loaded) -- these are parity forms, not just
+;;; internally-consistent assertions.  This is the exact shape of the
+;;; real-world bug this extension fixes: real Emacs's own
+;;; `lisp/emacs-lisp/cl-lib.el' (loaded transitively by
+;;; `(require 'cl-lib)', e.g. from `eat.el') has, at its own top level:
+;;;   (cl-defmethod cl-generic-generalizers :extra "derived-types" (type)
+;;;     ...)
+;;; an UNSPECIALIZED-arg `:extra' method on the same generic function
+;;; real Emacs's own `cl-generic.el' already gives a plain (non-`:extra')
+;;; unspecialized primary method -- exactly the shape of `CaseB'/`CaseB2'
+;;; below.
+
+(nelisp-cl-generic-deftest nelisp-cl-generic/extra-methods-coexist-newest-first ()
+  "Parity form: real Emacs 31.1, same generic/methods, defined in the
+same order (primary, then `:extra' \"e1\", then `:extra' \"e2\"), gives
+call order `(e2 e1 primary)' -- most-recently-defined first, ending at
+the plain primary method (which is simply the chronologically oldest
+member of this group, not specially fixed-last: a separate real-Emacs
+probe this session, defining `:extra' \"e1\" FIRST, then the plain
+primary, then `:extra' \"e2\" LAST, gave `(e2 primary e1)' -- pure
+definition-recency order)."
+  (let (order)
+    (cl-defgeneric cgt-extra-basic (x))
+    (cl-defmethod cgt-extra-basic ((x integer))
+      (push 'primary order)
+      (if (cl-next-method-p) (cl-call-next-method) 'done))
+    (cl-defmethod cgt-extra-basic :extra "e1" ((x integer))
+      (push 'e1 order) (cl-call-next-method))
+    (cl-defmethod cgt-extra-basic :extra "e2" ((x integer))
+      (push 'e2 order) (cl-call-next-method))
+    (cgt-extra-basic 5)
+    (should (equal (reverse order) '(e2 e1 primary)))))
+
+(nelisp-cl-generic-deftest nelisp-cl-generic/extra-method-redefinition-keeps-position-not-front ()
+  "Real Emacs's own `cl-generic-define-method' comment: \"Keep the
+ordering; important for methods with :extra qualifiers.\" -- redefining
+\"e1\" (the OLDEST of the three) after \"e2\" already exists must NOT move
+it to the front; it stays between \"e2\" and the primary method.  Parity
+form: real Emacs 31.1 gives the identical `(e2 re-e1 primary)', not
+`(re-e1 e2 primary)'."
+  (let (order)
+    (cl-defgeneric cgt-extra-redef (x))
+    (cl-defmethod cgt-extra-redef ((x integer))
+      (push 'primary order) (if (cl-next-method-p) (cl-call-next-method) 'done))
+    (cl-defmethod cgt-extra-redef :extra "e1" ((x integer))
+      (push 'e1 order) (cl-call-next-method))
+    (cl-defmethod cgt-extra-redef :extra "e2" ((x integer))
+      (push 'e2 order) (cl-call-next-method))
+    (cl-defmethod cgt-extra-redef :extra "e1" ((x integer))
+      (push 're-e1 order) (cl-call-next-method))
+    (cgt-extra-redef 5)
+    (should (equal (reverse order) '(e2 re-e1 primary)))))
+
+(nelisp-cl-generic-deftest nelisp-cl-generic/extra-on-unspecialized-arg-not-ambiguous ()
+  "The real bug this extension fixes: an UNSPECIALIZED `:extra' method
+alongside an unspecialized primary (real Emacs's own `cl-lib.el' does
+exactly this to `cl-generic-generalizers').  Before this extension, two
+unspecialized methods were the SAME `nelisp-cl-generic--same-specializer-p'
+identity and one replaced the other; now they coexist, newest first, with
+NO ambiguous-dispatch error (unspecialized has no such check regardless,
+but this confirms both actually run, in order, via a counter)."
+  (let ((ran 0))
+    (cl-defgeneric cgt-extra-unspec (x))
+    (cl-defmethod cgt-extra-unspec (specializer) 'base-generalizer)
+    (cl-defmethod cgt-extra-unspec :extra "derived-types" (type)
+      (setq ran (1+ ran))
+      (if (cl-next-method-p) (cl-call-next-method) 'no-next))
+    (should (eq 'base-generalizer (cgt-extra-unspec 'anything)))
+    (should (= ran 1))))
+
+(nelisp-cl-generic-deftest nelisp-cl-generic/extra-same-type-name-not-ambiguous ()
+  "Two `:extra' variants of the SAME builtin type-name must NOT trip the
+`ambiguous dispatch' check (§3.5) that guards genuinely DIFFERENT
+type-names tying -- `nelisp-cl-generic/ambiguous-builtin-type-dispatch-
+signals' above still covers that real ambiguity, unchanged."
+  (let (order)
+    (cl-defgeneric cgt-extra-same-type (x))
+    (cl-defmethod cgt-extra-same-type ((x integer))
+      (push 'primary order) 'done)
+    (cl-defmethod cgt-extra-same-type :extra "e1" ((x integer))
+      (push 'e1 order) (cl-call-next-method))
+    (cgt-extra-same-type 5)
+    (should (equal (reverse order) '(e1 primary)))))
+
+(nelisp-cl-generic-deftest nelisp-cl-generic/extra-requires-a-string-signals ()
+  (cl-defgeneric cgt-extra-nostr (x))
+  (should-error
+   (nelisp-cl-generic-test--eval (cl-defmethod cgt-extra-nostr :extra (x) 'nope))
+   :type 'error))
+
+(nelisp-cl-generic-deftest nelisp-cl-generic/extra-combined-with-before-after-around ()
+  "Parity form: real Emacs 31.1, the identical generic/methods, gives
+call order `(around-enter before primary after around-leave)' and a
+final result of `primary-result' -- before/after run for effect only and
+never change the primary chain's own return value; `:around' wraps the
+whole combination and can inspect/alter what `cl-call-next-method'
+returns.  `:extra' must be the FIRST qualifier when combined with a
+combinator -- real Emacs's own `cl--generic-standard-method-combination'
+only strips a LEADING `:extra STRING' pair, confirmed this session:
+`(cl-defmethod bar :around :extra \"x\" (...) ...)' (combinator first)
+signals \"Unsupported qualifiers\" in real, unmodified Emacs 31.1 too."
+  (let (order)
+    (cl-defgeneric cgt-extra-combo (x))
+    (cl-defmethod cgt-extra-combo ((x integer))
+      (push 'primary order) 'primary-result)
+    (cl-defmethod cgt-extra-combo :extra "be1" :before ((x integer))
+      (push 'before order))
+    (cl-defmethod cgt-extra-combo :extra "ae1" :after ((x integer))
+      (push 'after order))
+    (cl-defmethod cgt-extra-combo :extra "ar1" :around ((x integer))
+      (push 'around-enter order)
+      (prog1 (cl-call-next-method)
+        (push 'around-leave order)))
+    (should (eq 'primary-result (cgt-extra-combo 7)))
+    (should (equal (reverse order)
+                   '(around-enter before primary after around-leave)))))
+
+(nelisp-cl-generic-deftest nelisp-cl-generic/extra-combinator-wrong-order-signals ()
+  "`:around :extra STRING' (combinator before `:extra') is not the same
+qualifier list as `:extra STRING :around' -- real Emacs itself rejects
+the former (measured this session) with \"Unsupported qualifiers\"; this
+subset rejects it too, at `cl-defmethod' macroexpansion time, same as
+every other unsupported qualifier shape (§3.5)."
+  (cl-defgeneric cgt-extra-wrong-order (x))
+  (should-error
+   (nelisp-cl-generic-test--eval
+    (cl-defmethod cgt-extra-wrong-order :around :extra "x" (x) 'nope))
+   :type 'error))
+
+(nelisp-cl-generic-deftest nelisp-cl-generic/no-primary-method-signals ()
+  "A call whose only applicable methods are `:extra'+combinator (no
+plain, no-combinator method at all, `:extra' or otherwise) signals
+`cl-no-primary-method' -- real Emacs's own condition name/message, not
+reachable in this subset before the `:extra' extension (previously any
+qualifier other than none was rejected at `cl-defmethod' time, so \"some
+methods applicable, none of them primary\" could never arise)."
+  (cl-defgeneric cgt-no-primary (x))
+  (cl-defmethod cgt-no-primary :extra "b" :before ((x integer))
+    (ignore x))
+  (should-error (cgt-no-primary 5) :type 'cl-no-primary-method))
+
 (provide 'nelisp-cl-generic-test)
 ;;; nelisp-cl-generic-test.el ends here
