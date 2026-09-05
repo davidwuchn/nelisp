@@ -246,6 +246,10 @@ under `dev/nelisp/`, safe to delete or keep as future repro material):
   but `getenv "PATH"` and `make-string` both come back
   `multibyte-string-p` nil, and the flat-regardless-of-position timing
   confirms they are not taking that arm).
+- **Superseded by §6.11**, which re-measured this on 5931f980 with two
+  instruments and got 1-31us, not 0.15-0.36ms, and a 20-30x spread rather
+  than a flat cost.  The paragraph below is left as written because four
+  later sections quote it.
 - Every basic primitive measured costs about the same, ~0.15-0.36ms per
   call, regardless of which one: `(+ 1 1)`, `(aref VECTOR 0)`, `(aref
   STRING 0)`, `(car CONS)`, a zero-arg user-defined function call, `(setq
@@ -1185,9 +1189,11 @@ fire.  Small, and the only item in the rule-tree cost that is ours.
 
 **5. Interpreter per-operation cost (THIS repository).  Open-ended.**
 
-§3's 262us is what everything above is a multiple of.  It is the only
-lever that helps every workload rather than one file, and the only one
-with no owner but us.  §6.5's unexplained ~5% and §6.8's allocation-shaped
+§3's 262us is what everything above is a multiple of -- though §6.11 puts
+a basic operation at 1-31us, so the multiplier is smaller than written
+here and the option's size shrinks with it.  It is still the only lever
+that helps every workload rather than one file, and the only one with no
+owner but us.  §6.5's unexplained ~5% and §6.8's allocation-shaped
 kernel time are the two concrete threads into it.
 
 **6. Native AOT on windows-x86_64.  Unknown payoff -- measure first.**
@@ -1474,7 +1480,9 @@ Measured, and it is not:
   per trivial operation predicts.
 - That same loop took 78.66s, i.e. **262µs per `(+ 1 1)`** -- §3's
   0.15-0.4ms per basic operation, reproduced independently on today's
-  binary.
+  binary.  §6.11 re-measured the same form on 5931f980 and got 7-17us;
+  neither this number nor the allocation reading in the bullet above
+  reproduces there.
 
 So Defender is not why this is slow; the interpreter is.  Defender and the
 search indexer do explain the VARIANCE, which is why the floor control
@@ -1759,9 +1767,107 @@ unaffected by this measurement.
 
 Option 5 -- the interpreter's own per-operation cost, §6.8's 262us -- is
 untouched by all of this and remains the only lever that helps every
-workload.  The IME numbers make the scale concrete: one keystroke through
+workload.  §6.11 re-measures that floor and finds it much lower than
+262us, which changes the option's size but not its rank.  The IME numbers make the scale concrete: one keystroke through
 the JSON-RPC boundary costs 312ms with a compact snapshot and 742ms
 without, against the 50ms a usable IME needs.  The two primitive
 regressions fixed alongside this work (`string-to-number' 5.8x,
 `make-hash-table' 2.2x) did not move that number measurably, and neither
 would native AOT at 12%.
+
+** §6.11 The per-operation floor, measured again: §3's number does not reproduce
+
+§3 records that "every basic primitive measured costs about the same,
+~0.15-0.36ms per call, regardless of which one", and §6.8's 262us for
+`(+ 1 1)' is quoted from it in four later places -- as the multiplier
+under every ranked option, and as the reason option 5 is the only lever
+that helps every workload.  Both halves of that sentence were re-measured
+on 5931f980 and neither holds.
+
+*** The numbers
+
+Two instruments, because this document already records (§6.8, "On
+measurement variance") that this host moves timings 2-3x between runs and
+that an average over a contaminated sample is still contaminated.
+
+The first runs each shape in its own process, 20000 iterations of a
+`while' loop, median of three, and subtracts an empty loop measured the
+same way.  The second runs every shape in ONE process, round-robin over
+three rounds, keeping each shape's best -- so a drift inside the session
+spreads over all of them and the shapes stay comparable to each other,
+which is the comparison §3 actually makes.
+
+| shape                  | separate processes | one process |
+|------------------------+--------------------+-------------|
+| empty loop (per turn)  |               61us |        22us |
+| `(+ 1 1)'              |                7us |        17us |
+| `(+ i 1)'              |               12us |        13us |
+| `(car CONS)'           |               13us |         1us |
+| `(aref VECTOR 3)'      |               18us |        16us |
+| `(aref STRING 3)'      |               19us |        14us |
+| `(cons 1 2)'           |               25us |         7us |
+| `(concat "ab" "cd")'   |               25us |        11us |
+| `(gethash 'k TABLE)'   |               28us |        64us |
+| `(list 1 2 3)'         |               30us |         8us |
+| `(make-vector 4 0)'    |               31us |        12us |
+| `(let ((x 1)) x)'      |               57us |        15us |
+| zero-argument funcall  |               69us |        12us |
+| `(substring STR 2 5)'  |              223us |       128us |
+| `(nthcdr 5 LIST)'      |                  - |       330us |
+| `(nth 5 LIST)'         |              521us |       399us |
+
+*** What that changes
+
+**A basic operation is not 262us.**  It is 1-31us, whichever instrument
+is used, and `(+ 1 1)' -- the exact form §6.8 quotes -- is 7-17us.  The
+gap is 15-40x.  This document should not be read as saying an interpreter
+call costs a quarter of a millisecond, and the four places quoting that
+number are quoting a measurement that no longer reproduces.  Whether the
+runtime got faster between 2026-08-30 and 5931f980 or the two
+measurements were never the same measurement is not settled here, and
+saying which would need the old harness, which is not in the tree.  What
+is settled is that the number should be re-measured before it is used.
+
+**They are not all the same, either.**  §3's "regardless of which one"
+was true of the six shapes it tried; over sixteen the spread is 20-30x,
+and it is not noise -- the ordering is identical under both instruments.
+
+**Allocation is not what separates them.**  §3 reads the ~14 heap
+allocations it counted per `(+ 1 1)' as the thing driving the flat
+per-call cost.  Whatever those allocations are, they do not show up as a
+difference between shapes that allocate and shapes that do not: `(cons
+1 2)' at 7us and `(list 1 2 3)' at 8us are CHEAPER than `(aref VECTOR 3)'
+at 16us and `(gethash 'k TABLE)' at 64us, neither of which allocates a
+Lisp object.  The allocation thread in option 5 is not refuted -- nobody
+has re-counted the allocations -- but it can no longer be reached from
+these timings.
+
+*** Where the time actually is
+
+The two outliers are `nth'/`nthcdr' and `substring', and the first one is
+explained: `nthcdr' was walked by the prelude, one interpreted iteration
+per element, while `car', `cdr', `length' and `elt' all have reader
+builtins.  A builtin walk takes `(nthcdr 5 LIST)' from 330us to 68us and
+`(nth 5 LIST)' from 399us to 104us, and the builtin alone is 19us -- the
+rest is the prelude wrapper that keeps a bignum count on the old path.
+
+`substring' at 128-223us is the one left.  It is not obviously wrong the
+way `nthcdr' was -- it allocates and it decodes UTF-8 -- but it is five
+to ten times a basic operation and the lattice conversion probes it once
+per candidate edge, so it is where the next look should go.
+
+*** For the ranked options
+
+Option 5 keeps its place as the only lever that helps every workload, but
+its size changes.  A keystroke through the IME on this runtime is
+roughly 76ms warm, which at 1-31us an operation is thousands of
+operations, not hundreds: the work is real and the interpreter is not
+fifteen times slower than it looked.  Closing the remaining gap to a
+usable IME is therefore more about doing less per keystroke than about
+the floor -- which is what the four IME-side changes measured alongside
+this actually did, taking a keystroke from 742ms to 222ms cold and 76ms
+warm without touching the interpreter at all.
+
+The harness is `floor-cases.el' / `floor-bench.py' (separate processes)
+and `floor-inproc.el' (one process); neither is in the tree, both are a
+page of elisp, and either should be re-run rather than trusted from here.
