@@ -4530,6 +4530,69 @@ not only to compiled artifacts."
 a predicate raw in a value position."
   (should-not nelisp-aot-compiler--aot-test-position))
 
+(ert-deftest nelisp-aot-compiler/arith-literal-operand-after-int-unwrap-e2e ()
+  "`(- (sexp-int-unwrap p) 1)\' pushes the literal and pops it back: EXIT=42.
+
+Regression pin for the operand-stack accounting of `--emit-arith\' when B is
+an immediate and A is an immediate-aware unwrap (the `nelisp_frame_stack_find_in_frame\'
+shape).  Statically the object must contain `mov rax,1; push rax\' (48 C7 C0
+01 00 00 00 50) -- the literal IS pushed -- and at runtime the probe must
+return payload-1 for a host-provided Sexp::Int(43), which is only possible
+when the matching `pop r10\' recovers that same literal."
+  (skip-unless (and (executable-find "ld")
+                    (eq system-type 'gnu/linux)))
+  (let* ((probe-path (make-temp-file "nelisp-arith-lit-probe-" nil ".o"))
+         (host-path (make-temp-file "nelisp-arith-lit-host-" nil ".o"))
+         (bin-path (make-temp-file "nelisp-arith-lit-bin-" nil ""))
+         (data-bytes
+          (concat
+           (unibyte-string 2 0 0 0 0 0 0 0)
+           (unibyte-string 43 0 0 0 0 0 0 0)))
+         (host-text
+          (concat
+           (unibyte-string #x48 #x8D #x3D 0 0 0 0)   ; lea rdi,[rip+int_value]
+           (unibyte-string #xE8 0 0 0 0)             ; call probe
+           (unibyte-string #x48 #x89 #xC7)           ; mov rdi,rax
+           (unibyte-string #xB8 #x3C 0 0 0)          ; mov eax,60
+           (unibyte-string #x0F #x05))))             ; syscall
+    (unwind-protect
+        (progn
+          (nelisp-aot-compile-to-object
+           '(defun probe (p) (- (sexp-int-unwrap p) 1))
+           probe-path)
+          (let ((bytes (with-temp-buffer
+                         (set-buffer-multibyte nil)
+                         (insert-file-contents-literally probe-path)
+                         (buffer-string))))
+            (should (string-search
+                     (unibyte-string #x48 #xC7 #xC0 #x01 0 0 0 #x50) bytes)))
+          (nelisp-elf-write-binary
+           host-path
+           (list :e-type 'rel
+                 :text host-text
+                 :data data-bytes
+                 :symbols (list
+                           (list :name "int_value" :value 0
+                                 :size 16 :section 'data
+                                 :bind 'global :type 'object)
+                           (list :name "_start" :value 0
+                                 :size (length host-text)
+                                 :section 'text :bind 'global :type 'func)
+                           (list :name "probe" :section 'undef
+                                 :bind 'global :type 'notype))
+                 :relocs (list
+                          (list :section 'text :offset 3
+                                :symbol "int_value" :type 'pc32 :addend -4)
+                          (list :section 'text :offset 8
+                                :symbol "probe" :type 'plt32 :addend -4))))
+          (should (zerop (call-process "ld" nil nil nil
+                                       "-o" bin-path probe-path host-path)))
+          (set-file-modes bin-path #o755)
+          (should (= 42 (call-process bin-path nil nil nil))))
+      (ignore-errors (delete-file probe-path))
+      (ignore-errors (delete-file host-path))
+      (ignore-errors (delete-file bin-path)))))
+
 (provide 'nelisp-aot-compiler-test)
 
 ;;; nelisp-aot-compiler-test.el ends here

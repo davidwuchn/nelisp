@@ -2219,6 +2219,33 @@ real) native call\"."
           (should (eq (cdr arm) shared))
           (should-not (memq (car-safe (cdr arm)) real-impls)))))))
 
+(ert-deftest nelisp-standalone-target-gc-conserv-owner-rejects-pointer-words ()
+  "`nl_gc_conserv_owner\' must not take a 64-bit pointer word for a block header.
+
+`nl_hdr_bt\' masks the header word to its low 32 bits.  A native-stack word W
+that points 8 bytes past a live record\'s pointer slot therefore used to pass
+the owner check: the pointer at W-8 masked to a plausible BLOCK_TOTAL, the
+two-level next-header probe passed on another masked pointer, and
+`nl_hdr_set_mark\' rewrote the slot as (low32 & ~7) + 4 -- a lexframe
+hash-table\'s buckets word became 0x689aec / 0x21a764 / 0x72828c in three
+consumer boot cores and the next lookup faulted in `nl_vector_slot_ptr\'.  A
+real header never has a bit above 31 set, so both candidate words are
+required to have a zero high half before anything is written."
+  (cl-labels ((tree-member-p
+               (needle tree)
+               (cond
+                ((equal needle tree) t)
+                ((consp tree)
+                 (or (tree-member-p needle (car tree))
+                     (tree-member-p needle (cdr tree)))))))
+    (should (tree-member-p '(= (sar (ptr-read-u64 hdr 0) 32) 0)
+                           nelisp-standalone--gc-source))
+    (should (tree-member-p '(= (sar (ptr-read-u64 next 0) 32) 0)
+                           nelisp-standalone--gc-source))
+    ;; The pin itself is still there: this guard narrows, it does not remove.
+    (should (tree-member-p '(nl_seq2 (nl_hdr_set_mark hdr 4) 1)
+                           nelisp-standalone--gc-source))))
+
 (provide 'nelisp-standalone-target-test)
 
 ;;; nelisp-standalone-target-test.el ends here

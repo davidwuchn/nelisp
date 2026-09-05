@@ -2911,21 +2911,40 @@ arm64 Linux has no legacy x86 numbering)."
     ;;       bytes later, so this rejects the false positives that (b) alone
     ;;       lets through.
     ;; ADDITIVE keep-alive: sound for mark+sweep (only ever retains more).
+    ;;   (d) the RAW header word at W-8 (and at the next block) has no bit
+    ;;       above 31 set.  A real header is BLOCK_TOTAL | mark and BLOCK_TOTAL
+    ;;       is < 4 GiB by construction; `nl_hdr_bt' masks to the low 32 bits,
+    ;;       so without this check a 64-bit POINTER word sitting at W-8 -- e.g.
+    ;;       W = &record.slots[k+1] left on the native stack by a slot-address
+    ;;       computation while slots[k] holds a child pointer -- masks to a
+    ;;       plausible BT (any 0x00007fXX_00yyyyyy pointer masks to yyyyyy),
+    ;;       the two-level check passes, and `nl_hdr_set_mark' rewrites that
+    ;;       pointer as (low32 & ~7) + 4: it loses its high half.  Measured:
+    ;;       three consumer boot cores, each a lexframe hash-table whose
+    ;;       buckets word read 0x689aec / 0x21a764 / 0x72828c = the buckets
+    ;;       Sexp-slot address & 0xFFFFFFF8, + 4, with slots[2] = 5 (tag 5 <
+    ;;       16) 8 bytes after it; the next-hop word masked into [16, 16 MiB]
+    ;;       in all three.  Before `nl_hdr_bt' was masked (d145e3c02) the raw
+    ;;       pointer failed (b) by itself; this restores that rejection.
     (defun nl_gc_conserv_owner (w)
       (let ((hdr (- w 8)))
         (if (= (nl_gc_in_arena hdr) 0) 0
           (if (= (nl_gc_is_boot hdr) 1) 0
-            (let ((bt (nl_hdr_bt hdr)))
-              (if (< bt 16) 0
-                (if (< 16777216 bt) 0
-                  (if (= (nl_gc_in_arena (+ hdr (- bt 1))) 0) 0
-                    (let ((next (+ hdr bt)))
-                      (if (= (nl_gc_in_arena next) 0)
-                          (if (= (nl_hdr_mark hdr) 0) (nl_seq2 (nl_hdr_set_mark hdr 4) 1) 0)   ; Doc155 §8.12: PIN (mark 4) — keep alive; precise marker recurses it
-                        (let ((bt2 (nl_hdr_bt next)))
-                          (if (< bt2 16) 0
-                            (if (< 16777216 bt2) 0
-                              (if (= (nl_hdr_mark hdr) 0) (nl_seq2 (nl_hdr_set_mark hdr 4) 1) 0))))))))))))))
+            (if (= (sar (ptr-read-u64 hdr 0) 32) 0)
+                (let ((bt (nl_hdr_bt hdr)))
+                  (if (< bt 16) 0
+                    (if (< 16777216 bt) 0
+                      (if (= (nl_gc_in_arena (+ hdr (- bt 1))) 0) 0
+                        (let ((next (+ hdr bt)))
+                          (if (= (nl_gc_in_arena next) 0)
+                              (if (= (nl_hdr_mark hdr) 0) (nl_seq2 (nl_hdr_set_mark hdr 4) 1) 0)   ; Doc155 §8.12: PIN (mark 4) — keep alive; precise marker recurses it
+                            (if (= (sar (ptr-read-u64 next 0) 32) 0)
+                                (let ((bt2 (nl_hdr_bt next)))
+                                  (if (< bt2 16) 0
+                                    (if (< 16777216 bt2) 0
+                                      (if (= (nl_hdr_mark hdr) 0) (nl_seq2 (nl_hdr_set_mark hdr 4) 1) 0))))
+                              0)))))))
+              0)))))
     (defun nl_gc_conserv_word (w)
       (if (= (logand w 7) 0)              ; obj ptrs are 8-aligned
           (if (= (nl_gc_in_arena w) 1)    ; within live arena data (no deref of w)
