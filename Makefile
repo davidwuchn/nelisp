@@ -1086,6 +1086,7 @@ STANDALONE_READER_SMOKES = \
   standalone-reader-pcase-quote-literal-smoke \
   standalone-reader-prelude-equal-reload-smoke \
   standalone-reader-prelude-test \
+  standalone-reader-print-large-sexp-smoke \
   standalone-reader-process-adapter-smoke \
   standalone-reader-process-adapter-smoke-red \
   standalone-reader-process-smoke \
@@ -2092,6 +2093,23 @@ alloc-check-collect: $(if $(wildcard target/nelisp target/nelisp.exe),,standalon
 standalone-reader-recursion-guard-smoke: standalone-reader
 	@bin=$(STANDALONE_BIN); \
 	timeout 180 $$bin --load tools/recursion-guard-smoke.el
+
+# `prin1-to-string' on the shapes a consumer actually serialises: a long
+# flat list, a vector of floats, a deep nest.  Added 2026-09-05 after
+# nelisp-llm reported exit 139 while printing a ~155k-float checkpoint on a
+# d145e3c02 build.  That death was the conservative-pin defect e240485bb
+# closed (see docs and the report of that fix); the printer itself walks list
+# spines with a loop and was never the faulting frame.  This smoke pins the
+# contract on the shipped binary anyway -- exact printed length, `equal'
+# read-back, exact deep-nest text, `print-level' cap -- so a printer that
+# started recursing per element, truncating, or dropping separators is one
+# red line here rather than a consumer's corrupt checkpoint.  Sizes are
+# bounded for the smoke budget; the 100k-element / ~700 KB twin lives in
+# test/nelisp-stdlib-test.el where host Emacs runs the same printer source.
+.PHONY: standalone-reader-print-large-sexp-smoke
+standalone-reader-print-large-sexp-smoke: standalone-reader
+	@bin=$(STANDALONE_BIN); \
+	timeout 180 $$bin --load tools/print-large-sexp-smoke.el
 
 # The environment, read back through `getenv' from a child that was given
 # one.  Written on wip/uncommitted-2026-08-18 by whoever first noticed that

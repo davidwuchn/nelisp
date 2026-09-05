@@ -711,3 +711,14 @@ standalone-reader-ffi-smoke|scripts/nelisp-standalone-build.el|s/("libm.so.6" . 
 # not just an arbitrary edit.
 standalone-reader-host-parity-smoke|scripts/nelisp-standalone-build.el|s/(bf_load_with_lfn args env out)/(bf_load_readable args env out)/|`load' stops binding `load-file-name', as in v1.2.0 -- every (or load-file-name buffer-file-name) idiom silently sees nil
 standalone-reader-host-parity-smoke|scripts/nelisp-stdlib-prelude.el|s/(if (fboundp .string-as-multibyte) (string-as-multibyte str) str)))/str))/|`decode-coding-string' is the identity again, as in v1.2.0 -- decoded text stays unibyte and `length' counts bytes
+# 2026-09-05 print-large-sexp smoke (tools/print-large-sexp-smoke.el), added
+# with the nelisp-llm crash investigation (both consumer faults were the
+# e240485bb conservative-pin class; the printer was never the faulting frame,
+# this smoke pins its contract on the shipped binary anyway).  The row drops
+# the element separator in `nelisp--prn-list-body' -- the ONE line in the
+# prelude with that exact text (the vector and record printers spell theirs
+# differently), so the injection lands once.  Proven with `make
+# gate-mutation-verify GATE=standalone-reader-print-large-sexp-smoke' before
+# landing: mutated, the smoke prints `FAIL: 10k-int list printed length ->
+# 60002' (exit 1); restored, `PASS: 10k-int list 70001 bytes exact, ...'.
+standalone-reader-print-large-sexp-smoke|scripts/nelisp-stdlib-prelude.el|s/(unless first (nelisp--prn-chunks-add chunks " "))/(unless first (ignore chunks " "))/|list elements print with no separator between them: a 10k-int list comes out 60002 bytes instead of 70001, text no reader could take back

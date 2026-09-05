@@ -556,6 +556,124 @@ and NeLisp-only defuns see (KEY VALUE) — not the raw host callee."
           (when (fboundp (car entry))
             (fmakunbound (car entry))))))))
 
+(defun nelisp-stdlib-test--load-printer-defuns ()
+  "Evaluate the printer `defun's of lisp/nelisp-stdlib-prn.el in this Emacs.
+Only the `nelisp--prn-*' helpers and `prin1-to-string' are taken: `prin1'
+and `terpri' write to the standalone's stdout primitive and, being C subrs
+here, would make native-comp install trampolines for definitions that
+cannot run on the host.  Return an alist of (SYMBOL . PREVIOUS-DEFINITION-
+OR-NIL) so the caller can restore the host's own definitions afterwards."
+  (let ((forms nil))
+    (with-temp-buffer
+      (insert-file-contents
+       (expand-file-name "lisp/nelisp-stdlib-prn.el" default-directory))
+      (goto-char (point-min))
+      (let ((done nil))
+        (while (not done)
+          (condition-case nil
+              (let ((form (read (current-buffer))))
+                (when (and (consp form) (eq (car form) 'defun)
+                           (or (eq (cadr form) 'prin1-to-string)
+                               (string-prefix-p "nelisp--prn-"
+                                                (symbol-name (cadr form)))))
+                  (push form forms)))
+            (end-of-file (setq done t))))))
+    (setq forms (nreverse forms))
+    (let ((saved (mapcar (lambda (form)
+                           (cons (cadr form)
+                                 (and (fboundp (cadr form))
+                                      (symbol-function (cadr form)))))
+                         forms)))
+      (dolist (form forms)
+        (eval form t))
+      saved)))
+
+(defun nelisp-stdlib-test--restore-defuns (saved)
+  (dolist (entry saved)
+    (if (cdr entry)
+        (fset (car entry) (cdr entry))
+      (when (fboundp (car entry))
+        (fmakunbound (car entry))))))
+
+(ert-deftest nelisp-stdlib-printer-large-flat-structure-iterates-spine ()
+  "`prin1-to-string' walks 100k elements (~700 KB of output) with a loop.
+The consumer report of 2026-09-05 (nelisp-llm) serialised a checkpoint
+plist of ~155k floats; the death it saw was a collector defect, but the
+printer's own contract is what this pins: one eval level per NESTING level,
+never per element.  Under `max-lisp-eval-depth' 400 a printer that recursed
+along the spine would signal `excessive-lisp-nesting' long before element
+400; the real one prints all 100 000 and the text reads back `equal'.
+Both shapes the consumer writes are covered -- a flat list and a plist of
+float vectors (a tensor dump)."
+  (let ((saved (nelisp-stdlib-test--load-printer-defuns)))
+    (unwind-protect
+        (let* ((n 100000)
+               (flat (let ((l nil) (i n))
+                       (while (> i 0)
+                         (setq i (1- i))
+                         (setq l (cons (+ 100000 i) l)))
+                       l))
+               (tensors (let ((acc nil) (k 0))
+                          (while (< k 50)
+                            (let ((v (make-vector 2000 0.0)) (i 0))
+                              (while (< i 2000)
+                                (aset v i (* 0.0703125
+                                             (- (mod (+ (* (1+ i) 11) k) 113) 56)))
+                                (setq i (1+ i)))
+                              (setq acc (cons (list :w (list 40 50) :data v) acc)))
+                            (setq k (1+ k)))
+                          (list :format "nl-llm-ckpt-v1" :step 23 :blocks acc)))
+               (flat-text nil)
+               (tensor-text nil))
+          (let ((max-lisp-eval-depth 400)
+                (print-length nil)
+                (print-level nil))
+            (setq flat-text (prin1-to-string flat))
+            (setq tensor-text (prin1-to-string tensors)))
+          ;; "(" + 100000 six-digit integers + 99999 spaces + ")"
+          (should (= (length flat-text) (+ (* 7 n) 1)))
+          (should (equal (car (read-from-string flat-text)) flat))
+          ;; 100 000 floats of ~8-9 characters: comfortably past 700 KB.
+          (should (> (length tensor-text) 700000))
+          (should (equal (car (read-from-string tensor-text)) tensors)))
+      (nelisp-stdlib-test--restore-defuns saved))))
+
+(ert-deftest nelisp-stdlib-printer-deep-nesting-exact-and-guarded ()
+  "A deep nest prints exactly; a nest past the eval budget signals, not dies.
+Depth is the one axis the printer does recurse on (that is what
+`print-level' bounds), so two things are pinned: 200 levels print as 200
+\"(\" + nil + 200 \")\" and `print-level' 3 caps a deeper nest exactly as
+Emacs does (\"(((...)))\"), and a 100 000-level nest under the default
+eval budget surfaces the host's `excessive-lisp-nesting' as an ordinary
+error -- no `condition-case' inside the printer may swallow it into a
+truncated string, and nothing may loop forever.  The standalone twin is
+tools/print-large-sexp-smoke.el, whose depth guard is `rec_max'
+(tools/recursion-guard-smoke.el)."
+  (let ((saved (nelisp-stdlib-test--load-printer-defuns)))
+    (unwind-protect
+        (cl-flet ((nest (depth)
+                    (let ((x nil) (i 0))
+                      (while (< i depth)
+                        (setq x (list x))
+                        (setq i (1+ i)))
+                      x)))
+          ;; Interpreted, each nesting level costs the host several eval
+          ;; levels (200 levels overran the default 1600 budget when this
+          ;; was first run), so the exact case gets a budget that a
+          ;; per-level recursion fits in and a per-ELEMENT one would not.
+          (let ((print-length nil) (print-level nil)
+                (max-lisp-eval-depth 20000))
+            (should (equal (prin1-to-string (nest 200))
+                           (concat (make-string 200 ?\() "nil"
+                                   (make-string 200 ?\))))))
+          (let ((print-level 3) (print-length nil))
+            (should (equal (prin1-to-string (nest 4)) "(((...)))")))
+          (let ((print-length nil) (print-level nil)
+                (max-lisp-eval-depth 1600))
+            (let ((err (should-error (prin1-to-string (nest 100000)))))
+              (should (memq (car err) '(excessive-lisp-nesting error))))))
+      (nelisp-stdlib-test--restore-defuns saved))))
+
 (ert-deftest nelisp-stdlib-bit-arithmetic ()
   (should (= 4 (nelisp-eval '(ash 1 2))))
   (should (= 1 (nelisp-eval '(logand 3 5))))
