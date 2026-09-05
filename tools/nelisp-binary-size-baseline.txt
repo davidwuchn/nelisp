@@ -483,5 +483,5 @@
 # 0 natively compiled functions to 4 on the same input, because
 # `nelisp-aot-compiler--emit-extern-call' is written with parallel `for'
 # clauses and had been compiling to nothing.
-size 8382448
+size 8572368
 slack-pct 2

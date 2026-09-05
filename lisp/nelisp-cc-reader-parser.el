@@ -427,6 +427,10 @@
        ((= esc-byte 67)
         (nelisp_reader_p_decode_char_ctrl
          payload-slot (+ start 1)))
+       ;; \\^X -> control modifier (caret synonym for `\\C-').
+       ((= esc-byte 94)
+        (nelisp_reader_p_decode_char_caret
+         payload-slot (+ start 1)))
        ;; \\M-X -> meta modifier (set bit 27 = 0x8000000).
        ((= esc-byte 77)
         (nelisp_reader_p_decode_char_meta
@@ -445,12 +449,22 @@
 
     (defun nelisp_reader_p_decode_char_ctrl (payload-slot start)
       ;; \\C-X — expect `-' at START, then the control target at START+1.
-      ;; Control char = (byte & 0x1f).
+      ;; Control char = (byte & 0x1f), except `?' denotes DEL (127).
       (if (>= (str-len payload-slot) (+ start 2))
           (if (= (str-byte-at payload-slot start) 45)
-              (logand (str-byte-at payload-slot (+ start 1)) 31)
+              (if (= (str-byte-at payload-slot (+ start 1)) 63)
+                  127
+                (logand (str-byte-at payload-slot (+ start 1)) 31))
             0)
         0))
+
+    (defun nelisp_reader_p_decode_char_caret (payload-slot start)
+      ;; \\^X — START points directly at the control target.
+      (if (>= start (str-len payload-slot))
+          0
+        (if (= (str-byte-at payload-slot start) 63)
+            127
+          (logand (str-byte-at payload-slot start) 31))))
 
     (defun nelisp_reader_p_decode_char_meta (payload-slot start)
       ;; \\M-X — expect `-' at START, then the meta target at START+1.
@@ -485,9 +499,13 @@
        ((= inner 67)
         (if (>= (str-len payload-slot) (+ start 3))
             (if (= (str-byte-at payload-slot (+ start 1)) 45)
-                (logand (str-byte-at payload-slot (+ start 2)) 31)
+                (if (= (str-byte-at payload-slot (+ start 2)) 63)
+                    127
+                  (logand (str-byte-at payload-slot (+ start 2)) 31))
               0)
           0))
+       ((= inner 94)
+        (nelisp_reader_p_decode_char_caret payload-slot (+ start 1)))
        ((= inner 110) 10)
        ((= inner 116) 9)
        ((= inner 114) 13)

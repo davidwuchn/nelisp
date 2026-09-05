@@ -11743,11 +11743,13 @@ baked build's own `<'/`>'/`=' arms need it too.")
                       (bf_read_syntax_error src))
                (seq (wf_dirty) (ptr-write-u64 268436448 0 prevcap) 0)))))))
     (defun bf_read_all_from_string_native (args out)
-      ;; Return all top-level forms from SRC as a proper list using the same
-      ;; native reader parser that drives standalone load/eval.  This gives
-      ;; interpreted artifact builders a bulk reader without the per-form
-      ;; `read-from-string' / `nelisp--rd-one' compatibility path.
-      (let* ((src (wf_arg_ptr args 0))
+      ;; With one argument, return all top-level forms as before.  START and
+      ;; END select the single-form cursor-returning mode used internally by
+      ;; `read-from-string'.  Reusing this existing private surface keeps the
+      ;; substrate-presence corpus stable.
+      (if (= (ptr-read-u64 (nl_cons_cdr_ptr args) 0) 7)
+          (bf_read_one_from_string_native args out)
+        (let* ((src (wf_arg_ptr args 0))
              (cursor (alloc-bytes 32 8))
              (result (alloc-bytes 32 8))
              (head (alloc-bytes 32 8))
@@ -11793,7 +11795,190 @@ baked build's own `<'/`>'/`=' arms need it too.")
            (seq
             (wf_copy32 out head)
             (ptr-write-u64 268436448 0 prevcap)
-            0)))))
+            0))))))
+    ;; Character-indexed single-form entry point for `read-from-string'.
+    ;; The production reader cursor is a UTF-8 BYTE offset; Elisp START/END
+    ;; and the returned cdr are CHARACTER indexes.  Work directly over a
+    ;; bounded view of the caller's string so repeated reads do not copy the
+    ;; unread suffix on every call.
+    (defun bf_read_one_char_to_byte (src byte char target limit)
+      (if (= (bf_string_unibyte_p src) 1)
+          target
+        (seq
+         (while (and (< char target) (< byte limit))
+           (seq (setq byte (+ byte (nl_u8_clen_at (m5_byte_at src byte))))
+                (setq char (+ char 1))))
+         byte)))
+    (defun bf_read_one_bytes_to_chars (src from to)
+      (if (= (bf_string_unibyte_p src) 1)
+          (- to from)
+        (let* ((i from) (count 0))
+          (seq
+           (while (< i to)
+             (seq
+              (if (= (logand (m5_byte_at src i) 192) 128)
+                  0
+                (setq count (+ count 1)))
+              (setq i (+ i 1))))
+           count))))
+    (defun bf_read_one_hex_p (byte)
+      (if (and (>= byte 48) (<= byte 57))
+          1
+        (if (and (>= byte 65) (<= byte 70))
+            1
+          (if (and (>= byte 97) (<= byte 102)) 1 0))))
+    ;; Return 0 for a string escape whose native lexer intentionally supports
+    ;; only a smaller bootstrap spelling than GNU read-from-string.  The
+    ;; interpreted fallback owns the complete GNU escape table.
+    (defun bf_read_one_string_escape_supported_p (src at end)
+      (if (>= at end)
+          0
+        (let* ((esc (m5_byte_at src at)))
+          (cond
+           ;; Unicode/name and Meta escapes are decoded by nelisp--rd-*.
+           ((= esc 117) 0)             ; \\u
+           ((= esc 85) 0)              ; \\U
+           ((= esc 78) 0)              ; \\N
+           ((= esc 77) 0)              ; \\M-
+           ;; Native consumes exactly two hex digits; GNU consumes the whole
+           ;; nonempty hex run.
+           ((= esc 120)
+            (if (>= (+ at 2) end)
+                0
+              (if (= (bf_read_one_hex_p (m5_byte_at src (+ at 1))) 0)
+                  0
+                (if (= (bf_read_one_hex_p (m5_byte_at src (+ at 2))) 0)
+                    0
+                  (if (and (< (+ at 3) end)
+                           (= (bf_read_one_hex_p
+                               (m5_byte_at src (+ at 3))) 1))
+                      0
+                    1)))))
+           ;; The bootstrap decoder uses `& 31' for `?', whereas GNU maps it
+           ;; to DEL.  Nested modifiers also belong to the fallback table.
+           ((= esc 67)
+            (if (and (< (+ at 2) end)
+                     (= (m5_byte_at src (+ at 1)) 45))
+                (if (= (m5_byte_at src (+ at 2)) 63)
+                    0
+                  (if (= (m5_byte_at src (+ at 2)) 92) 0 1))
+              1))
+           ((= esc 94)
+            (if (and (< (+ at 1) end)
+                     (= (m5_byte_at src (+ at 1)) 63))
+                0
+              1))
+           (t 1)))))
+    (defun bf_read_one_scan_string (src at end)
+      (let* ((ok 1))
+        (seq
+         (while (and (= ok 1) (< at end))
+           (let* ((byte (m5_byte_at src at)))
+             (cond
+              ((= byte 34)
+               (setq at end))
+              ((= byte 92)
+               (if (= (bf_read_one_string_escape_supported_p
+                       src (+ at 1) end) 1)
+                   (setq at (+ at 2))
+                 (setq ok 0)))
+              (t (setq at (+ at 1))))))
+         ok)))
+    (defun bf_read_one_skip_comment (src at end)
+      (let* ((more 1))
+        (while (and (= more 1) (< at end))
+          (if (= (m5_byte_at src at) 10)
+              (setq more 0)
+            (setq at (+ at 1)))))
+      at)
+    (defun bf_read_one_native_compatible_p (src at end)
+      (let* ((ok 1))
+        (seq
+         (while (and (= ok 1) (< at end))
+           (let* ((byte (m5_byte_at src at)))
+             (cond
+              ((= byte 59)
+               (setq at (bf_read_one_skip_comment src at end)))
+              ((= byte 34)
+               (if (= (bf_read_one_scan_string src (+ at 1) end) 1)
+                   ;; The parsed cursor bounds exactly one complete form, so
+                   ;; no later source needs inspection once its string scan
+                   ;; succeeds.  Continue conservatively for nested forms.
+                   (setq at (+ at 1))
+                 (setq ok 0)))
+              ;; Escaped atom bytes cannot open a string or spell `##'.
+              ((= byte 92) (setq at (+ at 2)))
+              ;; GNU's bare `##' is the empty-name symbol.  The load reader
+              ;; deliberately preserves the repository's historical "##"
+              ;; symbol for llama aliases, so read-from-string falls back.
+              ((and (= byte 35) (< (+ at 1) end)
+                    (= (m5_byte_at src (+ at 1)) 35))
+               (setq ok 0))
+              ;; Do not mistake a quote byte used as a character literal for
+              ;; the beginning of a string.
+              ((= byte 63)
+               (if (and (< (+ at 1) end)
+                        (= (m5_byte_at src (+ at 1)) 92))
+                   (setq at (+ at 3))
+                 (setq at (+ (+ at 1)
+                              (if (< (+ at 1) end)
+                                  (nl_u8_clen_at
+                                   (m5_byte_at src (+ at 1)))
+                                0)))))
+              (t (setq at (+ at 1))))))
+         ok)))
+    (defun bf_read_one_from_string_native (args out)
+      (let* ((src (wf_arg_ptr args 0))
+             (start (wf_argval args 1))
+             (end (wf_argval args 2))
+             (byte-len (bf_str_len src))
+             (byte-start (bf_read_one_char_to_byte src 0 0 start byte-len))
+             (byte-end (bf_read_one_char_to_byte
+                        src byte-start start end byte-len))
+             (view (alloc-bytes 32 8))
+             (cursor (alloc-bytes 32 8))
+             (result (alloc-bytes 32 8))
+             (position (alloc-bytes 32 8))
+             ;; Four parser work slots per nesting level.  2048 slots permit
+             ;; roughly 510 nested forms; deeper input cleanly declines to the
+             ;; Elisp reader without allocating a source-sized pool per call.
+             (cap (let ((n (* 4 (- byte-end byte-start))))
+                    (if (< n 256) 256 (if (> n 2048) 2048 n))))
+             (pool (alloc-bytes (* cap 32) 8))
+             (prevcap (ptr-read-u64 268436448 0)))
+        (seq
+         ;; Immutable bounded view over SRC's bytes.  The argument remains a
+         ;; live root for the duration of this builtin call.
+         (ptr-write-u64 view 0 (if (= (bf_string_unibyte_p src) 1) 14 5))
+         (ptr-write-u64 view 8 byte-end)
+         (ptr-write-u64 view 16 (bf_str_ptr src))
+         (ptr-write-u64 view 24 byte-end)
+         (ptr-write-u64 cursor 0 2)
+         (ptr-write-u64 cursor 8 byte-start)
+         (ptr-write-u64 result 0 0)
+         (ptr-write-u64 result 8 0)
+         (ptr-write-u64 268436448 0 cap)
+         (let* ((prc (nelisp_reader_parse_one view cursor result pool 0))
+                (byte-pos (ptr-read-u64 cursor 8)))
+           (if (and (= prc 1)
+                    (= (bf_read_one_native_compatible_p
+                        src byte-start byte-pos) 1))
+               (seq
+                (sexp-int-make
+                 position
+                 (+ start (bf_read_one_bytes_to_chars
+                           src byte-start byte-pos)))
+                (cons-make-with-clone result position out)
+                (ptr-write-u64 268436448 0 prevcap)
+                0)
+             ;; Nil is an internal "declined" sentinel.  Clear a parser-side
+             ;; condition (depth/raw-byte guards) because the public wrapper
+             ;; immediately retries with nelisp--rd-one.
+             (seq
+              (ptr-write-u64 268435472 0 0)
+              (wf_write_nil out)
+              (ptr-write-u64 268436448 0 prevcap)
+              0))))))
     ;; length that also handles vectors (tag 8) -> vector-len; else m5_length.
     (defun bf_length (p)
       (if (= (ptr-read-u64 p 0) 8) (vector-len p) (m5_length p)))

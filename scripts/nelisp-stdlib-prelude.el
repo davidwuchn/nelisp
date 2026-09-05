@@ -8263,7 +8263,20 @@ claimed to match, only the shape."
         (setq i (1+ i)))
       (when (and (< i n) (= (aref s i) 59)) ; ;
         (while (and (< i n) (not (= (aref s i) 10))) (setq i (1+ i)))
-        (setq go t)))
+        (setq go t))
+      ;; GNU's byte-compiler comment syntax: `#@N' skips the following N
+      ;; characters, then reading resumes at the next form.  It is handled
+      ;; beside semicolon comments because it can appear anywhere whitespace
+      ;; may, including before the first form.
+      (when (and (< (+ i 2) n)
+                 (= (aref s i) 35) (= (aref s (1+ i)) 64)
+                 (>= (aref s (+ i 2)) 48) (<= (aref s (+ i 2)) 57))
+        (let ((j (+ i 2)) (count 0))
+          (while (and (< j n) (>= (aref s j) 48) (<= (aref s j) 57))
+            (setq count (+ (* count 10) (- (aref s j) 48))
+                  j (1+ j)))
+          (setq i (min n (+ j count))
+                go t))))
     i))
 
 (defun nelisp--rd-atom-end (s i n)
@@ -8591,11 +8604,45 @@ are numbers; `1.' is the integer 1."
                     (cons v (+ i 3))))
               (cons c1 (+ i 2))))))
        ((= c 35) ; #
-         (if (and (< (1+ i) n) (= (aref s (1+ i)) 39))
-             (let ((r (nelisp--rd-one s (+ i 2) n))) (cons (list 'function (car r)) (cdr r)))
-           (let* ((e (nelisp--rd-atom-end s i n))
-                  (tok (substring s i e)))
-             (cons (intern (nelisp--rd-symbol-unescape tok)) e))))
+         (cond
+          ((and (< (1+ i) n) (= (aref s (1+ i)) 39))
+           (let ((r (nelisp--rd-one s (+ i 2) n)))
+             (cons (list 'function (car r)) (cdr r))))
+          ;; GNU's `##' denotes the empty-name interned symbol and consumes
+          ;; exactly two characters even when another atom follows.
+          ((and (< (1+ i) n) (= (aref s (1+ i)) 35))
+           (cons (intern "") (+ i 2)))
+          (t
+           (let ((j (1+ i)))
+             (while (and (< j n) (>= (aref s j) 48) (<= (aref s j) 57))
+               (setq j (1+ j)))
+             (if (and (> j (1+ i)) (< j n)
+                      (or (= (aref s j) 114) (= (aref s j) 82)))
+                 (let* ((base (string-to-number (substring s (1+ i) j)))
+                        (k (1+ j)) (negative nil) (digits 0) (value 0)
+                        (bad nil) (done nil))
+                   (when (or (< base 2) (> base 36))
+                     (signal 'invalid-read-syntax
+                             (list (format "integer, radix %d" base))))
+                   (when (and (< k n)
+                              (or (= (aref s k) 43) (= (aref s k) 45)))
+                     (setq negative (= (aref s k) 45)
+                           k (1+ k)))
+                   (while (and (< k n) (not done))
+                     (let ((v (nelisp-stdlib--digit-value (aref s k) 36)))
+                       (cond
+                        ((null v) (setq done t))
+                        ((>= v base) (setq bad t done t))
+                        (t (setq value (+ (* value base) v)
+                                 digits (1+ digits)
+                                 k (1+ k))))))
+                   (when (or (= digits 0) bad)
+                     (signal 'invalid-read-syntax
+                             (list (format "integer, radix %d" base))))
+                   (cons (if negative (- value) value) k))
+               (let* ((e (nelisp--rd-atom-end s i n))
+                      (tok (substring s i e)))
+                 (cons (intern (nelisp--rd-symbol-unescape tok)) e)))))))
        (t
          (let* ((e (nelisp--rd-atom-end s i n))
                 (raw-tok (substring s i e))
@@ -8698,6 +8745,56 @@ are numbers; `1.' is the integer 1."
                           (nelisp--read-all-from-string-native stream))))
           (if forms (car forms) (car (read-from-string stream))))
       (signal 'error (list "read: only string streams supported")))))
+
+;; The standalone-only builtin's optional START/END mode is the native
+;; single-form entry point that the guarded legacy definitions above could
+;; not use when their namespace baseline was written.  Install it without
+;; changing those public definition shapes; host Emacs never has this private
+;; builtin and therefore retains its own functions.
+(when (fboundp 'nelisp--read-all-from-string-native)
+  (fset 'read-from-string
+        (lambda (string &optional start end)
+          (nelisp--check-string string)
+          (when start
+            (unless (integerp start)
+              (signal 'wrong-type-argument (list 'integerp start))))
+          (when end
+            (unless (integerp end)
+              (signal 'wrong-type-argument (list 'integerp end))))
+          (when (or (and end (> end (length string)))
+                    (and start (> start (length string))))
+            (signal 'args-out-of-range (list string start end)))
+          (let ((given start))
+            (when (and start (< start 0))
+              (setq start (+ (length string) start))
+              (when (< start 0)
+                (signal 'args-out-of-range (list string given end)))))
+          (let* ((base (or start 0))
+                 (limit (if end
+                            (if (< end 0) (+ (length string) end) end)
+                          (length string)))
+                 (native (and (<= base limit)
+                              (nelisp--read-all-from-string-native
+                               string base limit))))
+            (if native
+                native
+              (let* ((s (if (or start end)
+                            (substring string base (or end (length string)))
+                          string))
+                     (r (nelisp--rd-one s 0 (length s))))
+                (when (and (null (car r)) (>= (cdr r) (length s))
+                           (>= (nelisp--rd-skip-ws s 0 (length s))
+                               (length s)))
+                  (signal 'end-of-file nil))
+                (cons (car r) (+ base (cdr r))))))))
+  (fset 'read
+        (lambda (&optional stream)
+          (unless (or (null stream) (stringp stream) (functionp stream))
+            (signal (if (symbolp stream) 'void-function 'invalid-function)
+                    (list stream)))
+          (if (stringp stream)
+              (car (read-from-string stream))
+            (signal 'error (list "read: only string streams supported"))))))
 
 ;; Doc 152 gate-G: give the standard built-in error symbols their
 ;; `error-conditions' so a `(condition-case ... (error H))' handler matches

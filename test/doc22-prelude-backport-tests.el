@@ -1,5 +1,6 @@
 (require 'cl-lib)
 (require 'ert)
+(require 'subr-x)
 
 (defun nelisp-doc22--prelude-defun-form (name)
   "Read the definition of NAME from the standalone prelude."
@@ -11,6 +12,105 @@
      (concat "^(defun " (regexp-quote (symbol-name name)) "\\_>"))
     (beginning-of-line)
     (read (current-buffer))))
+
+(defun nelisp-doc22--standalone-eval (expression)
+  "Evaluate EXPRESSION with the prepared standalone reader and return output."
+  (let ((binary (expand-file-name "target/nelisp" default-directory)))
+    (unless (file-executable-p binary)
+      (ert-skip "target/nelisp is not built; standalone-reader gate owns it"))
+    (with-temp-buffer
+      (let ((rc (call-process binary nil t nil "--eval" expression)))
+        (unless (= rc 0)
+          (ert-fail (format "standalone expression failed: rc=%S output=%S"
+                            rc (buffer-string))))
+        (string-trim-right (buffer-string))))))
+
+(ert-deftest nelisp-doc22-read-from-string-native-end-position-and-core-syntax ()
+  "The public reader uses the native single-form cursor for core syntax."
+  (should
+   (equal
+    (nelisp-doc22--standalone-eval
+     (concat
+      "(list"
+      " (fboundp 'nelisp--read-all-from-string-native)"
+      " (nelisp--read-all-from-string-native \"  (a b) tail\" 0 12)"
+      " (read-from-string \"xx(foo)yy\" 2 7)"
+      " (read-from-string \"é (a) tail\" 2)"
+      " (read-from-string \"#'foo\")"
+      " (read-from-string \"'foo\")"
+      " (read-from-string \"`foo\")"
+      " (read-from-string \",foo\")"
+      " (read-from-string \",@foo\")"
+      " (read \"(1 2) tail\"))"))
+    (concat
+     "(t ((a b) . 7) ((foo) . 7) ((a) . 5) ((function foo) . 5) "
+     "((quote foo) . 4) ((` foo) . 4) ((, foo) . 4) ((,@ foo) . 5) "
+     "(1 2))"))))
+
+(ert-deftest nelisp-doc22-read-from-string-native-numbers-symbols-and-records ()
+  "Native leaves, dotted pairs, escaped symbols, and records retain GNU shape."
+  (should
+   (equal
+    (nelisp-doc22--standalone-eval
+     (concat
+      "(list"
+      " (read-from-string \"42\") (read-from-string \"1.5\")"
+      " (read-from-string \"#x10\") (read-from-string \"#b101\")"
+      " (read-from-string \"(a . b)\")"
+      " (symbol-name (car (read-from-string \"\\\\,\")))"
+      " (read-from-string \"#s(foo 1)\")"
+      " (recordp (car (read-from-string \"#s(foo 1)\"))))"))
+    "((42 . 2) (1.5 . 3) (16 . 4) (5 . 5) ((a . b) . 7) \",\" (#<object> . 9) t)")))
+
+(ert-deftest nelisp-doc22-read-from-string-native-chars-and-gnu-string-escapes ()
+  "Required character literals stay native; the full string table falls back."
+  (should
+   (equal
+    (nelisp-doc22--standalone-eval
+     (concat
+      "(list"
+      " (read-from-string \"?a\") (read-from-string \"?\\\\C-x\")"
+      " (read-from-string \"?\\\\M-x\") (read-from-string \"?\\\\^?\")"
+      " (let ((cases (list"
+      "  '(34 92 117 48 48 52 49 34)"
+      "  '(34 92 85 48 48 48 49 70 54 48 48 34)"
+      "  '(34 92 78 123 85 43 52 49 125 34)"
+      "  '(34 92 120 52 49 52 34)"
+      "  '(34 92 67 45 63 34) '(34 92 94 63 34)"
+      "  '(34 92 77 45 120 34) '(34 92 48 49 50 34))))"
+      "   (mapcar (lambda (codes)"
+      "     (let ((r (read-from-string (apply #'string codes))))"
+      "       (list (string-to-list (car r)) (cdr r)))) cases)))"))
+    (concat
+     "((97 . 2) (24 . 5) (134217848 . 5) (127 . 4) "
+     "(((65) 8) ((128512) 12) ((65) 10) ((1044) 7) "
+     "((127) 6) ((127) 5) ((248) 6) ((10) 6)))"))))
+
+(ert-deftest nelisp-doc22-read-from-string-native-explicit-fallbacks-and-errors ()
+  "Fallback-only syntax is correct and keeps the established error data."
+  (should
+   (equal
+    (nelisp-doc22--standalone-eval
+     (concat
+      "(list"
+      " (nelisp--read-all-from-string-native \"#24r10\" 0 6)"
+      " (read-from-string \"#24r10\") (read-from-string \"#24rN\")"
+      " (symbol-name (car (read-from-string \"##\")))"
+      " (read-from-string (concat \"#@4abc\" (string 31) \"42\"))"
+      ;; The old Elisp reader does not accept byte-code objects: preserve its
+      ;; one-token result rather than claiming a native byte-code Sexp exists.
+      " (read-from-string \"#[0 \\\"x\\\" [] 0]\")"
+      " (condition-case e (read-from-string \"\") (error e))"
+      " (condition-case e (read-from-string \" ;comment\\n\") (error e))"
+      " (condition-case e (read-from-string \"#37r1\") (error e))"
+      " (condition-case e"
+      "   (read-from-string (apply #'string '(34 92 117 49 50 34)))"
+      "   (error e)))"))
+    (concat
+     "(nil (24 . 6) (23 . 5) \"\" (42 . 9) (# . 1) "
+     "(end-of-file) (end-of-file) "
+     "(invalid-read-syntax \"integer, radix 37\") "
+     "(invalid-read-syntax \"Short Unicode escape\"))"))))
 
 (ert-deftest nelisp-doc22-read-from-string-decodes-gnu-string-escapes ()
   "The prelude string decoder matches GNU's escape values and byte shape."
