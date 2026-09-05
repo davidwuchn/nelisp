@@ -2180,6 +2180,12 @@ standalone-reader-print-large-sexp-smoke: standalone-reader
 #   5 `rdf' answers nil for a file it cannot open, "" only for an empty one.
 #   6 `encode-coding-string' / `decode-coding-string' are a real
 #     unibyte/multibyte pair, not the identity.
+#   7 `exp' at an extreme argument answers 0.0 / +inf, not a multi-second
+#     hang or NaN (dev/BUG-nelisp-standalone-exp-streams-sigsegv-2026-09-05.md
+#     section 1; scripts/nelisp-stdlib-prelude.el's `exp' used an O(|k|)
+#     scaling loop with k unbounded in |x|, so `(exp -1.0e6)' took over 10s
+#     and `(exp -1.0e30)' answered NaN from k overflowing `truncate''s i64
+#     range).
 #
 # Each assertion is a VALUE, not an exit status: every one of these answered
 # something plausible-looking before, which is exactly why they survived a
@@ -2235,7 +2241,39 @@ standalone-reader-host-parity-smoke: standalone-reader
 	else \
 	  echo "[host-parity] FAIL: kill-emacs exit status $$rc (expected 7)"; exit 1; \
 	fi
-	@echo "[standalone-reader-host-parity-smoke] PASS: all six v1.2.0 host-parity gaps"
+	@printf '%s\n' \
+	  '(setq r-exp-u30 (= (exp -1.0e30) 0.0))' \
+	  '(setq r-exp-u9 (= (exp -1.0e9) 0.0))' \
+	  '(setq r-exp-u6 (= (exp -1.0e6) 0.0))' \
+	  '(setq r-exp-745 (= (exp -745.0) 4.9406564584124654e-324))' \
+	  '(setq r-exp-n700 (= (exp -700.0) 9.85967654375977e-305))' \
+	  '(setq r-exp-o (= (exp 710.0) (/ 1.0 0.0)))' \
+	  '(setq r-exp-nan (let ((v (exp (/ 0.0 0.0)))) (/= v v)))' \
+	  '(list r-exp-u30 r-exp-u9 r-exp-u6 r-exp-745 r-exp-n700 r-exp-o r-exp-nan)' \
+	  > target/standalone-reader-host-parity-exp.el
+	@out="$$($(STANDALONE_BIN) --load target/standalone-reader-host-parity-exp.el)"; \
+	expected='(t t t t t t t)'; \
+	if [ "$$out" = "$$expected" ]; then \
+	  echo "[host-parity] PASS: exp() at -1e30/-1e9/-1e6 (underflow), -745/-700 (finite, incl. the smallest subnormal), 710 (overflow), NaN -> $$out"; \
+	else \
+	  echo "[host-parity] FAIL: exp() range handling -> $$out"; \
+	  echo "[host-parity]       expected $$expected"; \
+	  exit 1; \
+	fi
+	@start_ns=$$(date +%s%N); \
+	out="$$(timeout 5 $(STANDALONE_BIN) --eval '(exp -1.0e6)')"; rc=$$?; \
+	end_ns=$$(date +%s%N); \
+	elapsed_ms=$$(( (end_ns - start_ns) / 1000000 )); \
+	if [ "$$rc" = "124" ]; then \
+	  echo "[host-parity] FAIL: (exp -1.0e6) did not answer within 5s (hang)"; exit 1; \
+	elif [ "$$out" != "0.0" ]; then \
+	  echo "[host-parity] FAIL: (exp -1.0e6) -> $$out (expected 0.0)"; exit 1; \
+	elif [ "$$elapsed_ms" -ge 1000 ]; then \
+	  echo "[host-parity] FAIL: (exp -1.0e6) took $${elapsed_ms}ms (expected well under 1000ms; this row alone used to run over 10s)"; exit 1; \
+	else \
+	  echo "[host-parity] PASS: (exp -1.0e6) answered 0.0 in $${elapsed_ms}ms (< 1000ms; was a >10s hang)"; \
+	fi
+	@echo "[standalone-reader-host-parity-smoke] PASS: all seven v1.2.0/v1.2.1 host-parity gaps"
 
 .PHONY: standalone-reader-getenv-smoke
 # The environment the parent set must reach `getenv' inside the standalone

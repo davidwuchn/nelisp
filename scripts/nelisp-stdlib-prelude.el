@@ -278,6 +278,49 @@ a negative, and signalling there turned a limit into a failure."
            (pe (nelisp--two-prod q (float n)))
            (rem (+ (- (- (car x) (car pe)) (cdr pe)) (cdr x))))
       (nelisp--two-sum q (/ rem (float n)))))
+  (defun nelisp--pow2-exact (n)
+    "2.0^N as an exact double, via repeated squaring (O(log N), never a
+per-unit loop).  Every intermediate the caller ever asks for stays inside
+the normal double exponent range (roughly [-1021, 1023]), so each squaring
+step is a pure exponent-field move -- exact, no rounding -- and the result
+is exact too."
+    (if (>= n 0)
+        (let ((r 1.0) (b 2.0) (e n))
+          (while (> e 0)
+            (when (= (logand e 1) 1) (setq r (* r b)))
+            (setq b (* b b))
+            (setq e (ash e -1)))
+          r)
+      (let ((r 1.0) (b 0.5) (e (- n)))
+        (while (> e 0)
+          (when (= (logand e 1) 1) (setq r (* r b)))
+          (setq b (* b b))
+          (setq e (ash e -1)))
+        r)))
+  (defun nelisp--scale-pow2 (acc k)
+    "ACC * 2^K, correctly rounded, in O(1) multiplications.
+K is bounded to roughly [-1075, 1024] by `exp's caller, which has already
+turned anything further out into a direct 0.0/+inf answer -- so this never
+loops a number of times proportional to the original |X| (the defect this
+replaces: the old code multiplied/divided by 2.0 once per unit of K, which
+made `(exp -1.0e6)' a ~1.44e6-iteration loop and `(exp -1.0e9)' a ~1.44e9-
+iteration one).
+
+2^1024 and 2^-1075 are not representable as standalone doubles (they
+overflow / underflow before ACC is ever applied), even though ACC*2^K can
+be a perfectly ordinary finite or subnormal result -- the classic
+premature-overflow/underflow trap.  Both ends are split into two exact
+multiplications so only the LAST one ever rounds: for K>1023 (only 1024 is
+reachable here), scale by 2 and by 2^1023 separately; for K<-1021, scale by
+2^-1021 (still a normal double -- ACC is in [2^-1,2^1), so this step alone
+cannot itself underflow) and then by the small remaining 2^(K+1021), whose
+single rounding step is exactly the hardware division/multiplication a
+correctly-rounded libm performs, denormals included."
+    (cond
+     ((= k 0) acc)
+     ((> k 1023) (* (* acc 2.0) (nelisp--pow2-exact (1- k))))
+     ((< k -1021) (* (* acc (nelisp--pow2-exact -1021)) (nelisp--pow2-exact (+ k 1021))))
+     (t (* acc (nelisp--pow2-exact k)))))
   (defun exp (x)
     "e raised to X.
 Newton-free and correctly rounded: x is reduced to k*ln2 + r with ln2 split
@@ -285,11 +328,29 @@ hi/lo so the subtraction is exact, and exp(r) is then summed term by term in
 DOUBLE-DOUBLE arithmetic.  A plain double series left the last bit wrong --
 (exp 1) came back one ULP above the host's answer -- because the residual
 that decides the rounding is smaller than the sum can represent.  Measured
-against the host over 28 arguments: none differ."
+against the host over 28 arguments: none differ.
+
+Before any of that: NaN passes through unchanged, and X outside
+[-745.13321910194111, 709.78271289338397] (fdlibm's own u_threshold /
+o_threshold -- the exact points past which every finite double answer is
+0.0 or +inf) short-circuits to 0.0 / +inf directly.  Without this, `k'
+(the number of ln2's reduced out of X) grows proportionally to |X| with no
+bound: `truncate' itself is a hardware f64->i64 cast that returns the
+Intel-SDM-mandated indefinite sentinel for any magnitude past i64 range
+-- garbage in, `hi - k*ln2' collapses to inf-inf (NaN) -- and even where
+`truncate' still answers correctly, the OLD final-scaling loop ran |k|
+times, so `(exp -1.0e6)' took ~1.44e6 iterations and `(exp -1.0e9)' ~1.44e9
+-- the reported hang.  Clamping first keeps k bounded to about [-1075,
+1024] no matter how extreme X is, which both `nelisp--scale-pow2' and
+`truncate' (now only ever asked about a bounded product) handle correctly."
     (nelisp--check-number x)
     (let ((xf (float x)))
-      (if (= xf 0.0)
-          1.0
+      (cond
+       ((/= xf xf) xf)                                     ; NaN in -> NaN out
+       ((= xf 0.0) 1.0)
+       ((> xf 7.09782712893383973096e+02) (/ 1.0 0.0))      ; +inf: past o_threshold
+       ((< xf -7.45133219101941108420e+02) 0.0)             ; 0.0: past u_threshold
+       (t
         (let* ((k (if (> xf 0)
                       (truncate (+ (* 1.44269504088896338700e+00 xf) 0.5))
                     (truncate (- (* 1.44269504088896338700e+00 xf) 0.5))))
@@ -304,11 +365,7 @@ against the host over 28 arguments: none differ."
             (setq term (nelisp--dd-div-int term n))
             (setq sum (nelisp--dd-add sum term))
             (setq n (1+ n)))
-          (let ((acc (+ (car sum) (cdr sum))) (j (abs k)))
-            (while (> j 0)
-              (setq acc (if (< k 0) (/ acc 2.0) (* acc 2.0)))
-              (setq j (1- j)))
-            acc))))))
+          (nelisp--scale-pow2 (+ (car sum) (cdr sum)) k)))))))
 ;; There are no buffers here, so this can only report the type error --
 ;; which is the half Emacs reaches first anyway for a bad position.
 (unless (fboundp 'buffer-substring-no-properties)
@@ -2186,7 +2243,51 @@ loop for the exponent (= no `expt' / `float' primitive needed)."
                  (setq r next))
                (setq i (1+ i)))
              r))
-          ((and (integerp e) (>= e 0)) (let ((r 1) (i 0)) (while (< i e) (setq r (* r b) i (1+ i))) r))
+          ;; A non-negative integer E against a non-integer (typically
+          ;; float) B used to be a flat `(while (< i e) (setq r (* r b)) ...)'
+          ;; loop -- fine for a small E, but E arrives here as a huge integer
+          ;; two different ways a large float exponent actually takes: E
+          ;; itself may already be a huge integer-valued float truncated to
+          ;; an integer just above, or the HALF-INTEGER branch below computes
+          ;; `(expt b n)' with N in the millions.  `(expt 2.0 1442695.5)'
+          ;; (reached via the half-integer branch, N = 1442695) took over
+          ;; five seconds here before this fix -- the same shape of defect
+          ;; `exp' had (a loop count proportional to the raw exponent, not
+          ;; bounded by anything the float format itself bounds), just one
+          ;; level up the call chain.  Any |B| != 1 overflows to +-infinity
+          ;; or underflows to 0.0 within about 2100 squarings-worth of
+          ;; iterations no matter how huge E is (that is the entire double
+          ;; exponent range), and both 0.0 and +-infinity are absorbing under
+          ;; further multiplication by a nonzero finite B -- so once R gets
+          ;; there, continuing the loop cannot change the answer and only
+          ;; burns iterations.  B's sign is factored out up front (E's
+          ;; parity fixes it once, for the FULL exponent -- picking it up
+          ;; from whatever transient sign R had at the moment of early exit
+          ;; would be wrong) and the loop runs on `mag' = |B| instead: since
+          ;; IEEE-754 multiplication rounds the same way regardless of
+          ;; operand sign (only the result's sign bit differs, XORed
+          ;; separately), this is bit-for-bit the same computation as the
+          ;; original sign-alternating one for every iteration that used to
+          ;; run, just able to stop once it reaches an absorbing state.
+          ;; |B| == 1.0 is its own absorbing state from iteration zero
+          ;; (1.0^n == 1.0) and is special-cased so it costs O(1) rather than
+          ;; O(E) -- otherwise `(expt -1.0 1442695)' would still crawl.
+          ;; A |B| meaningfully close to but not exactly 1 (e.g. 1+1e-9) can
+          ;; still take a very long time to reach the absorbing state this
+          ;; way; that residual case is a pre-existing property of this
+          ;; linear algorithm (unrelated to the range-vs-|X| defect this
+          ;; fixes) and is not addressed here.
+          ((and (integerp e) (>= e 0))
+           (let* ((neg (and (< b 0) (= 1 (logand e 1))))
+                  (mag (if (< b 0) (- b) b)))
+             (cond
+              ((= e 0) 1)
+              ((= mag 1.0) (if neg -1.0 1.0))
+              (t (let ((r 1) (i 0))
+                   (while (and (< i e) (/= r 0.0) (<= r 1.7976931348623157e+308))
+                     (setq r (* r mag))
+                     (setq i (1+ i)))
+                   (if neg (- r) r))))))
           ((integerp e) (/ 1.0 (expt b (- e))))
           ;; The half power is the non-integer exponent that actually turns
           ;; up, and `sqrt' answers it.  A general float exponent still
