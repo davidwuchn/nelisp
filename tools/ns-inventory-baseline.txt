@@ -1020,7 +1020,7 @@ pinned-collision ns-collision-divergent	string-trim	lisp/nelisp-stdlib-plist-str
 pinned-collision ns-collision-divergent	string-trim-left	lisp/nelisp-stdlib-plist-str.el scripts/nelisp-stdlib-prelude.el	798069bba410
 pinned-collision ns-collision-divergent	string-trim-right	lisp/nelisp-stdlib-plist-str.el scripts/nelisp-stdlib-prelude.el	ad1c68d45490
 pinned-collision ns-collision-divergent	string=	lisp/nelisp-stdlib-misc.el scripts/nelisp-stdlib-prelude.el	9ee0e410ab3a
-pinned-collision ns-collision-divergent	substring	lisp/nelisp-stdlib-plist-str.el scripts/nelisp-stdlib-prelude.el	20559dc826f7
+pinned-collision ns-collision-divergent	substring	lisp/nelisp-stdlib-plist-str.el scripts/nelisp-stdlib-prelude.el	6e7a35e2d425
 pinned-collision ns-collision-divergent	sxhash	lisp/nelisp-stdlib.el scripts/nelisp-stdlib-prelude.el	c6647c32772e
 pinned-collision ns-collision-divergent	sxhash-eq	lisp/nelisp-stdlib-misc.el scripts/nelisp-stdlib-prelude.el	f30c9e810c87
 pinned-collision ns-collision-divergent	sxhash-eql	lisp/nelisp-stdlib-misc.el scripts/nelisp-stdlib-prelude.el	ef0e301feba4
