@@ -19749,6 +19749,103 @@ the native stack."
         ,@(nreverse forms)
         (+ off ,len)))))
 
+(defun nelisp-standalone--elisp-strip-comments (text)
+  "Return TEXT with every `;' line comment removed, syntax-aware.
+This exists to shrink `nelisp-standalone--reader-repl-prelude-source'
+before it is handed to `nelisp-standalone--copy-lit-u64-defuns': that
+function turns every 8 bytes of its STRING argument into a native
+`ptr-write-u64' store (`nl_repl_prelude_source_chunk_NNN'), so every
+byte of comment prose in the prelude is paid for at ~6x its size in
+compiled code.  Doc-T60's size audit measured ~27% of the prelude's raw
+source as comments and blank lines.
+
+Only `;' characters the Elisp reader would actually treat as starting a
+comment are removed:
+
+- A `;' inside a string (honoring backslash escapes, so `\\\"' never
+  closes the string early) is left alone -- this is what keeps
+  docstrings untouched, since a docstring is an ordinary string to
+  this scan and every byte of one, semicolons included, survives.
+- A `;' that is the second character of a character literal -- the
+  backslash form `?\\;' (already covered generically: `\\' always
+  escapes exactly the next character, in or out of a string) and the
+  bare form `?;' (a lone `?' not immediately followed by `\\' always
+  starts a 2-character literal, so the very next raw character, `;' or
+  otherwise, is taken as the constant rather than re-examined) -- is
+  left alone too.
+- A `#@N' byte-compiler docstring-skip marker, if the concatenated
+  source ever contains one, is passed through with its N-byte payload
+  completely unexamined (same shape as the skip in
+  `nelisp--rd-skip-ws', a few thousand lines above, in the prelude
+  source this strips: N counts bytes starting right after the decimal
+  digits, no separator byte). Ordinary hand-written .el source never
+  contains this construct; it only exists in byte-compiler output, so
+  this branch is defensive.
+
+A comment's own terminating newline is always kept -- this function
+never deletes a newline, comment-only or otherwise blank lines
+included, so every surviving line keeps the same line number it had in
+TEXT.  That matters here because `nl_eval_source_all' counts newlines
+while it parses the embedded prelude and passes the running count as
+`line_no' to `nl_eval_source_print_error' on an eval error: shifting
+line numbers would make a rare prelude-load error harder to place in
+the source for a byte savings of about one byte per blank line, far
+short of the bulk of the savings, which is the comment prose itself.
+Horizontal whitespace directly before a stripped comment is trimmed
+along with it (a comment-only line, indentation included, becomes a
+bare newline); this cannot merge tokens because the kept newline (or
+EOF) still delimits whatever came before from whatever comes next."
+  (let* ((len (length text))
+         (i 0)
+         (start 0)
+         (chunks nil))
+    (cl-flet ((flush (upto)
+                (when (> upto start)
+                  (push (substring text start upto) chunks))))
+      (while (< i len)
+        (let ((c (aref text i)))
+          (cond
+           ;; `\' escapes exactly the next character, everywhere -- inside
+           ;; or outside a string, whether or not it follows a `?'.
+           ((eq c ?\\)
+            (setq i (min len (+ i 2))))
+           ;; A `?' not immediately followed by `\' starts a 2-character
+           ;; literal (`?;', `?"', `??', ...): the reader takes the very
+           ;; next raw character as the constant, never as comment/string
+           ;; syntax, regardless of what it is.
+           ((and (eq c ??)
+                 (< (1+ i) len)
+                 (not (eq (aref text (1+ i)) ?\\)))
+            (setq i (+ i 2)))
+           ((eq c ?\")
+            (setq i (1+ i))
+            (while (and (< i len) (not (eq (aref text i) ?\")))
+              (setq i (if (eq (aref text i) ?\\) (+ i 2) (1+ i))))
+            (setq i (min len (1+ i))))
+           ;; `#@N': byte-compiler docstring skip -- copy the digits, then
+           ;; the N bytes right after them, through unexamined.
+           ((and (eq c ?#)
+                 (< (+ i 2) len)
+                 (eq (aref text (1+ i)) ?@)
+                 (<= ?0 (aref text (+ i 2)) ?9))
+            (let ((j (+ i 2)) (count 0))
+              (while (and (< j len) (<= ?0 (aref text j) ?9))
+                (setq count (+ (* count 10) (- (aref text j) ?0))
+                      j (1+ j)))
+              (setq i (min len (+ j count)))))
+           ((eq c ?\;)
+            (let ((trim i))
+              (while (and (> trim start)
+                          (memq (aref text (1- trim)) '(?\s ?\t)))
+                (setq trim (1- trim)))
+              (flush trim))
+            (while (and (< i len) (not (eq (aref text i) ?\n)))
+              (setq i (1+ i)))
+            (setq start i))
+           (t (setq i (1+ i))))))
+      (flush len))
+    (apply #'concat (nreverse chunks))))
+
 (defun nelisp-standalone--copy-lit-u64-defuns (name string &optional chunk-bytes)
   "Return Phase47 defuns copying large literal STRING into DST at OFF.
 The generated NAME defun delegates to bounded chunk defuns so host-side walkers
@@ -23330,7 +23427,8 @@ correctly."
       "(nelisp--repl-idle-pump)")
     ,@(nelisp-standalone--copy-lit-u64-defuns
       'nl_repl_prelude_source
-      (nelisp-standalone--reader-repl-prelude-source))
+      (nelisp-standalone--elisp-strip-comments
+       (nelisp-standalone--reader-repl-prelude-source)))
     (defun nl_runtime_image_command_p (ptr)
       (if (= (nl_cstr_eq_dump_runtime_image ptr) 1)
           1

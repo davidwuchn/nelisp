@@ -483,5 +483,49 @@
 # 0 natively compiled functions to 4 on the same input, because
 # `nelisp-aot-compiler--emit-extern-call' is written with parallel `for'
 # clauses and had been compiling to nothing.
-size 8572368
+# Lowered 2026-09-05 (Doc-T60 recovery item #1): strip `;' comments and
+# blank-line prose out of the embedded REPL prelude before
+# `nelisp-standalone--copy-lit-u64-defuns' turns it into native
+# `ptr-write-u64'/`ptr-write-u8' stores -- every prelude byte was paid
+# for at ~6.16x its size in compiled code (Doc-T60's own measurement),
+# and the same audit measured ~27% of the prelude's raw source as
+# exactly this: comment text and blank lines the runtime never reads.
+# New function: `nelisp-standalone--elisp-strip-comments' (scripts/
+# nelisp-standalone-build.el), applied at the one call site that builds
+# `nl_repl_prelude_source'.  `nelisp-standalone--reader-repl-prelude-
+# source' itself is untouched -- two other tools,
+# `nelisp-generated-source-parse.el' and `nelisp-doc200-tag-census.el',
+# read its ORIGINAL (unstripped) text and rely on its line numbers.
+#
+#   this commit (6a1c71574), clean worktree, before the strip   8748840
+#   this branch, same procedure, after the strip                7601096
+#   saved by the strip                                          -1147744 (-13.1%)
+#
+# Those two numbers do not net to a simple 8572368 -> X delta: the pin
+# already in this file (8572368) was stale for this commit even before
+# this change -- a clean, cold `git worktree' build of 6a1c71574 alone
+# (no changes from this commit) measures 8748840, which is 176472 over
+# the pinned baseline and 5025 over its own 2% ceiling (8743815).  Not
+# this change's doing; recorded here rather than folded silently into
+# the drop, same as this file's other "the pin was already stale"
+# entries above.  Pinning against the real, freshly measured pair
+# (8748840 -> 7601096), both built the same way in the same session,
+# rather than against the stale 8572368.
+#
+# Correctness: proved semantics-preserving by reading the real,
+# concatenated prelude source and its stripped form with the host Emacs
+# reader, form by form, and asserting the two lists of forms are
+# `equal' (`nelisp-standalone-target-reader-repl-prelude-strip-
+# preserves-forms', test/nelisp-standalone-target-test.el) -- 948 forms,
+# identical, on both sides.  Every newline survives the strip (13512 on
+# both sides): a comment-only line becomes a blank line rather than
+# disappearing, so `nl_eval_source_all''s `line_no' (passed to
+# `nl_eval_source_print_error' on a prelude eval error) means the same
+# thing before and after.  Docstrings are ordinary strings to the strip
+# and are therefore untouched byte for byte, semicolons included.
+#
+# The integrator should re-measure and re-pin against the CI cold
+# number when landing, per this file's own rule -- the 7601096 above is
+# this session's own cold worktree build, not a CI run.
+size 7601096
 slack-pct 2

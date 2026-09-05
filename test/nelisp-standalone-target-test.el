@@ -2246,6 +2246,121 @@ required to have a zero high half before anything is written."
     (should (tree-member-p '(nl_seq2 (nl_hdr_set_mark hdr 4) 1)
                            nelisp-standalone--gc-source))))
 
+(defun nelisp-standalone-target-test--read-all-forms (text)
+  "Read every top-level form out of TEXT via the host reader.
+Mirrors `nelisp-generated-source-parse--leftover': read forms front to
+back until only whitespace remains or `read-from-string' itself signals
+that TEXT is not well-formed, whichever comes first."
+  (let ((pos 0) (out nil) (done nil))
+    (while (not done)
+      (condition-case nil
+          (if (or (>= pos (length text))
+                  (string-match-p "\\`[ \t\n\f]*\\'" (substring text pos)))
+              (setq done t)
+            (let ((r (read-from-string text pos)))
+              (push (car r) out)
+              (setq pos (cdr r))))
+        (error (setq done t))))
+    (nreverse out)))
+
+(ert-deftest nelisp-standalone-target-strip-comments-keeps-comment-newline ()
+  "Stripping a comment drops its text but keeps the line it was on.
+A comment-only line (indentation included) becomes a bare newline
+rather than disappearing, so line numbers after the strip line up
+1:1 with line numbers before it -- see the newline-count assertion."
+  (let* ((src "(foo)   ; trailing comment\n   ;; comment-only line\n(bar)\n")
+         (out (nelisp-standalone--elisp-strip-comments src)))
+    (should (equal out "(foo)\n\n(bar)\n"))
+    (should (= (cl-count ?\n src) (cl-count ?\n out)))))
+
+(ert-deftest nelisp-standalone-target-strip-comments-drops-trailing-comment-at-eof ()
+  "A final comment with no trailing newline is dropped cleanly."
+  (should (equal (nelisp-standalone--elisp-strip-comments
+                  "(foo)\n(bar) ; no newline follows this")
+                 "(foo)\n(bar)")))
+
+(ert-deftest nelisp-standalone-target-strip-comments-is-idempotent-on-clean-source ()
+  "Source with no comments passes through unchanged."
+  (let ((clean "(foo)\n(bar (baz 1 2))\n"))
+    (should (equal (nelisp-standalone--elisp-strip-comments clean) clean))))
+
+(ert-deftest nelisp-standalone-target-strip-comments-preserves-strings-verbatim ()
+  "A `;' or an escaped quote inside a string is not comment/string syntax.
+Exercises exactly what keeps a docstring untouched: docstrings are
+ordinary strings to this scan, so nothing inside one is ever touched,
+semicolons and embedded escaped quotes included."
+  (let ((src "(defun f (x)\n  \"doc; has a semicolon and \\\"a quote\\\" in it.\"\n  (list x)) ; drop only this\n"))
+    (should (equal (nelisp-standalone--elisp-strip-comments src)
+                   "(defun f (x)\n  \"doc; has a semicolon and \\\"a quote\\\" in it.\"\n  (list x))\n"))))
+
+(ert-deftest nelisp-standalone-target-strip-comments-preserves-char-literals ()
+  "A bare `?;' and the backslash form `?\\;' never start a comment.
+Emacs's own reader accepts (and, for the bare form, deprecates but does
+not reject) both spellings of the semicolon character literal; this
+strip must agree with the reader, not with a naive syntax-table scan
+that only recognizes the backslash form -- `emacs-lisp-mode' itself
+does not special-case the bare form, which is why this cannot simply
+delegate to `syntax-ppss'."
+  (let* ((src "(list ?\\; ?; \"a;b\") ; real comment\n(next-form 1)\n")
+         (out (nelisp-standalone--elisp-strip-comments src)))
+    (should (equal out "(list ?\\; ?; \"a;b\")\n(next-form 1)\n"))
+    (should (equal (nelisp-standalone-target-test--read-all-forms src)
+                   (nelisp-standalone-target-test--read-all-forms out)))))
+
+(ert-deftest nelisp-standalone-target-strip-comments-passes-through-doc-at-sign-skip ()
+  "A `#@N' byte-compiler docstring skip is copied through untouched.
+Its N-byte payload (here containing a literal `;' and `\"', chosen to
+prove they are not reinterpreted) must survive byte for byte, matching
+the same skip shape `nelisp--rd-skip-ws' implements a few thousand
+lines earlier in the very source this strips."
+  (let* ((payload "abc;def\"ghi")
+         (src (format "(foo)\n#@%d%s\n(bar)\n" (length payload) payload)))
+    (should (equal (nelisp-standalone--elisp-strip-comments src) src))))
+
+(ert-deftest nelisp-standalone-target-reader-repl-prelude-strip-preserves-forms ()
+  "The embedded prelude's stripped source reads identically to the original.
+This is Doc-T60 recovery item #1: strip `;' comments and blank-line
+prose out of `nelisp-standalone--reader-repl-prelude-source' before
+`nelisp-standalone--copy-lit-u64-defuns' pays ~6x its size in compiled
+`ptr-write-u64' stores for every byte of it.  The host Emacs reader is
+the ground truth for \"semantics-preserving\": read the real,
+concatenated prelude source (stdlib prelude + regexp matcher + the
+event-loop/process-adapter upgrade, exactly as shipped) and its
+stripped form, both form by form, and require the two lists of forms
+to be `equal'.  Also requires every newline to survive (so a
+`nl_eval_source_all' line number stays meaningful across the strip)
+and a real byte reduction (this corpus is know to be ~26-27% comments
+and blank lines; guard loosely at 15% so unrelated future prelude
+growth cannot make this test flaky)."
+  (let* ((raw (nelisp-standalone--reader-repl-prelude-source))
+         (stripped (nelisp-standalone--elisp-strip-comments raw)))
+    (should (= (cl-count ?\n raw) (cl-count ?\n stripped)))
+    (should (< (string-bytes stripped) (* 0.85 (string-bytes raw))))
+    (should (equal (nelisp-standalone-target-test--read-all-forms raw)
+                   (nelisp-standalone-target-test--read-all-forms stripped)))))
+
+(ert-deftest nelisp-standalone-target-reader-repl-prelude-forms-use-stripped-source ()
+  "The embedding step actually strips before it embeds.
+Guards the call site itself (not just the stripper in isolation): a
+future edit that stops threading the prelude source through
+`nelisp-standalone--elisp-strip-comments' before
+`nelisp-standalone--copy-lit-u64-defuns' would silently pay the full,
+unstripped size again."
+  (let* ((raw (nelisp-standalone--reader-repl-prelude-source))
+         (chunk-defs (nelisp-standalone--copy-lit-u64-defuns
+                      'nl_repl_prelude_source
+                      (nelisp-standalone--elisp-strip-comments raw)))
+         (flat (flatten-tree chunk-defs))
+         ;; Every embedded byte becomes exactly one `ptr-write-u64' (8
+         ;; bytes) or one `ptr-write-u8' (1 byte) call; summing them
+         ;; recovers the total byte count actually embedded without
+         ;; depending on the chunk defuns' exact shape.
+         (embedded-bytes (+ (* 8 (cl-count 'ptr-write-u64 flat))
+                            (cl-count 'ptr-write-u8 flat))))
+    (should (= embedded-bytes (string-bytes
+                                (nelisp-standalone--elisp-strip-comments raw))))
+    (should (< embedded-bytes (string-bytes raw)))))
+
 (provide 'nelisp-standalone-target-test)
 
 ;;; nelisp-standalone-target-test.el ends here
