@@ -4700,7 +4700,19 @@ argument (reachability + in-arena bounds checks).")
     ((:lit "substring")        . (if (= (bf_arrayp_raw (wf_arg_ptr args 0)) 0)
                             (bf_wrong_type_named (wf_arg_ptr args 0) 123666628244065 0 0 6)
                           (if (= (ptr-read-u64 (wf_arg_ptr args 1) 0) 2)
-                            (let* ((ms (alloc-bytes 32 8))
+                            ;; TO is read as an integer and never checked, so a non-integer answered a
+                            ;; slice instead of signalling: (nelisp--native-substring "abcdef" 1 "z")
+                            ;; was "", the string's second word read as a count.  The prelude wrapper
+                            ;; checks it, which is why nothing in the tree ever saw this, and is also
+                            ;; why the wrapper could not simply delegate to this arm.  Checked before
+                            ;; the range arithmetic below, so (substring "abcdef" 12354 "z") still
+                            ;; names "z" rather than a range computed from it.
+                            (if (if (= (ptr-read-u64 (nl_cons_cdr_ptr (nl_cons_cdr_ptr args)) 0) 7)
+                                    (if (= (ptr-read-u64 (wf_arg_ptr args 2) 0) 0) 0
+                                      (if (= (ptr-read-u64 (wf_arg_ptr args 2) 0) 2) 0 1))
+                                  0)
+                                (bf_wrong_type_integerp (wf_arg_ptr args 2))
+                              (let* ((ms (alloc-bytes 32 8))
                                         (s (wf_arg_ptr args 0))
                                         (nb (m5_strlen s))
                                         (clen (m5_length s))
@@ -4736,7 +4748,7 @@ argument (reachability + in-arena bounds checks).")
                                             (if (= (m5_unibyte_tag_p (ptr-read-u64 s 0)) 1)
                                                 ct
                                               (nl_u8_cidx_byte s 0 nb 0 ct)))
-                                          (mut-str-finalize ms out) 0))))
+                                          (mut-str-finalize ms out) 0)))))
                           (bf_wrong_type_integerp (wf_arg_ptr args 1)))))
     ((:lit "format")           . (let* ((ms (alloc-bytes 32 8))
                                         (fmt (wf_arg_ptr args 0))

@@ -9916,32 +9916,46 @@ it here turned that call into a `wrong-number-of-arguments'.  Both indices
 are checked for integerness BEFORE any range arithmetic, so
 (substring \"abcdef\" 12354 \"z\") names \"z\" rather than reporting a range
 computed from it."
-  (unless (arrayp seq) (signal 'wrong-type-argument (list 'arrayp seq)))
-  (when from
-    (unless (integerp from) (signal 'wrong-type-argument (list 'integerp from))))
-  (when to
-    (unless (integerp to) (signal 'wrong-type-argument (list 'integerp to))))
-  (setq from (or from 0))
-  (if (vectorp seq)
-      (let* ((n (length seq))
-             (s (if (< from 0) (+ n from) from))
-             (e (if to (if (< to 0) (+ n to) to) n))
-             ;; The string path signals for an index outside the sequence;
-             ;; the vector path used to build a vector of negative length
-             ;; instead, so it failed later and somewhere else.
-             (_ (when (or (< s 0) (> s n) (< e 0) (> e n) (> s e))
-                  (signal 'args-out-of-range (list seq from to))))
-             (out (make-vector (- e s) nil))
-             (i 0))
-        (while (< (+ s i) e)
-          (aset out i (aref seq (+ s i)))
-          (setq i (1+ i)))
-        out)
-    ;; String path: native `substring' returns "" when TO is passed as an
-    ;; explicit nil, so only forward the 3rd argument when it was supplied.
-    (if to
-        (nelisp--native-substring seq from to)
-      (nelisp--native-substring seq from))))
+  ;; The string case is the one ordinary elisp writes, and it is the one the
+  ;; native arm already decides completely: it signals `arrayp' for a
+  ;; non-array, `integerp' for a non-integer FROM or TO, and
+  ;; `args-out-of-range' for an index outside the string, in that order.  So
+  ;; the guards below are not repeated for it.  They were not free: `arrayp'
+  ;; alone is `(or (vectorp x) (stringp x))' in elisp, and the four of them
+  ;; together made this function 82us against 3us for the arm underneath.
+  ;; A vector still takes the long way, because the arm slices with string
+  ;; primitives and cannot do one.
+  (if (stringp seq)
+      (if to
+          (nelisp--native-substring seq (or from 0) to)
+        (nelisp--native-substring seq (or from 0)))
+    (progn
+      (unless (arrayp seq) (signal 'wrong-type-argument (list 'arrayp seq)))
+      (when from
+        (unless (integerp from) (signal 'wrong-type-argument (list 'integerp from))))
+      (when to
+        (unless (integerp to) (signal 'wrong-type-argument (list 'integerp to))))
+      (setq from (or from 0))
+      (if (vectorp seq)
+	  (let* ((n (length seq))
+		 (s (if (< from 0) (+ n from) from))
+		 (e (if to (if (< to 0) (+ n to) to) n))
+		 ;; The string path signals for an index outside the sequence;
+		 ;; the vector path used to build a vector of negative length
+		 ;; instead, so it failed later and somewhere else.
+		 (_ (when (or (< s 0) (> s n) (< e 0) (> e n) (> s e))
+                      (signal 'args-out-of-range (list seq from to))))
+		 (out (make-vector (- e s) nil))
+		 (i 0))
+            (while (< (+ s i) e)
+              (aset out i (aref seq (+ s i)))
+              (setq i (1+ i)))
+            out)
+        ;; Not a vector and not a string: an array this build does not know.
+        ;; The arm answers for it, and signals if it cannot.
+        (if to
+            (nelisp--native-substring seq from to)
+          (nelisp--native-substring seq from))))))
 
 ;; ---- Doc 22 reader-core gap fixes, iteration 2 (A7/A13) ----
 
