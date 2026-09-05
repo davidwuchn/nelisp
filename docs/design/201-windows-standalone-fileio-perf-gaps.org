@@ -1845,6 +1845,12 @@ Lisp object.  The allocation thread in option 5 is not refuted -- nobody
 has re-counted the allocations -- but it can no longer be reached from
 these timings.
 
+§6.15 did re-count them, and the last sentence is the wrong conclusion
+from the right observation: allocation does not separate the shapes
+because it is the SAME for all of them.  Every interpreted operation
+allocates ~30 objects whether or not it allocates a Lisp object, so §3's
+count was low but its instinct was sound.
+
 *** Where the time actually is
 
 The two outliers are `nth'/`nthcdr' and `substring', and the first one is
@@ -2231,3 +2237,79 @@ asymmetry between targets and bounds a garbage-dominated heap -- but it should
 not be read as the IME fix, and §6.13 should not be read as saying the
 collector was broken.  It was not; it was missing one platform's release path,
 and that path was not what the IME needed.
+
+** §6.15 One interpreted operation allocates ~30 objects, whatever it does
+
+§6.11 measured the per-operation floor and found allocation did not separate
+the shapes: `(cons 1 2)' was cheaper than `(aref VECTOR 3)', so the section
+said §3's allocation reading "can no longer be reached from these timings".
+That was the right observation and the wrong conclusion.  Allocation does not
+separate the shapes because it is the same for all of them.
+
+`nl_alloc_diag' counts allocations by path, so they can be counted rather than
+inferred.  20000 turns of a `while' loop, each shape against the same loop with
+an empty body:
+
+| shape                | allocs/turn | over an empty turn |
+|----------------------+-------------+--------------------|
+| empty loop           |          77 |                 -- |
+| `(car CONS)'         |         106 |                 28 |
+| `(length STRING)'    |         105 |                 27 |
+| `(ash 256 -4)'       |         109 |                 31 |
+| `(cons 1 2)'         |         108 |                 31 |
+| `(list 1 2 3)'       |         110 |                 32 |
+| `(logand 255 15)'    |         111 |                 33 |
+| `(aref VECTOR 2)'    |         113 |                 36 |
+| `(+ 1 1)'            |         114 |                 36 |
+| `(aset STRING 2 ?a)' |         119 |                 41 |
+| zero-argument funcall|         141 |                 63 |
+
+An empty loop turn -- `<', `setq', `1+' and nothing else -- allocates 77
+objects.  Every operation adds 27 to 41 more.  `(cons 1 2)', which really does
+allocate one cons, adds 31; `(car CONS)', which allocates nothing at all, adds
+28.  The Lisp object the operation is *for* is under 4% of what running the
+operation costs.
+
+*** This is the mechanism under §6.11, §6.12 and §6.14
+
+It explains why the wrapper layer costs what §6.12 measured: a wrapper is
+several more interpreted operations, and each one is ~30 allocations and ~10us
+whether it computes anything or not.  `arrayp' as `(or (vectorp x) (stringp
+x))' is not slow because `or' is slow; it is slow because it is three
+operations where the emitter has one.
+
+It explains the shape of the IME's cost.  A keystroke through the production
+path allocates 253522 objects, which at ~30 per operation is roughly 8000
+interpreted operations -- and 8000 operations at §6.11's 1-31us is the ~80ms
+median §6.13 measured.  The two independent measurements agree, which is the
+main reason to believe either.
+
+And it explains the collection rate in §6.14.  Allocation volume is
+proportional to interpreted operations executed, not to what the program means
+to allocate, so a collection every ~100 keystrokes is a collection every ~25
+million allocations, which is what ~800000 interpreted operations produce.
+Nothing about the IME's data structures sets that rate; the amount of elisp run
+per keystroke sets it.
+
+*** What it leaves
+
+There is one lever, and §6.12 and §6.14 were both pointing at it from
+different ends: **run fewer interpreted operations per keystroke.**  Not
+allocate less -- the allocation is not the program's -- but execute less.
+
+That makes the ranked options concrete again:
+
+- Moving a wrapper into the emitter removes its operations outright.  `nthcdr'
+  went from an interpreted walk to one builtin: `(nth 5 LIST)' 399us -> 104us,
+  and the allocations went with the operations.
+- `format' is the largest single instance: ~750us per directive is ~75
+  operations and ~2000 allocations, every time a directive is rendered.
+- The IME's own hot spots follow the same rule.  `nelisp-ime-stateline--candidates'
+  costs 78563 allocations of the STATE line's 104161 -- not because it
+  allocates strings, but because hex-encoding thirty candidates is a few
+  thousand interpreted operations.  The encoder is already preallocated and
+  `aset'-based; there is nothing left to remove in it that is not an operation
+  count.
+
+The measurement is `alloc-per-op.el', a page of elisp, using switch 24/26 and
+subtracting an empty loop of the same shape.  It is not in the tree.
