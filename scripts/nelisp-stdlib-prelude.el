@@ -134,12 +134,14 @@
 ;; `intern' takes an OBARRAY it cannot honour -- one global table here --
 ;; but Emacs type-checks the argument, and accepting anything hid the fact
 ;; that it is ignored (recorded in tools/partial-accepted.txt).
+;; The check is in the native arm (`bf_obarray_arg_bad' in
+;; scripts/nelisp-standalone-build.el) since 2026-09-06: the elisp wrapper
+;; that used to do it here was one more interpreted call on every `intern'
+;; -- 22 us of a 26 us hit, on a 4 us native probe -- and every
+;; macro-generated name pays it.  The alias stays because the presence
+;; corpus and consumers name it.
 (unless (fboundp 'nelisp--native-intern)
-  (defalias 'nelisp--native-intern (symbol-function 'intern))
-  (defun intern (name &optional obarray)
-    (when (and obarray (not (obarrayp obarray)))
-      (signal 'wrong-type-argument (list 'obarrayp obarray)))
-    (nelisp--native-intern name)))
+  (defalias 'nelisp--native-intern (symbol-function 'intern)))
 ;; Absent, so a caller got `void-function' -- which reads as "the runtime
 ;; cannot do this" rather than "nobody wrote it yet".  There are no buffers
 ;; or byte-compiler here, so these answer nil and signal on a wrong type,
@@ -1860,21 +1862,22 @@ nothing."
 ;; native `nelisp--intern-lookup' (Doc 163 Phase C), which reports a miss
 ;; instead of interning.  Falling back to `intern' -- which never answers
 ;; nil -- is what made a `(while (setq x (intern-soft ...)))' probe loop
-;; run forever.  This shadows nothing: `intern-soft' was in
-;; lisp/nelisp-stdlib-misc.el and never reached the prelude, so the
-;; standalone had no `intern-soft' at all.
-(defun intern-soft (name &optional obarray)
-  "Return the symbol named NAME if it is interned, else nil.
+;; run forever.  Since 2026-09-06 the standalone has a native `intern-soft'
+;; arm with exactly this contract (scripts/nelisp-standalone-build.el), so
+;; this definition is reached only by a binary older than the arm.
+(unless (fboundp 'intern-soft)
+  (defun intern-soft (name &optional obarray)
+    "Return the symbol named NAME if it is interned, else nil.
 NeLisp has one global intern table and no first-class obarray object, so a
 non-nil OBARRAY is not honoured.  The probe is `nelisp--intern-lookup\', which
 reports a miss instead of interning -- falling back to `intern\', which never
 answers nil, is what made a `(while (setq x (intern-soft ...)))\' probe loop
 run forever."
-  (when (and obarray (not (obarrayp obarray)))
-    (signal 'wrong-type-argument (list 'obarrayp obarray)))
-  (cond ((symbolp name) name)
-        ((stringp name) (nelisp--intern-lookup name))
-        (t (signal 'wrong-type-argument (list 'stringp name)))))
+    (when (and obarray (not (obarrayp obarray)))
+      (signal 'wrong-type-argument (list 'obarrayp obarray)))
+    (cond ((symbolp name) name)
+          ((stringp name) (nelisp--intern-lookup name))
+          (t (signal 'wrong-type-argument (list 'stringp name))))))
 (unless (fboundp 'vconcat)
   (defun vconcat (&rest seqs)
     (dolist (x seqs) (nelisp--check-seq-list x))
@@ -10556,13 +10559,31 @@ NUL.  Emacs signals for every one of those."
       (signal 'wrong-type-argument (list 'characterp arg)))))
   arg)
 
+;; Fast path (2026-09-06).  `nelisp--format-simple' is a native arm that
+;; answers the finished string when every directive is a plain %s %d %i %o
+;; %x %X %c %% with a matching, correctly-typed argument, and nil for
+;; anything the field-width / precision / type-check layer below has to
+;; look at.  That layer cost 200 us for (format "abc") and 1.4 ms for
+;; (format "sym-%d" i) against 14 us / 27 us native; T77's "intern is 1000x
+;; slower than Emacs" reproducer was this layer under `(intern (format ...))'.
+;; A binary older than the arm keeps the full layer for every call.
+(unless (fboundp 'nelisp--format-simple)
+  (defun nelisp--format-simple (_template _args) nil))
+
 (defun format (template &rest args)
   "Format TEMPLATE with ARGS honoring %[flags][width][.prec]conv (Doc 22 A7).
-Width, left-justify (-), zero-pad (0), sign (+/space) and string precision
-(.N) are applied in elisp; %f/%F honor their .PRECISION via
-`nelisp--ffmt-f' (Doc 159 §3); %S uses `prin1-to-string' and the remaining
-conversions are delegated to native `format', which lacks only the field-width
-layer."
+Plain directives with matching arguments take the native fast path
+`nelisp--format-simple'; everything else goes through `nelisp--format-full',
+where width, left-justify (-), zero-pad (0), sign (+/space) and string
+precision (.N) are applied in elisp, %f/%F honor their .PRECISION via
+`nelisp--fmt-float' (Doc 159 §3), %S uses `prin1-to-string' and the remaining
+conversions are delegated to native `format', which lacks only the
+field-width layer."
+  (or (nelisp--format-simple template args)
+      (nelisp--format-full template args)))
+
+(defun nelisp--format-full (template args)
+  "The full elisp `format' layer over TEMPLATE and the list ARGS; see `format'."
   (nelisp--check-string template)
   (let ((n (length template)) (i 0) (out "") (argp args))
     (while (< i n)
@@ -10620,6 +10641,15 @@ layer."
                                           (char-to-string conv)))))
                   (if (= conv 37)        ; ?%
                       (setq out (concat out "%"))
+                    ;; Emacs signals when the arguments run out; this
+                    ;; layer used to read (car nil) and print "nil" in
+                    ;; the slot -- (format "%s %s" "one") was "one nil".
+                    ;; Found 2026-09-06 by the fast path's parity test:
+                    ;; `nelisp--format-simple' declines the call for
+                    ;; exactly this reason and relies on the signal here.
+                    (unless argp
+                      (signal 'error
+                              (list "Not enough arguments for format string")))
                     (let* ((arg (nelisp--format-check-arg conv (car argp)))
                            (body (if (and (numberp arg)
                                           (or (= conv 102) (= conv 70)   ; f F

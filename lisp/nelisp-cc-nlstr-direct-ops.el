@@ -266,12 +266,28 @@ lifetime of a Sexp value.  No `let' binding needed.")
       (if (= (ptr-read-u64 slot 0) (+ n 1))
           (nl_intern_eq p (ptr-read-u64 slot 8) 0 n)
         0))
-    (defun nl_intern_probe (table idx p n)
-      (if (= (ptr-read-u64 (+ table (* idx 16)) 0) 0)
-          (+ table (* idx 16))
-        (if (= (nl_intern_slotmatch (+ table (* idx 16)) p n) 1)
+    ;; K counts probe steps.  After 2^20 of them every slot has been
+    ;; visited and the table is full: answer 0 (no slot) so the callers
+    ;; degrade to a plain per-occurrence buffer instead of spinning here
+    ;; forever.  Capacity is fixed at 2^20 names (16 MiB of slots) plus a
+    ;; 48 MiB name arena; the region's layout is what the flat-arena image
+    ;; dumper relocates, so growing it is a dumper change, not a table one.
+    (defun nl_intern_probe (table idx p n k)
+      (if (< 1048575 k)
+          0
+        (if (= (ptr-read-u64 (+ table (* idx 16)) 0) 0)
             (+ table (* idx 16))
-          (nl_intern_probe table (logand (+ idx 1) 1048575) p n))))
+          (if (= (nl_intern_slotmatch (+ table (* idx 16)) p n) 1)
+              (+ table (* idx 16))
+            (nl_intern_probe table (logand (+ idx 1) 1048575) p n (+ k 1))))))
+    ;; 1 when N more bytes (1 for an empty name) still fit in the name
+    ;; arena [base+16MiB, base+64MiB).  The bump pointer used to advance
+    ;; past the end of the mapping unchecked.
+    (defun nl_intern_arena_fits (n)
+      (if (<= (+ (ptr-read-u64 268436296 0) (if (= n 0) 1 n))
+              (+ (ptr-read-u64 268436288 0) 67108864))
+          1
+        0))
     (defun nl_intern_bump (n)
       (and (ptr-write-u64 268436296 0
                           (+ (ptr-read-u64 268436296 0) (if (= n 0) 1 n)))
@@ -287,10 +303,22 @@ lifetime of a Sexp value.  No `let' binding needed.")
            (ptr-write-u64 slot 0 (+ n 1))
            (ptr-write-u64 slot 8 buf)
            (nl_intern_write_sexp result-slot buf n)))
+    ;; Plain per-occurrence buffer: used when the region is disabled and
+    ;; when it is exhausted (SLOT 0 = table full, or the arena cannot take
+    ;; the name).  The symbol is still correct -- `eq' compares names -- it
+    ;; is just not deduplicated and `intern-soft' cannot see it.
+    (defun nl_alloc_symbol_plain (bytes-ptr n result-slot)
+      (nl_alloc_symbol_write
+       bytes-ptr n (if (= n 0) 1 n) result-slot
+       (alloc-bytes (if (= n 0) 1 n) 1)))
     (defun nl_intern_finish (slot p n result-slot)
-      (if (= (ptr-read-u64 slot 0) 0)
-          (nl_intern_insert slot p n result-slot (nl_intern_bump n))
-        (nl_intern_write_sexp result-slot (ptr-read-u64 slot 8) n)))
+      (if (= slot 0)
+          (nl_alloc_symbol_plain p n result-slot)
+        (if (= (ptr-read-u64 slot 0) 0)
+            (if (= (nl_intern_arena_fits n) 1)
+                (nl_intern_insert slot p n result-slot (nl_intern_bump n))
+              (nl_alloc_symbol_plain p n result-slot))
+          (nl_intern_write_sexp result-slot (ptr-read-u64 slot 8) n))))
 
     ;; ---- nil/t name canonicalization ----
     ;; `nil' and `t' are immediate Sexp values (tag=0 / tag=1 -- see
@@ -338,13 +366,11 @@ lifetime of a Sexp value.  No `let' binding needed.")
         (if (= (nl_name_is_t bytes-ptr n) 1)
             (nl_write_canonical_t result-slot)
           (if (= (ptr-read-u64 268436288 0) 0)
-              (nl_alloc_symbol_write
-               bytes-ptr n (if (= n 0) 1 n) result-slot
-               (alloc-bytes (if (= n 0) 1 n) 1))
+              (nl_alloc_symbol_plain bytes-ptr n result-slot)
             (nl_intern_finish
              (nl_intern_probe (ptr-read-u64 268436288 0)
                               (logand (nl_intern_hash bytes-ptr 0 n 2166136261) 1048575)
-                              bytes-ptr n)
+                              bytes-ptr n 0)
              bytes-ptr n result-slot)))))
 
     ;; Public entry: nl_alloc_symbol(bytes_ptr, len, result_slot).
@@ -375,9 +401,11 @@ lifetime of a Sexp value.  No `let' binding needed.")
     ;; 0-sentinel convention `nl_os_alloc_chunk' / `nl_intern_region_init'
     ;; already use elsewhere in this codebase.
     (defun nl_intern_lookup_finish (slot n result-slot)
-      (if (= (ptr-read-u64 slot 0) 0)
+      (if (= slot 0)
           0
-        (nl_intern_write_sexp result-slot (ptr-read-u64 slot 8) n)))
+        (if (= (ptr-read-u64 slot 0) 0)
+            0
+          (nl_intern_write_sexp result-slot (ptr-read-u64 slot 8) n))))
 
     ;; Probe-only counterpart of `nl_alloc_symbol_pos'.  "nil"/"t" short-
     ;; circuit to a HIT on the canonical immediate value first: they are
@@ -401,7 +429,7 @@ lifetime of a Sexp value.  No `let' binding needed.")
             (nl_intern_lookup_finish
              (nl_intern_probe (ptr-read-u64 268436288 0)
                               (logand (nl_intern_hash bytes-ptr 0 n 2166136261) 1048575)
-                              bytes-ptr n)
+                              bytes-ptr n 0)
              n result-slot)))))
 
     ;; Public entry: nl_intern_lookup(bytes_ptr, len, result_slot).
@@ -441,12 +469,16 @@ Private helpers (shared within this `.o'):
   — Sexp::Symbol allocate-or-intern chain (calls `nl_intern_finish' on
   a set-up region).
 - `nl_intern_hash' / `nl_intern_eq' / `nl_intern_slotmatch' /
-  `nl_intern_probe' / `nl_intern_bump' / `nl_intern_write_sexp' /
-  `nl_intern_insert' / `nl_intern_finish'
+  `nl_intern_probe' / `nl_intern_arena_fits' / `nl_intern_bump' /
+  `nl_intern_write_sexp' / `nl_intern_insert' / `nl_alloc_symbol_plain' /
+  `nl_intern_finish'
   — open-addressing intern-region table ops (Doc 08 §8.16); `nl_intern_probe'
-  returns the address of either the first empty slot or a matching slot
-  and is shared, read-only, by BOTH the insert path (`nl_intern_finish')
-  and the lookup-only path (`nl_intern_lookup_finish') below.
+  returns the address of either the first empty slot or a matching slot --
+  or 0 once it has stepped through all 2^20 slots (table full) -- and is
+  shared, read-only, by BOTH the insert path (`nl_intern_finish') and the
+  lookup-only path (`nl_intern_lookup_finish') below.  A full table or a
+  full name arena degrades to `nl_alloc_symbol_plain' (2026-09-06); before
+  that the probe spun forever and the bump pointer ran off the mapping.
 - `nl_intern_lookup_finish' / `nl_intern_lookup_pos'
   — lookup-only chain backing `nl_intern_lookup' (Doc 163 Phase C).
 

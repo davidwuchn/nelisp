@@ -9814,6 +9814,83 @@ baked build's own `<'/`>'/`=' arms need it too.")
       (if (= (nl_intern_lookup (bf_str_ptr sx) (bf_str_len sx) out) 0)
           (wf_write_nil out)
         0))
+    ;; OBARRAY argument of `intern' / `intern-soft'.  This runtime has one
+    ;; global intern table and no obarray object, so the only OBARRAY it can
+    ;; honour is nil or absent; Emacs type-checks the argument, so a non-nil
+    ;; one signals (wrong-type-argument obarrayp OBARRAY) exactly as there.
+    ;; Returns 1 when it signalled, 0 when the argument is acceptable.
+    (defun bf_obarray_arg_bad (args)
+      (if (= (ptr-read-u64 (nl_cons_cdr_ptr args) 0) 7)
+          (if (= (ptr-read-u64 (wf_arg_ptr args 1) 0) 0)
+              0
+            (bf_wrong_type_named (wf_arg_ptr args 1) 8104616148603069039 0 0 8))
+        0))
+    ;; ---- `format' fast path (2026-09-06) ----
+    ;; The prelude `format' adds Emacs's field-width / flags / precision
+    ;; layer and argument type checks in interpreted elisp, walking the
+    ;; template one character at a time and re-`concat'ing the output for
+    ;; every piece.  That layer cost 200 us for (format "abc") and 1.4 ms for
+    ;; (format "sym-%d" i) against 14 us / 27 us for the native arm -- and
+    ;; `format' is under `message', `error', `cl-defstruct' accessor names,
+    ;; `define-minor-mode' hook names and most macro-generated symbols.  The
+    ;; ~1000x-slower-than-Emacs `(intern (format ...))' that T77 measured
+    ;; was this wrapper; the intern table itself is a flat open-addressing
+    ;; hash (lisp/nelisp-cc-nlstr-direct-ops.el) and costs ~4 us a probe.
+    ;;
+    ;; `bf_fmt_simple_scan' decides in one native pass whether the native
+    ;; formatter produces exactly what the elisp layer produces: every
+    ;; directive is one of %s %d %i %o %x %X %c %% with no flag, width or
+    ;; precision; every arg-consuming directive has an argument; the numeric
+    ;; directives get a fixnum (a float needs Emacs's truncation, a
+    ;; non-number must signal) and %c a fixnum in the character range; and
+    ;; neither the template nor a consumed argument is a raw-byte string
+    ;; (the concat-of-pieces path and the one-shot path differ there).
+    ;; Anything else declines (0) and the caller runs the full elisp layer,
+    ;; so every signal and edge case stays exactly where it was.  The scan
+    ;; is also what makes `m5_fmt_loop' safe to call: the loop itself never
+    ;; checks that an argument exists, and (nelisp--native-format "%s %s"
+    ;; "one") reads the nil tail as a cons and faults.
+    (defun bf_fmt_simple_char_ok (a)
+      (if (= (ptr-read-u64 a 0) 2)
+          (if (< (ptr-read-u64 a 8) 0) 0
+            (if (< 4194303 (ptr-read-u64 a 8)) 0 1))
+        0))
+    (defun bf_fmt_simple_arg_ok (d a)
+      (if (= (m5_unibyte_tag_p (ptr-read-u64 a 0)) 1) 0
+        (if (= d 115) 1
+          (if (= d 99) (bf_fmt_simple_char_ok a)
+            (if (= (ptr-read-u64 a 0) 2) 1 0)))))
+    (defun bf_fmt_simple_conv_p (d)
+      (if (= d 115) 1
+        (if (= d 100) 1
+          (if (= d 105) 1
+            (if (= d 111) 1
+              (if (= d 120) 1
+                (if (= d 88) 1
+                  (if (= d 99) 1 0))))))))
+    (defun bf_fmt_simple_scan (fmt i n argp)
+      (if (>= i n) 1
+        (if (= (m5_byte_at fmt i) 37)
+            (if (>= (+ i 1) n) 0
+              (let* ((d (m5_byte_at fmt (+ i 1))))
+                (if (= d 37)
+                    (bf_fmt_simple_scan fmt (+ i 2) n argp)
+                  (if (= (bf_fmt_simple_conv_p d) 0) 0
+                    (if (= (ptr-read-u64 argp 0) 7)
+                        (if (= (bf_fmt_simple_arg_ok d (nl_cons_car_ptr argp)) 1)
+                            (bf_fmt_simple_scan fmt (+ i 2) n (nl_cons_cdr_ptr argp))
+                          0)
+                      0)))))
+          (bf_fmt_simple_scan fmt (+ i 1) n argp))))
+    (defun bf_format_simple (fmt argl out)
+      (if (= (m5_string_tag_p (ptr-read-u64 fmt 0)) 0) (wf_write_nil out)
+        (if (= (m5_unibyte_tag_p (ptr-read-u64 fmt 0)) 1) (wf_write_nil out)
+          (if (= (bf_fmt_simple_scan fmt 0 (m5_strlen fmt) argl) 0) (wf_write_nil out)
+            (let* ((ms (alloc-bytes 32 8)))
+              (seq (m5_make_builder ms 32 0)
+                   (m5_fmt_loop ms fmt 0 (m5_strlen fmt) argl)
+                   (mut-str-finalize ms out)
+                   0))))))
     ;; Doc 22 A11: `make-symbol' must yield a symbol with DISTINCT identity.
     ;; This reader has no obarray -- variable lookup and `eq' compare symbols by
     ;; NAME (name == identity, see bf_eq2 tag-4 arm), so routing make-symbol
@@ -12320,7 +12397,12 @@ Wave-2 (C) appends bf_ash (shl/sar compose) + bf_str_lt (byte-lexicographic).")
     ;; name buffer just as happily as a Str's.  Emacs signals, and a caller
     ;; that interned something already interned was almost certainly working
     ;; from a wrong assumption about what it held.
-    ((:lit "intern")      . (let* ((a (wf_arg_ptr args 0)) (tg (ptr-read-u64 a 0)))
+    ;; The OBARRAY argument is type-checked here (`bf_obarray_arg_bad')
+    ;; rather than by a prelude wrapper: the wrapper was one more interpreted
+    ;; call on every `intern' -- 22 us of a 26 us hit on a 4 us native probe,
+    ;; measured 2026-09-06 -- and every macro-generated name pays it.
+    ((:lit "intern")      . (if (= (bf_obarray_arg_bad args) 1) 1
+                             (let* ((a (wf_arg_ptr args 0)) (tg (ptr-read-u64 a 0)))
                               (if (if (= tg 5) 1 (if (= tg 6) 1 (if (= tg 14) 1 (if (= tg 15) 1 0))))
                                   ;; An existing intern is a lookup, not a
                                   ;; mutation.  Only the miss that would insert
@@ -12335,7 +12417,20 @@ Wave-2 (C) appends bf_ash (shl/sar compose) + bf_str_lt (byte-lexicographic).")
                                           1
                                         (seq (bf_intern a out) 0))
                                     0)
-                                (bf_wrong_type_stringp a))))
+                                (bf_wrong_type_stringp a)))))
+    ;; `intern-soft' natively (2026-09-06).  A symbol (nil and t included)
+    ;; answers itself -- name identity is symbol identity here, see Doc 163
+    ;; sec 8.3 -- a string probes the table without inserting, anything else
+    ;; signals `stringp' as Emacs does.  Replaces the prelude defun, which
+    ;; was two interpreted calls (its own and `nelisp--intern-lookup') on
+    ;; every probe.
+    ((:lit "intern-soft") . (if (= (bf_obarray_arg_bad args) 1) 1
+                             (let* ((a (wf_arg_ptr args 0)) (tg (ptr-read-u64 a 0)))
+                               (if (if (= tg 4) 1 (if (= tg 0) 1 (if (= tg 1) 1 0)))
+                                   (wf_copy32 out a)
+                                 (if (if (= tg 5) 1 (if (= tg 6) 1 (if (= tg 14) 1 (if (= tg 15) 1 0))))
+                                     (bf_intern_soft a out)
+                                   (bf_wrong_type_stringp a))))))
     ((:lit "make-symbol") . (seq (bf_make_symbol (wf_arg_ptr args 0) out) 0))
     ;; nelisp--intern-lookup: probe-only counterpart of `intern' (Doc 163
     ;; Phase C).  `bf_intern_soft' already returns 0 on both the hit and
@@ -12343,6 +12438,11 @@ Wave-2 (C) appends bf_ash (shl/sar compose) + bf_str_lt (byte-lexicographic).")
     ;; needed here (unlike `intern', whose `bf_intern' returns a non-zero
     ;; slot pointer).  Backs the elisp `intern-soft' (lisp/nelisp-stdlib-misc.el).
     ((:lit "nelisp--intern-lookup") . (bf_intern_soft (wf_arg_ptr args 0) out))
+    ;; nelisp--format-simple TEMPLATE ARGS: the finished string when the
+    ;; native formatter is known to agree with the prelude `format' layer
+    ;; for this call, else nil (see `bf_format_simple').  Called by the
+    ;; prelude `format' before its interpreted field-width/type-check layer.
+    ((:lit "nelisp--format-simple") . (bf_format_simple (wf_arg_ptr args 0) (wf_arg_ptr args 1) out))
     ;; A BYTE is 0..255.  Anything else was taken modulo 256 and became a
     ;; different character: (unibyte-string 300) answered "," rather than
     ;; signalling, so a caller building a byte string from computed values
@@ -12545,7 +12645,8 @@ ash/logand/logior/logxor/lognot + string<.")
   '("consp" "atom" "stringp" "symbolp" "integerp" "bignump" "natnump" "numberp" "floatp"
     "nl--read-int" "nl--int-token-p" "nl--nthcdr"
     "vectorp" "listp" "zerop" "set" "symbol-value" "fboundp" "boundp" "featurep" "provide" "require"
-    "symbol-name" "intern" "make-symbol" "nelisp--intern-lookup" "unibyte-string"
+    "symbol-name" "intern" "intern-soft" "make-symbol" "nelisp--intern-lookup"
+    "nelisp--format-simple" "unibyte-string"
     "make-vector" "vector" "aref" "elt" "aset" "record" "recordp" "make-record"
     ;; Doc 186 P0/P1/P2: char-table constructor/accessor layer.
     "char-table-p" "make-char-table" "char-table-subtype"
@@ -17460,7 +17561,8 @@ value (matches the binary's M8 read+eval-loop driver)."
     "consp" "atom" "stringp" "symbolp" "integerp" "bignump" "natnump" "numberp" "floatp"
     "nl--read-int" "nl--int-token-p" "nl--nthcdr"
     "vectorp" "listp" "zerop" "set" "symbol-value" "fboundp" "boundp" "featurep" "provide" "require"
-    "symbol-name" "intern" "make-symbol" "nelisp--intern-lookup" "unibyte-string"
+    "symbol-name" "intern" "intern-soft" "make-symbol" "nelisp--intern-lookup"
+    "nelisp--format-simple" "unibyte-string"
     "make-vector" "vector" "aref" "elt" "aset" "record" "recordp" "make-record"
     ;; Doc 186 P0/P1/P2: char-table constructor/accessor layer.
     "char-table-p" "make-char-table" "char-table-subtype"

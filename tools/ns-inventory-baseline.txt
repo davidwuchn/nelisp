@@ -954,7 +954,7 @@ pinned-collision ns-collision-divergent	file-readable-p	lisp/nelisp-stdlib-misc.
 pinned-collision ns-collision-divergent	file-regular-p	lisp/nelisp-stdlib-misc.el scripts/nelisp-stdlib-prelude.el	2b2029793466
 pinned-collision ns-collision-divergent	file-truename	lisp/nelisp-stdlib-misc.el scripts/nelisp-stdlib-prelude.el	5b04ba8cfc4d
 pinned-collision ns-collision-divergent	floor	lisp/nelisp-stdlib.el scripts/nelisp-stdlib-prelude.el	4971512ef302
-pinned-collision ns-collision-divergent	format	lisp/nelisp-stdlib-plist-str.el scripts/nelisp-stdlib-prelude.el	eb65553a63d8
+pinned-collision ns-collision-divergent	format	lisp/nelisp-stdlib-plist-str.el scripts/nelisp-stdlib-prelude.el	b414a0b05778
 pinned-collision ns-collision-divergent	functionp	lisp/nelisp-stdlib.el scripts/nelisp-stdlib-prelude.el	3172cb365701
 pinned-collision ns-collision-divergent	gensym	lisp/nelisp-stdlib-misc.el scripts/nelisp-stdlib-prelude.el	22edbc59d344
 pinned-collision ns-collision-divergent	getenv	lisp/nelisp-build-host.el scripts/nelisp-stdlib-prelude.el	02471b7ae06d

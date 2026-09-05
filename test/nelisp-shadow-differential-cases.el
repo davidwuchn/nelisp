@@ -411,6 +411,24 @@
        (string-trim-left "ab" "x+"))
  (list (format-message "`%s'" "q") (format-message "no quotes"))
  (list (intern-soft "zz-never-interned-parity") (intern-soft 'car))
+ ;; 2026-09-06: `intern-soft' and the OBARRAY type check of `intern' moved
+ ;; into native arms and the prelude stopped defining either, so both
+ ;; halves of a run reach the same code.  These pin that the arms answer
+ ;; what the wrappers answered, and what Emacs answers.
+ (list (condition-case e (intern "nl-diff-ob" 'not-an-obarray) (error e))
+       (condition-case e (intern-soft "nl-diff-ob" 'not-an-obarray) (error e))
+       (condition-case e (intern-soft 5) (error e))
+       (intern-soft "nil") (intern-soft "t") (eq (intern "nil") nil)
+       (let ((s (intern "nl-diff-soft-hit"))) (eq (intern-soft "nl-diff-soft-hit") s)))
+ ;; `format' takes a native fast path for plain directives with matching
+ ;; arguments (`nelisp--format-simple'); the bare native arm and the
+ ;; prelude layer over it must agree on exactly those shapes.  No string
+ ;; nested in the list: `%s' of a list prints one quoted here and unquoted
+ ;; in Emacs, a pre-existing printer gap both paths share.
+ (list (format "abc") (format "%s-%d" "nl" 7) (format "%c%%" 97)
+       (format "%x %X %o %i" 255 255 8 -3)
+       (format "%s|%s|%s|%s" 1.5 'sym '(1 a) nil)
+       (format "%s extra" "a" "b"))
  ;; The regexp engine: shy groups, explicit numbering, word boundaries,
  ;; non-greedy quantifiers, folding, and \N in a replacement.
  (list (string-match "\\(?:x+\\)" "xxab")
