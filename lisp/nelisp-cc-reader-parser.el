@@ -957,14 +957,25 @@
               0))
         0))
 
+    ;; DATA is 0 (not a Nil sexp) when the literal has no `data' key AND
+    ;; fewer than five elements, so the positional fallback in
+    ;; `nelisp_reader_p_build_hash_table' finds nothing either.  That is
+    ;; the shape Emacs 30+ prints for EVERY empty table --
+    ;; `#s(hash-table test equal)' -- and savehist writes one per empty
+    ;; history variable.  Reading the tag word of a 0 pointer is a NULL
+    ;; dereference: the consumer's real-init audit died there, on
+    ;; `(savehist-mode 1)' loading `projectile-project-command-history'
+    ;; (SIGSEGV in this function, rdi = 0, 2026-09-06).  The fill step
+    ;; below already guards `(= data 0)'; the count must too.
     (defun nelisp_reader_p_hash_pair_count (data n)
-      (if (= (ptr-read-u64 data 0) 7)
-          (let* ((rest (nl_cons_cdr_ptr data)))
-            (if (= (ptr-read-u64 rest 0) 7)
-                (nelisp_reader_p_hash_pair_count
-                 (nl_cons_cdr_ptr rest) (+ n 1))
-              n))
-        n))
+      (if (= data 0) n
+        (if (= (ptr-read-u64 data 0) 7)
+            (let* ((rest (nl_cons_cdr_ptr data)))
+              (if (= (ptr-read-u64 rest 0) 7)
+                  (nelisp_reader_p_hash_pair_count
+                   (nl_cons_cdr_ptr rest) (+ n 1))
+                n))
+          n)))
 
     (defun nelisp_reader_p_list_nth_ptr (node n)
       (if (= (ptr-read-u64 node 0) 7)

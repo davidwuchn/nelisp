@@ -8134,7 +8134,17 @@ eval applyfn.")
               (let* ((data_slot (nl_ht_data_slot table_ptr))
                      (entry_ptr (nl_ht_find_table data_slot key_ptr)))
                 (if (= entry_ptr 0)
-                    (if (= data_slot 0)
+                    ;; An EMPTY table's cdr is nil, and nil is an immediate:
+                    ;; `nl_cons_cdr_ptr' hands back a FRESH 32B view of it,
+                    ;; not the cons's own slot.  The alist branch below
+                    ;; writes the new head into that view and the table
+                    ;; never changes -- (puthash k v '#s(hash-table test
+                    ;; equal)) answered v and stored nothing, count stayed
+                    ;; 0 (measured 2026-09-06 on 5f9138e51; every reader
+                    ;; literal Emacs 30 writes for an empty table has this
+                    ;; shape, savehist restores them by the dozen).  Go
+                    ;; through the cons mutator, as for a 0 data slot.
+                    (if (if (= data_slot 0) 1 (= (ptr-read-u64 data_slot 0) 0))
                         (let* ((nil_s (alloc-bytes 32 8))
                                (pair_s (alloc-bytes 32 8))
                                (newhead_s (alloc-bytes 32 8)))
@@ -27445,13 +27455,33 @@ conclusion rather than a contradiction of it."
         (rc nil))
     (unwind-protect
         (progn
+          ;; The binary exits with the value of the LAST form, so every
+          ;; check is a conjunct of one final `(if (and ...) 42 13)': a
+          ;; 13 from an earlier line alone was never seen (measured
+          ;; 2026-09-06: `13' then `42' exits 42).
+          ;;
+          ;; The last three conjuncts are the empty-table literal Emacs 30+
+          ;; writes -- no `size', no `data' -- which savehist restores for
+          ;; every empty history table.  Reading `'#s(hash-table test
+          ;; equal)' dereferenced NULL in `nelisp_reader_p_hash_pair_count'
+          ;; (the consumer's real-init audit SIGSEGV on `(savehist-mode
+          ;; 1)', 2026-09-06), and `puthash' into the table it built
+          ;; stored nothing.  Both are exercised as source literals AND
+          ;; through `read', because the file loader and `read' enter the
+          ;; parser at different depths.
           (with-temp-file tmp
             (insert
-             "(if (= (hash-table-count '#s(hash-table test equal data (\"a\" 42 \"b\" 7))) 2) 42 13)\n"
-             "(if (= (gethash \"a\" '#s(hash-table test equal data (\"a\" 42 \"b\" 7))) 42) 42 13)\n"
-             "(if (= (gethash \"y\" (gethash \"x\" '#s(hash-table test equal data (\"x\" #s(hash-table test equal data (\"y\" 42)))))) 42) 42 13)\n"
-             "(if (= (length #^[nil nil nil #^^[3 0 t nil]]) 4) 42 13)\n"
-             "(if (equal (elt #^[nil nil nil #^^[1 0 #^^[2 0 #^^[3 0 t nil \"a\"]]]] 2) \"a\") 42 13)\n"))
+             "(if (and (= (hash-table-count '#s(hash-table test equal data (\"a\" 42 \"b\" 7))) 2)\n"
+             "         (= (gethash \"a\" '#s(hash-table test equal data (\"a\" 42 \"b\" 7))) 42)\n"
+             "         (= (gethash \"y\" (gethash \"x\" '#s(hash-table test equal data (\"x\" #s(hash-table test equal data (\"y\" 42)))))) 42)\n"
+             "         (= (length #^[nil nil nil #^^[3 0 t nil]]) 4)\n"
+             "         (equal (elt #^[nil nil nil #^^[1 0 #^^[2 0 #^^[3 0 t nil \"a\"]]]] 2) \"a\")\n"
+             "         (let ((h '#s(hash-table test equal)))\n"
+             "           (and (hash-table-p h) (= (hash-table-count h) 0) (eq (hash-table-test h) 'equal)\n"
+             "                (= (puthash \"k\" 9 h) 9) (= (gethash \"k\" h) 9) (= (hash-table-count h) 1)))\n"
+             "         (= (hash-table-count (read \"#s(hash-table)\")) 0)\n"
+             "         (= (hash-table-count (read \"#s(hash-table size 65 test equal rehash-size 1.5 rehash-threshold 0.8125 data ())\")) 0))\n"
+             "    42 13)\n"))
           (setq rc (call-process nelisp-standalone--reader-out nil nil nil tmp))
           (unless (= rc 42)
             (error "generated reader literal smoke exit=%S" rc)))

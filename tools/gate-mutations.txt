@@ -238,6 +238,8 @@ ert-full|lisp/nelisp-cl-macros.el|s/(signal 'cl-no-applicable-method (cons name 
 # 11/13-16 of the same smoke now assert the promoted value instead).
 standalone-reader-test|scripts/nelisp-standalone-build.el|s/(and (> v 0) (> acc (- 2305843009213693951 v)))/(and (> v 0) nil)/|wf_sum's positive-overflow half of the literal-bound check is deleted, (+ most-positive-fixnum 1) wraps silently again instead of promoting to a bignum
 standalone-reader-test|scripts/nelisp-standalone-build.el|s#(/= (/ prod acc) v)#nil#|wf_prod's div-round-trip overflow check is deleted, (* 100000000000 100000000000) wraps silently again instead of promoting to a bignum
+standalone-reader-test|lisp/nelisp-cc-reader-parser.el|s/(if (= data 0) n$/(if (= data 1) n/|the NULL guard in nelisp_reader_p_hash_pair_count is defeated, so an empty-table literal with no data key -- '#s(hash-table test equal), what Emacs 30 writes and savehist restores -- reads the tag word at address 0 and the binary faults
+standalone-reader-test|scripts/nelisp-standalone-build.el|s/(if (if (= data_slot 0) 1 (= (ptr-read-u64 data_slot 0) 0))/(if (= data_slot 0)/|nl_ht_put stops treating a materialised nil cdr as an absent data slot, so puthash into an empty reader-built table writes into a scratch view and the table stays empty
 # 2026-08-26 (Doc 187 P4 continuous cost gate): the exact flag-controlled
 # guard call is made unconditional-false.  The gate compiles its one-add loop
 # twice from the same source; this mutation makes the checked and unchecked

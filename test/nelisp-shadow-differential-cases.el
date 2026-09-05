@@ -1431,6 +1431,22 @@
        (condition-case e (float-time '(1 . 0)) (error e))
        (condition-case e (float-time '(1 . 2.0)) (error e))
        (condition-case e (float-time '(0 5.0)) (error e)))
+ ;; The empty-table literal Emacs 30+ writes -- `#s(hash-table test equal)',
+ ;; no `size', no `data' -- and the shorter shapes around it.  The native
+ ;; parser dereferenced NULL on it (2026-09-06, savehist's
+ ;; `projectile-project-command-history'), and `puthash' into the table it
+ ;; built stored nothing.  `read' on a string is the native parser in both
+ ;; halves; `read-from-string' is the prelude's own reader once loaded, so
+ ;; the two readers are held to the same count, test and mutability here.
+ ;; `hash-table-test' of a literal with no `test' is left out: Emacs answers
+ ;; `eql', the standalone records no default.
+ (let ((h (read "#s(hash-table test equal)")))
+   (list (hash-table-p h) (hash-table-count h) (hash-table-test h)
+         (puthash "k" 9 h) (gethash "k" h) (hash-table-count h)))
+ (let ((h (car (read-from-string "#s(hash-table test equal)"))))
+   (list (hash-table-count h) (puthash "k" 9 h) (gethash "k" h) (hash-table-count h)))
+ (hash-table-count (read "#s(hash-table)"))
+ (hash-table-count (car (read-from-string "#s(hash-table size 65 test equal rehash-size 1.5 rehash-threshold 0.8125 data ())")))
 )
 
 ;;; nelisp-shadow-differential-cases.el ends here
