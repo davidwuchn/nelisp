@@ -1900,7 +1900,7 @@ process seconds apart -- is what carries the argument.
 
 | function              | wrapper | the builtin under it |
 |-----------------------+---------+----------------------|
-| `format' "%-6s|"      | 1330us  | --                   |
+| `format' with a width | 1330us  | --                   |
 | `format' "%s"         |  849us  |                  5us |
 | `substring'           |   82us  |                  3us |
 | `functionp'           |   63us  |                 42us |
