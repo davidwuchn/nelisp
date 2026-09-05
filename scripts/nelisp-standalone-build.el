@@ -12403,6 +12403,7 @@ Wave-2 (C) appends bf_ash (shl/sar compose) + bf_str_lt (byte-lexicographic).")
     ((:lit "nelisp--syscall-lstat-buf") . (nl_bi_syscall_lstat_buf args out))
     ((:lit "nelisp--syscall-readlink") . (nl_bi_syscall_readlink args out))
     ((:lit "nelisp--syscall-readdir-names") . (nl_bi_syscall_readdir_names args out))
+    ((:lit "nelisp--readdir-scan-raw") . (nl_bi_readdir_scan_raw args out))
     ((:lit "nelisp--syscall-utimes") . (nl_bi_syscall_utimes args out))
     ((:lit "nelisp--syscall-statx-buf") . (nl_bi_syscall_statx_buf args out))
     ((:lit "nelisp--syscall-unshare") . (nl_bi_syscall_unshare args out))
@@ -14510,17 +14511,15 @@ Other targets return nil, preserving their generated process source exactly."
         (if (< n 0)
             (wf_write_nil out)
           (nl_seq2 (nl_alloc_str buf n out) 0))))
-    ;; nelisp--syscall-readdir-names PATH: openat(O_RDONLY|O_DIRECTORY) +
-    ;; getdents64 + close -- return every entry name in PATH as one
-    ;; newline-joined string ("." / ".." included; callers filter), or nil
-    ;; when PATH cannot be opened as a directory.  One flat string keeps the
-    ;; builtin list-free (same return shape as readlink / read-file).
+    ;; Directory enumeration's primitive boundary stays flat and allocation
+    ;; free while getdents64 is live.  SEP remains newline for existing
+    ;; callers and is NUL for directory operations that opt into the
+    ;; collision-free form.
     ;; dirent64 layout: d_ino@0 d_off@8 d_reclen(u16)@16 d_type(u8)@18
     ;; d_name@19 (NUL-terminated).  Output is clipped at 65535 bytes.
     ;; Pure elisp, no new Rust.
-    (defun nl_bi_syscall_readdir_names (args out)
-      (let* ((path_sx (wf_arg_ptr args 0))
-             (cpath (nl_bi_make_cpath path_sx))
+    (defun nl_bi_syscall_readdir_buffer (path_sx sep out)
+      (let* ((cpath (nl_bi_make_cpath path_sx))
              (fd (nl_os_open_dir cpath)))
         (if (< fd 0)
             (wf_write_nil out)
@@ -14550,13 +14549,83 @@ Other targets return nil, preserving their generated process source exactly."
                                   (setq np (+ np 1))))
                                (if (< slen 65536)
                                    (seq
-                                    (ptr-write-u8 sbuf slen 10)
+                                    (ptr-write-u8 sbuf slen sep)
                                     (setq slen (+ slen 1)))
                                  0)
                                (setq pos (+ pos reclen))))))))
                   0)))
              (nl_os_close_dir fd)
              (nl_seq2 (nl_alloc_str sbuf slen out) 0))))))
+    (defun nl_bi_syscall_readdir_names (args out)
+      (let* ((rest (nl_cons_cdr_ptr args))
+             (nul-separated
+              (if (= (ptr-read-u64 rest 0) 7)
+                  (if (= (ptr-read-u64 (nl_cons_car_ptr rest) 0) 0) 0 1)
+                0)))
+        (nl_bi_syscall_readdir_buffer
+         (wf_arg_ptr args 0) (if (= nul-separated 1) 0 10) out)))
+    ;; Decode one flat readdir buffer natively.  Build the list tail-forward
+    ;; while scanning byte offsets so there is neither an interpreted `aref'
+    ;; per byte nor a reversal pass.  `nl_alloc_str' copies exact UTF-8 byte
+    ;; slices, preserving multibyte names.
+    (defun nl_readdir_dot_entry_p (ptr start n)
+      (if (= n 1)
+          (if (= (ptr-read-u8 ptr start) 46) 1 0)
+        (if (= n 2)
+            (if (= (ptr-read-u8 ptr start) 46)
+                (if (= (ptr-read-u8 ptr (+ start 1)) 46) 1 0)
+              0)
+          0)))
+    (defun nl_readdir_scan_raw (raw sep skip-dotdot out)
+      (let* ((ptr (bf_str_ptr raw))
+             (len (bf_str_len raw))
+             (idx 0)
+             (start 0)
+             (have 0)
+             (tail (alloc-bytes 32 8))
+             (node (alloc-bytes 32 8))
+             (name (alloc-bytes 32 8))
+             (nil-slot (alloc-bytes 32 8)))
+        (seq
+         (wf_write_nil out)
+         (wf_write_nil tail)
+         (wf_write_nil nil-slot)
+         (while (< idx len)
+           (seq
+            (if (= (ptr-read-u8 ptr idx) sep)
+                (let* ((n (- idx start)))
+                  (seq
+                   (if (if (= skip-dotdot 0)
+                           1
+                         (if (= (nl_readdir_dot_entry_p ptr start n) 1) 0 1))
+                       (seq
+                        (nl_alloc_str (+ ptr start) n name)
+                        (nelisp_cons_construct name nil-slot node)
+                        (if (= have 0)
+                            (seq
+                             (wf_copy32 out node)
+                             (wf_copy32 tail node)
+                             (setq have 1))
+                          (seq
+                           (cons-set-cdr tail node)
+                           (wf_copy32 tail node))))
+                     0)
+                   (setq start (+ idx 1))))
+              0)
+            (setq idx (+ idx 1))))
+         0)))
+    (defun nl_bi_readdir_scan_raw (args out)
+      (let* ((rest1 (nl_cons_cdr_ptr args))
+             (rest2 (nl_cons_cdr_ptr rest1))
+             (nul-separated
+              (if (= (ptr-read-u64 rest2 0) 7)
+                  (if (= (ptr-read-u64 (nl_cons_car_ptr rest2) 0) 0) 0 1)
+                0)))
+        (nl_readdir_scan_raw
+         (wf_arg_ptr args 0)
+         (if (= nul-separated 1) 0 10)
+         (ptr-read-u64 (wf_arg_ptr args 1) 0)
+         out)))
     ;; nelisp--syscall-utimes PATH ATIME MTIME: utimes(2) (syscall 235) -- set
     ;; the access + modification times to ATIME / MTIME (seconds; usec = 0).
     ;; Builds a struct timeval[2] {atime.sec, atime.usec, mtime.sec, mtime.usec}
@@ -17379,7 +17448,7 @@ value (matches the binary's M8 read+eval-loop driver)."
     "nelisp--syscall-path" "nelisp--syscall-path2" "nelisp--syscall-path-int"
     "nelisp--syscall-stat-field" "nelisp--syscall-stat-buf"
     "nelisp--syscall-lstat-buf" "nelisp--syscall-readlink"
-    "nelisp--syscall-readdir-names"
+    "nelisp--syscall-readdir-names" "nelisp--readdir-scan-raw"
     "nelisp--syscall-utimes" "nelisp--syscall-statx-buf" "nelisp--syscall-unshare"
     "nelisp--syscall-mount" "nelisp--syscall-pivot-root"
     "nelisp--write-stdout-bytes" "nelisp--write-stderr-line"

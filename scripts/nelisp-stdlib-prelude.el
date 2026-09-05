@@ -9209,11 +9209,10 @@ Prefers the real process id; falls back to the clock, marked with a leading
 ;; `directory-files' (which calls it) hang indefinitely.
 ;;
 ;; `nelisp--syscall-readdir-names' IS a proper dispatch-armed builtin that
-;; already returns a newline-joined string of all entry names (including
-;; "." and "..").  We split that string, prepend the canonical absolute
-;; directory path as the first element, and return `(ABS-DIR NAME ...)',
-;; exactly matching the contract expected by `directory-files' in
-;; nelisp-stdlib-misc.el.
+;; returns a newline-joined string of all entry names (including "." and
+;; "..") for existing one-argument callers.  Directory operations here ask
+;; its optional mode for NUL separators, because NUL cannot occur in a
+;; filename, and pass the matching optional mode to the native decoder.
 ;;
 ;; Guarded by `(fboundp 'nelisp--syscall-readdir-names)': true only on the
 ;; standalone reader binary, so host Emacs is unaffected.  Uses `fset'
@@ -9226,73 +9225,78 @@ Prefers the real process id; falls back to the clock, marked with a leading
 ;; takes effect.  The misc.el version would also work once readdir is fixed,
 ;; but the fset here is a belt-and-suspenders override that avoids any
 ;; dependency on the misc.el load order.
-;; nelisp--readdir-scan-raw: helper that walks a newline-terminated name
-;; string from nelisp--syscall-readdir-names and builds a list of strings,
-;; one per entry.  The loop uses `if' (not the `or' macro) to avoid the
-;; let-frame overflow that `or' causes inside tight while loops on the
-;; standalone reader when the string exceeds ~32KB.
+;; nelisp--readdir-scan-raw: the standalone registers a native byte-offset
+;; decoder under this existing name.  The interpreted definition remains for
+;; hosted/older runtimes.  NUL-SEPARATED selects the collision-free raw form;
+;; omitted/nil preserves the legacy newline representation.
 ;;
 ;; Callers pass a SKIP-DOTDOT argument: when non-nil, "." and ".." are
 ;; excluded (needed by directory-files).
-(defun nelisp--readdir-scan-raw (raw skip-dotdot)
-  (let ((len (length raw))
-        (idx 0)
-        (start 0)
-        (result nil))
-    (while (< idx len)
-      (if (= (aref raw idx) 10)
-          (let ((name (substring raw start idx)))
-            (if skip-dotdot
-                (if (= (length name) 1)
-                    (if (= (aref name 0) 46)
-                        nil
-                      (setq result (cons name result)))
-                  (if (= (length name) 2)
+(unless (fboundp 'nelisp--readdir-scan-raw)
+  (defun nelisp--readdir-scan-raw (raw skip-dotdot &optional nul-separated)
+    (let ((len (length raw))
+          (idx 0)
+          (start 0)
+          (separator (if nul-separated 0 10))
+          (result nil))
+      (while (< idx len)
+        (if (= (aref raw idx) separator)
+            (let ((name (substring raw start idx)))
+              (if skip-dotdot
+                  (if (= (length name) 1)
                       (if (= (aref name 0) 46)
-                          (if (= (aref name 1) 46)
-                              nil
-                            (setq result (cons name result)))
+                          nil
                         (setq result (cons name result)))
-                    (setq result (cons name result))))
-              (setq result (cons name result)))
-            (setq start (1+ idx))))
-      (setq idx (1+ idx)))
-    (nreverse result)))
+                    (if (= (length name) 2)
+                        (if (= (aref name 0) 46)
+                            (if (= (aref name 1) 46)
+                                nil
+                              (setq result (cons name result)))
+                          (setq result (cons name result)))
+                      (setq result (cons name result))))
+                (setq result (cons name result)))
+              (setq start (1+ idx))))
+        (setq idx (1+ idx)))
+      (nreverse result))))
 (when (fboundp 'nelisp--syscall-readdir-names)
   ;; fset nelisp--syscall-readdir: pure-elisp replacement for the CLASS-2
   ;; deferred builtin.  Returns (ABS-DIR NAME ...) or nil, matching the Rust
   ;; bi_syscall_readdir contract expected by directory-files in misc.el.
   (fset 'nelisp--syscall-readdir
         (lambda (dir)
-          (let ((raw (nelisp--syscall-readdir-names dir)))
+          (let ((raw (nelisp--syscall-readdir-names dir t)))
             (if raw
                 (cons (expand-file-name dir)
-                      (nelisp--readdir-scan-raw raw nil))
+                      (nelisp--readdir-scan-raw raw nil t))
               nil))))
   ;; fset directory-files: override the misc.el version (which calls
   ;; nelisp--syscall-readdir, itself deferred) with one that calls
-  ;; nelisp--syscall-readdir-names directly and scans via the
-  ;; nelisp--readdir-scan-raw helper (no or-macro loops).
+  ;; nelisp--syscall-readdir-names directly.  The common no-FULL/no-MATCH
+  ;; case returns the native decoder's list as-is, avoiding a second
+  ;; interpreted traversal and reversal.
   (fset 'directory-files
         (lambda (directory &optional full match _nosort)
-          (let ((raw (nelisp--syscall-readdir-names directory)))
+          (let ((raw (nelisp--syscall-readdir-names directory t)))
             (if raw
-                (let ((names (nelisp--readdir-scan-raw raw t))
+                (let ((names (nelisp--readdir-scan-raw raw t t))
                       (out nil))
-                  (while names
-                    (let ((name (car names)))
-                      (if match
-                          (if (string-match-p match name)
+                  (if (if full t match)
+                      (progn
+                        (while names
+                          (let ((name (car names)))
+                            (if match
+                                (if (string-match-p match name)
+                                    (setq out (cons (if full
+                                                        (expand-file-name name directory)
+                                                      name)
+                                                    out)))
                               (setq out (cons (if full
                                                   (expand-file-name name directory)
                                                 name)
-                                              out)))
-                        (setq out (cons (if full
-                                            (expand-file-name name directory)
-                                          name)
-                                        out))))
-                    (setq names (cdr names)))
-                  (nreverse out))
+                                              out))))
+                          (setq names (cdr names)))
+                        (nreverse out))
+                    names))
               nil)))))
 (unless (fboundp 'file-exists-p)
   (defun file-exists-p (filename)
@@ -9374,8 +9378,8 @@ and only running both says which."
 (unless (fboundp 'delete-file)
   (defun delete-file (filename &optional _trash) (nelisp--syscall-path 87 filename) nil))
 (defun nelisp--delete-directory-recursive (path)
-  (let ((names (nelisp--split-on-char
-                (or (nelisp--syscall-readdir-names path) "") 10 t)))
+  (let ((names (nelisp--readdir-scan-raw
+                (or (nelisp--syscall-readdir-names path t) "") t t)))
     (dolist (name names)
       (unless (or (equal name ".") (equal name ".."))
         (nelisp--delete-directory-recursive

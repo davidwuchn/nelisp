@@ -1424,13 +1424,20 @@ standalone-reader-winpath-smoke: $(if $(wildcard target/nelisp target/nelisp.exe
 standalone-reader-fileattrs-smoke: $(if $(wildcard target/nelisp target/nelisp.exe),,standalone-reader)
 	@bin=$(STANDALONE_BIN); \
 	d=target/tmp/fileattrs-smoke; \
-	rm -rf $$d; mkdir -p $$d/sub; \
+	rm -rf $$d; mkdir -p $$d/sub $$d/empty $$d/many; \
 	printf '0123456789' > $$d/ten-bytes.txt; \
+	touch $$d/.hidden $$d/日本語-😀.txt; \
+	seq -w 0 999 | xargs -I{} touch $$d/many/entry-{}; \
+	$(EMACS) --batch -Q --eval \
+	  '(write-region "" nil "target/tmp/fileattrs-smoke/line\nbreak" nil (quote silent))' \
+	  >/dev/null; \
 	dir="$$(pwd -W 2>/dev/null || pwd)/$$d"; \
 	printf '%s\n' \
 	  "(let* ((dir \"$$dir\")" \
 	  '       (f (concat dir "/ten-bytes.txt"))' \
 	  '       (sub (concat dir "/sub"))' \
+	  '       (empty (concat dir "/empty"))' \
+	  '       (many (concat dir "/many"))' \
 	  '       (attrs (file-attributes f))' \
 	  '       (mtime (file-attribute-modification-time attrs))' \
 	  '       (size-ok (equal (file-attribute-size attrs) 10))' \
@@ -1438,13 +1445,50 @@ standalone-reader-fileattrs-smoke: $(if $(wildcard target/nelisp target/nelisp.e
 	  '       (reg-ok (and (file-regular-p f) (not (file-directory-p f))))' \
 	  '       (dir-ok (and (file-directory-p sub) (not (file-regular-p sub))))' \
 	  '       (names (directory-files dir))' \
-	  '       (names-ok (and (= (length names) 2) (and (member "sub" names) t)' \
-	  '                      (and (member "ten-bytes.txt" names) t)))' \
+	  '       (all-names (cdr (nelisp--syscall-readdir dir)))' \
+	  '       (many-names (directory-files many nil nil t))' \
+	  '       (many-raw (nelisp--syscall-readdir-names many))' \
+	  '       (many-decoded (nelisp--readdir-scan-raw many-raw t))' \
+	  '       (perf-reps 20)' \
+	  '       (perf-i 0)' \
+	  '       (perf-value nil)' \
+	  '       (raw-t0 (float-time))' \
+	  '       (raw-loop (while (< perf-i perf-reps)' \
+	  '                   (setq perf-value (nelisp--syscall-readdir-names many))' \
+	  '                   (setq perf-i (1+ perf-i))))' \
+	  '       (raw-usec (/ (* (- (float-time) raw-t0) 1000000.0) perf-reps))' \
+	  '       (perf-i 0)' \
+	  '       (public-t0 (float-time))' \
+	  '       (public-loop (while (< perf-i perf-reps)' \
+	  '                      (setq perf-value (directory-files many nil nil t))' \
+	  '                      (setq perf-i (1+ perf-i))))' \
+	  '       (public-usec (/ (* (- (float-time) public-t0) 1000000.0) perf-reps))' \
+	  '       (perf-ratio (if (> raw-usec 0.0) (/ public-usec raw-usec) 99999.0))' \
+	  '       (perf-ok (< perf-ratio 20.0))' \
+	  '       (names-ok (and (= (length names) 7)' \
+	  '                      (and (member "sub" names) t)' \
+	  '                      (and (member "empty" names) t)' \
+	  '                      (and (member "many" names) t)' \
+	  '                      (and (member "ten-bytes.txt" names) t)' \
+	  '                      (and (member ".hidden" names) t)' \
+	  '                      (and (member "日本語-😀.txt" names) t)' \
+	  '                      (and (member "line\nbreak" names) t)' \
+	  '                      (not (member "." names))' \
+	  '                      (not (member ".." names))))' \
+	  '       (dot-ok (and (= (length all-names) 9)' \
+	  '                    (and (member "." all-names) t)' \
+	  '                    (and (member ".." all-names) t)))' \
+	  '       (empty-ok (null (directory-files empty)))' \
+	  '       (many-ok (and (= (length many-names) 1000)' \
+	  '                     (and (member "entry-000" many-names) t)' \
+	  '                     (and (member "entry-999" many-names) t)' \
+	  '                     (equal many-names many-decoded)))' \
 	  '       (absent-ok (and (null (file-attributes (concat dir "/nope")))' \
 	  '                       (null (directory-files (concat dir "/nope"))))))' \
-	  '  (princ (format "size-ok=%S mtime=%S reg-ok=%S dir-ok=%S names=%S absent-ok=%S pass=%S\n"' \
-	  '                 size-ok mtime reg-ok dir-ok names absent-ok' \
-	  '                 (and size-ok mtime-ok reg-ok dir-ok names-ok absent-ok))))' \
+	  '  (princ (format "size-ok=%S mtime=%S reg-ok=%S dir-ok=%S names-ok=%S dot-ok=%S empty-ok=%S many=%d order-ok=%S perf=%.2fx absent-ok=%S pass=%S\n"' \
+	  '                 size-ok mtime reg-ok dir-ok names-ok dot-ok empty-ok' \
+	  '                 (length many-names) (equal many-names many-decoded) perf-ratio absent-ok' \
+	  '                 (and size-ok mtime-ok reg-ok dir-ok names-ok dot-ok empty-ok many-ok perf-ok absent-ok))))' \
 	  > target/standalone-reader-fileattrs-smoke.el; \
 	out="$$($$bin --load target/standalone-reader-fileattrs-smoke.el 2>&1)"; \
 	case "$$out" in \
