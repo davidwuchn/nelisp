@@ -20017,6 +20017,180 @@ EOF) still delimits whatever came before from whatever comes next."
       (flush len))
     (apply #'concat (nreverse chunks))))
 
+(defconst nelisp-standalone--docstring-body-heads
+  '(defun defmacro defsubst cl-defun cl-defmacro define-inline)
+  "Heads whose 4th element is documentation only when a body form follows.
+`(HEAD NAME ARGLIST \"DOC\")' with nothing after \"DOC\" is a function whose
+BODY happens to be a literal string -- not documentation -- exactly the
+distinction `defun'/`defmacro' themselves draw when they build the
+callable; see `nelisp--lambda-body' in src/nelisp-eval.el.")
+
+(defconst nelisp-standalone--docstring-tail-heads
+  '(defvar defconst defvar-local)
+  "Heads whose 4th element, when present, is always documentation.
+Unlike the function heads above, these forms take at most 3 arguments
+\(NAME, VALUE, DOC\); a 4th element can only be the docstring, never a
+body form, so it is stripped whenever it is the form's last element.")
+
+(defun nelisp-standalone--elisp-strip-docstrings (text)
+  "Return TEXT with every prelude docstring elided, forms-preserving.
+This runs after `nelisp-standalone--elisp-strip-comments' in the same
+pipeline and for the same reason: every byte kept in
+`nelisp-standalone--reader-repl-prelude-source' is paid for again, at
+roughly 6x its size, once `nelisp-standalone--copy-lit-u64-defuns' turns
+it into native `ptr-write-u64' stores.  Doc-T99's audit measured prelude
+docstrings (function and variable) at roughly 90-100 KB of the
+comment-stripped source.
+
+This is safe on this runtime specifically because a docstring baked into
+the embedded prelude source never survives to be read back at all:
+
+- Every code path that builds a callable from a `defun'/`defmacro'/
+  `lambda' body -- interpreter closures and the bytecode-VM path alike --
+  runs BODY through `nelisp--lambda-body' first (src/nelisp-eval.el),
+  which unconditionally drops a leading string before the closure is
+  built.  The docstring is discarded the instant the prelude is
+  evaluated at boot, whether or not this function ever ran.
+- The one thing standing between a prelude symbol and a live
+  `documentation' string is the `function-documentation' symbol
+  property, which is exactly what nelisp-emacs-lib's
+  `documentation' fallback reads (`src/emacs-help.el', guarded
+  `(unless (fboundp \\='documentation) ...)'  -- nothing on either side of
+  that boundary ever puts a plain prelude function's original docstring
+  onto that property (the property is real Emacs's own advice.el/
+  nadvice.el mechanism for a SYNTHESIZED doc string on an advised
+  function, unrelated to this).  `documentation' does not exist at all
+  as a builtin on bare standalone `target/nelisp' (see the ERT comment in
+  packages/nl-prelude/test/nl-prelude-test.el).
+- So: `(documentation SYM)' returns nil for every prelude function today,
+  with or without this strip, and keeps returning nil after it -- the
+  differential this change must hold to is \"unchanged\", not
+  \"preserved\", because there was never anything served from this copy.
+
+Only a docstring the reader itself would recognize as one is removed:
+
+- `(HEAD NAME ARGLIST \"DOC\" BODY...)' for the heads in
+  `nelisp-standalone--docstring-body-heads' -- removed only when at least
+  one BODY form follows, the same condition that makes Emacs treat the
+  string as documentation instead of the function's return value.
+- `(HEAD NAME VALUE \"DOC\")' for the heads in
+  `nelisp-standalone--docstring-tail-heads' -- removed only when it is
+  the form's last element, the only position these forms accept one.
+
+Every top-level form is parsed once via `read-from-string' to classify
+it; a matched form's head/name/arglist-or-value tokens are then re-read
+from the same start position to recover the exact character span of the
+docstring in TEXT (deterministic: re-reading the same prefix from the
+same offset always lands on the same boundary the whole-form read already
+used).  That span, quotes included, is dropped verbatim and nothing else
+in TEXT moves -- a form this function does not recognize, or recognizes
+but decides not to touch, is copied through unchanged, byte for byte."
+  (let* ((len (length text)) (pos 0) (start 0) (chunks nil))
+    (cl-flet ((flush (upto)
+                (when (> upto start)
+                  (push (substring text start upto) chunks)))
+              (skip-ws (p)
+                (while (and (< p len)
+                            (memq (aref text p) '(?\s ?\t ?\n ?\f ?\r)))
+                  (setq p (1+ p)))
+                p))
+      (while (< pos len)
+        (setq pos (skip-ws pos))
+        (when (< pos len)
+          (let* ((form-start pos)
+                 ;; No `condition-case' here, deliberately: TEXT is this
+                 ;; tree's own prelude source, already read once in full
+                 ;; by `nelisp-standalone--reader-repl-prelude-forms''s
+                 ;; caller and again by every `standalone-reader-prelude-
+                 ;; test' run -- a `read-from-string' error here means
+                 ;; that read is about to fail too, or already has, and a
+                 ;; loud build-time `invalid-read-syntax'/`end-of-file' is
+                 ;; strictly more useful than silently emitting a build
+                 ;; that ships broken source (`tools/fallback-inventory-
+                 ;; baseline.txt': "an error becomes a quieter, wrong
+                 ;; answer" is exactly the kind this avoids).
+                 (r (read-from-string text pos))
+                 (parsed (car r)) (next (cdr r)))
+            (when (and (consp parsed) (eq (aref text form-start) ?\())
+              (let* ((head (car-safe parsed))
+                     (flen (safe-length parsed))
+                     (body-shape (and (memq head nelisp-standalone--docstring-body-heads)
+                                       (>= flen 4) (stringp (nth 3 parsed)) (> flen 4)))
+                     (tail-shape (and (memq head nelisp-standalone--docstring-tail-heads)
+                                       (= flen 4) (stringp (nth 3 parsed)))))
+                (when (or body-shape tail-shape)
+                  ;; Re-derive the docstring's exact span by re-reading the
+                  ;; same head/name/arglist-or-value prefix `parsed' was
+                  ;; already read from -- same no-`condition-case' reasoning
+                  ;; as above, and the `equal' check just below still
+                  ;; refuses to touch anything unless the re-derived
+                  ;; position lands on the exact same string `parsed'
+                  ;; already reported at index 3.
+                  (let* ((inner (1+ form-start))
+                         (r1 (read-from-string text inner)) (p1 (cdr r1))
+                         (r2 (read-from-string text p1)) (p2 (cdr r2))
+                         (r3 (read-from-string text p2)) (p3 (cdr r3))
+                         (p4 (skip-ws p3)))
+                    (when (and (eq (aref text p4) ?\")
+                               (equal (car (read-from-string text p4))
+                                      (nth 3 parsed)))
+                      (let ((p5 (cdr (read-from-string text p4))))
+                        (flush p4)
+                        (setq start p5)))))))
+            (setq pos next))))
+      (flush len))
+    (apply #'concat (nreverse chunks))))
+
+(defun nelisp-standalone--elisp-collapse-whitespace (text)
+  "Return TEXT with runs of horizontal whitespace collapsed to one space.
+Runs after `nelisp-standalone--elisp-strip-docstrings' in the same
+pipeline, for the same reason as both strips above: indentation costs
+the same ~6x-on-embed premium as comment prose or a docstring, and the
+reader does not care how many spaces or tabs separate two tokens as
+long as at least one separator remains where one is required -- which a
+single space always satisfies.
+
+Only `?\\s' and `?\\t' runs OUTSIDE a string or character literal are
+touched, and only ever collapsed down to exactly one `?\\s', never
+removed outright: this never merges two tokens that whitespace was
+keeping apart, and, because a run's own newlines are left alone
+entirely, `nl_eval_source_all''s line-counting error-reporting path
+(see `nelisp-standalone--elisp-strip-comments', which preserves
+newlines for the identical reason) is unaffected -- this function never
+touches a `?\\n', so it cannot shift which line anything falls on.
+String and character-literal scanning mirrors
+`nelisp-standalone--elisp-strip-comments' exactly (the same backslash-
+escape and quote handling), so whitespace inside a string literal -- for
+example a two-space indent baked into a docstring or an error message --
+is never touched."
+  (let* ((len (length text)) (i 0) (start 0) (chunks nil))
+    (cl-flet ((flush (upto)
+                (when (> upto start)
+                  (push (substring text start upto) chunks))))
+      (while (< i len)
+        (let ((c (aref text i)))
+          (cond
+           ((eq c ?\\)
+            (setq i (min len (+ i 2))))
+           ((and (eq c ??)
+                 (< (1+ i) len)
+                 (not (eq (aref text (1+ i)) ?\\)))
+            (setq i (+ i 2)))
+           ((eq c ?\")
+            (setq i (1+ i))
+            (while (and (< i len) (not (eq (aref text i) ?\")))
+              (setq i (if (eq (aref text i) ?\\) (+ i 2) (1+ i))))
+            (setq i (min len (1+ i))))
+           ((memq c '(?\s ?\t))
+            (flush i)
+            (push " " chunks)
+            (while (and (< i len) (memq (aref text i) '(?\s ?\t)))
+              (setq i (1+ i)))
+            (setq start i))
+           (t (setq i (1+ i))))))
+      (flush len))
+    (apply #'concat (nreverse chunks))))
+
 (defun nelisp-standalone--copy-lit-u64-defuns (name string &optional chunk-bytes)
   "Return Phase47 defuns copying large literal STRING into DST at OFF.
 The generated NAME defun delegates to bounded chunk defuns so host-side walkers
@@ -23598,8 +23772,10 @@ correctly."
       "(nelisp--repl-idle-pump)")
     ,@(nelisp-standalone--copy-lit-u64-defuns
       'nl_repl_prelude_source
-      (nelisp-standalone--elisp-strip-comments
-       (nelisp-standalone--reader-repl-prelude-source)))
+      (nelisp-standalone--elisp-collapse-whitespace
+       (nelisp-standalone--elisp-strip-docstrings
+        (nelisp-standalone--elisp-strip-comments
+         (nelisp-standalone--reader-repl-prelude-source)))))
     (defun nl_runtime_image_command_p (ptr)
       (if (= (nl_cstr_eq_dump_runtime_image ptr) 1)
           1
