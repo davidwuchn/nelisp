@@ -10742,6 +10742,82 @@ native predicates."
      ((vectorp x) 'vector)
      (t 'cons))))
 
+;; native `fboundp' rejects `nil' and `t' with `(wrong-type-argument
+;; symbolp nil)' even though `symbolp' correctly accepts both -- nil and
+;; t are symbols, just ones whose function cell can never usefully hold
+;; anything in ordinary use.  cc-mode's cc-defs.el hits this at load time
+;; through `(and (symbolp form) (fboundp form))' with FORM bound to nil,
+;; so every package that requires cc-mode (json-mode, csharp-mode, ...)
+;; failed to load on the standalone reader.  Measured against Emacs 31.1:
+;; `(fboundp nil)' is nil (nil can never be `fset', so this is always
+;; false); `(fboundp t)' is nil in the ordinary case but t if `t' has
+;; actually been `fset' (unlike nil, t's function cell is not otherwise
+;; protected) -- so this defers to `symbol-function' for every symbol
+;; rather than hard-coding nil/t as always-unbound.  `symbol-function'
+;; itself sometimes answers the internal `nelisp--unbound-marker'
+;; sentinel for a symbol that only ever got a `defconst' (see the sibling
+;; gap this masks: a variable-only symbol's function-cell mirror entry
+;; holds the marker, not a clean nil), so that is filtered here too, the
+;; same as the native check already did for ordinary symbols.
+(unless (fboundp 'nelisp--native-fboundp)
+  (fset 'nelisp--native-fboundp (symbol-function 'fboundp)))
+(defun fboundp (symbol)
+  "Return t if SYMBOL's function definition is not nil."
+  (if (symbolp symbol)
+      (let ((def (symbol-function symbol)))
+        (and def (not (eq def 'nelisp--unbound-marker)) t))
+    (nelisp--native-fboundp symbol)))
+
+;; `macrop', `commandp' and `indirect-function' do not exist at all on the
+;; standalone reader (void-function) -- cc-mode and friends have been
+;; shimming them from the consuming side until now.  Ported directly from
+;; GNU Emacs's own algorithms (`eval.c''s indirect_function/Fcommandp,
+;; `subr.el''s `macrop'), specialised to the two function shapes this
+;; runtime actually produces: a builtin is `(builtin NAME)', an evaluated
+;; lambda is `(closure ENV ARGS . BODY)', and an unevaluated lambda literal
+;; (never passed through the evaluator, e.g. stored via `fset' of a quoted
+;; `(lambda ...)' form, which is how this prelude's own bootstrap
+;; `defmacro' builds a macro's function) is `(lambda ARGS . BODY)' with no
+;; ENV slot.  All measured against Emacs 31.1.
+(unless (fboundp 'indirect-function)
+  (defun indirect-function (object &optional _noerror)
+    "Return the function at the end of OBJECT's function chain.
+If OBJECT is not a symbol, just return it.  Otherwise, follow all
+function indirections -- through `nil' and `t', which are symbols like
+any other -- to find the final function binding and return it."
+    (while (and (symbolp object) object)
+      (setq object (symbol-function object)))
+    object))
+
+(unless (fboundp 'macrop)
+  (defun macrop (object)
+    "Non-nil if and only if OBJECT is a macro."
+    (let ((def (indirect-function object)))
+      (and (consp def) (eq (car def) 'macro) t))))
+
+(unless (fboundp 'commandp)
+  (defun commandp (function &optional for-call-interactively)
+    "Non-nil if FUNCTION makes provisions for interactive calling.
+This means it contains a description for how to read arguments to give
+it.  The value is nil for an invalid function or a symbol with no
+function definition.
+
+Interactively callable functions include strings and vectors (treated
+as keyboard macros) and lambda-expressions that contain a top-level
+call to `interactive'.  Also, a symbol satisfies `commandp' if its
+function definition does so.
+
+If the optional argument FOR-CALL-INTERACTIVELY is non-nil, then
+strings and vectors are not accepted."
+    (let ((fun (indirect-function function)))
+      (cond
+       ((null fun) nil)
+       ((or (stringp fun) (vectorp fun)) (and (not for-call-interactively) t))
+       ((not (consp fun)) nil)
+       ((eq (car fun) 'lambda) (and (assq 'interactive (cdr (cdr fun))) t))
+       ((eq (car fun) 'closure) (and (assq 'interactive (cdr (cdr (cdr fun)))) t))
+       (t nil)))))
+
 ;; ---- Doc 22 reader-core gap fix A9 + with-output-to-string ----
 ;;
 ;; native princ/prin1/terpri ignore a buffer/function STREAM and the

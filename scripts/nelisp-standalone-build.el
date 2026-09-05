@@ -28431,7 +28431,8 @@ its header for the `cat PRELUDE yourfile.el | binary' usage.")
 
 (defun nelisp-standalone--prelude-breadth-test-src ()
   "Breadth test exercising the Wave-1 (B) primitives + the prelude macros.
-Returns 42: defun+cond, dolist+setq, nth, plist-get, and a backquote `length'
+Returns 42: defun+cond, dolist+setq, nth, plist-get, `fboundp'/`macrop'/
+`commandp'/`indirect-function' accepting nil, and a backquote `length'
 all combine so a single wrong primitive shifts the result off 42."
   (concat
    "(defun bt-f (x) (cond ((< x 0) 0) (t (* x 2))))\n"
@@ -28473,6 +28474,15 @@ all combine so a single wrong primitive shifts the result off 42."
    "               (setq i (1+ i)))\n"
    "             (and (> acc 0) (< (- (float-time) s) 4.0)))\n"
    "           0 100)\n"
+   ;; nil/t are symbols (a never-fset function cell, same as any other
+   ;; never-bound symbol) -- these four used to signal `(wrong-type-
+   ;; argument symbolp nil)' instead of answering nil like GNU Emacs.
+   "       (if (eq (fboundp nil) nil) 0 100)\n"
+   "       (if (eq (fboundp 'car) t) 0 100)\n"
+   "       (if (eq (macrop nil) nil) 0 100)\n"
+   "       (if (eq (commandp nil) nil) 0 100)\n"
+   "       (if (eq (commandp \"kbd\") t) 0 100)\n"
+   "       (if (eq (indirect-function nil) nil) 0 100)\n"
    "       (if (= (length `(1 ,b ,@c 5)) 5) 42 100))))\n")) ; backquote length 5 -> 42
 
 ;;;###autoload

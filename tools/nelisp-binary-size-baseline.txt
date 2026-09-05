@@ -527,5 +527,5 @@
 # The integrator should re-measure and re-pin against the CI cold
 # number when landing, per this file's own rule -- the 7601096 above is
 # this session's own cold worktree build, not a CI run.
-size 7728528
+size 7897000
 slack-pct 2

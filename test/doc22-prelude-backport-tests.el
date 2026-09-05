@@ -283,3 +283,60 @@
                           (setq out (concat out (char-to-string ch)))))
                 t))
     (should (equal out "\n"))))
+
+;; The predicates below all previously signalled `(wrong-type-argument
+;; symbolp nil)' for `nil'/`t' even though `symbolp' itself accepts both
+;; -- nil and t ARE symbols, just ones whose function cell is empty in
+;; the ordinary case.  `macrop', `commandp' and `indirect-function' did
+;; not exist at all (void-function) on the standalone reader; cc-mode's
+;; cc-defs.el hitting `(and (symbolp form) (fboundp form))' with FORM
+;; bound to nil broke every package that requires cc-mode.  Every
+;; expected value below was cross-checked against Emacs 31.1.
+
+(ert-deftest nelisp-doc22-fboundp-accepts-nil-and-t ()
+  "`fboundp' of `nil'/`t' is nil in the ordinary (never-`fset') case,
+same as any other never-bound symbol; a non-symbol argument still
+signals `wrong-type-argument', unchanged."
+  (should (equal (nelisp-doc22--standalone-eval
+                  (concat "(list (fboundp nil) (fboundp t) (fboundp 'car)"
+                          " (fboundp 'nelisp-doc22-totally-unbound-xyz))"))
+                 "(nil nil t nil)"))
+  (should (equal (nelisp-doc22--standalone-eval
+                  "(condition-case e (fboundp \"x\") (error (car e)))")
+                 "wrong-type-argument")))
+
+(ert-deftest nelisp-doc22-indirect-function-follows-chain-and-stops-at-nil ()
+  "`indirect-function' matches `eval.c''s `indirect_function': chase
+symbol function cells -- nil/t included, since both are symbols -- until
+a non-symbol or a never-`fset' (empty) cell is reached; a multi-hop
+`fset' alias chain resolves to the function at its end."
+  (should (equal (nelisp-doc22--standalone-eval
+                  (concat "(list (indirect-function nil) (indirect-function t)"
+                          " (functionp (indirect-function 'car))"
+                          " (indirect-function 'nelisp-doc22-totally-unbound-xyz2))"))
+                 "(nil nil t nil)"))
+  (should (equal (nelisp-doc22--standalone-eval
+                  (concat "(progn (fset 'nelisp-doc22-alias-a 'nelisp-doc22-alias-b)"
+                          " (fset 'nelisp-doc22-alias-b (lambda () 42))"
+                          " (funcall (indirect-function 'nelisp-doc22-alias-a)))"))
+                 "42")))
+
+(ert-deftest nelisp-doc22-macrop-recognises-macro-cons-and-rejects-nil ()
+  "`macrop' of nil/t/a plain function is nil; a real macro is t."
+  (should (equal (nelisp-doc22--standalone-eval
+                  (concat "(list (macrop nil) (macrop t) (macrop 'car)"
+                          " (macrop (lambda (x) x))"
+                          " (progn (defmacro nelisp-doc22-mac (x) x)"
+                          " (macrop 'nelisp-doc22-mac)))"))
+                 "(nil nil nil nil t)")))
+
+(ert-deftest nelisp-doc22-commandp-nil-t-and-interactive-forms ()
+  "`commandp' of nil/t/a non-interactive symbol or lambda is nil; a
+string or vector (keyboard macros) and a lambda with a top-level
+`(interactive)' call are t."
+  (should (equal (nelisp-doc22--standalone-eval
+                  (concat "(list (commandp nil) (commandp t) (commandp 'car)"
+                          " (commandp \"abc\") (commandp [?a ?b])"
+                          " (commandp (lambda () 1))"
+                          " (commandp (lambda () (interactive) 1)))"))
+                 "(nil nil nil t t nil t)")))

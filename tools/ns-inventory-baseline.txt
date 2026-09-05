@@ -722,7 +722,16 @@ ns-prefix-violation 945
 # reconcile to the measured tree so the collision identity gate can run.
 # 725 -> 724 on 2026-09-03: ratcheted down to the measured value (the gate
 # reported it one below baseline).
-ns-private-escape 724
+# 724 -> 725 on 2026-09-06 (predicates-accept-nil): `fboundp' on the
+# standalone reader wrongly rejected `nil'/`t' as non-symbols; the elisp
+# fix in scripts/nelisp-stdlib-prelude.el must filter out the sentinel
+# `symbol-function' leaks for a defconst-only symbol, the same value
+# `lisp/nelisp-stdlib-fast-hash.el' defines as `nelisp--unbound-marker'.
+# One more cross-file reference to that name, same conceded shape as
+# every other entry already in this ledger for it (lisp/nelisp-env.el,
+# lisp/nelisp-lexframe.el, lisp/nelisp-artifact.el, the two mirror-*
+# modules, several test files) -- not a boundary crossed by accident.
+ns-private-escape 725
 ns-unreadable 0
 
 # `pinned-collision KEY' pins every ns-collision and ns-collision-divergent
