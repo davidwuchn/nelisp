@@ -4635,9 +4635,13 @@ bodies (= Stage 4 follow-up).  Indent / edebug specs come back when
 ;; real Emacs's own grammar.  A bare `:before'/`:after'/`:around' (no
 ;; `:extra') remains out of scope.  Every other unsupported form -- an
 ;; unsupported qualifier shape, a specializer kind other than
-;; type/eql/unspecialized, a specializer on an argument position other
-;; than 0 -- is a loud `error' at `cl-defmethod' macroexpansion time,
-;; never a silent no-dispatch (§3.5).
+;; type/eql/head/unspecialized, a specializer on an argument position
+;; other than 0 -- is a loud `error' at `cl-defmethod' macroexpansion
+;; time, never a silent no-dispatch (§3.5).  T59 addendum: `(head VALUE)'
+;; specializers are now supported too (real Emacs generalizer priority
+;; 80 -- between `eql' (100) and any type match (10); matches when the
+;; argument is a cons whose `car' is `eql' to VALUE), needed by `eat.el'
+;; transitively via EIEIO/cl-generic subclass dispatch.
 ;;
 ;; No `declare' in the macro bodies below -- see the `cl-defstruct'
 ;; comment above: the standalone reader does not yet strip `declare'
@@ -4698,10 +4702,13 @@ both copies stay in sync regardless."
 (defun nelisp-cl-generic--parse-specializer (arg-form)
   "Parse one position-0 arglist entry of a `cl-defmethod' form.
 Return a plist: `(:kind unspecialized)' for a bare symbol,
-`(:kind type :type-name TYPE)' for `(VAR TYPE)', or
-`(:kind eql :value-form FORM)' for `(VAR (eql FORM))'.  Signals a loud
-`error' for any other shape -- head/list-head specializers, `&context',
-or anything else Doc 185 §2.1 does not support."
+`(:kind type :type-name TYPE)' for `(VAR TYPE)',
+`(:kind eql :value-form FORM)' for `(VAR (eql FORM))', or
+`(:kind head :head-value VALUE)' for `(VAR (head VALUE))' (T59
+addendum -- VALUE is taken literally, never evaluated, matching real
+Emacs's own `(cadr specializer)').  Signals a loud `error' for any other
+shape -- `&context', list-head grammar beyond plain `head', or anything
+else Doc 185 §2.1 does not support."
   (cond
    ((symbolp arg-form) (list :kind 'unspecialized))
    ((and (consp arg-form) (symbolp (car arg-form))
@@ -4711,12 +4718,15 @@ or anything else Doc 185 §2.1 does not support."
        ((and (consp spec) (eq (car spec) 'eql)
              (consp (cdr spec)) (null (cddr spec)))
         (list :kind 'eql :value-form (car (cdr spec))))
+       ((and (consp spec) (eq (car spec) 'head)
+             (consp (cdr spec)) (null (cddr spec)))
+        (list :kind 'head :head-value (car (cdr spec))))
        ((symbolp spec) (list :kind 'type :type-name spec))
        (t (error "cl-defmethod: unsupported specializer form %S (Doc 185 \
-§2.1 -- type name or (eql VALUE) only)"
+§2.1 -- type name, (eql VALUE), or (head VALUE) only)"
                  arg-form)))))
    (t (error "cl-defmethod: unsupported specializer form %S (Doc 185 §2.1 \
--- type name or (eql VALUE) only)"
+-- type name, (eql VALUE), or (head VALUE) only)"
              arg-form))))
 
 (defun nelisp-cl-generic--parse-arglist (arglist name)
@@ -4817,6 +4827,7 @@ instead of replacing each other (Doc 185 §2.2's `:extra' extension:
   (and (eq (plist-get a :kind) (plist-get b :kind))
        (eq (plist-get a :type-name) (plist-get b :type-name))
        (eql (plist-get a :value) (plist-get b :value))
+       (eql (plist-get a :head-value) (plist-get b :head-value))
        (equal (plist-get a :extra) (plist-get b :extra))
        (eq (plist-get a :combinator) (plist-get b :combinator))))
 
@@ -4857,14 +4868,16 @@ reverses that per bucket while partitioning, so each bucket is
 `nreverse'd back afterwards -- several `:extra' methods sharing one
 specializer must stay ordered newest-first within their tier (Doc 185
 §2.2 extension), matching real Emacs."
-  (let (eql-methods type-methods unspecialized-methods)
+  (let (eql-methods head-methods type-methods unspecialized-methods)
     (dolist (e (get name 'nelisp-cl-generic--methods))
       (let ((k (plist-get e :kind)))
         (cond
          ((eq k 'eql) (push e eql-methods))
+         ((eq k 'head) (push e head-methods))
          ((eq k 'type) (push e type-methods))
          (t (push e unspecialized-methods)))))
     (let ((table (list :eql (nreverse eql-methods)
+                        :head (nreverse head-methods)
                         :type (nreverse type-methods)
                         :unspecialized (nreverse unspecialized-methods))))
       (put name 'nelisp-cl-generic--dispatch-cache table)
@@ -4890,6 +4903,20 @@ newest first, exactly like a builtin-type or unspecialized tier."
   (let (hits)
     (dolist (e methods)
       (when (eql (plist-get e :value) value) (push e hits)))
+    (nreverse hits)))
+
+(defun nelisp-cl-generic--head-matches (methods value)
+  "T59 addendum: `:head'-tier METHODS applicable to VALUE -- VALUE is a
+cons whose `car' is `eql' to a method's `:head-value' (real Emacs's own
+`(head VAL)' contract; generalizer priority 80, strictly between `eql'
+\(100) and any type match (10), §2.1).  Never ambiguous: two different
+`:head-value's can never both match one `car'.  METHODS arrives newest-
+defined-first; filtering preserves that order, exactly like
+`nelisp-cl-generic--eql-matches'."
+  (let (hits)
+    (dolist (e methods)
+      (when (and (consp value) (eql (plist-get e :head-value) (car value)))
+        (push e hits)))
     (nreverse hits)))
 
 (defun nelisp-cl-generic--ordered-type-matches (methods value)
@@ -4941,13 +4968,16 @@ all match %S"
 
 (defun nelisp-cl-generic--applicable-methods (name value)
   "NAME's methods applicable to VALUE, most specific first: an `eql'
-match (if any) outranks every type match, which outranks the
-unspecialized fallback (if any) -- Doc 185 §3.3.  Within one specificity
-tier, several `:extra' variants (Doc 185 §2.2 extension) are newest-
-defined-first, matching real Emacs."
+match (if any) outranks a `head' match (T59 addendum), which outranks
+every type match, which outranks the unspecialized fallback (if any) --
+Doc 185 §3.3, matching real Emacs's own generalizer priorities (eql 100 >
+head 80 > type 10 > t 0).  Within one specificity tier, several `:extra'
+variants (Doc 185 §2.2 extension) are newest-defined-first, matching
+real Emacs."
   (let ((table (nelisp-cl-generic--dispatch-table name)))
     (append
      (nelisp-cl-generic--eql-matches (plist-get table :eql) value)
+     (nelisp-cl-generic--head-matches (plist-get table :head) value)
      (nelisp-cl-generic--ordered-type-matches (plist-get table :type) value)
      (plist-get table :unspecialized))))
 
@@ -5120,8 +5150,9 @@ qualifier.  Any other leading non-list token is a loud `error' naming it.
 
 Exactly one specializer, on argument position 0 only: a type name
 \(builtin `cl-typep' symbol or `cl-defstruct' name), an `(eql VALUE)'
-form, or a bare (unspecialized) symbol (§2.1/§3.1).  The method body can
-call `cl-call-next-method'/`cl-next-method-p' (§2.2)."
+form, a `(head VALUE)' form (T59 addendum -- matches a cons whose `car'
+is `eql' to VALUE), or a bare (unspecialized) symbol (§2.1/§3.1).  The
+method body can call `cl-call-next-method'/`cl-next-method-p' (§2.2)."
   (let (extra combinator)
     (when (and args (eq (car args) :extra))
       (unless (and (cdr args) (stringp (cadr args)))
@@ -5142,12 +5173,14 @@ combined with one of :before/:after/:around)"
            (spec (cdr parsed))
            (kind (plist-get spec :kind))
            (type-name (plist-get spec :type-name))
-           (value-form (and (eq kind 'eql) (plist-get spec :value-form))))
+           (value-form (and (eq kind 'eql) (plist-get spec :value-form)))
+           (head-value (and (eq kind 'head) (plist-get spec :head-value))))
       `(prog1 ',name
          (nelisp-cl-generic--ensure ',name)
          (nelisp-cl-generic--register-method
           ',name
           (list :kind ',kind :type-name ',type-name :value ,value-form
+                :head-value ',head-value
                 :extra ,extra :combinator ',combinator
                 :fn (lambda ,plain-arglist ,@body)))))))
 

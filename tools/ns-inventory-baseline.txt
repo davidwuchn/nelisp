@@ -245,7 +245,7 @@
 # fixnum count to the `nl--nthcdr' reader builtin and keeps its own loop for
 # a bignum one, so its shape moved; lisp/nelisp-stdlib-list.el, which has no
 # builtin to call, is untouched.  Same divergence, new shape.
-ns-collision 254
+ns-collision 255
 # 97 -> 96 on 2026-08-19: `string-equal' no longer differs between the two
 # files -- the prelude's now signals for a non-string instead of falling
 # through to `equal', and the lisp copy was brought with it.  Ratcheted down
@@ -1140,3 +1140,4 @@ pinned-collision ns-collision	nelisp-cl-macros--loop-unbuildable-p	lisp/nelisp-c
 pinned-collision ns-collision	nelisp--split-on-char	lisp/nelisp-stdlib-regexp.el scripts/nelisp-stdlib-prelude.el
 pinned-collision ns-collision	nelisp-cl-generic--eql-matches	lisp/nelisp-cl-macros.el scripts/nelisp-stdlib-prelude.el
 pinned-collision ns-collision	nelisp-cl-generic--invoke-combined	lisp/nelisp-cl-macros.el scripts/nelisp-stdlib-prelude.el
+pinned-collision ns-collision	nelisp-cl-generic--head-matches	lisp/nelisp-cl-macros.el scripts/nelisp-stdlib-prelude.el
