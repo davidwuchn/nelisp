@@ -414,13 +414,15 @@ still signals, exactly as `(head ...)' itself used to before T59."
    (nelisp-cl-generic-test--eval (cl-defmethod cgt-ba :after ((x cgt-ba-animal)) 'nope))
    :type 'error))
 
-(nelisp-cl-generic-deftest nelisp-cl-generic/default-method-body-signals-at-defgeneric ()
-  "Doc 185's subset does not implement CLOS-style default-method bodies
-on `cl-defgeneric' itself -- a non-docstring BODY form is a loud
-macroexpansion-time error rather than a silently-ignored default method."
-  (should-error
-   (nelisp-cl-generic-test--eval (cl-defgeneric cgt-dmb (x) (+ x 1)))
-   :type 'error))
+(nelisp-cl-generic-deftest nelisp-cl-generic/default-method-body-defines-unspecialized-method ()
+  "T81 addendum: this used to prove a `cl-defgeneric' default-method body
+was rejected (a loud macroexpansion-time `error') -- default bodies are
+now supported (Doc 185's T81 addendum), so it correctly proves the
+opposite instead: a non-docstring, non-option BODY form defines an
+ordinary unspecialized primary method, callable immediately, exactly
+like real Emacs's own `cl-defgeneric'."
+  (cl-defgeneric cgt-dmb (x) (+ x 1))
+  (should (equal 6 (cgt-dmb 5))))
 
 (nelisp-cl-generic-deftest nelisp-cl-generic/docstring-only-cl-defgeneric-is-fine ()
   (should (eq 'cgt-doc-ok (eval '(cl-defgeneric cgt-doc-ok (x) "A docstring, nothing else.") t))))
@@ -721,6 +723,177 @@ subset is intentionally stricter here."
    (nelisp-cl-generic-test--eval
     (cl-defmethod cgt-head-malformed ((x (head foo bar))) 'nope))
    :type 'error))
+
+;;; T81 addendum -- `cl-defgeneric' default-method bodies and
+;;; OPTIONS-AND-METHODS (`(declare ...)', `(:documentation ...)',
+;;; `(:method ...)', `(:argument-precedence-order ...)').  Every ordering/
+;;; behavior claim below was cross-checked this session against real,
+;;; unmodified Emacs 31.1's own `cl-generic' (a throwaway batch process,
+;;; `(require 'cl-lib)', no `nelisp-cl-macros' loaded) -- parity forms,
+;;; not just internally-consistent assertions.  Gap this addendum fixes:
+;;; real Emacs's own `lisp/emacs-lisp/eieio.el' -- the actual consumer
+;;; blocker -- has, at its very first `cl-defgeneric' call:
+;;;   (cl-defgeneric eieio-object-name-string (obj)
+;;;     "Return a string which is OBJ's name."
+;;;     (or (gethash obj eieio--object-names)
+;;;         (format "%s-%x" (eieio-object-class obj) (sxhash-eq obj))))
+;;; -- exactly the default-body shape this addendum lands.
+
+(nelisp-cl-generic-deftest nelisp-cl-generic/default-body-struct-dispatch-order ()
+  "Parity form: real Emacs 31.1, a `cl-defgeneric' default body plus
+`cl-defmethod' on a struct and its parent -- the default body is just
+the LEAST-specific method in the very same chain, reached via
+`cl-call-next-method' exactly like any other unspecialized primary
+method (no new dispatch machinery).  Measured this session: `(dog
+animal default)' for a `cgt-dbo-dog' instance, `(animal default)' for a
+plain `cgt-dbo-animal', `(default)' for an unrelated value."
+  (cl-defstruct cgt-dbo-animal name)
+  (cl-defstruct (cgt-dbo-dog (:include cgt-dbo-animal)) breed)
+  (let (order)
+    (cl-defgeneric cgt-dbo-speak (x)
+      (push 'default order)
+      'done)
+    (cl-defmethod cgt-dbo-speak ((x cgt-dbo-dog))
+      (push 'dog order) (cl-call-next-method))
+    (cl-defmethod cgt-dbo-speak ((x cgt-dbo-animal))
+      (push 'animal order) (cl-call-next-method))
+    (cgt-dbo-speak (make-cgt-dbo-dog :name "Rex" :breed "lab"))
+    (should (equal (reverse order) '(dog animal default)))
+    (setq order nil)
+    (cgt-dbo-speak (make-cgt-dbo-animal :name "generic"))
+    (should (equal (reverse order) '(animal default)))
+    (setq order nil)
+    (cgt-dbo-speak 5)
+    (should (equal (reverse order) '(default)))))
+
+(nelisp-cl-generic-deftest nelisp-cl-generic/default-body-next-method-p-false-at-tail ()
+  "Parity form: real Emacs 31.1, calling a generic whose ONLY method is
+its own default body -- `cl-next-method-p' there is nil (the default
+body is the least-specific method in the chain): `(default-fallback
+nil)'."
+  (cl-defgeneric cgt-dbo-chain (x)
+    (list 'default-fallback (cl-next-method-p)))
+  (should (equal '(default-fallback nil) (cgt-dbo-chain 5))))
+
+(nelisp-cl-generic-deftest nelisp-cl-generic/default-body-redefinition-replaces-default-keeps-specialized ()
+  "Parity form: real Emacs 31.1 -- redefining a `cl-defgeneric' with a
+NEW default body replaces only the default (unspecialized) method,
+leaving a previously-defined specialized method untouched: `(int
+default-v1 42)'/`(default-v1 \"s\")' before redefinition, `(int
+default-v2 42)'/`(default-v2 \"s\")' after.  This falls out for free from
+the existing method table: the new default body is just another `:kind
+unspecialized', no-`:extra', no-combinator entry, whose identity
+\(`nelisp-cl-generic--same-specializer-p') already matches the old one,
+so `nelisp-cl-generic--register-method' replaces it in place -- no new
+machinery needed."
+  (cl-defgeneric cgt-dbo-redef (x) (list 'default-v1 x))
+  (cl-defmethod cgt-dbo-redef ((x integer))
+    (cons 'int (cl-call-next-method)))
+  (should (equal '(int default-v1 42) (cgt-dbo-redef 42)))
+  (should (equal '(default-v1 "s") (cgt-dbo-redef "s")))
+  (cl-defgeneric cgt-dbo-redef (x) (list 'default-v2 x))
+  (should (equal '(int default-v2 42) (cgt-dbo-redef 42)))
+  (should (equal '(default-v2 "s") (cgt-dbo-redef "s"))))
+
+(nelisp-cl-generic-deftest nelisp-cl-generic/declare-form-accepted-with-default-body ()
+  "`(declare ...)' is accepted syntactically (no error) but its content
+is not applied -- this subset does not implement e.g. `(indent N)' side
+effects.  Confirmed against real Emacs 31.1: an equivalent
+`(declare (indent 1))' there is silently accepted the same way, with the
+default body still callable afterward."
+  (cl-defgeneric cgt-dbo-declared (x)
+    (declare (indent 1))
+    (list 'declared-default x))
+  (should (equal '(declared-default 9) (cgt-dbo-declared 9))))
+
+(nelisp-cl-generic-deftest nelisp-cl-generic/declare-only-defines-no-default-method ()
+  "A `cl-defgeneric' whose only content is `(declare ...)' (nothing left
+once that run ends) defines no default method at all -- real Emacs
+31.1's own `eieio.el' has exactly this shape (`destructor'/
+`eieio-object-set-name-string': `(declare (obsolete ...))' and nothing
+else).  A subsequent call with no applicable method still signals
+`cl-no-applicable-method', exactly as an empty `cl-defgeneric' already
+did before this addendum."
+  (cl-defgeneric cgt-dbo-declareonly (x)
+    (declare (indent 1)))
+  (should-error (cgt-dbo-declareonly 1) :type 'cl-no-applicable-method))
+
+(nelisp-cl-generic-deftest nelisp-cl-generic/inline-method-forms-define-methods ()
+  "Parity form: real Emacs 31.1, `(:method ...)' forms inside a
+`cl-defgeneric' expand to ordinary methods, in the order written,
+alongside a trailing default body: `(inline-int 3)'/`(inline-string
+\"hi\")'/`(inline-default sym)'."
+  (cl-defgeneric cgt-dbo-inline (x)
+    (:method ((x integer)) (list 'inline-int x))
+    (:method ((x string)) (list 'inline-string x))
+    (list 'inline-default x))
+  (should (equal '(inline-int 3) (cgt-dbo-inline 3)))
+  (should (equal '(inline-string "hi") (cgt-dbo-inline "hi")))
+  (should (equal '(inline-default sym) (cgt-dbo-inline 'sym))))
+
+(nelisp-cl-generic-deftest nelisp-cl-generic/inline-method-bare-around-still-signals ()
+  "A `(:method :around ...)' form expands to an ordinary `(cl-defmethod
+NAME :around ...)' call -- QUALIFIERS go through `cl-defmethod''s own,
+UNCHANGED grammar, so a bare (non-`:extra') `:around' is still rejected
+there exactly as it would be at a top-level `cl-defmethod' call (Doc 185
+§2.2's documented divergence from real Emacs, which accepts it)."
+  (should-error
+   (nelisp-cl-generic-test--eval
+    (cl-defgeneric cgt-dbo-inline-around (x)
+      (:method :around ((x integer)) (cl-call-next-method))))
+   :type 'error))
+
+(nelisp-cl-generic-deftest nelisp-cl-generic/inline-method-extra-around-combination-works ()
+  "`(:method :extra STRING :around ...)' reaches `cl-defmethod''s own
+ALREADY-supported `:extra'+combinator grammar unchanged (Doc 185 §2.2's
+`:extra' extension) -- only a BARE `:around' (no `:extra') is rejected."
+  (let (order)
+    (cl-defgeneric cgt-dbo-inline-extra-around (x)
+      (:method :extra "wrap" :around ((x integer))
+       (push 'around order) (cl-call-next-method))
+      (:method ((x integer)) (push 'primary order) 'done))
+    (cgt-dbo-inline-extra-around 7)
+    (should (equal (reverse order) '(around primary)))))
+
+(nelisp-cl-generic-deftest nelisp-cl-generic/multiple-doc-strings-signals ()
+  "Parity form: real Emacs 31.1 signals `(error \"Multiple doc strings
+for %S\" NAME)' for a leading docstring combined with
+`(:documentation ...)' -- measured this session."
+  (should-error
+   (nelisp-cl-generic-test--eval
+    (cl-defgeneric cgt-dbo-doc2 (x) "doc1" (:documentation "doc2") (list 'd x)))
+   :type 'error))
+
+(nelisp-cl-generic-deftest nelisp-cl-generic/multiple-declare-forms-signals ()
+  "Parity form: real Emacs 31.1 signals `(error \"Multiple `declare' for
+%S\" NAME)' for two `(declare ...)' forms on the same `cl-defgeneric' --
+measured this session."
+  (should-error
+   (nelisp-cl-generic-test--eval
+    (cl-defgeneric cgt-dbo-decl2 (x)
+      (declare (indent 1))
+      (declare (indent 2))
+      (list 'd x)))
+   :type 'error))
+
+(nelisp-cl-generic-deftest nelisp-cl-generic/unsupported-defgeneric-option-signals ()
+  "Any keyword-headed OPTIONS-AND-METHODS form other than
+`:documentation'/`:method'/`:argument-precedence-order'/`declare' is a
+loud macroexpansion-time `error' naming it (Doc 185 §3.5's discipline
+extended to this grammar) -- never silently collected and ignored."
+  (should-error
+   (nelisp-cl-generic-test--eval
+    (cl-defgeneric cgt-dbo-badopt (x) (:something-else 1 2) (list 'd x)))
+   :type 'error))
+
+(nelisp-cl-generic-deftest nelisp-cl-generic/argument-precedence-order-accepted-and-ignored ()
+  "`(:argument-precedence-order ...)' is accepted and ignored: Doc 185
+§3.1 supports a single dispatch argument (position 0) only, so there is
+never more than one specializer to reorder."
+  (cl-defgeneric cgt-dbo-apo (x y)
+    (:argument-precedence-order y x)
+    (list 'apo-default x y))
+  (should (equal '(apo-default 1 2) (cgt-dbo-apo 1 2))))
 
 (provide 'nelisp-cl-generic-test)
 ;;; nelisp-cl-generic-test.el ends here

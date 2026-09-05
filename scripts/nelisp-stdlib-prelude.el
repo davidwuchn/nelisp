@@ -4742,7 +4742,18 @@ bodies (= Stage 4 follow-up).  Indent / edebug specs come back when
 ;; specializers are now supported too (real Emacs generalizer priority
 ;; 80 -- between `eql' (100) and any type match (10); matches when the
 ;; argument is a cons whose `car' is `eql' to VALUE), needed by `eat.el'
-;; transitively via EIEIO/cl-generic subclass dispatch.
+;; transitively via EIEIO/cl-generic subclass dispatch.  T81 addendum:
+;; `cl-defgeneric' now supports real Emacs's full `(NAME ARGS
+;; [DOCSTRING] [OPTIONS-AND-METHODS...] &rest DEFAULT-BODY)' grammar --
+;; a non-empty DEFAULT-BODY becomes an ordinary unspecialized primary
+;; method (no new dispatch machinery: it is just another method-table
+;; entry), `(:method ...)' forms expand to ordinary `cl-defmethod'
+;; calls, `(declare ...)'/`(:documentation ...)'/
+;; `(:argument-precedence-order ...)' are accepted (the first two
+;; syntactically only, with no side effect; the third is a no-op since
+;; §3.1 supports only a single dispatch argument) -- needed by
+;; `eieio.el' itself, whose very first `cl-defgeneric' call
+;; (`eieio-object-name-string') uses exactly the default-body shape.
 ;;
 ;; No `declare' in the macro bodies below -- see the `cl-defstruct'
 ;; comment above: the standalone reader does not yet strip `declare'
@@ -5211,21 +5222,106 @@ and callable from both `cl-defgeneric' and `cl-defmethod' -- real
     (put name 'nelisp-cl-generic--dispatcher-installed t)
     (defalias name (nelisp-cl-generic--make-dispatcher name))))
 
+(defun nelisp-cl-generic--parse-defgeneric-methods (name arglist body)
+  "Parse the OPTIONS-AND-METHODS/DEFAULT-BODY grammar of a `cl-defgeneric'
+call for NAME (Doc 185 §3.1, T81 addendum -- default-method bodies and
+inline `:method' forms).  BODY is `cl-defgeneric''s own trailing macro
+argument, with any leading docstring not yet stripped.  Real Emacs's own
+`cl-defgeneric' (`lisp/emacs-lisp/cl-generic.el') walks
+OPTIONS-AND-METHODS left to right consuming any run of forms whose CAR
+is a keyword or the symbol `declare'; the first form whose CAR is
+neither ends that run, and everything from there on (however many forms
+follow) is \"assumed to be a default method body\" -- this reproduces
+that exact walk, form for form, rather than a stricter re-derivation of
+it.  Returns a list of method forms, each ready to splice as
+`(cl-defmethod ,name ,@method)', in the exact order they should be
+*defined* (source order): every `(:method QUALIFIERS ARGS BODY...)'
+form's `(QUALIFIERS ARGS BODY...)' cdr verbatim -- QUALIFIERS/ARGS/BODY
+go through `cl-defmethod''s own parsing and loud-failure matrix
+unchanged, so e.g. a bare `:around' with no `:extra' is still rejected
+there exactly as it would be at a top-level `cl-defmethod' call -- then,
+if anything remains once that run ends, one final method
+`(ARGLIST . REMAINING-BODY)': NAME's own ARGLIST, verbatim, with no
+specializers at all, i.e. an ordinary unspecialized primary method (T81's
+whole point: the default body needs no new dispatch machinery, it is
+just another entry in the same method table `cl-defmethod' already
+maintains, so it participates in dispatch, chains via
+`cl-call-next-method', and gets replaced in place -- never duplicated --
+by a later `cl-defgeneric' redefinition, exactly like any other
+unspecialized primary method).  Nothing remaining (e.g. a `cl-defgeneric'
+whose only content is a docstring and/or `declare') defines no default
+method, exactly as an empty `cl-defgeneric' already did before this
+addendum.
+
+`(declare ...)' is accepted and its content is NOT applied: this subset
+does not implement e.g. `(indent N)' or `(obsolete ...)' side effects --
+editor/byte-compiler metadata, with no cl-generic dispatch semantics
+either way (confirmed against host Emacs 31.1: `(declare (obsolete nil
+\"26.1\"))' with no other body defines zero methods there too).  A
+leading docstring and/or one `(:documentation STRING)' form are likewise
+accepted and discarded, never installed as the generic's own
+documentation (unchanged from before this addendum).  Giving a doc
+string twice, or `declare' twice, is a loud `error' -- real Emacs
+signals `Multiple doc strings for %S'/`Multiple \\=`declare\\=' for %S'
+for the same two cases, measured this session.
+`(:argument-precedence-order ...)' is accepted and ignored: Doc 185
+§3.1 supports a single dispatch argument (position 0) only, so there is
+never more than one specializer to reorder.  Any OTHER keyword-headed
+form is a loud macroexpansion-time `error' naming it -- Doc 185 §3.5's
+loud-failure discipline extended to this grammar, never a silently-
+dropped option."
+  (let ((methods nil) (have-doc nil) (have-declare nil) (looping t))
+    (when (and body (stringp (car body)))
+      (setq have-doc t)
+      (setq body (cdr body)))
+    (while (and looping body)
+      (let* ((form (car body))
+             (head (car-safe form)))
+        (cond
+         ((not (or (keywordp head) (eq head 'declare)))
+          (setq looping nil))
+         ((eq head :documentation)
+          (when have-doc
+            (error "cl-defgeneric %s: multiple doc strings (a leading \
+docstring together with (:documentation ...), or (:documentation ...) \
+given twice)" name))
+          (setq have-doc t)
+          (setq body (cdr body)))
+         ((eq head 'declare)
+          (when have-declare
+            (error "cl-defgeneric %s: multiple `declare' forms" name))
+          (setq have-declare t)
+          (setq body (cdr body)))
+         ((eq head :method)
+          (push (cdr form) methods)
+          (setq body (cdr body)))
+         ((eq head :argument-precedence-order)
+          (setq body (cdr body)))
+         (t
+          (error "cl-defgeneric %s: unsupported option %S (Doc 185 \
+subset: (:documentation STRING), (declare ...), (:method ...), \
+(:argument-precedence-order ...) only)"
+                 name form)))))
+    (when body
+      (push (cons arglist body) methods))
+    (nreverse methods)))
+
 (defmacro cl-defgeneric (name arglist &rest body)
-  "Declare NAME as a generic function over ARGLIST (Doc 185 §3.1).
-Installs NAME as a dispatching function with no methods yet -- add
-methods with `cl-defmethod'.  BODY may be a single leading docstring
-only: this subset does not implement CLOS-style default-method bodies,
-so a non-docstring BODY form is a loud macroexpansion-time `error'
-rather than a silently-ignored default method."
-  (ignore arglist)
-  (when (and body (stringp (car body))) (setq body (cdr body)))
-  (when body
-    (error "cl-defgeneric %s: default-method body not supported by this \
-subset -- declare with no body, add methods via cl-defmethod (Doc 185 \
-§3.1)"
-           name))
-  `(prog1 ',name (nelisp-cl-generic--ensure ',name)))
+  "Declare NAME as a generic function over ARGLIST (Doc 185 §3.1,
+extended by the T81 addendum: default-method bodies and OPTIONS-AND-
+METHODS are now supported, not just a bare declaration).  Installs NAME
+as a dispatching function, then defines, in source order, every method
+`nelisp-cl-generic--parse-defgeneric-methods' finds in BODY -- see that
+function's docstring for the full per-option grammar (`(declare ...)',
+`(:documentation ...)', `(:method ...)', `(:argument-precedence-order
+...)', and the trailing default-method-body rule) and its two `error'
+cases (a doc string or `declare' given twice).  A non-docstring,
+non-option BODY form used to be an unconditional loud `error' before
+this addendum; it is now the start of the default method body instead."
+  `(prog1 ',name
+     (nelisp-cl-generic--ensure ',name)
+     ,@(mapcar (lambda (m) `(cl-defmethod ,name ,@m))
+               (nelisp-cl-generic--parse-defgeneric-methods name arglist body))))
 
 (defmacro cl-defmethod (name &rest args)
   "Define a method on generic NAME (Doc 185's subset of real

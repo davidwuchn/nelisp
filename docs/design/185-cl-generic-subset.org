@@ -260,6 +260,208 @@ paths" note above), vs. a ceiling of 8,743,815 and a =main= baseline of
 8,580,560.  ~40 KB of ratchet headroom remains; the baseline itself is
 untouched by this addendum.
 
+* Addendum 3 (2026-09-06, T81): =cl-defgeneric= default-method bodies and OPTIONS-AND-METHODS are now supported
+
+§3.1's original grammar (still accurate for the P0-P3 baseline) allowed
+only =(cl-defgeneric NAME ARGLIST [DOCSTRING])= -- any other trailing
+form was a loud macroexpansion-time =error= ("default-method body not
+supported by this subset"). That turned out to be the consumer's very
+next real blocker behind Addendum 2's =(head SYMBOL)= fix: loading the
+real =eat.el= now gets past the whole =cl-lib=/EIEIO =:extra=/=head=
+chain (Addenda 1-2) and stops on real Emacs's own
+=lisp/emacs-lisp/eieio.el=, at its *first* =cl-defgeneric= call:
+
+#+begin_src elisp
+(cl-defgeneric eieio-object-name-string (obj)
+  "Return a string which is OBJ's name."
+  (or (gethash obj eieio--object-names)
+      (format "%s-%x" (eieio-object-class obj) (sxhash-eq obj))))
+#+end_src
+
+-- a plain default-method BODY, exactly the shape this doc's original
+§3.1 rejected. Real GNU =cl-defgeneric='s actual grammar (read directly
+from =lisp/emacs-lisp/cl-generic.el= lines 230-320, not guessed) is
+=(cl-defgeneric NAME ARGS [DOCSTRING] [OPTIONS-AND-METHODS...] &rest
+DEFAULT-BODY)=: OPTIONS-AND-METHODS is any run of forms whose CAR is a
+keyword or the symbol =declare=, each consumed left to right; the first
+form whose CAR is neither ends that run, and everything remaining
+(however many forms) is "assumed to be a default method body". Real
+=cl-defgeneric='s own expansion literally lowers every =(:method
+...)= form AND the trailing default body to ordinary =(cl-defmethod
+NAME ...)= calls, in source order, executed right after the generic
+itself is declared -- confirmed by reading =cl-defgeneric='s own
+=let*= construction of its expansion, not assumed.
+
+** Semantics, verified against host Emacs 31.1 (not assumed)
+
+Five throwaway probes this session, plus real =lisp/emacs-lisp/cl-
+generic.el= source read directly (the exact macro quoted above):
+
+| form | real Emacs 31.1 (this session's probe transcript) |
+|---|---|
+| default body + specialized struct methods, dispatch order | =(dog animal default)= / =(animal default)= / =(default)= -- the default body is just the LEAST-specific method in the SAME =cl-call-next-method= chain, no separate mechanism |
+| =cl-next-method-p= called from inside the default body itself (nothing less specific than it) | =nil= -- =(default-fallback nil)= |
+| redefining the generic with a NEW default body | replaces ONLY the default method, in place; a previously-defined specialized method is untouched: =(int default-v1 42)=/=(default-v1 "s")= before, =(int default-v2 42)=/=(default-v2 "s")= after |
+| =(declare (indent N))= as an OPTIONS-AND-METHODS form | accepted; real Emacs actually applies it (=(function-get 'NAME 'lisp-indent-function)= => N) -- this subset accepts the FORM but does not apply its content (see below) |
+| =(declare (obsolete ...))= with nothing else following | defines *zero* methods -- real =eieio.el= itself has this exact shape twice (=destructor=, =eieio-object-set-name-string=) |
+| =(:method [QUALIFIERS] ARGS BODY)= inline forms | expand to ordinary =cl-defmethod= calls, in the order written, interleaved with a trailing default body exactly as if each had been a separate top-level =cl-defmethod= |
+| a leading DOCSTRING together with =(:documentation STRING)= | =(error "Multiple doc strings for %S" NAME)= |
+| two =(declare ...)= forms | real Emacs's own =cl--generic-lambda='s twin check, =(error "Multiple \`declare' for %S" NAME)= (not separately re-probed by name this session -- inferred from the identical doc-string-twice construction in the same =let*=, confirmed present in source) |
+
+The =(declare ...)=/=(:documentation ...)= *content* is accepted but NOT
+applied by this subset (no =function-put= for =indent=, no installed
+docstring) -- purely editor/byte-compiler metadata with zero cl-generic
+dispatch-semantic effect either way, and this subset has never installed
+a generic's docstring anywhere (true before this addendum too). Only the
+*syntax* is accepted, so a real-world =cl-defgeneric= call carrying one
+is not rejected merely for having it -- the same "accept the form,
+don't apply the content" choice this doc already made for other purely-
+cosmetic real-Emacs constructs. =(:argument-precedence-order ...)= is
+likewise accepted and ignored outright: §3.1 supports a single dispatch
+argument (position 0) only, so there is never more than one specializer
+to reorder in the first place.
+
+** Implementation: the default body is an ordinary method, not new machinery
+
+Landed as a single new helper, =nelisp-cl-generic--parse-defgeneric-
+methods=, reproducing real =cl-defgeneric='s own left-to-right
+OPTIONS-AND-METHODS walk (form for form, not a stricter re-derivation)
+and returning a list of method forms in source-definition order:
+
+- Every =(:method QUALIFIERS ARGS BODY...)= form's cdr, verbatim --
+  QUALIFIERS/ARGS/BODY flow through =cl-defmethod='s own, UNCHANGED
+  parsing and loud-failure matrix, so e.g. a bare =:around= (no
+  =:extra=) inside a =(:method ...)= form is rejected exactly as it
+  would be at a top-level =cl-defmethod= call (this doc's §2.2
+  divergence, unmodified by this addendum) while =(:method :extra
+  STRING :around ...)= reaches the ALREADY-supported Addendum-1
+  combination unchanged.
+- Then, if anything remains once that OPTIONS-AND-METHODS run ends, one
+  final method =(ARGLIST . REMAINING-BODY)=: the generic's own ARGLIST,
+  verbatim, with NO specializers at all -- an ordinary =:kind
+  unspecialized= primary method, i.e. exactly the same shape a bare
+  =(cl-defmethod NAME ARGLIST BODY...)= call already produced before
+  this addendum. This is the whole point: the default body needs no new
+  dispatch machinery whatsoever. It is just another entry in the same
+  method table =nelisp-cl-generic--register-method=/
+  =nelisp-cl-generic--applicable-methods= already maintain, so it
+  participates in specificity ordering, chains via
+  =cl-call-next-method=, and -- because
+  =nelisp-cl-generic--same-specializer-p= already treats two
+  no-=:extra=/no-combinator =:kind unspecialized= entries as the SAME
+  identity -- a later =cl-defgeneric= redefinition's new default body
+  REPLACES the old one in place via the pre-existing
+  =nelisp-cl-generic--register-method= logic, never duplicating it and
+  never disturbing a specialized method, with zero new code for that
+  behavior.
+- =cl-defgeneric='s own macro body shrank to one =mapcar= over this
+  helper's result, splicing =(cl-defmethod ,name ,@m)= for each --
+  structurally the same technique real Emacs's own =cl-defgeneric=
+  uses (=(mapcar (lambda (method) \`(cl-defmethod ,name ,@method))
+  (nreverse methods))=), independently arrived at.
+
+=cl-call-next-method=/=cl-next-method-p=,
+=cl-no-applicable-method=/=cl-no-primary-method=, the =:extra=
+qualifier grammar, and every specializer kind (§2.1, including
+Addenda 1-2) are all completely untouched -- this addendum is entirely
+inside =cl-defgeneric='s own macro, adding one parsing helper and
+reusing every existing piece of §3's dispatch machinery unmodified.
+
+Landed in both mirror copies (=lisp/nelisp-cl-macros.el= and
+=scripts/nelisp-stdlib-prelude.el=, identically -- the new helper and
+the =cl-defgeneric= macro body are byte-for-byte equal between the two
+copies, confirmed by diff of the extracted blocks; only the surrounding,
+pre-existing section-header comment carries this doc's own established
+per-file cross-referencing style). Diff numstat equal in both files
+(+111/-15 each).
+
+** Tests
+
+12 new =ert-deftest= cases in =test/nelisp-cl-generic-test.el=
+(=nelisp-cl-generic/default-body-*=, =declare-*=, =inline-method-*=,
+=multiple-doc-strings-signals=, =multiple-declare-forms-signals=,
+=unsupported-defgeneric-option-signals=,
+=argument-precedence-order-accepted-and-ignored=), several of them
+parity forms with an exact real-Emacs-31.1 transcript in their own
+docstring/commentary, measured this session per the table above. One
+pre-existing case,
+=nelisp-cl-generic/default-method-body-signals-at-defgeneric=, is
+updated in place (renamed
+=nelisp-cl-generic/default-method-body-defines-unspecialized-method=)
+following this doc's own Addendum 2 precedent for a test whose *concept*
+inverted rather than merely its concrete example: it used to prove a
+default body was rejected and now correctly proves the opposite --
+every other pre-existing case (all 38 from before this addendum) is
+unchanged. Full file: =Ran 50 tests, 50 results as expected, 0
+unexpected= (38 from before this addendum + 12 new).
+
+** Standalone binary proof
+
+Built =target/nelisp= from this addendum's worktree (=make
+standalone-reader=). Direct, minimal, against-the-bug repro of the
+EXACT real form quoted above (=eieio-object-name-string=, literal name
+and shape), run on both the pre-addendum and post-addendum binary (a
+throwaway =/tmp= copy of each, same host, same session):
+
+#+begin_example
+BEFORE (main, e87e1dd80, no T81 fix):
+$ target/nelisp --eval '(progn (cl-defgeneric eieio-object-name-string (obj) "Return a string which is OBJ'"'"'s name." (format "%s-name" obj)) (eieio-object-name-string "widget"))'
+nelisp: uncaught error: ... error: ("cl-defgeneric eieio-object-name-string: default-method body not supported by this subset -- declare with no body, add methods via cl-defmethod (Doc 185 §3.1)")
+
+AFTER (this addendum):
+$ target/nelisp --eval '(progn (cl-defgeneric eieio-object-name-string (obj) "Return a string which is OBJ'"'"'s name." (format "%s-name" obj)) (eieio-object-name-string "widget"))'
+"widget-name"
+#+end_example
+
+-- the exact byte-for-byte error the task's own briefing quoted is gone,
+and the identical real-Emacs form now defines and calls a working
+default method.
+
+Loading the actual =eat.el= directly (same recipe as Addenda 1-2: load-
+path covering =compat=, and the plain-=.el= Emacs 31.1 tree for
+=cl-lib=/=ansi-color=/=shell=/=term=/=url=/=tramp=) gives the SAME
+=void-function: (version<)= transcript Addendum 2 already documented,
+on BOTH the before and after binary -- confirmed by running the
+identical script against a =/tmp= copy of each. This is expected, not a
+regression check that happens to pass: =eat.el='s very first form is
+=(require 'compat)=, and =compat.el='s own bootstrap
+(=compat--maybe-require=) calls =version<= (a primitive this subset's
+stdlib does not define, unrelated to cl-generic) before =eat.el= ever
+reaches its OWN =(require 'cl-lib)= a few lines later -- and
+=(featurep 'cl-lib)= is ALREADY =t= at a fresh =target/nelisp= boot
+(this subset's own =(provide 'cl-lib)=, present since Doc 49 Wave 7,
+long before any of Addenda 1-3), so that later =require= is a no-op
+that never touches the real, on-disk =cl-lib.el=/=eieio.el= either way.
+Confirmed directly: =(fboundp 'eieio-object-name-string)= is =nil=
+after this exact eat.el-load transcript, on the post-addendum binary
+too -- real =eieio.el='s own body genuinely is never reached via this
+particular harness, in either state. The "load eat.el directly"
+transcript is therefore NOT discriminating evidence for this specific
+addendum (it would read identically with or without this fix) --
+recorded here so a future reader does not mistake an unchanged
+transcript for a regression, or for proof this addendum lacks. The
+literal minimal repro above, run on both binaries, is this addendum's
+actual against-the-bug evidence; reaching real =eieio.el='s body for
+true end-to-end validation needs a harness that does not rely on
+=(require 'cl-lib)='s short-circuit (e.g. the consumer's own vendored
+=cl-lib.el=/=eieio.el= tree loaded through its real-init-audit
+pipeline, out of this addendum's scope to run).
+
+** Binary size
+
+=main= moved twice while this addendum was in progress (T64 comment-
+stripping/regex-cache, then float-printing/exp-expt/readdir commits from
+sibling tasks in the same batch); this worktree rebased onto the final
+=main= tip (=8262214b0=) before its gates ran. Isolated delta, same
+commit, same host, this session: a plain =main=-tip build measures
+7,782,024 bytes; this addendum's own build measures 7,835,440 bytes --
+a clean **+53,416-byte** delta for the whole default-method-body/
+OPTIONS-AND-METHODS addition (one new ~90-line parsing helper plus a
+shrunk =cl-defgeneric= macro body), isolating exactly this change from
+the sibling tasks' own, separate growth. =make binary-size-ratchet=
+(baseline 7,728,528, ceiling 7,883,098) PASSES at 7,835,440 bytes,
+~1.9% ratchet slack remaining; baseline untouched.
+
 * §0 TL;DR
 
 =cl-defgeneric=/=cl-defmethod= (and EIEIO's =defclass=, which is built on
