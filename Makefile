@@ -1483,6 +1483,7 @@ standalone-reader-regexp-lead-filter-smoke: $(if $(wildcard target/nelisp target
 	mkdir -p target; \
 	printf '%s\n' \
 	  '(let* ((got (list (string-match "abc" "xxabcyy")' \
+	  '                  (string-match "abc+" "xxabcc")' \
 	  '                  (string-match "abc" "xxabxx")' \
 	  '                  (let ((case-fold-search t)) (string-match "ABC" "xxabc"))' \
 	  '                  (let ((case-fold-search nil)) (string-match "ABC" "xxabc"))' \
@@ -1491,7 +1492,7 @@ standalone-reader-regexp-lead-filter-smoke: $(if $(wildcard target/nelisp target
 	  '                  (string-match "x" "")' \
 	  '                  (string-match "" "abc")' \
 	  '                  (string-match "b" "abc" 2)))' \
-	  '       (want (list 2 nil 2 nil 2 0 nil 0 nil))' \
+	  '       (want (list 2 2 nil 2 nil 2 0 nil 0 nil))' \
 	  '       (r6 (string-match "\\(a+\\)\\(b+\\)" "zzaabbb"))' \
 	  '       (g1 (list (match-beginning 1) (match-end 1)' \
 	  '                 (match-beginning 2) (match-end 2)))' \

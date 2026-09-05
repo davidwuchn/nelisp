@@ -1,38 +1,23 @@
 ;;; nelisp-stdlib-regexp.el --- pure-elisp Emacs-regexp matcher  -*- lexical-binding: nil; -*-
 
-;; Doc 143: a backtracking matcher for the common Emacs regexp subset,
-;; implemented WITHOUT lexical closures so it loads on the dynamic-binding
-;; standalone reader prelude.  Backtracking threads the "rest of the pattern"
-;; as an explicit argument (no CPS lambdas).  Capture positions are recorded
-;; via :savestart/:saveend sentinel nodes into a global vector; the last writes
-;; on the successful path win (match-list returns on first success).
-;;
-;; Supported: literal chars, `.', `*' `+' `?' (greedy), `[...]'/`[^...]' with
-;; ranges, `^' `$' anchors, `\(...\)' capture groups, `\|' alternation,
-;; `\w' `\W' `\s-'(whitespace) `\.'-style escapes, and `\\C' literal escapes.
-;; Out of scope (v1): `\{n,m\}', backreferences, non-greedy `*?', `\b' `\<' `\>',
-;; syntax classes other than whitespace, char-class names like [[:alpha:]].
-;;
-;; This file uses a distinct `nlre-' prefix so it can be differential-tested in
-;; host Emacs against the real `string-match' before being wired into the reader
-;; prelude (where `nlre-string-match' is aliased to `string-match').
+;; Doc 143's dynamically bound parser/backtracker.  Continuations are explicit
+;; and captures use :savestart/:saveend nodes, so no lexical closures are needed.
+;; The nlre- names support host differential tests; standalone installs aliases.
 
 ;; ---- parser: pattern string -> node list (a "seq") ----
-;; node forms:
-;;   (:lit C) (:any) (:set NEG RANGES) (:bol) (:eol)
-;;   (:word NEG) (:space NEG)
-;;   (:group N SEQ) (:alt LIST-OF-SEQ)
-;;   (:star NODE) (:plus NODE) (:opt NODE)
-;;   (:savestart N) (:saveend N)   ;; injected around group bodies
 
 (defvar nlre--gcount 0 "Group counter during a parse.")
 
 (defvar nlre--compiled-cache (make-hash-table :test 'equal)
-  "Cache from regexp pattern strings to (AST . GROUP-COUNT).")
+  "Pattern-keyed buckets of compiled regexp cache entries.")
 (defvar nlre--compiled-cache-count 0
   "Number of entries currently tracked in `nlre--compiled-cache'.")
-(defvar nlre--compiled-cache-limit 512
-  "Maximum compiled regexp patterns kept before clearing the cache.")
+(defvar nlre--compiled-cache-limit 32
+  "Maximum compiled regexp patterns retained by the LRU cache.")
+(defvar nlre--compiled-cache-lru nil)
+(defvar nlre--syntax-table-reader
+  (cond ((fboundp 'current-syntax-table) 'current-syntax-table)
+        ((fboundp 'syntax-table) 'syntax-table)))
 (defvar nlre--compiled-cache-hits 0
   "Number of compiled regexp cache hits.")
 (defvar nlre--compiled-cache-misses 0
@@ -48,25 +33,64 @@
 
 (defun nlre--compiled-cache-clear ()
   "Clear the compiled regexp cache and its entry count."
-  (clrhash nlre--compiled-cache)
-  (setq nlre--compiled-cache-count 0))
+  ;; `clrhash' costs about 100ms even when this runtime's table is empty.
+  (setq nlre--compiled-cache (make-hash-table :test 'equal)
+        nlre--compiled-cache-count 0
+        nlre--compiled-cache-lru nil))
+
+;; Entry: [PATTERN CASE-FOLD SYNTAX-TABLE COMPILED].  The LRU has at most 32
+;; elements, so a list is smaller than baking link-management code per image.
+(defun nlre--cache-find (pat fold table)
+  (let ((xs (gethash pat nlre--compiled-cache)) hit)
+    (while (and xs (not hit))
+      (let ((e (car xs)))
+        (if (and (eq fold (aref e 1)) (eq table (aref e 2)))
+            (setq hit e)
+          (setq xs (cdr xs)))))
+    hit))
+
+(defun nlre--cache-touch (e)
+  (unless (eq e (car nlre--compiled-cache-lru))
+    (setq nlre--compiled-cache-lru
+          (cons e (delq e nlre--compiled-cache-lru)))))
+
+(defun nlre--cache-evict ()
+  (let* ((e (car (last nlre--compiled-cache-lru))) (pat (aref e 0))
+         (xs (delq e (gethash pat nlre--compiled-cache))))
+    (setq nlre--compiled-cache-lru (delq e nlre--compiled-cache-lru))
+    (if xs (puthash pat xs nlre--compiled-cache)
+      (remhash pat nlre--compiled-cache))
+    (setq nlre--compiled-cache-count (1- nlre--compiled-cache-count))))
+
+(defun nlre--cache-add (pat fold table compiled)
+  (let ((e (vector pat fold table compiled)))
+    (puthash pat (cons e (gethash pat nlre--compiled-cache))
+             nlre--compiled-cache)
+    (setq nlre--compiled-cache-lru (cons e nlre--compiled-cache-lru)
+          nlre--compiled-cache-count (1+ nlre--compiled-cache-count))
+    (when (> nlre--compiled-cache-count nlre--compiled-cache-limit)
+      (nlre--cache-evict))
+    compiled))
 
 (defun nlre--compiled-pattern (pat)
   "Return cached compiled representation for PAT.
-The result is (AST . GROUP-COUNT), where GROUP-COUNT includes match group 0."
-  (let ((compiled (gethash pat nlre--compiled-cache)))
-    (if compiled
-        (progn
+The result is [AST GROUP-COUNT FAST-PLAN]."
+  (let* ((fold (and case-fold-search t))
+         (table (and nlre--syntax-table-reader
+                     (funcall nlre--syntax-table-reader)))
+         (head (car nlre--compiled-cache-lru))
+         (entry (if (and head (or (eq pat (aref head 0))
+                                  (equal pat (aref head 0)))
+                         (eq fold (aref head 1)) (eq table (aref head 2)))
+                    head
+                  (nlre--cache-find pat fold table))))
+    (if entry
+      (progn
           (setq nlre--compiled-cache-hits (1+ nlre--compiled-cache-hits))
-          compiled)
+          (unless (eq entry head) (nlre--cache-touch entry))
+          (aref entry 3))
       (setq nlre--compiled-cache-misses (1+ nlre--compiled-cache-misses))
-      (when (>= nlre--compiled-cache-count nlre--compiled-cache-limit)
-        (nlre--compiled-cache-clear))
-      (let ((ast (nlre--parse pat)))
-        (setq compiled (cons ast (1+ nlre--gcount)))
-        (puthash pat compiled nlre--compiled-cache)
-        (setq nlre--compiled-cache-count (1+ nlre--compiled-cache-count))
-        compiled))))
+      (nlre--cache-add pat fold table (nlre--compile-pattern pat fold)))))
 
 (defun nlre--parse (pat)
   "Parse PAT into a top-level node (a :seq or :alt). Sets group count."
@@ -170,14 +194,7 @@ Return (REVERSED-EXPANSION-NODES . newpos)."
      ((eq c ?\\)
       (let ((d (aref pat (1+ i))))
         (cond
-         ((eq d ?\() ;; group start: plain, shy \(?:..\), or numbered \(?N:..\)
-          ;; A `?' directly after \( introduces the shy and the explicitly
-          ;; numbered forms.  Neither was recognised, so the `?' and the `:'
-          ;; were parsed as ordinary pattern characters and \(?:x+\) matched
-          ;; the literal text "?:x..." -- i.e. every shy group in the tree
-          ;; silently failed to match, including the ones `regexp-opt'
-          ;; generates and the ones `string-trim-left' needs.  It failed by
-          ;; not matching rather than by erroring, which is why it survived.
+         ((eq d ?\() ;; plain, shy, or explicitly numbered group
           (let ((k (+ i 2)) (shy nil) (explicit nil))
             (when (and (< k n) (eq (aref pat k) ?\?))
               (let ((m (1+ k)) (num nil))
@@ -195,22 +212,13 @@ Return (REVERSED-EXPANSION-NODES . newpos)."
                 (setq nlre--gcount explicit))
               (let* ((r (nlre--parse-alt pat k n))
                      (inner (car r)) (j (cdr r)))
-                ;; consume \)
                 (when (and (< (1+ j) n) (eq (aref pat j) ?\\) (eq (aref pat (1+ j)) ?\)))
                   (setq j (+ j 2)))
-                ;; A shy group captures nothing, so it simply IS its body.
-                ;; `:seq' and `:alt' are both already node types the matcher
-                ;; dispatches on, in `nlre--match-list' and `nlre--match-one'
-                ;; alike, so this needs no new node type and no new arm.
                 (cons (if shy inner (list :group gn inner)) j)))))
          ((eq d ?w) (cons (list :word nil) (+ i 2)))
          ((eq d ?W) (cons (list :word t) (+ i 2)))
-         ;; \b / \B: zero-width word boundary.  Absent, so \b fell through
-         ;; to the default arm and matched the literal character `b'.
          ((eq d ?b) (cons (list :wordb nil) (+ i 2)))
          ((eq d ?B) (cons (list :wordb t) (+ i 2)))
-         ;; \< / \> word edges, \_< / \_> symbol edges.  None were parsed, so
-         ;; \< fell through to the default arm and matched a literal `<'.
          ((eq d ?<) (cons (list :wordedge nil) (+ i 2)))
          ((eq d ?>) (cons (list :wordedge t) (+ i 2)))
          ((and (eq d ?_) (< (+ i 2) n) (eq (aref pat (+ i 2)) ?<))
@@ -273,26 +281,178 @@ Return (REVERSED-EXPANSION-NODES . newpos)."
            (t (setq ranges (cons (cons c c) ranges) i (1+ i)))))))
     (cons (list :set neg (nreverse ranges)) i)))
 
+;; A fast plan is either a literal, or a finite language whose every variant
+;; ends at `\\''.  The latter covers load-history and regexp-opt file names
+;; without carrying the former general-purpose finite matcher in the image.
+(defvar nlre--plan-limit 256)
+(defvar nlre--plan-count 0)
+(defvar nlre--plan-failed nil)
+(defvar nlre--fast-plan-hits 0)
+
+;; Fragment: [ATOMS CAPS BOS-OFFSET].  An atom is a literal
+;; character or (:set RANGES); sets stay compact rather than expanding.
+(defun nlre--plan-new (atoms caps bos)
+  (setq nlre--plan-count (1+ nlre--plan-count))
+  (when (> nlre--plan-count nlre--plan-limit)
+    (setq nlre--plan-failed t))
+  (vector atoms caps bos))
+
+(defun nlre--plan-empty (ng)
+  (nlre--plan-new nil (make-vector ng nil) nil))
+
+(defun nlre--plan-cat (a b)
+  (let* ((off (length (aref a 0))) (ca (aref a 1)) (cb (aref b 1))
+         (n (length ca)) (caps (make-vector n nil)) (i 0)
+         (ab (aref a 2)) (bb (aref b 2))
+         (bb (and bb (+ off bb))))
+    (when (and ab bb (/= ab bb)) (setq nlre--plan-failed t))
+    (while (< i n)
+      (let ((x (aref ca i)) (y (aref cb i)))
+        (aset caps i (if y (cons (+ off (car y)) (+ off (cdr y))) x)))
+      (setq i (1+ i)))
+    (nlre--plan-new (append (aref a 0) (aref b 0)) caps (or ab bb))))
+
+(defun nlre--plan-cross (as bs)
+  (let (out)
+    (while (and as (not nlre--plan-failed))
+      (let ((ys bs))
+        (while (and ys (not nlre--plan-failed))
+          (setq out (cons (nlre--plan-cat (car as) (car ys)) out)
+                ys (cdr ys))))
+      (setq as (cdr as)))
+    (nreverse out)))
+
+(defun nlre--plan-seq (nodes ng)
+  (let ((out (list (nlre--plan-empty ng))))
+    (while (and nodes (not nlre--plan-failed))
+      (setq out (nlre--plan-cross out (nlre--plan-expand (car nodes) ng))
+            nodes (cdr nodes)))
+    out))
+
+(defun nlre--plan-expand (node ng)
+  (let ((tag (car node)))
+    (cond
+     ((eq tag :lit)
+      (list (nlre--plan-new (list (nth 1 node))
+                            (make-vector ng nil) nil)))
+     ((eq tag :set)
+      (if (nth 1 node) (progn (setq nlre--plan-failed t) nil)
+        (list (nlre--plan-new (list (list :set (nth 2 node)))
+                              (make-vector ng nil) nil))))
+     ((eq tag :bos)
+      (list (nlre--plan-new nil (make-vector ng nil) 0)))
+     ((eq tag :seq) (nlre--plan-seq (nth 1 node) ng))
+     ((eq tag :alt)
+      (let ((branches (nth 1 node)) out)
+        (while (and branches (not nlre--plan-failed))
+          (setq out (append out (nlre--plan-seq (car branches) ng))
+                branches (cdr branches)))
+        out))
+     ((eq tag :group)
+      (let ((xs (nlre--plan-expand (nth 2 node) ng)) (gn (nth 1 node)))
+        (let ((rest xs))
+          (while rest
+            (aset (aref (car rest) 1) gn
+                  (cons 0 (length (aref (car rest) 0))))
+            (setq rest (cdr rest))))
+        xs))
+     ((eq tag :opt)
+      (append (nlre--plan-expand (nth 1 node) ng)
+              (list (nlre--plan-empty ng))))
+     ((eq tag :lazyopt)
+      (cons (nlre--plan-empty ng) (nlre--plan-expand (nth 1 node) ng)))
+     (t (setq nlre--plan-failed t) nil))))
+
+(defun nlre--fold-text (s fold)
+  (if (not fold) s
+    (let ((i 0) (n (length s)) (out ""))
+      (while (< i n)
+        (let ((c (aref s i)))
+          (setq out (concat out (char-to-string
+                                 (if (and (>= c ?A) (<= c ?Z)) (+ c 32) c)))))
+        (setq i (1+ i)))
+      out)))
+
+(defun nlre--atom-strings (atoms)
+  (let ((out (list "")))
+    (while (and atoms (not nlre--plan-failed))
+      (let ((prefixes out) next (atom (car atoms)))
+        (while prefixes
+          (if (integerp atom)
+              (setq next (cons (concat (car prefixes)
+                                       (char-to-string atom)) next))
+            (let ((ranges (nth 1 atom)))
+              (while ranges
+                (let ((c (car (car ranges))) (hi (cdr (car ranges))))
+                  (while (<= c hi)
+                    (setq nlre--plan-count (1+ nlre--plan-count)
+                          next (cons (concat (car prefixes)
+                                             (char-to-string c)) next)
+                          c (1+ c))))
+                (setq ranges (cdr ranges)))))
+          (setq prefixes (cdr prefixes)))
+        (setq out (nreverse next) atoms (cdr atoms))
+        (when (> nlre--plan-count nlre--plan-limit)
+          (setq nlre--plan-failed t))))
+    out))
+
+(defun nlre--suffix-entry-add (entry xs)
+  "Insert ENTRY into XS by decreasing suffix length."
+  (let ((n (length (car entry))))
+  (cond ((null xs) (list entry))
+          ((>= n (length (car (car xs)))) (cons entry xs))
+          (t (cons (car xs) (nlre--suffix-entry-add entry (cdr xs)))))))
+
+(defun nlre--literal-text (ast)
+  (and (eq (car ast) :seq)
+       (let ((nodes (nth 1 ast)) (out "") (ok t))
+         (while (and nodes ok)
+           (if (eq (car (car nodes)) :lit)
+               (setq out (concat out (char-to-string (nth 1 (car nodes))))
+                     nodes (cdr nodes))
+             (setq ok nil)))
+         (and ok out))))
+
+(defun nlre--suffix-plan (ast ng fold)
+  (let ((nodes (and (eq (car ast) :seq) (nth 1 ast))))
+    (when (and nodes (eq (car (car (last nodes))) :eos))
+      (let ((nlre--plan-count 0) (nlre--plan-failed nil))
+        (let ((variants (nlre--plan-seq (butlast nodes) ng)))
+          (when (and variants (not nlre--plan-failed))
+            (let ((ends (make-hash-table :test 'equal)) empty
+                  (xs (reverse variants)))
+              (while (and xs (not nlre--plan-failed))
+                (let ((v (car xs)) (strings (nlre--atom-strings (aref (car xs) 0))))
+                  (while strings
+                    (let* ((text (nlre--fold-text (car strings) fold))
+                           (len (length text)) (entry (cons text v)))
+                      (if (= len 0) (setq empty (cons entry empty))
+                        (let* ((last (aref text (1- len)))
+                               (key (if (= len 1) last
+                                      (+ last (* 1114112
+                                                 (1+ (aref text (- len 2))))))))
+                          (puthash key
+                                   (nlre--suffix-entry-add
+                                    entry (gethash key ends))
+                                   ends)))
+                      (setq strings (cdr strings)))))
+                (setq xs (cdr xs)))
+              (and (not nlre--plan-failed)
+                   (vector :suffix ends fold empty)))))))))
+
+(defun nlre--compile-pattern (pat fold)
+  (let* ((ast (nlre--parse pat)) (ng (1+ nlre--gcount))
+         (literal (nlre--literal-text ast)))
+    (vector ast ng
+            (if literal
+              (vector :literal (nlre--fold-text literal fold) fold)
+              (nlre--suffix-plan ast ng fold)))))
+
 ;; ---- matcher (no closures; rest threaded explicitly) ----
 
 (defvar nlre--caps nil "Vector of (start . end) per group during a match.")
 
-;; Emacs folds case by default -- `case-fold-search' is t globally -- and
-;; this engine did not honour it at all, so (string-match "A" "a") answered
-;; nil where Emacs answers 0.  Every case-insensitive search in every caller
-;; silently found nothing, which is the failure mode that does not announce
-;; itself.
-;;
-;; The fold is applied at the two comparison sites rather than baked into
-;; the parsed pattern, for two reasons: `nlre--compiled-pattern' caches
-;; ASTs keyed on the pattern string alone, so a folded AST would be handed
-;; to a later case-sensitive match; and downcasing the pattern text would
-;; rewrite \W into \w and \B into \b, turning negated classes into their
-;; opposites.
-;; `case-fold-search' itself is declared in scripts/nelisp-stdlib-prelude.el,
-;; beside the other stock Emacs variables this runtime has to provide -- this
-;; file only reads it, and reads it through `boundp' so a match that runs
-;; before that declaration behaves as case-sensitive rather than erroring.
+;; Fold only comparison operands; rewriting the regexp would invert \W/\B.
 (defvar nlre--fold nil "Non-nil while the current match folds case.")
 
 (defun nlre--fold-char (c)
@@ -304,10 +464,7 @@ Return (REVERSED-EXPANSION-NODES . newpos)."
         (t c)))
 
 (defun nlre--space-p (c) (or (= c 32) (= c 9) (= c 10) (= c 13) (= c 12)))
-;; `_' is a SYMBOL constituent, not a word constituent, in the standard
-;; syntax table -- (string-match "\\w" "_") is nil in Emacs.  Counting it as a
-;; word character also moved every \\b boundary: (string-match "\\bx" "_x")
-;; answered nil where Emacs answers 1.
+;; `_` is a symbol constituent, not a word constituent.
 (defun nlre--word-p (c)
   (or (and (>= c ?a) (<= c ?z)) (and (>= c ?A) (<= c ?Z))
       (and (>= c ?0) (<= c ?9))))
@@ -315,11 +472,7 @@ Return (REVERSED-EXPANSION-NODES . newpos)."
 (defun nlre--symbol-p (c)
   (or (nlre--word-p c) (= c ?_)))
 
-;; `\\sC' matches a character whose SYNTAX CLASS is C.  The class character was
-;; parsed and thrown away, so every \\sC behaved as \\s- (whitespace) and every
-;; \\SC as its negation: (string-match "\\Sw" "a") answered 0 where Emacs
-;; answers nil.  A class this does not model matches nothing, which is wrong
-;; in a stated direction rather than in an arbitrary one.
+;; Unknown syntax classes deliberately match nothing.
 (defun nlre--syntax-p (class c)
   (cond ((eq class ?w) (nlre--word-p c))
         ((eq class ?_) (= c ?_))
@@ -345,6 +498,85 @@ Return (REVERSED-EXPANSION-NODES . newpos)."
                  (and nlre--fold
                       (nlre--set-in-ranges ranges (nlre--flip-case c))))))
     (if neg (not hit) hit)))
+
+(defun nlre--literal-search (needle string start)
+  (cond
+   ((and (fboundp 'nelisp--string-search)
+         (not (multibyte-string-p needle))
+         (not (multibyte-string-p string)))
+    (nelisp--string-search needle string start))
+   ((fboundp 'string-search) (string-search needle string start))
+   (t
+    (let ((i start) (n (length string)) (m (length needle)) hit)
+      (while (and (not hit) (<= (+ i m) n))
+        (if (string= needle (substring string i (+ i m)))
+            (setq hit i)
+          (setq i (1+ i))))
+      hit))))
+
+(defun nlre--literal-plan-match (plan string start n)
+  (let ((needle (aref plan 1)) (fold (aref plan 2)))
+    (if (not fold) (nlre--literal-search needle string start)
+      (let ((m (length needle)))
+        (if (= m 0) start
+          (let* ((c (aref needle 0)) (other (nlre--flip-case c))
+                 (pos start) (exact (nlre--literal-search needle string start))
+                 hit)
+            (while (and (not hit) (<= (+ pos m) n))
+              (let ((p (nlre--literal-search (char-to-string c) string pos))
+                    (q (and (/= c other)
+                            (nlre--literal-search
+                             (char-to-string other) string pos))) at)
+                (setq at (cond ((null p) q) ((null q) p)
+                               ((< p q) p) (t q)))
+                (if (or (null at) (> (+ at m) n))
+                    (setq pos (1+ n))
+                  (let ((piece (and (not (eq at exact))
+                                    (substring string at (+ at m)))))
+                    (if (or (eq at exact)
+                            (string= piece needle)
+                            (string= (nlre--fold-text piece t) needle))
+                        (setq hit at)
+                      (setq pos (1+ at)))))))
+            hit))))))
+
+(defun nlre--suffix-plan-match (plan string start n)
+  (let ((fold (aref plan 2)) (empty (aref plan 3)) xs short hit)
+    (when (> n start)
+      (let ((last (aref string (1- n))))
+        (when (and fold (>= last ?A) (<= last ?Z))
+          (setq last (+ last 32)))
+        (setq short (gethash last (aref plan 1)))
+        (when (> (- n start) 1)
+          (let ((prev (aref string (- n 2))))
+            (when (and fold (>= prev ?A) (<= prev ?Z))
+              (setq prev (+ prev 32)))
+            (setq xs (gethash (+ last (* 1114112 (1+ prev)))
+                              (aref plan 1)))))))
+    (while (and (not hit) (or xs short))
+      (unless xs (setq xs short short nil))
+      (let* ((entry (car xs)) (text (car entry)) (variant (cdr entry))
+             (pos (- n (length text))) (bos (aref variant 2)))
+        (when (and (>= pos start) (or (null bos) (= (+ pos bos) 0))
+                   (if fold
+                       (string= text (nlre--fold-text (substring string pos n) t))
+                     (eq pos (nlre--literal-search text string pos))))
+          (setq hit (cons pos variant))))
+      (setq xs (cdr xs)))
+    (when (and (not hit) empty)
+      (let* ((variant (cdr (car empty))) (bos (aref variant 2)))
+        (when (or (null bos) (= (+ n bos) 0))
+          (setq hit (cons n variant)))))
+    hit))
+
+(defun nlre--plan-set-caps (caps variant start end)
+  (aset caps 0 (cons start end))
+  (let ((relative (aref variant 1)) (i 1) (n (length caps)))
+    (while (< i n)
+      (let ((span (aref relative i)))
+        (aset caps i
+              (and span (cons (+ start (car span)) (+ start (cdr span))))))
+      (setq i (1+ i)))))
 
 (defun nlre--match-atom1 (node s pos n)
   "Match a single non-quantified atom NODE at POS; return end-pos or nil.
@@ -466,44 +698,8 @@ Return end-pos or nil."
 
 ;; ---- public entry ----
 
-;; Doc 201 §5.4.  `nlre-string-match' retries at every start position, and
-;; each retry used to cost a fresh `make-vector' plus a walk into
-;; `nlre--match-list''s dispatch chain -- even where the pattern's very
-;; first node is a literal that the character at that position plainly is
-;; not.  Two changes, both confined to the scan loop:
-;;
-;;   1. the capture vector is allocated ONCE per call and cleared per
-;;      attempt, instead of once per attempt;
-;;   2. when the pattern must begin with one specific character, a position
-;;      whose character is not that one is skipped with a single `aref' and
-;;      `eq' rather than an attempt.
-;;
-;; The filter fires ONLY when the first node must match exactly one known
-;; character.  Anything optional (`:star'/`:opt' and the lazy forms),
-;; zero-width (`:bol', `:wordb', ...), structural (`:alt'/`:group'/`:seq')
-;; or multi-character (`:set'/`:any'/`:word'/`:space') answers nil and the
-;; loop runs exactly as it did: guessing wrong here would skip a real
-;; match, so the question is only asked where the answer is certain.
-;;
-;; Measured on the shape `skk-version.el' pays -- 42 `string-match' calls
-;; over ~43-character strings -- on this repo's windows-x86_64 standalone,
-;; 2026-08-30, three runs each side, interleaved in one stretch on an idle
-;; machine:
-;;
-;;   never-matching `ddskk-[0-9]+\.[0-9]+'  2.68-2.88s -> 0.47-0.52s  (5.5x)
-;;   matching       `package-[0-9]+/lisp'   1.91-2.00s -> 1.40-1.62s  (1.3x)
-;;   lead-less      `[0-9]+/lisp'           4.67-4.73s -> 4.84-5.42s  (0.95x)
-;;
-;; The last row is a real, small COST, not noise: a control build carrying
-;; the two new defuns below but never calling them measured 4.59-4.75s,
-;; i.e. code layout does not explain it, and splitting the scan into two
-;; loops (so the lead-less path executes no filter test at all) did not
-;; remove it either.  Counting interpreter calls says this path should have
-;; got marginally CHEAPER -- one `>' where there used to be a `make-vector'
-;; -- so the remaining explanation is allocation/collection behaviour
-;; rather than work done, and it is left measured but unexplained.  ~5% on
-;; patterns with no leading literal buys 5.5x on those that have one, which
-;; is nearly all of them.
+;; Reuse one capture vector per scan and reject impossible leading characters
+;; before entering the backtracker (Doc 201 §5.4).
 (defun nlre--leading-lit-char (nodes)
   "Return the one character every match of NODES must start with, or nil."
   (and (consp nodes)
@@ -527,56 +723,49 @@ Sets `nlre--match-data' (and host match-data when available via set-match-data).
              (fboundp 'nl-write-file))
     (nl-write-file nlre--string-match-counter-file
                    (format "%d" nlre--string-match-calls)))
-  (let* ((nlre--fold (and (boundp 'case-fold-search) case-fold-search))
+  (let* ((nlre--fold case-fold-search)
          (compiled (nlre--compiled-pattern regexp))
-         (ast (car compiled))
-         (top (nlre--seq-nodes ast))
          (n (length string))
          (i (or start 0))
-         (ng (cdr compiled))
-         (lead (nlre--leading-lit-char top))
-         ;; Fold the required character the same way the matcher folds the
-         ;; one it is compared against, so `case-fold-search' does not make
-         ;; the filter reject a position the matcher would have accepted.
-         (lead (and lead (nlre--fold-char lead)))
-         ;; One scratch vector for the whole scan.  `:savestart'/`:saveend'
-         ;; put back whatever they overwrote when their continuation fails,
-         ;; so the only state a failed attempt can leave behind is a group
-         ;; that matched inside it; clearing covers that.  Patterns with no
-         ;; group (ng = 1) have nothing to clear -- slot 0 is written on
-         ;; success and read nowhere else.
+         (ng (aref compiled 1))
+         (plan (aref compiled 2))
+         ;; Capture state is shared only between attempts in this call.
          (caps (make-vector ng nil))
          (hit nil))
     (setq nlre--caps caps)
-    (when lead
-      (setq nlre--leading-filter-calls (1+ nlre--leading-filter-calls)))
-    ;; Two loops rather than one with the filter test inside it.  The
-    ;; filter exists to make a rejected position cost almost nothing, and a
-    ;; `lead' test in a shared loop hands that cost straight back to every
-    ;; pattern that has no leading literal: measured at 4-7% on a
-    ;; `[0-9]+/lisp' sweep, with a control build (the two new defuns
-    ;; present but never called) ruling out code layout as the cause.
-    (if lead
-        ;; `(< i n)': a `:lit' cannot match where there is no character, so
-        ;; the i = n attempt the other loop still makes is dead here.
-        (while (and (not hit) (< i n))
-          (if (not (eq (nlre--fold-char (aref string i)) lead))
-              (setq i (1+ i))
+    (cond
+     ((and plan (eq (aref plan 0) :literal))
+      (setq nlre--fast-plan-hits (1+ nlre--fast-plan-hits)
+            hit (nlre--literal-plan-match plan string i n))
+      (when hit (aset caps 0 (cons hit (+ hit (length (aref plan 1)))))))
+     ((and plan (eq (aref plan 0) :suffix))
+      (setq nlre--fast-plan-hits (1+ nlre--fast-plan-hits))
+      (let ((result (nlre--suffix-plan-match plan string i n)))
+        (when result
+          (setq hit (car result))
+          (nlre--plan-set-caps caps (cdr result) hit n))))
+     (t
+      (let* ((top (nlre--seq-nodes (aref compiled 0)))
+             (lead (nlre--leading-lit-char top))
+             (lead (and lead (nlre--fold-char lead))))
+        (when lead
+          (setq nlre--leading-filter-calls (1+ nlre--leading-filter-calls)))
+        (if lead
+            (while (and (not hit) (< i n))
+              (if (not (eq (nlre--fold-char (aref string i)) lead))
+                  (setq i (1+ i))
+                (when (> ng 1) (nlre--caps-clear caps))
+                (let ((e (nlre--match-list top string i n)))
+                  (if e
+                      (progn (aset caps 0 (cons i e)) (setq hit i))
+                    (setq i (1+ i))))))
+          (while (and (not hit) (<= i n))
             (when (> ng 1) (nlre--caps-clear caps))
             (let ((e (nlre--match-list top string i n)))
               (if e
                   (progn (aset caps 0 (cons i e)) (setq hit i))
-                (setq i (1+ i))))))
-      (while (and (not hit) (<= i n))
-        (when (> ng 1) (nlre--caps-clear caps))
-        (let ((e (nlre--match-list top string i n)))
-          (if e
-              (progn (aset caps 0 (cons i e)) (setq hit i))
-            (setq i (1+ i))))))
+                (setq i (1+ i)))))))))
     (when hit
-      ;; `caps' is this call's own vector -- the reuse above is within one
-      ;; scan, never across calls -- so handing it straight to
-      ;; `nlre--last-caps' is what the per-attempt `make-vector' did too.
       (setq nlre--last-caps caps)
       hit)))
 
@@ -589,26 +778,47 @@ Sets `nlre--match-data' (and host match-data when available via set-match-data).
   (and nlre--last-caps (< n (length nlre--last-caps))
        (let ((c (aref nlre--last-caps n))) (and c (cdr c)))))
 
+(defun nlre--caps-offset (offset)
+  (let ((i 0) (n (length nlre--last-caps)))
+    (while (< i n)
+      (let ((span (aref nlre--last-caps i)))
+        (when span
+          (aset nlre--last-caps i
+                (cons (+ offset (car span)) (+ offset (cdr span))))))
+      (setq i (1+ i)))))
+
+(defun nlre--looking-at (regexp)
+  (let* ((base (point))
+         (hit (nlre-string-match
+               regexp (buffer-substring base (point-max)) 0)))
+    (when (and hit (= hit 0))
+      (nlre--caps-offset base)
+      t)))
+
+(defun nlre--re-search-forward (regexp &optional bound noerror count)
+  (let ((left (or count 1)) (limit (or bound (point-max))) result)
+    (while (> left 0)
+      (let* ((base (point))
+             (hit (nlre-string-match regexp (buffer-substring base limit) 0)))
+        (if (null hit) (setq left 0 result nil)
+          (nlre--caps-offset base)
+          (goto-char (nlre-match-end 0))
+          (setq result (point) left (1- left)))))
+    (if result result
+      (if noerror
+          (progn (unless (eq noerror t) (goto-char limit)) nil)
+        (signal 'search-failed (list regexp))))))
+
+(unless (fboundp 'looking-at)
+  (fset 'looking-at (symbol-function 'nlre--looking-at)))
+(unless (fboundp 're-search-forward)
+  (fset 're-search-forward (symbol-function 'nlre--re-search-forward)))
+
 ;; ---- regexp-dependent string helpers (built on nlre-string-match) ----
 
-;; PERF (cold-start hand-off follow-up, 2026-08-30): a SEPARATORS of
-;; exactly one byte, none of them an Emacs-regexp metacharacter, can never
-;; behave differently split literally vs. through the regexp engine below
-;; -- there is nothing for `nlre-string-match' to buy over a plain
-;; byte-compare. Measured directly: splitting a real ~2.3KB, 59-entry
-;; Windows PATH on ";" cost 3.2-3.4s through the regexp engine vs 0.4s via
-;; `nelisp--split-on-char' (scripts/nelisp-stdlib-prelude.el) -- an 8x
-;; difference for identical output. `executable-find' was fixed to call
-;; `nelisp--split-on-char' directly (dev/nelisp commit 70cd5852); this
-;; extends the same fast path to every OTHER caller of `split-string'/
-;; `nlre-split-string' with a single-byte literal separator, since a
-;; caller other than `executable-find' hitting this same cost was flagged
-;; as a known follow-up in that commit and in docs/design/201 §5.2.
+;; A non-metacharacter one-byte separator is a literal split (Doc 201 §5.2).
 (unless (fboundp 'nelisp--split-on-char)
-  ;; The standalone prelude normally supplies this helper.  Hosted users of
-  ;; this library do not load that prelude, so keep an identical fallback
-  ;; here rather than sending their literal separators through the regexp
-  ;; engine.
+  ;; Hosted users do not load the standalone prelude's identical helper.
   (defun nelisp--split-on-char (string char omit-empty)
     (let ((start 0)
           (idx 0)
@@ -661,11 +871,7 @@ implies OMIT-NULLS and leading/trailing trim (matching GNU Emacs)."
         (while (and res (= (length (car res)) 0)) (setq res (cdr res))))
       res)))
 
-;; \N, \& and \\ in a string REPLACEMENT were not expanded -- they were
-;; copied through as the two literal characters -- so
-;; (replace-regexp-in-string "\\(a\\)" "[\\1]" "a") produced "[\\1]".
-;; A backreference is the usual reason to write a group in the first place,
-;; so the common call was the broken one.
+;; Expand \N, \&, and \\ in string replacements.
 (defun nlre--expand-replacement (rep string)
   (let ((i 0) (n (length rep)) (out ""))
     (while (< i n)

@@ -70,5 +70,121 @@
     (should (equal (replace-regexp-in-string (nth 0 c) (nth 1 c) (nth 2 c))
                    (nlre-replace-regexp-in-string (nth 0 c) (nth 1 c) (nth 2 c))))))
 
+(ert-deftest nelisp-regexp-compiled-cache-reuses-exact-key ()
+  "A repeated pattern/fold/syntax-table triple is one cache entry."
+  (let ((case-fold-search nil))
+    (nlre--compiled-cache-clear)
+    (setq nlre--compiled-cache-hits 0
+          nlre--compiled-cache-misses 0)
+    (let ((first (nlre--compiled-pattern "cache-literal"))
+          (second (nlre--compiled-pattern "cache-literal")))
+      (should (eq first second))
+      (should (= nlre--compiled-cache-count 1))
+      (should (= nlre--compiled-cache-hits 1))
+      (should (= nlre--compiled-cache-misses 1)))))
+
+(ert-deftest nelisp-regexp-compiled-cache-separates-fold-and-syntax-table ()
+  "Case-fold values and syntax-table identities occupy separate entries."
+  (nlre--compiled-cache-clear)
+  (setq nlre--compiled-cache-hits 0
+        nlre--compiled-cache-misses 0)
+  (let ((case-fold-search nil))
+    (nlre--compiled-pattern "cache-key"))
+  (let ((case-fold-search t))
+    (nlre--compiled-pattern "cache-key"))
+  (let ((case-fold-search nil))
+    (with-syntax-table (copy-syntax-table)
+      (nlre--compiled-pattern "cache-key")))
+  (should (= nlre--compiled-cache-count 3))
+  (should (= nlre--compiled-cache-hits 0))
+  (should (= nlre--compiled-cache-misses 3)))
+
+(ert-deftest nelisp-regexp-compiled-cache-evicts-least-recently-used ()
+  "The bounded cache evicts the LRU entry rather than clearing everything."
+  (let ((case-fold-search nil)
+        (nlre--compiled-cache-limit 3))
+    (nlre--compiled-cache-clear)
+    (setq nlre--compiled-cache-hits 0
+          nlre--compiled-cache-misses 0)
+    (nlre--compiled-pattern "cache-0")
+    (nlre--compiled-pattern "cache-1")
+    (nlre--compiled-pattern "cache-2")
+    (nlre--compiled-pattern "cache-0") ; promote; cache-1 is now LRU
+    (nlre--compiled-pattern "cache-3")
+    (should (= nlre--compiled-cache-count 3))
+    (should (= nlre--compiled-cache-hits 1))
+    (nlre--compiled-pattern "cache-1")
+    (should (= nlre--compiled-cache-misses 5))
+    ;; cache-0 survived both evictions because it was touched before cache-3.
+    (nlre--compiled-pattern "cache-0")
+    (should (= nlre--compiled-cache-hits 2))))
+
+(ert-deftest nelisp-regexp-finite-prefilter-preserves-edge-cases ()
+  "Finite fast plans must not skip empty/anchored/folded valid matches."
+  (dolist (case '(("a\\|" "bbb")
+                  ("\\`foo\\|bar\\'" "xxbar")
+                  ("[^x]foo" "xxyfoo")
+                  ("a.*?b" "zaxxbxxb")
+                  ("\\(a\\|ba\\)\\'" "xxba")
+                  ("\\(za\\|a\\)\\'" "xxa")))
+    (let* ((regexp (nth 0 case))
+           (string (nth 1 case))
+           (reference (string-match regexp string))
+           (reference-end (and reference (match-end 0)))
+           (actual (nlre-string-match regexp string)))
+      (should (equal actual reference))
+      (should (equal (and actual (nlre-match-end 0)) reference-end))))
+  (let ((case-fold-search t))
+    (should (= (nlre-string-match "ALPHA" "xxalpha") 2))
+    (should (= (nlre-string-match "\\(A0\\|B0\\)\\'" "xxb0") 2))))
+
+(ert-deftest nelisp-regexp-finite-prefilter-load-history-and-regexp-opt ()
+  "The two hot finite-pattern shapes retain match and capture semantics."
+  (let* ((load-re
+          "\\(\\`\\|/\\)org\\(\\.elc\\|\\.el\\|\\.so\\|\\)\\(\\.gz\\)?\\'")
+         (load-string "/usr/share/emacs/lisp/org.elc.gz")
+         (extensions nil)
+         (i 0))
+    (while (< i 40)
+      (setq extensions (cons (format "mode%02d" i) extensions)
+            i (1+ i)))
+    (let ((auto-re (concat "\\." (regexp-opt (nreverse extensions) t) "\\'")))
+      (dolist (case (list (list load-re load-string)
+                          (list auto-re "/tmp/example.mode39")))
+        (let* ((regexp (nth 0 case))
+               (string (nth 1 case))
+               (reference (string-match regexp string))
+               (reference-data (and reference (match-data)))
+               (actual (nlre-string-match regexp string)))
+          (should (aref (nlre--compiled-pattern regexp) 2))
+          (should (equal actual reference))
+          (should (= (length nlre--last-caps) (/ (length reference-data) 2)))
+          ;; These shapes have at most three subexpressions.  Keep the
+          ;; assertions explicit: this also leaves `nlre--last-caps' live
+          ;; while checking it, just as the public match accessors do.
+          (should (equal (nlre-match-beginning 0) (nth 0 reference-data)))
+          (should (equal (nlre-match-end 0) (nth 1 reference-data)))
+          (should (equal (nlre-match-beginning 1) (nth 2 reference-data)))
+          (should (equal (nlre-match-end 1) (nth 3 reference-data)))
+          (when (> (length nlre--last-caps) 2)
+            (should (equal (nlre-match-beginning 2) (nth 4 reference-data)))
+            (should (equal (nlre-match-end 2) (nth 5 reference-data))))
+          (when (> (length nlre--last-caps) 3)
+            (should (equal (nlre-match-beginning 3) (nth 6 reference-data)))
+            (should (equal (nlre-match-end 3) (nth 7 reference-data)))))))))
+
+(ert-deftest nelisp-regexp-buffer-search-wrappers ()
+  "Buffer searches share the string matcher and report buffer positions."
+  (with-temp-buffer
+    (insert "xxneedlezz")
+    (goto-char 3)
+    (should (nlre--looking-at "needle"))
+    (should (= (nlre-match-beginning 0) 3))
+    (should (= (nlre-match-end 0) 9))
+    (goto-char 1)
+    (should (= (nlre--re-search-forward "needle" nil nil) 9))
+    (should (= (point) 9))
+    (should (= (nlre-match-beginning 0) 3))))
+
 (provide 'nelisp-regexp-diff-test)
 ;;; nelisp-regexp-diff-test.el ends here
