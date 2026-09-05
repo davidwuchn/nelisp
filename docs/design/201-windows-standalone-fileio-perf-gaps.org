@@ -1191,9 +1191,12 @@ fire.  Small, and the only item in the rule-tree cost that is ours.
 
 §3's 262us is what everything above is a multiple of -- though §6.11 puts
 a basic operation at 1-31us, so the multiplier is smaller than written
-here and the option's size shrinks with it.  It is still the only lever
-that helps every workload rather than one file, and the only one with no
-owner but us.  §6.5's unexplained ~5% and §6.8's allocation-shaped
+here, and §6.12 finds that for the functions ordinary elisp calls the
+evaluator's per-operation cost is not what is being paid at all: the
+prelude's correction layer is 10-170x the builtins it wraps.  The option
+keeps its rank; what it means changes, and §6.12 names the three shapes
+the work takes.  It is still the only lever that helps every workload
+rather than one file, and the only one with no owner but us.  §6.5's unexplained ~5% and §6.8's allocation-shaped
 kernel time are the two concrete threads into it.
 
 **6. Native AOT on windows-x86_64.  Unknown payoff -- measure first.**
@@ -1854,7 +1857,8 @@ rest is the prelude wrapper that keeps a bignum count on the old path.
 `substring' at 128-223us is the one left.  It is not obviously wrong the
 way `nthcdr' was -- it allocates and it decodes UTF-8 -- but it is five
 to ten times a basic operation and the lattice conversion probes it once
-per candidate edge, so it is where the next look should go.
+per candidate edge, so it is where the next look should go.  §6.12 took
+that look: neither allocation nor UTF-8 turned out to be the cost.
 
 *** For the ranked options
 
@@ -1871,3 +1875,113 @@ warm without touching the interpreter at all.
 The harness is `floor-cases.el' / `floor-bench.py' (separate processes)
 and `floor-inproc.el' (one process); neither is in the tree, both are a
 page of elisp, and either should be re-run rather than trusted from here.
+
+** §6.12 Where the time actually is: the prelude's wrapper layer, not the interpreter
+
+§6.11 corrected §3's per-operation floor from 262us to 1-31us and left two
+outliers, `nth'/`nthcdr' and `substring'.  `nthcdr' turned out to be the
+prelude walking a list one interpreted iteration at a time where a reader
+builtin could walk it (`3933b5b8').  Chasing `substring' the same way found
+something larger, and not specific to `substring'.
+
+*** The measurement
+
+The prelude corrects native builtins that are wrong in specific ways.  The
+idiom is fixed: capture the builtin as `nelisp--native-X', then install an
+elisp `X' over it.  Eleven functions are wrapped that way, so each was timed
+against the builtin it delegates to, all in one process, round-robin, best of
+three rounds, empty loop subtracted -- the instrument §6.11 describes.
+
+These numbers were taken on `28817257', §6.11's on `5931f980', so `substring'
+reads 82us here and 128-223us there.  Both are this host on the days they were
+run; the two are not meant to be subtracted from each other, and the ratio
+inside one table -- wrapper against the builtin it calls, measured in the same
+process seconds apart -- is what carries the argument.
+
+| function              | wrapper | the builtin under it |
+|-----------------------+---------+----------------------|
+| `format' "%-6s|"      | 1330us  | --                   |
+| `format' "%s"         |  849us  |                  5us |
+| `substring'           |   82us  |                  3us |
+| `functionp'           |   63us  |                 42us |
+| `truncate'            |   48us  |                  3us |
+| `ceiling'             |   47us  |                  3us |
+| `floor'               |   43us  |                  3us |
+| `equal'               |   38us  |                 <1us |
+| `intern'              |   25us  |                  5us |
+| `car' (not wrapped)   |    4us  |                   -- |
+| `concat' (not wrapped)|    7us  |                   -- |
+
+An unwrapped builtin costs 3-7us.  A wrapped one costs 25-1330us.  The
+wrapper is 10-170x the work it guards, and for the whole set the layer, not
+the evaluator underneath it, is what the call costs.
+
+`prin1', `princ' and `terpri' are absent because they cannot be measured this
+way.  A first attempt gave them a sink function; the runtime printed to stdout
+regardless, 120000 characters of it, and the I/O moved every other shape in
+the same process -- native `substring' came back below the empty loop.  A
+benchmark that prints cannot measure itself, and the numbers from that run
+were discarded rather than corrected.
+
+*** Why the wrappers cost this much
+
+`format' is the clearest, and it is the shape of the rest.  It parses the
+template character by character in elisp on every call, and it builds its
+result with
+
+: (setq out (concat out (char-to-string ch)) i (1+ i))
+
+-- one allocation of the entire accumulated output per literal character.
+Per directive it rebuilds a one-directive mini-template with `concat' and
+`char-to-string', hands that to the builtin, then applies the width and
+precision layer with more `concat' and several `substring' calls.
+
+Which is the second effect: **the wrappers call each other.**  `format' calls
+`substring' at 82us a time, and `substring' is itself a wrapper whose own
+guard, `arrayp', is elisp -- `(or (vectorp x) (stringp x))', 26us, where
+`stringp' alone is 7us and the emitter already carries `bf_arrayp_raw' with
+exactly the right tag test but no dispatch arm to reach it.  A single
+`(format "%-6s|" 1)' therefore pays the interpreter for a template scan, a
+mini-template rebuild, a padding pass, several wrapped `substring' calls, and
+inside each of those an `arrayp' that is two more interpreted calls.
+
+*** What this changes
+
+Option 5 is "interpreter per-operation cost", and everything ranked under it
+is a multiple of §3's 262us.  §6.11 already showed that number does not
+reproduce.  This says more than that the multiplier is wrong: for the
+functions ordinary elisp actually calls, the per-operation cost of the
+evaluator is not what is being paid.  `(format "%s" 1)' is 849us against a
+1-31us floor -- roughly forty basic operations' worth of wrapper around one
+5us builtin.
+
+So the lever under option 5 is not "make the evaluator faster".  It is "stop
+paying for a correction layer written in the language the layer exists to
+speed up".  Three shapes, in increasing size:
+
+1. Expose a builtin that already exists.  `arrayp' has `bf_arrayp_raw' and no
+   arm; `nthcdr' had none and got one.  Cheap and local.
+2. Fix the builtin so the wrapper can be thin.  Measured here: the native
+   `substring' arm does not type-check TO.  `(nelisp--native-substring
+   "abcdef" 1 "z")' answers "" -- no error, wrong answer -- because it reads
+   the argument's second word as an integer.  It also accepts a vector, which
+   `bf_arrayp_raw' admits and the string slicing cannot handle; that one
+   fails safely with `args-out-of-range' rather than corrupting memory.  Both
+   are latent, since the wrapper intercepts every call in the tree today, and
+   both are why the wrapper cannot simply delegate.
+3. Move the layer itself into the emitter.  `format' is the case that would
+   pay, and it is also the one with the most exposed semantics: the builtin
+   renders `%S' on a string without quoting it, and `%d'/`%o'/`%x'/`%X' on a
+   non-integer print the argument's raw tagged word rather than signalling --
+   `(nelisp--native-format "%d" (list 1 2))' answered "139734186063984".  A
+   fast path is only sound for templates whose every directive the builtin
+   already renders exactly, which means checking the argument types as well as
+   the template, so it is a real piece of work rather than a guard.
+
+The IME numbers alongside this say the same thing from the other end.  A
+keystroke went from 742ms to 222ms cold and 76ms warm on changes that only
+removed repeated work -- no evaluator change at all.
+
+The harness is `wrap-bench2.el', `sub-bench.el' and `fmt-diff.el'; none is in
+the tree, each is a page of elisp, and each should be re-run rather than
+trusted from here.
