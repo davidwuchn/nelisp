@@ -173,6 +173,40 @@
             (should (equal (nlre-match-beginning 3) (nth 6 reference-data)))
             (should (equal (nlre-match-end 3) (nth 7 reference-data)))))))))
 
+(ert-deftest nelisp-regexp-finite-prefilter-bailout-classes-still-match ()
+  "Patterns the finite-plan builder must decline still match correctly
+via the backtracking slow path (Doc T48d)."
+  ;; A mid-pattern anchor other than a leading `\\=\\`' or trailing `\\='':
+  ;; `nlre--plan-expand' has no case for `:bol'/`:eol' and falls through
+  ;; to its `t' clause, which fails the plan rather than mis-modeling it.
+  (let* ((regexp "x\\(^y\\|z\\)\\'") (string "xz")
+         (reference (string-match regexp string))
+         (reference-data (match-data))
+         (actual (nlre-string-match regexp string)))
+    (should (null (aref (nlre--compiled-pattern regexp) 2)))
+    (should (equal actual reference))
+    (should (equal (nlre-match-beginning 0) (nth 0 reference-data)))
+    (should (equal (nlre-match-end 0) (nth 1 reference-data)))
+    (should (equal (nlre-match-beginning 1) (nth 2 reference-data)))
+    (should (equal (nlre-match-end 1) (nth 3 reference-data))))
+  ;; More alternation leaves than `nlre--plan-limit' allows: the builder
+  ;; must give up once its atom-instance budget is spent instead of
+  ;; finishing an unbounded cross-product.
+  (let* ((branches nil) (i 0))
+    (while (< i 300)
+      (setq branches (cons (format "w%03d" i) branches) i (1+ i)))
+    (let* ((regexp (concat "\\(" (mapconcat #'identity (nreverse branches) "\\|") "\\)\\'"))
+           (string "xxw299")
+           (reference (string-match regexp string))
+           (reference-data (match-data))
+           (actual (nlre-string-match regexp string)))
+      (should (null (aref (nlre--compiled-pattern regexp) 2)))
+      (should (equal actual reference))
+      (should (equal (nlre-match-beginning 0) (nth 0 reference-data)))
+      (should (equal (nlre-match-end 0) (nth 1 reference-data)))
+      (should (equal (nlre-match-beginning 1) (nth 2 reference-data)))
+      (should (equal (nlre-match-end 1) (nth 3 reference-data))))))
+
 (ert-deftest nelisp-regexp-buffer-search-wrappers ()
   "Buffer searches share the string matcher and report buffer positions."
   (with-temp-buffer

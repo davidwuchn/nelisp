@@ -12,9 +12,21 @@
   "Pattern-keyed buckets of compiled regexp cache entries.")
 (defvar nlre--compiled-cache-count 0
   "Number of entries currently tracked in `nlre--compiled-cache'.")
-(defvar nlre--compiled-cache-limit 32
-  "Maximum compiled regexp patterns retained by the LRU cache.")
+(defvar nlre--compiled-cache-limit 1024
+  "Maximum compiled regexp patterns retained by the LRU cache.
+Doc T48d: a real init.el's `with-eval-after-load' feature-name checks
+alone produce hundreds of distinct load-history-shaped patterns; at the
+old limit of 32 essentially every one of them was a cache miss on every
+pass, so raising this is what turns repeat passes over a wide corpus of
+distinct patterns from all-cold into (after the first pass) all-warm.")
 (defvar nlre--compiled-cache-lru nil)
+(defvar nlre--compiled-cache-tick 0
+  "Monotonic counter stamped onto a cache entry's TICK slot on add/touch;
+higher means more recently used.  See `nlre--cache-evict'.")
+(defvar nlre--compiled-cache-last nil
+  "The most recently added-or-hit entry: an O(1) repeat-call shortcut for
+`nlre--compiled-pattern' that does not depend on `nlre--compiled-cache-lru'
+being recency-ordered (it is not; see `nlre--cache-touch').")
 (defvar nlre--syntax-table-reader
   (cond ((fboundp 'current-syntax-table) 'current-syntax-table)
         ((fboundp 'syntax-table) 'syntax-table)))
@@ -36,10 +48,22 @@
   ;; `clrhash' costs about 100ms even when this runtime's table is empty.
   (setq nlre--compiled-cache (make-hash-table :test 'equal)
         nlre--compiled-cache-count 0
-        nlre--compiled-cache-lru nil))
+        nlre--compiled-cache-lru nil
+        nlre--compiled-cache-last nil))
 
-;; Entry: [PATTERN CASE-FOLD SYNTAX-TABLE COMPILED].  The LRU has at most 32
-;; elements, so a list is smaller than baking link-management code per image.
+;; Entry: [PATTERN CASE-FOLD SYNTAX-TABLE COMPILED TICK].  `nlre--compiled-cache-lru'
+;; is just the unordered list of all live entries, not an ordering; TICK
+;; (a per-entry stamp from the monotonic `nlre--compiled-cache-tick'
+;; counter) is what recency comparisons use instead (Doc T48d).  At the
+;; old 32-entry limit a plain move-to-front list was fine; raised to
+;; cover a real init.el's hundreds of distinct load-history-shaped
+;; patterns, a HIT that has to relocate its entry via `delq' through a
+;; list that long -- the common case once the corpus exceeds one
+;; screenful of patterns, since the moved-to-front entry is essentially
+;; never the next one looked up -- measured at tens of milliseconds,
+;; not the sub-millisecond a warm hit must stay under.  Stamping TICK is
+;; O(1); only eviction scans for the minimum, and eviction is paid by
+;; cold misses, not hits.
 (defun nlre--cache-find (pat fold table)
   (let ((xs (gethash pat nlre--compiled-cache)) hit)
     (while (and xs (not hit))
@@ -50,24 +74,30 @@
     hit))
 
 (defun nlre--cache-touch (e)
-  (unless (eq e (car nlre--compiled-cache-lru))
-    (setq nlre--compiled-cache-lru
-          (cons e (delq e nlre--compiled-cache-lru)))))
+  (aset e 4 (setq nlre--compiled-cache-tick (1+ nlre--compiled-cache-tick)))
+  (setq nlre--compiled-cache-last e))
 
 (defun nlre--cache-evict ()
-  (let* ((e (car (last nlre--compiled-cache-lru))) (pat (aref e 0))
-         (xs (delq e (gethash pat nlre--compiled-cache))))
-    (setq nlre--compiled-cache-lru (delq e nlre--compiled-cache-lru))
-    (if xs (puthash pat xs nlre--compiled-cache)
-      (remhash pat nlre--compiled-cache))
-    (setq nlre--compiled-cache-count (1- nlre--compiled-cache-count))))
+  (let* ((xs (cdr nlre--compiled-cache-lru)) (victim (car nlre--compiled-cache-lru))
+         (vtick (aref victim 4)))
+    (while xs
+      (let ((e (car xs)))
+        (when (< (aref e 4) vtick) (setq victim e vtick (aref e 4))))
+      (setq xs (cdr xs)))
+    (let* ((pat (aref victim 0)) (rest (delq victim (gethash pat nlre--compiled-cache))))
+      (setq nlre--compiled-cache-lru (delq victim nlre--compiled-cache-lru))
+      (if rest (puthash pat rest nlre--compiled-cache)
+        (remhash pat nlre--compiled-cache))
+      (setq nlre--compiled-cache-count (1- nlre--compiled-cache-count)))))
 
 (defun nlre--cache-add (pat fold table compiled)
-  (let ((e (vector pat fold table compiled)))
+  (let ((e (vector pat fold table compiled
+                   (setq nlre--compiled-cache-tick (1+ nlre--compiled-cache-tick)))))
     (puthash pat (cons e (gethash pat nlre--compiled-cache))
              nlre--compiled-cache)
     (setq nlre--compiled-cache-lru (cons e nlre--compiled-cache-lru)
-          nlre--compiled-cache-count (1+ nlre--compiled-cache-count))
+          nlre--compiled-cache-count (1+ nlre--compiled-cache-count)
+          nlre--compiled-cache-last e)
     (when (> nlre--compiled-cache-count nlre--compiled-cache-limit)
       (nlre--cache-evict))
     compiled))
@@ -78,7 +108,7 @@ The result is [AST GROUP-COUNT FAST-PLAN]."
   (let* ((fold (and case-fold-search t))
          (table (and nlre--syntax-table-reader
                      (funcall nlre--syntax-table-reader)))
-         (head (car nlre--compiled-cache-lru))
+         (head nlre--compiled-cache-last)
          (entry (if (and head (or (eq pat (aref head 0))
                                   (equal pat (aref head 0)))
                          (eq fold (aref head 1)) (eq table (aref head 2)))
@@ -291,6 +321,20 @@ Return (REVERSED-EXPANSION-NODES . newpos)."
 
 ;; Fragment: [ATOMS CAPS BOS-OFFSET].  An atom is a literal
 ;; character or (:set RANGES); sets stay compact rather than expanding.
+;;
+;; ATOMS is stored in REVERSE match order (Doc T48d).  `nlre--plan-cat'
+;; combines two fragments A then B by consing B's (typically short,
+;; freshly-expanded) reversed atoms onto A's already-reversed atoms,
+;; which are shared untouched -- the large, growing side of a
+;; cross-product never gets copied.  Storing atoms forward instead would
+;; force copying whichever side comes first (A, the growing
+;; accumulator) at every combine; that copy, plus this runtime's own
+;; fixed per-call cost for `append', is what made cold-compiling an
+;; anchored multi-group pattern like the load-history shape
+;; (`\\(\\`\\|/\\)NAME\\(\\.elc\\|\\.el\\|\\.so\\|\\)\\(\\.gz\\)?\\'')
+;; cost far more than its final ~16 variants should need.  The only
+;; reader of a fragment's ATOMS in forward order is `nlre--suffix-plan',
+;; which un-reverses once per finished variant.
 (defun nlre--plan-new (atoms caps bos)
   (setq nlre--plan-count (1+ nlre--plan-count))
   (when (> nlre--plan-count nlre--plan-limit)
@@ -299,6 +343,17 @@ Return (REVERSED-EXPANSION-NODES . newpos)."
 
 (defun nlre--plan-empty (ng)
   (nlre--plan-new nil (make-vector ng nil) nil))
+
+;; Fresh copy of FRESH consed onto TAIL (TAIL shared, never mutated).
+;; `cons'/`setcdr' cost far less per call here than `append' (Doc T48d).
+(defun nlre--plan-prepend (fresh tail)
+  (if (null fresh) tail
+    (let* ((head (cons (car fresh) nil)) (last head) (rest (cdr fresh)))
+      (while rest
+        (let ((cell (cons (car rest) nil)))
+          (setcdr last cell) (setq last cell rest (cdr rest))))
+      (setcdr last tail)
+      head)))
 
 (defun nlre--plan-cat (a b)
   (let* ((off (length (aref a 0))) (ca (aref a 1)) (cb (aref b 1))
@@ -310,7 +365,7 @@ Return (REVERSED-EXPANSION-NODES . newpos)."
       (let ((x (aref ca i)) (y (aref cb i)))
         (aset caps i (if y (cons (+ off (car y)) (+ off (cdr y))) x)))
       (setq i (1+ i)))
-    (nlre--plan-new (append (aref a 0) (aref b 0)) caps (or ab bb))))
+    (nlre--plan-new (nlre--plan-prepend (aref b 0) (aref a 0)) caps (or ab bb))))
 
 (defun nlre--plan-cross (as bs)
   (let (out)
@@ -323,10 +378,34 @@ Return (REVERSED-EXPANSION-NODES . newpos)."
     (nreverse out)))
 
 (defun nlre--plan-seq (nodes ng)
+  ;; A run of consecutive single-atom nodes (a literal character, or a
+  ;; non-negated character set kept compact rather than expanded here --
+  ;; the common case of a literal substring) always yields exactly one
+  ;; fragment, with no cross-product branching at all -- so build it
+  ;; directly in one pass instead of paying one
+  ;; `nlre--plan-cross'/`nlre--plan-cat' call per character (Doc T48d).
+  ;; Consing each atom's value onto ATOMS while scanning forward
+  ;; produces the reversed order `nlre--plan-cat' expects, with no
+  ;; separate reverse step.
   (let ((out (list (nlre--plan-empty ng))))
     (while (and nodes (not nlre--plan-failed))
-      (setq out (nlre--plan-cross out (nlre--plan-expand (car nodes) ng))
-            nodes (cdr nodes)))
+      (let* ((tag (car (car nodes)))
+             (single (or (eq tag :lit) (and (eq tag :set) (not (nth 1 (car nodes)))))))
+        (if single
+            (let ((atoms nil))
+              (while (and nodes
+                          (let ((tag (car (car nodes))))
+                            (or (eq tag :lit)
+                                (and (eq tag :set) (not (nth 1 (car nodes)))))))
+                (setq atoms (cons (if (eq (car (car nodes)) :lit)
+                                      (nth 1 (car nodes))
+                                    (list :set (nth 2 (car nodes))))
+                                  atoms)
+                      nodes (cdr nodes)))
+              (setq out (nlre--plan-cross
+                         out (list (nlre--plan-new atoms (make-vector ng nil) nil)))))
+          (setq out (nlre--plan-cross out (nlre--plan-expand (car nodes) ng))
+                nodes (cdr nodes)))))
     out))
 
 (defun nlre--plan-expand (node ng)
@@ -343,9 +422,14 @@ Return (REVERSED-EXPANSION-NODES . newpos)."
       (list (nlre--plan-new nil (make-vector ng nil) 0)))
      ((eq tag :seq) (nlre--plan-seq (nth 1 node) ng))
      ((eq tag :alt)
-      (let ((branches (nth 1 node)) out)
+      ;; Process branches in reverse (once; there are few of them) and
+      ;; prepend each per-branch fragment-list onto the accumulator, so
+      ;; only ever-small per-branch chunks get copied -- never the
+      ;; growing accumulator (same rationale as `nlre--plan-cat',
+      ;; applied to lists of fragments instead of atoms).
+      (let ((branches (reverse (nth 1 node))) out)
         (while (and branches (not nlre--plan-failed))
-          (setq out (append out (nlre--plan-seq (car branches) ng))
+          (setq out (nlre--plan-prepend (nlre--plan-seq (car branches) ng) out)
                 branches (cdr branches)))
         out))
      ((eq tag :group)
@@ -422,7 +506,8 @@ Return (REVERSED-EXPANSION-NODES . newpos)."
             (let ((ends (make-hash-table :test 'equal)) empty
                   (xs (reverse variants)))
               (while (and xs (not nlre--plan-failed))
-                (let ((v (car xs)) (strings (nlre--atom-strings (aref (car xs) 0))))
+                (let ((v (car xs))
+                      (strings (nlre--atom-strings (reverse (aref (car xs) 0)))))
                   (while strings
                     (let* ((text (nlre--fold-text (car strings) fold))
                            (len (length text)) (entry (cons text v)))
