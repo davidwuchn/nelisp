@@ -1429,6 +1429,43 @@ scratch chunks have their cursor reset."
                dyn)))
     (should (= 3 (logior 1 nelisp-standalone--arena-chunk-flag-persistent)))))
 
+(ert-deftest nelisp-standalone-target-gc-root-tag-bound-covers-doc200-tags ()
+  "The conservative scan\'s plausible-tag bound is the whole Sexp tag universe.
+
+Doc 200 added tag 14 (UnibyteStr) and tag 15 (UnibyteMutStr).  `nl_gc_mark_slot\'
+was taught about both, but `nl_gc_conserv_word\''s bound stayed at 13, so a
+native-stack word pointing at a 32-byte Sexp slot holding a unibyte string was
+not treated as a root: the slot\'s block was never pinned and the sweep freed
+it, after which `nl_gc_free_block_link\''s next pointer overwrote the slot\'s
+tag word and the slot read back as tag 8 (Vector) -- SIGSEGV in
+`nelisp_nlvector_clone\' on the string\'s old capacity used as a box pointer.
+This test fails the moment the bound falls behind the tag universe again."
+  (cl-labels ((tree-member-p
+               (needle tree)
+               (cond
+                ((equal needle tree) t)
+                ((consp tree)
+                 (or (tree-member-p needle (car tree))
+                     (tree-member-p needle (cdr tree)))))))
+    ;; The live bound, and the stale one that must not come back.
+    (should (tree-member-p '(< (ptr-read-u8 w 0) 16)
+                           nelisp-standalone--gc-source))
+    (should-not (tree-member-p '(< (ptr-read-u8 w 0) 14)
+                               nelisp-standalone--gc-source))
+    ;; Both Doc 200 tags still have a marking arm to reach, which is what
+    ;; makes widening the bound safe rather than merely permissive.
+    (should (tree-member-p '(or (= tag 6) (= tag 15))
+                           nelisp-standalone--gc-source))
+    (should (tree-member-p '(or (= tag 5) (= tag 14))
+                           nelisp-standalone--gc-source))
+    ;; BLOCK_TOTAL is the low 32 bits, so one stray high bit in a header can
+    ;; no longer make `nl_gc_bt_ok\' reject a block and truncate the sweep.
+    (should (tree-member-p '(defun nl_hdr_bt (hdr)
+                              (logand (ptr-read-u64 hdr 0) 4294967288))
+                           nelisp-standalone--arena-source))
+    (should (tree-member-p '(ptr-write-u64 hdr 0 (+ (logand x 4294967288) m))
+                           nelisp-standalone--arena-source))))
+
 (ert-deftest nelisp-standalone-target-gc-walks-chunk-descriptors ()
   "GC membership uses the current-chunk fast path and chunk-list fallback."
   (cl-labels ((tree-member-p

@@ -1364,10 +1364,27 @@ directory tracks the tree rather than accumulating every key ever built."
     ;; linear fallback list.
     (defun nl_block_total (size)
       (let ((p (nl_align_up size 8))) (+ 8 (if (< p 8) 8 p))))
-    (defun nl_hdr_bt (hdr) (let ((x (ptr-read-u64 hdr 0))) (- x (logand x 7))))
+    ;; BLOCK_TOTAL is the LOW 32 BITS of the header word (8-aligned, < 4 GiB),
+    ;; not "everything except the low 3 bits".  A header that reads back as its
+    ;; own correct BLOCK_TOTAL with a stray HIGH bit set (observed:
+    ;; 0x0001000000000028 on a 40-byte block, and 0x0001000000000038 for the
+    ;; same block under NELISP_ALLOC_CHECK=1, which makes every block 16 bytes
+    ;; bigger -- so the bad word tracks the block's own size) used to make
+    ;; `nl_gc_bt_ok' reject the block, `nl_gc_sweep_step' answer 0 and
+    ;; `nl_gc_sweep_chunk' STOP: the rest of that chunk was then never swept
+    ;; again, so its blocks kept the mark bits of an earlier cycle.  A stale
+    ;; mark 1 is a lie to the next mark phase -- `nl_gc_mark_block' reads
+    ;; "already recursed", declines to walk the block, and the block's children
+    ;; are freed while the parent is alive.  Masking to 32 bits makes every
+    ;; header walk immune to stray high bits; no BLOCK_TOTAL the allocator can
+    ;; produce reaches 4 GiB (chunk 0 is 256 MiB and growth chunks are 64 MiB).
+    ;; `nl_hdr_set_mark' writes the masked size back, so the next mark write on
+    ;; such a block also repairs its header.
+    (defun nl_hdr_bt (hdr) (logand (ptr-read-u64 hdr 0) 4294967288))
     (defun nl_hdr_mark (hdr) (logand (ptr-read-u64 hdr 0) 7))
     (defun nl_hdr_set_mark (hdr m)
-      (let ((x (ptr-read-u64 hdr 0))) (ptr-write-u64 hdr 0 (+ (- x (logand x 7)) m))))
+      (let ((x (ptr-read-u64 hdr 0)))
+        (ptr-write-u64 hdr 0 (+ (logand x 4294967288) m))))
     (defun nl_arena_init () 0)
     (defun nl_os_alloc_chunk (_size) 0)
     (defun nl_os_free_chunk (_base _size) 0)  ; stub; platform source overrides w/ munmap
@@ -2912,7 +2929,28 @@ arm64 Linux has no legacy x86 numbering)."
     (defun nl_gc_conserv_word (w)
       (if (= (logand w 7) 0)              ; obj ptrs are 8-aligned
           (if (= (nl_gc_in_arena w) 1)    ; within live arena data (no deref of w)
-              (if (< (ptr-read-u8 w 0) 14) ; plausible Sexp tag 0..13 (Doc 190: 13=Bignum)
+              ;; The plausibility bound is the SEXP TAG UNIVERSE, and Doc 200
+              ;; made that universe 0..15 by adding tag 14 (UnibyteStr) and tag
+              ;; 15 (UnibyteMutStr).  Every other consumer was taught about them
+              ;; -- `nl_gc_mark_slot' has had both arms since, `nl_sci_dispatch'
+              ;; and `nl_sci_bump' dispatch them -- but this bound stayed at 13,
+              ;; so a native-stack word pointing at a 32-byte Sexp slot that
+              ;; currently holds a unibyte string was not a root at all:
+              ;; `nl_gc_conserv_owner' was never called on it, its block was
+              ;; never pinned, and the sweep freed it.  `nl_gc_free_block_link'
+              ;; then writes the free-list next pointer at hdr+8, which IS that
+              ;; slot's tag word; the pointer is 8-aligned, so the slot reads
+              ;; back as tag 8 (Vector) and the next clone takes the slot's
+              ;; second word (the string's old capacity) as a box pointer and
+              ;; atomically increments box+0x18 -> SIGSEGV in
+              ;; `nelisp_nlvector_clone'.  Measured: five identical cores from a
+              ;; consumer whose loader converts each source file to a unibyte
+              ;; string, all with rdi=0x61 (box = 0x49 = the old cap 73), and
+              ;; 1-3 in-arena tag-14 slots live on the faulting stack in every
+              ;; core examined.  Widening to `< 16' is ADDITIVE (it can only
+              ;; retain more) and `nl_gc_mark_slot' already handles both tags,
+              ;; so no new dereference shape is introduced.
+              (if (< (ptr-read-u8 w 0) 16) ; plausible Sexp tag 0..15 (Doc 200: 14/15 = unibyte str)
                   (nl_seq2
                    (nl_gc_conserv_owner w) ; §11.27: keep the slot's OWN block alive
                    (nl_gc_mark_slot w))    ; mark + recurse children (idempotent, guarded)
