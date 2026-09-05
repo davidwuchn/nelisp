@@ -2159,3 +2159,75 @@ collections, one round kept live, printing heap and used at each step -- with
 `ime-worst-key.el' and `ime-gc-growth.el' for the keystroke distribution.  None
 is in the tree; each is a page of elisp and takes under a minute on a build
 that already exists.
+
+** §6.14 Chunk reclamation on Windows: it works, and it does not fix the IME
+
+§6.13 found that `nl_os_empty_chunk_reclaim_p' returns 1 only in the
+linux-x86_64 chunk-allocator form, so windows-x86_64 never returned an empty
+chunk to the OS.  Turning it on is two lines, and the traversal behind it is
+already shared and already proves a chunk wholly free before releasing.  The
+one target-specific detail is the return convention: the caller uses munmap's
+-- zero is success -- and `VirtualFree' is a BOOL, nonzero for success, so the
+wrapper inverts.  Without that inversion a successful release reports failure
+and the caller relinks a descriptor whose mapping is gone.
+
+*** It works
+
+Ten rounds of 200000 discarded conses, heap in MiB after each:
+
+| round | before          | after                |
+|-------+-----------------+----------------------|
+|     1 |             320 |                  128 |
+|     3 |             512 |                  192 |
+|     6 |             704 |                  192 |
+|    10 |             896 |                  192 |
+
+Before, the heap rises every round and never stops.  After, it oscillates
+between 128 and 320 and stays there, and holding 200000 conses live still
+moves it -- so it is bounded rather than blind.  `nelisp--arena-walk-verify',
+`nelisp--arena-mark-reach-verify' and `nelisp--pool-root-coverage' are clean
+after the churn, and the Linux gate list is unaffected: the change is inside
+the windows-only form.
+
+*** It does not fix the IME
+
+The same runtime, typing the same phrase 45 times, still climbs 320 -> 832 MiB
+with the collection pause going 736ms to 2523ms.  Nine collections where there
+had been six, and the total time in collection over 765 keystrokes rose from
+10.4s to 13.6s: a smaller heap is reached sooner, and the collection trigger is
+heap-relative, so bounding the heap buys more frequent pauses.
+
+The reason chunk reclamation cannot help here is visible in the object counts.
+Sampled every second pass over twenty passes, the live count immediately after
+a collection is 551387, then 605364, then 569146 -- flat.  Nothing is retained
+per keystroke; §6.13's first reading of a leak was wrong.  What grows is the
+total, 4.7M objects to 11.6M, as the heap grows.
+
+So roughly 550000 live objects are spread across every chunk in the arena, and
+a chunk is only returned when *every* object in it is free.  With a live set
+that size and that scattered, almost no chunk qualifies, whatever the release
+path does.  This is fragmentation, and chunk-granularity reclamation is the
+wrong instrument for it.
+
+*** What that leaves
+
+The pause tracks the heap, not the live set -- 613 -> 933 MiB gave 1202 ->
+2367ms, and 320 -> 832 MiB gave 736 -> 2523ms, while the live set never moved.
+A mark phase costs the live set; a sweep costs the heap.  So the IME's pause is
+sweep, and the way to shorten it is to stop the heap growing, which needs one
+of:
+
+1. Allocate less per keystroke.  §6.12's wrapper layer is the supply: `format'
+   at 849us is not just slow, it is hundreds of allocations, and the IME's
+   STATE line goes through it.  This is the only one of the three that is
+   ordinary work rather than a runtime project.
+2. Keep the long-lived data out of the way of the short-lived.  The dictionary
+   is ~550000 objects that never die and currently sit interleaved with every
+   keystroke's garbage.  Segregating them is what makes whole chunks free.
+3. Compact.  The general answer, and the largest.
+
+The reclamation change is worth keeping on its own terms -- it removes a real
+asymmetry between targets and bounds a garbage-dominated heap -- but it should
+not be read as the IME fix, and §6.13 should not be read as saying the
+collector was broken.  It was not; it was missing one platform's release path,
+and that path was not what the IME needed.

@@ -2045,8 +2045,38 @@ arm64 Linux has no legacy x86 numbering)."
             base))))
     (defun nl_os_free_chunk (base _size)
       (extern-call VirtualFree base 0 32768))  ; MEM_RELEASE=0x8000; size must be 0
-    (defun nl_os_empty_chunk_reclaim_p () 0)
-    (defun nl_os_reclaim_empty_chunk (_base _size) 1)
+    ;; Doc 152 Stage 4c-1 was implemented for linux-x86_64 only, so on this
+    ;; target the arena grew a chunk whenever the free list could not satisfy a
+    ;; request and never gave one back.  Marking, sweeping and free-list reuse
+    ;; all worked; nothing was ever returned to the OS, so the heap only rose
+    ;; and the mark phase walked all of it.  Measured before this change: 64 MiB
+    ;; per collection, and an IME keystroke that lands on a collection blocking
+    ;; 1202ms, then 1373, 1634, 1816, 2041, 2367 as the heap went 613 -> 933 MiB
+    ;; -- against a heap that stayed at 320 MiB on linux-x86_64 running the same
+    ;; file.  Doc 201 §6.13.
+    ;;
+    ;; Everything the traversal needs is already shared: `nl_gc_chunk_all_free'
+    ;; proves the chunk empty, `nl_gc_freelist_purge_chunk' removes free-list
+    ;; links into it, head and current chunks are skipped, and a refused release
+    ;; relinks the descriptor.  `nl_os_free_chunk' above is already the right
+    ;; call -- VirtualFree with MEM_RELEASE and a zero size, on the exact base
+    ;; VirtualAlloc returned -- and the reserve-then-commit-on-demand shape
+    ;; means releasing gives back the committed pages with it.
+    (defun nl_os_empty_chunk_reclaim_p () 1)
+    (defun nl_os_reclaim_empty_chunk (base size)
+      ;; The same two refusals as the Linux form, at the release boundary:
+      ;; while a collection holds the in-progress flag, and while Tier 3a says
+      ;; workers are live.  Returning failure makes the caller restore the
+      ;; descriptor it unlinked.
+      (if (= (ptr-read-u64 (data-addr nl_gc_loop_ctx) 24) 1)
+          1
+        (if (= (ptr-read-u64 (data-addr nl_thread_parallel_ctx) 16) 1)
+            1
+          ;; The caller's convention is munmap's -- zero is success -- and
+          ;; VirtualFree is a BOOL, nonzero for success.  This inversion is
+          ;; load-bearing: without it a successful release reports failure and
+          ;; the caller relinks a descriptor whose mapping is gone.
+          (if (= (nl_os_free_chunk base size) 0) 1 0))))
     (defun nl_os_commit_range (base old new)
       (if (= (extern-call VirtualAlloc (+ base old) (- new old) 4096 4) 0) 0 1))
     ;; Exit code 88 = standalone arena allocation failure.
