@@ -1936,6 +1936,33 @@ Per directive it rebuilds a one-directive mini-template with `concat' and
 `char-to-string', hands that to the builtin, then applies the width and
 precision layer with more `concat' and several `substring' calls.
 
+Which of those dominates is worth knowing before anyone works on it, so the
+template was varied one part at a time:
+
+| template            | us/op | what it adds                     |
+|---------------------+-------+----------------------------------|
+| `""'                |    72 | the fixed cost of entering at all |
+| `"abc"'             |   205 | 3 literal characters             |
+| 12 literals         |   764 | ~64us per literal character      |
+| 24 literals         |  1533 | still linear at this size        |
+| `"%s"' of an int    |   817 | one directive                    |
+| `"%d"'              |   906 |                                  |
+| `"%S"'              |  1192 | `prin1-to-string' rather than the builtin |
+| `"%s%s"'            |  1609 | ~760us for the second directive  |
+| `"%s%s%s%s"'        |  3071 | linear in directives             |
+| the builtin, any of these | 6 |                                |
+
+So a directive costs about 750us and a literal character about 64us, on a
+72us base, against 6us for the builtin doing the whole template.  The
+per-character append is real but it is the smaller half: for the templates
+elisp actually writes, the directive path is where the time is, and a
+`(format "%s" 1)' with no literal characters at all still costs 817us.
+
+Neither number is an allocation count.  `concat' is 7us, `char-to-string'
+5us and `aref' 5us here, so the ~64us of a literal character is mostly the
+interpreted `while', `if', `let' and two `setq's around them -- the same
+reading §6.11 reached from the other direction.
+
 Which is the second effect: **the wrappers call each other.**  `format' calls
 `substring' at 82us a time, and `substring' is itself a wrapper whose own
 guard, `arrayp', is elisp -- `(or (vectorp x) (stringp x))', 26us, where
