@@ -983,7 +983,7 @@ pinned-collision ns-collision-divergent	nelisp--builtin-provide	src/nelisp-eval.
 pinned-collision ns-collision-divergent	nelisp--builtin-require	src/nelisp-eval.el src/nelisp-load.el	319625570d48
 pinned-collision ns-collision-divergent	nelisp--bq-expand	lisp/nelisp-cl-macros.el scripts/nelisp-stdlib-prelude.el	f9a31e2c4e1c
 pinned-collision ns-collision-divergent	nelisp--bq-expand-list	lisp/nelisp-cl-macros.el scripts/nelisp-stdlib-prelude.el	d95ffd6e58f2
-pinned-collision ns-collision-divergent	nelisp--emit-to-stream	lisp/nelisp-stdlib-misc.el scripts/nelisp-stdlib-prelude.el	f51f9ae7cf0a
+pinned-collision ns-collision-divergent	nelisp--emit-to-stream	lisp/nelisp-stdlib-misc.el scripts/nelisp-stdlib-prelude.el	6259062234bd
 pinned-collision ns-collision-divergent	nelisp--make-record	lisp/nelisp-heap-image.el scripts/nelisp-stdlib-prelude.el	8dafd3358494
 pinned-collision ns-collision-divergent	nelisp--prn-record	lisp/nelisp-stdlib-prn.el scripts/nelisp-stdlib-prelude.el	4cf6166f2172
 pinned-collision ns-collision-divergent	nelisp--prn-to-string	lisp/nelisp-stdlib-prn.el scripts/nelisp-stdlib-prelude.el	efe6abf25e00
@@ -1006,8 +1006,8 @@ pinned-collision ns-collision-divergent	plist-put	lisp/nelisp-stdlib-plist-str.e
 pinned-collision ns-collision-divergent	prin1	lisp/nelisp-stdlib-prn.el scripts/nelisp-stdlib-prelude.el	a915300b8c4f
 pinned-collision ns-collision-divergent	prin1-to-string	lisp/nelisp-stdlib-prn.el scripts/nelisp-stdlib-prelude.el	67ab9e11bc4e
 pinned-collision ns-collision-divergent	princ	lisp/nelisp-stdlib-misc.el scripts/nelisp-stdlib-prelude.el	3975e89c8c57
-pinned-collision ns-collision-divergent	print	lisp/nelisp-stdlib-misc.el scripts/nelisp-stdlib-prelude.el	8d17563aed08
-pinned-collision ns-collision-divergent	read	lisp/nelisp-stdlib-reader.el scripts/nelisp-stdlib-prelude.el	35f6c738cdc9
+pinned-collision ns-collision-divergent	print	lisp/nelisp-stdlib-misc.el scripts/nelisp-stdlib-prelude.el	f088947fd5e7
+pinned-collision ns-collision-divergent	read	lisp/nelisp-stdlib-reader.el scripts/nelisp-stdlib-prelude.el	e3d91bd5df73
 pinned-collision ns-collision-divergent	read-from-string	lisp/nelisp-stdlib-reader.el scripts/nelisp-stdlib-prelude.el	218b6a309dfa
 pinned-collision ns-collision-divergent	recordp	lisp/nelisp-stdlib.el scripts/nelisp-stdlib-prelude.el	20096afadd80
 pinned-collision ns-collision-divergent	regexp-quote	lisp/nelisp-stdlib-plist-str.el scripts/nelisp-stdlib-prelude.el	e92681fb0b02
@@ -1051,7 +1051,7 @@ pinned-collision ns-collision-divergent	vconcat	lisp/nelisp-stdlib-plist-str.el 
 pinned-collision ns-collision-divergent	when	lisp/nelisp-jit-substrate.el lisp/nelisp-stdlib-eval-special.el scripts/nelisp-stdlib-prelude.el	216caa34671c
 pinned-collision ns-collision-divergent	with-current-buffer	lisp/nelisp-stdlib-eval-special.el scripts/nelisp-stdlib-prelude.el	5f1ad63b8fb1
 pinned-collision ns-collision-divergent	with-temp-buffer	lisp/nelisp-stdlib-eval-special.el scripts/nelisp-stdlib-prelude.el	0188a49b256f
-pinned-collision ns-collision-divergent	write-region	lisp/nelisp-stdlib-misc.el scripts/nelisp-stdlib-prelude.el	ed3dffedef46
+pinned-collision ns-collision-divergent	write-region	lisp/nelisp-stdlib-misc.el scripts/nelisp-stdlib-prelude.el	497026434a87
 #
 # Doc 188 P1 (buffer unification, 2026-08-23): src/nelisp-buffer.el's
 # object model was ported into scripts/nelisp-stdlib-prelude.el verbatim

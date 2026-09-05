@@ -2273,7 +2273,35 @@ standalone-reader-host-parity-smoke: standalone-reader
 	else \
 	  echo "[host-parity] PASS: (exp -1.0e6) answered 0.0 in $${elapsed_ms}ms (< 1000ms; was a >10s hang)"; \
 	fi
-	@echo "[standalone-reader-host-parity-smoke] PASS: all seven v1.2.0/v1.2.1 host-parity gaps"
+	@# Consumer bug report (dev/BUG-nelisp-standalone-exp-streams-sigsegv-2026-09-05.md
+	@# §2): `prin1'/`princ'/`read' rejected a buffer PRINTCHARFUN/STREAM outright
+	@# (`invalid-function'), and `write-region' rejected integer buffer positions
+	@# (`wrong-type-argument stringp').  `r-prin1-buf'/`r-princ-buf'/`r-read-buf'/
+	@# `r-wr-buf' are that report's own four expressions; `r-prin1-marker'/
+	@# `r-read-marker' extend the same fix to a marker PRINTCHARFUN/STREAM (elisp
+	@# manual, `Output Streams' / `Input Streams'), which the report flagged as in
+	@# scope only "if markers exist in this runtime" -- they do (`nelisp-marker-p'
+	@# et al., ported from src/nelisp-buffer.el).  All values measured directly
+	@# against `emacs -Q --batch' (31.1), not assumed from the manual.
+	@printf '%s\n' \
+	  '(setq r-prin1-buf (with-temp-buffer (prin1 1 (current-buffer)) (buffer-string)))' \
+	  '(setq r-princ-buf (with-temp-buffer (princ "ab" (current-buffer)) (buffer-string)))' \
+	  '(setq r-read-buf (with-temp-buffer (insert "1 2") (goto-char (point-min)) (list (read (current-buffer)) (point))))' \
+	  '(setq r-wr-buf (progn (with-temp-buffer (insert "abc") (write-region (point-min) (point-max) "target/host-parity/wr-probe.txt" nil (quote silent))) (rdf "target/host-parity/wr-probe.txt")))' \
+	  '(setq r-prin1-marker (with-temp-buffer (insert "xyz") (let ((m (nelisp-copy-marker nelisp--current-buffer 2))) (prin1 (quote hi) m) (list (buffer-string) (nelisp-marker-position m)))))' \
+	  '(setq r-read-marker (with-temp-buffer (insert "(a b) (c d)") (let ((m (nelisp-copy-marker nelisp--current-buffer (point-min)))) (list (read m) (nelisp-marker-position m) (point)))))' \
+	  '(list r-prin1-buf r-princ-buf r-read-buf r-wr-buf r-prin1-marker r-read-marker)' \
+	  > target/standalone-reader-host-parity-streams.el
+	@out="$$($(STANDALONE_BIN) --load target/standalone-reader-host-parity-streams.el)"; \
+	expected='("1" "ab" (1 2) "abc" ("xhiyz" 4) ((a b) 6 12))'; \
+	if [ "$$out" = "$$expected" ]; then \
+	  echo "[host-parity] PASS: prin1/princ/read/write-region accept a buffer, prin1/read accept a marker -> $$out"; \
+	else \
+	  echo "[host-parity] FAIL: buffer/marker stream dispatch -> $$out"; \
+	  echo "[host-parity]       expected $$expected"; \
+	  exit 1; \
+	fi
+	@echo "[standalone-reader-host-parity-smoke] PASS: all seven v1.2.0/v1.2.1 host-parity gaps + six buffer/marker stream-dispatch gaps"
 
 .PHONY: standalone-reader-getenv-smoke
 # The environment the parent set must reach `getenv' inside the standalone

@@ -6964,18 +6964,36 @@ Rust-min migration (= moved out of build-tool/src/eval/special_forms.rs)."
 ;; Do not install Elisp fallbacks for them here: a fallback binding shadows
 ;; the native apply dispatch even though `fboundp' cannot see that dispatch.
 (unless (fboundp 'write-region)
-  (defun write-region (start end filename &optional append _visit _lockname _mustbenew)
-    (unless (stringp start)
-      (signal 'wrong-type-argument (list 'stringp start)))
-    (unless (stringp filename)
-      (signal 'wrong-type-argument (list 'stringp filename)))
-    (when append
-      (signal 'error (list "write-region stub: APPEND not supported")))
-    (let* ((bytes (cond
-                   ((null end) start)
-                   ((integerp end) (substring start 0 end))
-                   (t (signal 'wrong-type-argument
-                              (list '(or null integerp) end)))))
+  (defun write-region (start end filename &optional append visit _lockname mustbenew)
+    "Write START..END of the current buffer, or STRING, to FILENAME
+(Emacs 31.1 probe).  START nil = whole buffer; START a string = write
+it verbatim; both ignore END.  Else START/END are positions (integer
+or marker, either order); `wrong-type-argument' if only one is.  APPEND
+t = read FILENAME first and rewrite the concatenation; a numeric
+APPEND (seek) is not supported below `wrf' (whole-file create/truncate
+only) and says so.  VISIT t/string marks the buffer not-modified.
+MUSTBENEW non-nil errors if FILENAME exists, `excl' or not -- this
+headless runtime cannot answer Emacs's own confirmation prompt."
+    (nelisp--check-string filename)
+    (when (and append (not (eq append t)))
+      (signal 'error
+              (list "write-region: a numeric APPEND (seek offset) is not supported by this runtime's file layer"
+                    append)))
+    (when (and mustbenew (file-exists-p filename))
+      (signal 'file-already-exists (list "File exists" filename)))
+    (let* ((pos (lambda (v)
+                  (cond ((integerp v) v)
+                        ((nelisp-marker-p v) (nelisp-marker-position v))
+                        (t (signal 'wrong-type-argument (list 'integer-or-marker-p v))))))
+           (region-bytes
+            (cond
+             ((stringp start) start)
+             ((null start) (nelisp-buffer-string nelisp--current-buffer))
+             (t
+              (let* ((s (funcall pos start)) (e (funcall pos end)))
+                (nelisp-buffer-substring (min s e) (max s e) nelisp--current-buffer)))))
+           (existing (and (eq append t) (or (nelisp--syscall-read-file filename) "")))
+           (bytes (if existing (concat existing region-bytes) region-bytes))
            (rc (wrf filename bytes))
            ;; `wrf' reports bytes written; `length' counts characters.  The
            ;; two agree only on ASCII, so this compared a short read against
@@ -6986,9 +7004,11 @@ Rust-min migration (= moved out of build-tool/src/eval/special_forms.rs)."
            (expected (string-bytes bytes)))
       (unless (= rc expected)
         (signal 'error
-                (list (format "write-region stub: wrf returned %S (expected %S bytes) path=%s"
-                              rc expected filename)))))
-	    nil))
+                (list (format "write-region: wrf returned %S (expected %S bytes) path=%s"
+                              rc expected filename))))
+      (when (and visit nelisp--current-buffer)
+        (nelisp-buffer-set-modified nil nelisp--current-buffer)))
+    nil))
 ;; ---------------------------------------------------------------------
 ;; Doc 188 P1 -- buffer object model (ported from src/nelisp-buffer.el).
 ;;
@@ -7730,6 +7750,12 @@ wired to standard names by any phase through P2), so that gap is
 unreachable from the surface this phase builds, not silently papered
 over."
     (nelisp-erase-buffer nelisp--current-buffer)))
+
+;; No standard-name marker constructors wired here (binary-size-ratchet:
+;; each extra top-level `defun' costs far more than its source size).
+;; `nelisp--emit-to-stream' and the `read' dispatch below drive a marker
+;; PRINTCHARFUN/STREAM via the already-ported `nelisp-marker-p' et al.
+;; directly; construct one the same way, e.g. `(nelisp-copy-marker BUF POS)'.
 
 (unless (fboundp 'with-temp-file)
   (defmacro with-temp-file (file &rest body)
@@ -9144,30 +9170,103 @@ are numbers; `1.' is the integer 1."
         (signal 'end-of-file nil))
       (cons (car r) (+ base (cdr r))))))
 
+;; ---- `read' stream dispatch beyond a plain string (GNU parity) -------
+;;
+;; Both `read' installations below used to accept ONLY a string, `nil',
+;; or a function -- and even `nil'/function fell through to a bare
+;; "only string streams supported" `error'.  This one `defun' (not one
+;; per shape -- binary-size-ratchet) covers buffer/marker/function/
+;; `t'-or-nil (elisp manual, `Input Streams'); each `read' keeps its own
+;; string fast path.  Buffer/marker reuse the native single-form
+;; `read-from-string' (START offset) rather than copying a substring,
+;; and advance point (buffer) or the marker itself, not point (marker).
+;; EOF data differs (Emacs 31.1 probe): `(end-of-file BUFFER)' for a
+;; buffer, bare `(end-of-file)' for a marker.  Function stream: reads
+;; whole chunks until FN answers nil, then unreads whatever followed the
+;; parsed form -- exact when FN eventually answers nil, not exercised
+;; for one that never does.  `t'/nil: buffered stdin via the native
+;; `(read-stdin-bytes N)' chunk primitive (no ungetc below it).
+
+(defvar standard-input t
+  "Input stream for `read'; `t' always means batch stdin here.")
+
+(defvar nelisp--stdin-read-pending ""
+  "Bytes drawn from stdin but not yet consumed by `read'.")
+
+(defun nelisp--read-dispatch (stream)
+  "Resolve STREAM for `read', every shape but a plain string."
+  (cond
+   ((nelisp-buffer-p stream)
+    (let* ((full (nelisp-buffer-string stream))
+           (start (1- (nelisp-point stream)))
+           (r (condition-case nil
+                  (read-from-string full start)
+                (end-of-file (signal 'end-of-file (list stream))))))
+      (nelisp-goto-char (1+ (cdr r)) stream)
+      (car r)))
+   ((nelisp-marker-p stream)
+    (let ((mbuf (nelisp-marker-buffer stream)))
+      (unless mbuf (signal 'error (list "read: marker does not point anywhere" stream)))
+      (let* ((full (nelisp-buffer-string mbuf))
+             (start (1- (nelisp-marker-position stream)))
+             (r (read-from-string full start)))
+        (setf (nelisp-marker-position stream) (1+ (cdr r)))
+        (car r))))
+   ((functionp stream)
+    (let (chars c)
+      (while (setq c (funcall stream))
+        (push c chars))
+      (let* ((text (apply #'string (nreverse chars)))
+             (r (read-from-string text))
+             (extra (substring text (cdr r)))
+             (i (1- (length extra))))
+        (while (>= i 0)
+          (funcall stream (aref extra i))
+          (setq i (1- i)))
+        (car r))))
+   ((or (null stream) (eq stream t))
+    (catch 'nelisp--read-stdin-done
+      (while t
+        (when (> (length nelisp--stdin-read-pending) 0)
+          (let ((r (condition-case nil (read-from-string nelisp--stdin-read-pending)
+                     (end-of-file nil))))
+            (when (and r (< (cdr r) (length nelisp--stdin-read-pending)))
+              (setq nelisp--stdin-read-pending
+                    (substring nelisp--stdin-read-pending (cdr r)))
+              (throw 'nelisp--read-stdin-done (car r)))))
+        (let ((chunk (read-stdin-bytes 65536)))
+          (if (null chunk)
+              (let ((r (read-from-string nelisp--stdin-read-pending)))
+                (setq nelisp--stdin-read-pending
+                      (substring nelisp--stdin-read-pending (cdr r)))
+                (throw 'nelisp--read-stdin-done (car r)))
+            (setq nelisp--stdin-read-pending
+                  (concat nelisp--stdin-read-pending chunk)))))))
+   (t (signal (if (symbolp stream) 'void-function 'invalid-function) (list stream)))))
+
 (unless (fboundp 'read)
   (defun read (&optional stream)
-    (unless (or (null stream) (stringp stream) (functionp stream))
-      (signal (if (symbolp stream) 'void-function 'invalid-function) (list stream)))
-    (if (stringp stream)
-        ;; PERF (Doc 201 §6.9 item 5): `read-from-string' below is
-        ;; `nelisp--rd-one', a reader written in interpreted Elisp, and on
-        ;; the standalone it costs a basic operation per character.  The
-        ;; SAME parser that drives `load' is also exposed to Lisp as
-        ;; `nelisp--read-all-from-string-native'.  Measured on 9114 bytes of
-        ;; nested conses: 26.410s through `read-from-string', 0.003s through
-        ;; the native reader, identical results.
-        ;;
-        ;; `read' can take that path exactly, because it answers the FIRST
-        ;; form and discards the position -- which is the one part of
-        ;; `read-from-string''s contract the bulk reader cannot supply, and
-        ;; the reason that function is left alone (see its own comment).
-        ;; An empty or all-whitespace string reads as no forms at all, where
-        ;; `read' owes an `end-of-file' signal, so that case falls through
-        ;; to the Elisp path rather than being special-cased twice.
-        (let ((forms (and (fboundp 'nelisp--read-all-from-string-native)
-                          (nelisp--read-all-from-string-native stream))))
-          (if forms (car forms) (car (read-from-string stream))))
-      (signal 'error (list "read: only string streams supported")))))
+    (let ((s (or stream standard-input)))
+      (if (stringp s)
+          ;; PERF (Doc 201 §6.9 item 5): `read-from-string' below is
+          ;; `nelisp--rd-one', a reader written in interpreted Elisp, and on
+          ;; the standalone it costs a basic operation per character.  The
+          ;; SAME parser that drives `load' is also exposed to Lisp as
+          ;; `nelisp--read-all-from-string-native'.  Measured on 9114 bytes of
+          ;; nested conses: 26.410s through `read-from-string', 0.003s through
+          ;; the native reader, identical results.
+          ;;
+          ;; `read' can take that path exactly, because it answers the FIRST
+          ;; form and discards the position -- which is the one part of
+          ;; `read-from-string''s contract the bulk reader cannot supply, and
+          ;; the reason that function is left alone (see its own comment).
+          ;; An empty or all-whitespace string reads as no forms at all, where
+          ;; `read' owes an `end-of-file' signal, so that case falls through
+          ;; to the Elisp path rather than being special-cased twice.
+          (let ((forms (and (fboundp 'nelisp--read-all-from-string-native)
+                            (nelisp--read-all-from-string-native s))))
+            (if forms (car forms) (car (read-from-string s))))
+        (nelisp--read-dispatch s)))))
 
 ;; The standalone-only builtin's optional START/END mode is the native
 ;; single-form entry point that the guarded legacy definitions above could
@@ -9212,12 +9311,10 @@ are numbers; `1.' is the integer 1."
                 (cons (car r) (+ base (cdr r))))))))
   (fset 'read
         (lambda (&optional stream)
-          (unless (or (null stream) (stringp stream) (functionp stream))
-            (signal (if (symbolp stream) 'void-function 'invalid-function)
-                    (list stream)))
-          (if (stringp stream)
-              (car (read-from-string stream))
-            (signal 'error (list "read: only string streams supported"))))))
+          (let ((s (or stream standard-input)))
+            (if (stringp s)
+                (car (read-from-string s))
+              (nelisp--read-dispatch s))))))
 
 ;; Doc 152 gate-G: give the standard built-in error symbols their
 ;; `error-conditions' so a `(condition-case ... (error H))' handler matches
@@ -10887,9 +10984,11 @@ strings and vectors are not accepted."
 ;; declared special so a dynamic `let' binding is visible to these functions
 ;; (dynamic binding DOES work on the bare reader -- only `symbol-value' of a
 ;; let-bound special crashes, A8, which we avoid).  We honor a FUNCTION stream
-;; (called once per character, host contract); buffers do not retain inserted
-;; text on the bare reader so the buffer branch is best-effort only.  This
-;; unblocks `with-output-to-string' (Doc 16 round 12).
+;; (called once per character, host contract).  A buffer/marker STREAM now
+;; goes through `nelisp--emit-to-stream' below (elisp manual, `Output
+;; Streams': buffer = insert at point; marker = insert at the marker, which
+;; always advances, buffer's point untouched unless it sat at/after it).
+;; This unblocks `with-output-to-string' (Doc 16 round 12).
 
 (defvar standard-output nil
   "Output stream for `princ'/`prin1'/`print'/`terpri' (Doc 22 A9).")
@@ -10898,23 +10997,40 @@ strings and vectors are not accepted."
 (unless (fboundp 'nelisp--native-prin1) (fset 'nelisp--native-prin1 (symbol-function 'prin1)))
 (unless (fboundp 'nelisp--native-terpri) (fset 'nelisp--native-terpri (symbol-function 'terpri)))
 
+(defun nelisp--valid-print-stream-p (stream)
+  "Non-nil for a PRINTCHARFUN Emacs accepts: t, function, buffer, marker."
+  (or (eq stream t)
+      (functionp stream)
+      (nelisp-buffer-p stream)
+      (nelisp-marker-p stream)))
+
 (defun nelisp--emit-to-stream (str stream)
-  "Send string STR to STREAM: function = one funcall per character;
-buffer = best-effort insert; nil/t/other = native stdout."
+  "Send STR to STREAM: function = one funcall/char; buffer = insert at
+its point; marker = insert at its position then relocate it past STR
+regardless of insertion type, buffer's point shifting along only if it
+sat at/after that position (elisp manual, `Output Streams'); else stdout."
   (cond
    ((functionp stream)
     (let ((i 0) (n (length str)))
       (while (< i n) (funcall stream (aref str i)) (setq i (1+ i)))))
-   ((bufferp stream)
-    (with-current-buffer stream (insert str)))
+   ((nelisp-buffer-p stream)
+    (nelisp-insert str stream))
+   ((nelisp-marker-p stream)
+    (let ((mbuf (nelisp-marker-buffer stream)))
+      (unless mbuf
+        (signal 'error (list "annotate: marker does not point anywhere" stream)))
+      (let* ((orig-point (nelisp-point mbuf))
+             (ins-pos (nelisp-marker-position stream)))
+        (nelisp-goto-char ins-pos mbuf)
+        (nelisp-insert str mbuf)
+        (nelisp-goto-char (if (>= orig-point ins-pos) (+ orig-point (length str)) orig-point)
+                          mbuf)
+        (setf (nelisp-marker-position stream) (+ ins-pos (length str))))))
    (t (nelisp--native-princ str))))
 
 (defun princ (object &optional stream)
-  ;; A STREAM that is not a function is `invalid-function' in Emacs -- this
-  ;; ignored it and printed to stdout, so output went somewhere the caller
-  ;; did not ask for and nothing said so.
   "Print OBJECT with no quoting to STREAM or `standard-output' (Doc 22 A9)."
-  (when (and stream (not (eq stream t)) (not (functionp stream)))
+  (when (and stream (not (nelisp--valid-print-stream-p stream)))
     (signal (if (symbolp stream) 'void-function 'invalid-function)
             (list stream)))
   (let ((s (or stream standard-output)))
@@ -10925,12 +11041,9 @@ buffer = best-effort insert; nil/t/other = native stdout."
   object)
 
 (defun prin1 (object &optional stream overrides)
-  ;; A STREAM that is not a function is `invalid-function' in Emacs -- this
-  ;; ignored it and printed to stdout, so output went somewhere the caller
-  ;; did not ask for and nothing said so.
   "Print OBJECT in read syntax to STREAM or `standard-output' (Doc 22 A9)."
   (nelisp--check-print-overrides overrides)
-  (when (and stream (not (eq stream t)) (not (functionp stream)))
+  (when (and stream (not (nelisp--valid-print-stream-p stream)))
     (signal (if (symbolp stream) 'void-function 'invalid-function)
             (list stream)))
   (let ((s (or stream standard-output)))
@@ -10942,13 +11055,8 @@ buffer = best-effort insert; nil/t/other = native stdout."
 (defun terpri (&optional stream _ensure)
   "Output a newline to STREAM or `standard-output' (Doc 22 A9).
 The LATER definition is the live one -- an earlier copy in this file
-already had this check and it never ran.
-
-ENSURE is accepted and not acted on: Emacs only skips the newline when it
-can see the output COLUMN, which it can for a buffer or a marker, and this
-runtime has neither.  Measured directly, every non-function stream is
-`invalid-function' with ENSURE set or not."
-  (when (and stream (not (functionp stream)) (not (eq stream t)))
+already had this check and it never ran.  ENSURE is accepted, unused."
+  (when (and stream (not (nelisp--valid-print-stream-p stream)))
     (signal (if (symbolp stream) 'void-function 'invalid-function) (list stream)))
   (let ((s (or stream standard-output)))
     (if (or (null s) (eq s t))
@@ -10958,9 +11066,7 @@ runtime has neither.  Measured directly, every non-function stream is
 
 (unless (fboundp 'print)
   (defun print (object &optional stream)
-    (when (and stream (not (eq stream t)) (not (functionp stream)))
-      ;; A SYMBOL stream is looked up as a function first, so it reports
-      ;; `void-function'; anything else is `invalid-function'.
+    (when (and stream (not (nelisp--valid-print-stream-p stream)))
       (signal (if (symbolp stream) 'void-function 'invalid-function)
               (list stream)))
     "Output OBJECT in read syntax, surrounded by newlines (Doc 22 A9)."
@@ -10973,9 +11079,7 @@ runtime has neither.  Measured directly, every non-function stream is
   (defun write-char (character &optional stream)
   (unless (integerp character) (signal 'wrong-type-argument (list 'fixnump character)))
     (unless (integerp character) (signal 'wrong-type-argument (list 'fixnump character)))
-    (when (and stream (not (functionp stream)))
-      ;; A SYMBOL stream is looked up as a function first, so it reports
-      ;; `void-function'; anything else is `invalid-function'.
+    (when (and stream (not (nelisp--valid-print-stream-p stream)))
       (signal (if (symbolp stream) 'void-function 'invalid-function)
               (list stream)))
     "Output CHARACTER to STREAM or `standard-output' (Doc 22 A9)."

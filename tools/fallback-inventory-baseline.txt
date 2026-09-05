@@ -114,7 +114,11 @@
 # `--try-compile-defun' bare-handler pin is re-digested in the same commit:
 # its body changed, the handler did not.
 #
-silent-fallback        61
+#
+# 2026-09-06: +1 for `nelisp--read-dispatch''s stdin arm (see the
+# `pinned-site' entry near the end of this file for why the bare handler
+# there is not swallowing anything reportable).
+silent-fallback        62
 # 41 -> 42 on 2026-08-23: one new site, reviewed and pinned below (the
 # presence-sweep auto-note's defensive shape-extraction for a report-only
 # string, falls back to "?" on a malformed corpus form -- never on a
@@ -413,3 +417,15 @@ pinned-site silent-fallback	nelisp-thread-mirror-guard-smoke.el	defmacro nl-thre
 pinned-site silent-fallback	nelisp-thread-mirror-guard-smoke.el	let	33fdb6550dec 1
 pinned-site silent-fallback	nelisp-thread-mirror-guard-smoke.el	let	0e7205a57114 1
 pinned-site silent-fallback	nelisp-thread-mirror-guard-smoke.el	let	0da415661074 1
+# 2026-09-06: nelisp--read-dispatch (scripts/nelisp-stdlib-prelude.el, GNU-parity
+# `read' stream dispatch for buffer/marker/function/stdin) uses bare
+# `(condition-case nil ...)' twice to distinguish "not a complete form yet"
+# from a real parse error while reassembling text drawn from `read-from-string':
+# the buffer-stream arm re-signals `end-of-file' naming the buffer (so it is
+# traced, not silent), and the stdin arm's handler is deliberately a bare nil
+# -- an `end-of-file' there means "not enough buffered input yet, go read
+# another chunk", not an error to report, so there is nothing to record before
+# the loop continues and eventually re-raises for real once stdin is exhausted.
+pinned-site silent-fallback	nelisp-stdlib-prelude.el	defun nelisp--read-dispatch	09db60440f5b 1
+pinned-site bare-handler	nelisp-stdlib-prelude.el	defun nelisp--read-dispatch	b8f010e02ef9 1
+pinned-site bare-handler	nelisp-stdlib-prelude.el	defun nelisp--read-dispatch	25164537bb15 1

@@ -47,7 +47,7 @@ string-trim-left|lisp/nelisp-stdlib-plist-str.el|_regexp|not yet reviewed
 string-trim-right|lisp/nelisp-stdlib-plist-str.el|_regexp|not yet reviewed
 string-trim|lisp/nelisp-stdlib-plist-str.el|_trim-left _trim-right|not yet reviewed
 write-region|lisp/nelisp-stdlib-misc.el|_lockname _mustbenew _visit|not yet reviewed
-write-region|scripts/nelisp-stdlib-prelude.el|_lockname _mustbenew _visit|not yet reviewed
+write-region|scripts/nelisp-stdlib-prelude.el|_lockname|LOCKNAME ignored: this runtime has no file-locking/clash-detection facility to key it against (single-process, headless); APPEND/VISIT/MUSTBENEW are now handled, not ignored
 locate-file|scripts/nelisp-stdlib-prelude.el|_predicate|PREDICATE ignored: the search is file-exists-p only, so a caller asking for executable-only or readable-only gets any existing file
 terpri|scripts/nelisp-stdlib-prelude.el|_ensure|ENSURE ignored: output always goes to stdout and a newline is always written, so "only if not at column 0" cannot be honoured without a column to read
 prin1-to-string|lisp/nelisp-stdlib-prn.el|_overrides|OVERRIDES ignored; byte-identical to the prelude copy
