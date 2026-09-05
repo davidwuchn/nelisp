@@ -1872,6 +1872,11 @@ the floor -- which is what the four IME-side changes measured alongside
 this actually did, taking a keystroke from 742ms to 222ms cold and 76ms
 warm without touching the interpreter at all.
 
+That 76ms is a pass average, and §6.13 shows what it hides: one keystroke
+in about 127 runs a collection and blocks for 1.2 seconds and upward.
+The sentence above is right about the work per keystroke and wrong about
+what stands between this and a usable IME.
+
 The harness is `floor-cases.el' / `floor-bench.py' (separate processes)
 and `floor-inproc.el' (one process); neither is in the tree, both are a
 page of elisp, and either should be re-run rather than trusted from here.
@@ -2007,8 +2012,116 @@ speed up".  Three shapes, in increasing size:
 
 The IME numbers alongside this say the same thing from the other end.  A
 keystroke went from 742ms to 222ms cold and 76ms warm on changes that only
-removed repeated work -- no evaluator change at all.
+removed repeated work -- no evaluator change at all.  (Averages again; §6.13
+has the distribution, and the tail is somewhere else entirely.)
 
 The harness is `wrap-bench2.el', `sub-bench.el' and `fmt-diff.el'; none is in
 the tree, each is a page of elisp, and each should be re-run rather than
 trusted from here.
+
+** §6.13 The Windows standalone does not reclaim, and that is what a keystroke costs
+
+§6.11 and §6.12 both quote a keystroke through the IME at "76ms warm".  That
+number is a pass average -- seventeen keys typed, total divided by seventeen --
+and it hides the thing that actually makes the IME unusable.  Timed one key at
+a time, on the merged IME runtime for windows-x86_64:
+
+| keystrokes                      |  value |
+|---------------------------------+--------|
+| no collection: minimum          |   18ms |
+| no collection: median           |   79ms |
+| no collection: 95th percentile  |  197ms |
+| no collection: maximum          |  301ms |
+| WITH a collection               | 1202ms and up |
+
+765 keystrokes, six collections, one keystroke in 127.  A collection happens at
+one allocation, so it is paid by one keystroke rather than spread over the
+phrase, and the average never showed it.
+
+*** The pauses grow, and do not stop growing
+
+The six collections, in the order they happened:
+
+| collection | at keystroke | pause  | heap after |
+|------------+--------------+--------+------------|
+|          1 |           48 | 1202ms |    613 MiB |
+|          2 |          147 | 1373ms |    677 MiB |
+|          3 |          255 | 1634ms |    741 MiB |
+|          4 |          377 | 1816ms |    805 MiB |
+|          5 |          509 | 2041ms |    869 MiB |
+|          6 |          655 | 2367ms |    933 MiB |
+
+Exactly 64 MiB per collection, never less, and the pause tracks the heap.  Six
+minutes of typing one phrase reached 933 MiB and a 2.4-second freeze, still
+climbing.  Nothing here plateaus.
+
+*** Why: collection does not free anything on this target
+
+The first reading was that the IME retains something per keystroke.  It does
+not: over ten passes every cache stayed exactly the size it started
+(candidates 64, surfaces 10, lattice memo 4, learning 0).  So the test moved
+off the IME entirely -- allocate nothing but garbage, and watch the heap.
+
+On =windows-x86_64=, four rounds of 200000 discarded conses each:
+
+: 200k garbage   heap 320 MiB   used 255 MiB   collections 5
+: 200k garbage   heap 384 MiB   used 324 MiB   collections 6
+: 200k garbage   heap 448 MiB   used 383 MiB   collections 7
+: (garbage-collect) twice   heap 448   used 383   collections 7
+: 200k garbage   heap 512 MiB   used 447 MiB   collections 8
+: 200k KEPT LIVE heap 576 MiB   used 511 MiB   collections 9
+
+`used' never goes down.  An explicit `garbage-collect' changes nothing at all
+-- not the used figure, not even the collection counter, so it is a no-op.  And
+the last two lines are the whole finding: keeping 200000 conses alive costs
+exactly what throwing 200000 conses away costs.  The collector is not
+distinguishing them.
+
+The same file, on =linux-x86_64=, built from a tree containing the same
+allocator commit (`ac378b8a', "split oversized free blocks on reuse instead of
+bumping"):
+
+: 200k garbage   heap 320 MiB   used 256 MiB   collections 2
+: 200k garbage   heap 320 MiB   used 256 MiB   collections 2
+: 200k garbage   heap 320 MiB   used 256 MiB   collections 2
+: 200k garbage   heap 320 MiB   used 256 MiB   collections 2
+: 200k KEPT LIVE heap 512 MiB   used 447 MiB   collections 5
+
+Flat through four rounds of garbage, and it grows only when the data is live.
+That is a working collector.  Both binaries were built from trees carrying the
+same allocator; the target is the only difference that was varied, and it
+changes the answer.
+
+The same non-reclamation is visible in v1.2.1's own Windows binary
+(`0d7418b0'), so this is not something the IME fork introduced and not
+something this week introduced.
+
+*** What it costs before a key is even pressed
+
+Loading the IME's six files on Windows takes the heap from 64 MiB to 549 MiB
+and runs eight collections, from 835 KB of dictionary source.  On the Linux
+build, where garbage is reclaimed, the same dictionary moves `used' from 93 MiB
+to 320 MiB -- an upper bound, since that figure still includes whatever the
+load allocated since the last collection.  The gap between 549 and something
+under 320 is unreclaimed parsing garbage that the process now carries and marks
+forever.
+
+*** For the ranked options
+
+This outranks everything in §6.11 and §6.12.  A basic operation is 1-31us and
+`format' is 849us; a collection is 2400000us and gets longer.  No amount of
+work on the wrapper layer reaches a 2.4-second freeze, and a process that grows
+64 MiB per collection cannot host a session-lifetime input method at all.
+
+It also changes what the earlier keystroke figures mean.  "742ms to 222ms cold
+and 76ms warm" in §6.11 and §6.12 is still what those changes did to the work
+per keystroke, and the median above (79ms) agrees with it.  But it was never
+the latency an IME is judged by, and quoting it alone read as though the
+remaining gap to a usable 50ms was a factor of one and a half.  It is not: the
+gap is the tail, and the tail is the collector.
+
+The measurement is `gc-reclaim.el' -- three rounds of garbage, two explicit
+collections, one round kept live, printing heap and used at each step -- with
+`ime-worst-key.el' and `ime-gc-growth.el' for the keystroke distribution.  None
+is in the tree; each is a page of elisp and takes under a minute on a build
+that already exists.
