@@ -2313,3 +2313,60 @@ That makes the ranked options concrete again:
 
 The measurement is `alloc-per-op.el', a page of elisp, using switch 24/26 and
 subtracting an empty loop of the same shape.  It is not in the tree.
+
+** §6.16 `hash-table-count' costs twelve times what its neighbours cost
+
+§6.15 measures the runtime at ~30 allocations per interpreted operation, which
+makes the allocation counter a stable ruler when the clock is not: it does not
+move with machine load.  Ranking the IME's layers with it turned up one builtin
+that does not sit anywhere near the others.
+
+Counted with `nl_alloc_diag' (switch 24/26), 20 turns each, against an empty
+loop turn at 153:
+
+| operation                | allocations |
+|--------------------------+-------------|
+| `(car CONS)'             |         176 |
+| `(length VECTOR)'        |         180 |
+| `(length STRING)'        |         180 |
+| `(gethash 'k TABLE)'     |         190 |
+| `(puthash 'k 1 TABLE)'   |         192 |
+| `(hash-table-p TABLE)'   |         511 |
+| `(hash-table-count TABLE)' |      2231 |
+| `(vconcat VECTOR)'       |        6844 |
+
+`gethash' on the same table is 190.  `hash-table-count' is 2231 -- twelve
+times a lookup, and an eighth of what it costs to build a whole new vector.
+
+*** It is not the number of entries, and not the bucket array either
+
+The obvious reading is that the count is computed by walking rather than
+stored, and the arm does walk: `nl_ht_count_table' calls `nl_ht_count_vec',
+which recurses over the bucket vector, calling `nl_ht_count', which recurses
+along each chain.
+
+But the cost does not track either thing.  Measured on the same build:
+
+: default-size empty table      2231
+: `:size 4096' empty table      2231
+: table grown to 20000 entries  2231
+
+Same number for an empty table, a table whose bucket array was asked to be
+large, and a table holding twenty thousand entries.  So the walk is not what is
+being paid for, or the vector is not the size those arguments suggest.  This is
+not explained here, and saying which it is would need the arm instrumented
+rather than the elisp measured.
+
+*** Why it matters
+
+Nothing about a count should cost twelve lookups, and the shape invites callers
+to treat it as free.  `nelisp-ime--learning-affects-p' does exactly that: it
+short-circuits on `(> (hash-table-count nelisp-ime-learning) 0)' precisely to
+avoid walking the candidates, and its own docstring says the common case
+"costs one `hash-table-count' instead of a walk".  That one call is 2231
+allocations, and it runs on every cached surface lookup, several times per
+keystroke.
+
+The IME can route around it -- an empty-table check has cheaper spellings --
+but the builtin is the thing to fix, because every caller pays it and none of
+them can see why.
