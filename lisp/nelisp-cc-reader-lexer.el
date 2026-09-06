@@ -35,6 +35,7 @@
 ;;   10  Dot      `.'
 ;;   11  SharpsParen `#s('
 ;;   12  CharTableBracket `#^[' / `#^^['
+;;   13  PropertizedString `#('
 ;;   20  Int                   payload = Sexp::Str of digit text
 ;;   21  Float                 payload = Sexp::Str of text
 ;;   22  Str                   payload = Sexp::Str of resolved body
@@ -43,6 +44,8 @@
 ;;                                (after the leading `?'; parser decodes)
 ;;   25  RadixInt `#x..'/`#o..'/  payload = Sexp::Str of base byte
 ;;                `#b..'           (`x'/`o'/`b'/`X'/`O'/`B') + digit text
+;;   26  LabelDef `#N='             payload = decimal label text
+;;   27  LabelRef `#N#'             payload = decimal label text
 ;;   -1  Error / unexpected
 ;;
 ;; The Rust safe wrapper in `lib.rs::elisp_cc_spike::reader_lex_one'
@@ -363,12 +366,25 @@
       ;; greedily; for `?\\C-a' this walks `C', `-', `a'.
       (if (>= cursor n)
           cursor
-        (if (= (nelisp_reader_is_atom_term (str-byte-at str-ptr cursor)) 1)
-            cursor
-          (nelisp_reader_prog2
-           (mut-str-push-byte scratch (str-byte-at str-ptr cursor))
-           (nelisp_reader_char_body_tail
-            str-ptr (+ cursor 1) n scratch)))))
+        ;; A modifier target can itself be escaped.  Consume the backslash
+        ;; and its target together even when that target (`[' in `?\C-\[')
+        ;; is normally an atom terminator.
+        (if (= (str-byte-at str-ptr cursor) 92)
+            (if (>= (+ cursor 1) n)
+                cursor
+              (nelisp_reader_prog2
+               (mut-str-push-byte scratch 92)
+               (nelisp_reader_prog2
+                (mut-str-push-byte scratch
+                                   (str-byte-at str-ptr (+ cursor 1)))
+                (nelisp_reader_char_body_tail
+                 str-ptr (+ cursor 2) n scratch))))
+          (if (= (nelisp_reader_is_atom_term (str-byte-at str-ptr cursor)) 1)
+              cursor
+            (nelisp_reader_prog2
+             (mut-str-push-byte scratch (str-byte-at str-ptr cursor))
+             (nelisp_reader_char_body_tail
+              str-ptr (+ cursor 1) n scratch))))))
 
     (defun nelisp_reader_utf8_width (b)
       ;; Return the UTF-8 byte width for leading byte B.  Invalid leading
@@ -470,6 +486,37 @@
        (nelisp_reader_prog2
         (mut-str-finalize scratch payload-slot)
         25)))
+
+    ;; `#N=' / `#N#'.  CURSOR points at the first decimal digit.  Preserve
+    ;; just the digits as payload; the parser owns scope and resolution.
+    (defun nelisp_reader_label_digits (str-ptr cursor n scratch)
+      (if (>= cursor n)
+          cursor
+        (if (= (nelisp_reader_is_digit (str-byte-at str-ptr cursor)) 1)
+            (nelisp_reader_prog2
+             (mut-str-push-byte scratch (str-byte-at str-ptr cursor))
+             (nelisp_reader_label_digits str-ptr (+ cursor 1) n scratch))
+          cursor)))
+
+    (defun nelisp_reader_lex_label_finish
+        (str-ptr end n payload-slot cursor-out-slot scratch)
+      (if (>= end n)
+          (nelisp_reader_emit_error cursor-out-slot end)
+        (cond
+         ((= (str-byte-at str-ptr end) 61)
+          (nelisp_reader_finalize_classified
+           scratch payload-slot cursor-out-slot (+ end 1) 26))
+         ((= (str-byte-at str-ptr end) 35)
+          (nelisp_reader_finalize_classified
+           scratch payload-slot cursor-out-slot (+ end 1) 27))
+         (t (nelisp_reader_emit_error cursor-out-slot end)))))
+
+    (defun nelisp_reader_lex_label
+        (str-ptr cursor n payload-slot cursor-out-slot scratch)
+      (nelisp_reader_lex_label_finish
+       str-ptr
+       (nelisp_reader_label_digits str-ptr cursor n scratch)
+       n payload-slot cursor-out-slot scratch))
 
     ;; ===========================================================
     ;; String literal scanner.  Caller has already consumed `"'.
@@ -593,6 +640,114 @@
             (nelisp_reader_string_escape str-ptr (+ cursor 1) n scratch)))
          (t (nelisp_reader_string_plain str-ptr cursor n scratch)))))
 
+    ;; Modifier-chain state for string escapes: bit 0 Meta, bit 1 Shift,
+    ;; bit 2 a modifier that cannot be represented in a string
+    ;; (Hyper/Alt/Super), bit 4 Control.  Character literals keep those
+    ;; high modifiers as event bits; strings must either fold them into one
+    ;; byte or reject the spelling.
+    (defun nelisp_reader_string_ctrl_fold (chr)
+      (cond
+       ((= chr 63) 127)
+       ((and (>= chr 64) (<= chr 95)) (logand chr 31))
+       ((and (>= chr 97) (<= chr 122)) (logand chr 31))
+       ((= chr 32) 0)
+       (t -1)))
+
+    (defun nelisp_reader_string_modifier_emit
+        (str-ptr next n scratch state chr)
+      (if (= (logand state 4) 4)
+          -1
+        (let* ((shifted
+                (if (and (= (logand state 2) 2)
+                         (>= chr 97) (<= chr 122))
+                    (- chr 32)
+                  chr))
+               (controlled
+                (if (= (logand state 16) 16)
+                    (nelisp_reader_string_ctrl_fold shifted)
+                  shifted)))
+          (if (< controlled 0)
+              -1
+            (if (= (logand state 1) 1)
+                (if (> controlled 127)
+                    -1
+                  (nelisp_reader_string_push_raw_byte
+                   str-ptr next n scratch (+ controlled 128)))
+              (nelisp_reader_string_push_numeric
+               str-ptr next n scratch controlled))))))
+
+    (defun nelisp_reader_string_modifier_char (selector escaped)
+      ;; Named escapes apply only after a backslash.  The `a' target in
+      ;; `\S-a' is the raw letter a, not the `\a' bell escape.
+      (if (= escaped 0)
+          selector
+        (cond
+         ((= selector 97) 7)
+         ((= selector 98) 8)
+         ((= selector 100) 127)
+         ((= selector 101) 27)
+         ((= selector 102) 12)
+         ((= selector 110) 10)
+         ((= selector 114) 13)
+         ((= selector 115) 32)
+         ((= selector 116) 9)
+         ((= selector 118) 11)
+         (t selector))))
+
+    (defun nelisp_reader_string_modifier
+        (str-ptr cursor n scratch state escaped)
+      (if (>= cursor n)
+          -1
+        (let* ((selector (str-byte-at str-ptr cursor)))
+          (cond
+           ;; Meta/Shift/Hyper/Alt/Super prefixes require `-'.  Bare `\s'
+           ;; remains the ordinary space escape.
+           ((and (= escaped 1)
+                 (or (= selector 77) (= selector 83) (= selector 72)
+                     (= selector 65)
+                     (and (= selector 115) (< (+ cursor 1) n)
+                          (= (str-byte-at str-ptr (+ cursor 1)) 45))))
+            (if (or (>= (+ cursor 1) n)
+                    (= (= (str-byte-at str-ptr (+ cursor 1)) 45) 0))
+                -1
+              (let* ((next (+ cursor 2))
+                     (next-state
+                      (logior state
+                              (cond
+                               ((= selector 77) 1)
+                               ((= selector 83) 2)
+                               (t 4)))))
+                (if (and (< next n)
+                         (= (str-byte-at str-ptr next) 92))
+                    (nelisp_reader_string_modifier
+                     str-ptr (+ next 1) n scratch next-state 1)
+                  (nelisp_reader_string_modifier
+                   str-ptr next n scratch next-state 0)))))
+           ;; Control prefix and caret synonym.
+           ((and (= escaped 1) (= selector 67))
+            (if (or (>= (+ cursor 1) n)
+                    (= (= (str-byte-at str-ptr (+ cursor 1)) 45) 0))
+                -1
+              (let* ((next (+ cursor 2)))
+                (if (and (< next n)
+                         (= (str-byte-at str-ptr next) 92))
+                    (nelisp_reader_string_modifier
+                     str-ptr (+ next 1) n scratch (logior state 16) 1)
+                  (nelisp_reader_string_modifier
+                   str-ptr next n scratch (logior state 16) 0)))))
+           ((and (= escaped 1) (= selector 94))
+            (let* ((next (+ cursor 1)))
+              (if (and (< next n)
+                       (= (str-byte-at str-ptr next) 92))
+                  (nelisp_reader_string_modifier
+                   str-ptr (+ next 1) n scratch (logior state 16) 1)
+                (nelisp_reader_string_modifier
+                 str-ptr next n scratch (logior state 16) 0))))
+           (t
+            (nelisp_reader_string_modifier_emit
+             str-ptr (+ cursor 1) n scratch state
+             (nelisp_reader_string_modifier_char selector escaped)))))))
+
     (defun nelisp_reader_string_escape (str-ptr cursor n scratch)
       ;; CURSOR points at the byte AFTER `\\'.
       (cond
@@ -670,34 +825,15 @@
        ;; `\\<LF>' -> line continuation (drop both bytes).
        ((= (str-byte-at str-ptr cursor) 10)
         (nelisp_reader_string_body str-ptr (+ cursor 1) n scratch))
-       ;; `\\C-X' -> control modifier: (target & 0x1f).  Mirrors the
-       ;; char-literal path `nelisp_reader_p_decode_char_ctrl' so a key
-       ;; sequence such as "\\C-f" reads as the single byte 6 instead of the
-       ;; three literal characters `C', `-', `f'.
-       ((= (str-byte-at str-ptr cursor) 67)
-        (if (< (+ cursor 2) n)
-            (if (= (str-byte-at str-ptr (+ cursor 1)) 45)
-                (nelisp_reader_prog2
-                 (mut-str-push-byte
-                  scratch (logand (str-byte-at str-ptr (+ cursor 2)) 31))
-                 (nelisp_reader_string_body str-ptr (+ cursor 3) n scratch))
-              ;; `\\C' not followed by `-': literal `C'.
-              (nelisp_reader_prog2
-               (mut-str-push-byte scratch 67)
-               (nelisp_reader_string_body str-ptr (+ cursor 1) n scratch)))
-          (nelisp_reader_prog2
-           (mut-str-push-byte scratch 67)
-           (nelisp_reader_string_body str-ptr (+ cursor 1) n scratch))))
-       ;; `\\^X' -> control modifier (caret synonym for `\\C-').
-       ((= (str-byte-at str-ptr cursor) 94)
-        (if (< (+ cursor 1) n)
-            (nelisp_reader_prog2
-             (mut-str-push-byte
-              scratch (logand (str-byte-at str-ptr (+ cursor 1)) 31))
-             (nelisp_reader_string_body str-ptr (+ cursor 2) n scratch))
-          (nelisp_reader_prog2
-           (mut-str-push-byte scratch 94)
-           (nelisp_reader_string_body str-ptr (+ cursor 1) n scratch))))
+       ;; Modifier chains.  One decoder handles both orders of `\M-\C-x',
+       ;; escaped targets such as `\M-\C-\\', and `\S-a'.
+       ((or (= (str-byte-at str-ptr cursor) 67)
+            (= (str-byte-at str-ptr cursor) 94)
+            (= (str-byte-at str-ptr cursor) 77)
+            (= (str-byte-at str-ptr cursor) 83)
+            (= (str-byte-at str-ptr cursor) 72)
+            (= (str-byte-at str-ptr cursor) 65))
+        (nelisp_reader_string_modifier str-ptr cursor n scratch 0 1))
        ;; Unknown escape: drop backslash, push the byte literal.
        (t
         (nelisp_reader_prog2
@@ -847,8 +983,8 @@
        payload-slot cursor-out-slot scratch))
 
     ;; ===========================================================
-    ;; Sharpsign dispatch: `#'' / `##' / `#s(' / `#^[' / `#^^[' /
-    ;; `#x..' / `#o..' / `#b..' / fail.
+    ;; Sharpsign dispatch: `#'' / `##' / `#(' / `#N='/`#N#' / `#s(' /
+    ;; `#^[' / `#^^[' / `#x..' / `#o..' / `#b..' / fail.
     ;; ===========================================================
 
     (defun nelisp_reader_lex_sharpsign
@@ -859,6 +995,11 @@
          ;; `#''  -> function-quote (kind 9), 2-byte token.
          ((= (str-byte-at str-ptr (+ cursor 1)) 39)
           (nelisp_reader_emit_double cursor-out-slot cursor 9))
+         ;; Propertized string.  The parser reads the parenthesized body and
+         ;; keeps the first (string) item; this runtime has no text-property
+         ;; storage yet, so the remaining range/plist items are discarded.
+         ((= (str-byte-at str-ptr (+ cursor 1)) 40)
+          (nelisp_reader_emit_double cursor-out-slot cursor 13))
          ;; `##' is a complete 2-byte token on its own, exactly like real
          ;; Emacs: `#' immediately followed by a second `#' reads as the
          ;; empty-name symbol (printed back as `##'), consuming only
@@ -892,6 +1033,11 @@
             (mut-str-push-byte scratch 35)
             (nelisp_reader_finalize_classified
              scratch payload-slot cursor-out-slot (+ cursor 2) 23))))
+         ;; Read labels.  The first decimal digit is at CURSOR+1.
+         ((= (nelisp_reader_is_digit
+              (str-byte-at str-ptr (+ cursor 1))) 1)
+          (nelisp_reader_lex_label
+           str-ptr (+ cursor 1) n payload-slot cursor-out-slot scratch))
          ;; `#s(' -> sharps-paren (kind 11), 3-byte token.
          ((= (str-byte-at str-ptr (+ cursor 1)) 115)
           (if (>= (+ cursor 2) n)
@@ -1053,8 +1199,9 @@ Sexp::Cons that the §116.B parser will consume.
 
 Kinds: 0 EOF, 1 LParen, 2 RParen, 3 LBracket, 4 RBracket, 5 Quote,
 6 Backquote, 7 Comma, 8 CommaAt, 9 FunctionQuote, 10 Dot,
-11 SharpsParen, 12 CharTableBracket, 20 Int, 21 Float, 22 Str,
-23 Sym, 24 Char, 25 RadixInt, -1 Error.")
+11 SharpsParen, 12 CharTableBracket, 13 PropertizedString, 20 Int,
+21 Float, 22 Str, 23 Sym, 24 Char, 25 RadixInt, 26 LabelDef,
+27 LabelRef, -1 Error.")
 
 (provide 'nelisp-cc-reader-lexer)
 

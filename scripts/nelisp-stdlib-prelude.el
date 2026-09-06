@@ -8720,6 +8720,20 @@ claimed to match, only the shape."
     (when overrides (nelisp--check-print-overrides overrides))
     (nelisp--prn-to-string object (not noescape))))
 
+;; Strings on this runtime carry no text properties at all: there is no
+;; `propertize', no per-string property side table, and Doc 200's unibyte/
+;; multibyte string layout has no field for one.  A query therefore has
+;; exactly one correct answer -- "there are none" -- which is what GNU
+;; itself would also answer for a plain, property-free string.  These exist
+;; so that dropping the PLIST triples in `#("STRING" START END PLIST ...)'
+;; (the reader's `#(' arm, below) is verifiable rather than merely assumed:
+;; `(get-text-property 0 'face S)' on the result reads nil, not
+;; `void-function'.
+(unless (fboundp 'get-text-property)
+  (defun get-text-property (_pos _prop &optional _object) nil))
+(unless (fboundp 'text-properties-at)
+  (defun text-properties-at (_pos &optional _object) nil))
+
 ;; --- Doc 143: minimal read-from-string for the reader runtime -------------
 ;; Recursive-descent parser for the core sexp grammar (int/float/symbol/string/
 ;; list/dotted/vector/quote forms).  Records (#s) are out of scope (no record
@@ -8840,19 +8854,16 @@ are numbers; `1.' is the integer 1."
    (t nil)))
 
 (defun nelisp--rd-octal-escape (body pos n)
-  "Decode one to three octal digits in BODY at POS."
+  "Decode one to three octal digits in BODY at POS.  Return (CODE . NEXT-POS)."
   (let ((end pos) (cap (min n (+ pos 3))))
     (while (and (< end cap)
                 (let ((c (aref body end))) (and (>= c 48) (<= c 55))))
       (setq end (1+ end)))
-    (let ((code (string-to-number (substring body pos end) 8)))
-      ;; Octal values through 255 denote bytes.  In particular, keeping
-      ;; meta and high-octal escapes unibyte is observable in GNU Emacs.
-      (cons (if (<= code 255) (unibyte-string code) (char-to-string code))
-            end))))
+    (cons (string-to-number (substring body pos end) 8) end)))
 
 (defun nelisp--rd-unicode-escape (body pos n digits)
-  "Decode exactly DIGITS hexadecimal characters in BODY at POS."
+  "Decode exactly DIGITS hexadecimal characters in BODY at POS.
+Return (CODE . NEXT-POS)."
   (when (< (- n pos) digits)
     (signal 'invalid-read-syntax (list "Short Unicode escape")))
   (let ((end (+ pos digits)) (i pos) (valid t))
@@ -8861,11 +8872,11 @@ are numbers; `1.' is the integer 1."
       (setq i (1+ i)))
     (unless valid
       (signal 'invalid-read-syntax (list "Invalid Unicode escape")))
-    (cons (char-to-string (string-to-number (substring body pos end) 16))
-          end)))
+    (cons (string-to-number (substring body pos end) 16) end)))
 
 (defun nelisp--rd-named-unicode-escape (body pos n)
-  "Decode GNU's numeric `\\N{U+HEX}' form in BODY at POS."
+  "Decode GNU's numeric `\\N{U+HEX}' form in BODY at POS.
+Return (CODE . NEXT-POS)."
   (unless (and (< (1+ pos) n) (= (aref body (1+ pos)) 123))
     (signal 'invalid-read-syntax (list "Invalid \\N escape")))
   (let ((end (+ pos 2)))
@@ -8886,100 +8897,201 @@ are numbers; `1.' is the integer 1."
         (setq i (1+ i)))
       (unless valid
         (signal 'invalid-read-syntax (list "Invalid character code")))
-      (cons (char-to-string
-             (string-to-number (substring body digit-start end) 16))
+      (cons (string-to-number (substring body digit-start end) 16)
             (1+ end)))))
 
 (defun nelisp--rd-string-ctrl-char (c)
-  "Return GNU's control-code collapse of C, or nil when invalid."
+  "Return GNU's general control-code fold of C, or nil when C isn't foldable.
+Mirrors `read_char_escape's ncontrol loop in GNU's lread.c: characters
+`@'-`_' and `a'-`z' fold via `logand C #x1f'; `?' folds to DEL (127);
+anything else keeps its pending control modifier (signalled by
+returning nil here) rather than folding.  This deliberately does NOT
+special-case SPC to NUL -- that fold applies only when no OTHER
+modifier is also pending, so it is handled once, separately, in
+`nelisp--rd-string-escape' below."
   (cond
-   ((and (>= c 65) (<= c 90)) (1+ (- c 65)))
-   ((and (>= c 97) (<= c 122)) (1+ (- c 97)))
+   ((and (>= c 64) (<= c 95)) (logand c 31))
+   ((and (>= c 97) (<= c 122)) (logand c 31))
    ((= c 63) 127)
-   ((or (= c 64) (= c 32)) 0)
-   ((and (>= c 91) (<= c 95)) (- c 64))
    (t nil)))
 
-(defun nelisp--rd-basic-string-escape (body pos n)
-  "Decode one non-modifier string escape in BODY at POS."
-  (let ((e (aref body pos)))
-    (cond
-     ((= e 97)  (cons (char-to-string 7) (1+ pos)))
-     ((= e 98)  (cons (char-to-string 8) (1+ pos)))
-     ((= e 100) (cons (char-to-string 127) (1+ pos)))
-     ((= e 101) (cons (char-to-string 27) (1+ pos)))
-     ((= e 102) (cons (char-to-string 12) (1+ pos)))
-     ((= e 110) (cons (char-to-string 10) (1+ pos)))
-     ((= e 114) (cons (char-to-string 13) (1+ pos)))
-     ((= e 115) (cons (char-to-string 32) (1+ pos)))
-     ((= e 116) (cons (char-to-string 9) (1+ pos)))
-     ((= e 118) (cons (char-to-string 11) (1+ pos)))
-     ;; Backslash-newline and backslash-space are continuations in strings.
-     ((or (= e 10) (= e 32)) (cons "" (1+ pos)))
-     ((and (>= e 48) (<= e 55)) (nelisp--rd-octal-escape body pos n))
-     ((= e 120)
-      (let ((end (1+ pos)))
-        (while (and (< end n) (nelisp--rd-hex-digit-value (aref body end)))
-          (setq end (1+ end)))
-        (when (= end (1+ pos))
-          (signal 'invalid-read-syntax (list "Empty hex escape")))
-        (let ((code (string-to-number (substring body (1+ pos) end) 16)))
-          (cons (if (<= code 255) (unibyte-string code) (char-to-string code))
-                end))))
-     ((= e 117) (nelisp--rd-unicode-escape body (1+ pos) n 4))
-     ((= e 85) (nelisp--rd-unicode-escape body (1+ pos) n 8))
-     ((= e 78) (nelisp--rd-named-unicode-escape body pos n))
-     ;; GNU drops the backslash on unknown escapes, retaining the character.
-     (t (cons (char-to-string e) (1+ pos))))))
+;; Modifier bitmasks returned (packed with the base character) by
+;; `nelisp--rd-modified-string-escape', below.  These are GNU's OWN
+;; `*_modifier' bit values (lisp.h), not arbitrary local ones: the
+;; character-literal reader arm (the `?' case in `nelisp--rd-one') ORs
+;; any bits this function leaves pending straight onto the resolved
+;; character, exactly as GNU's `read_char_literal' does, so they need to
+;; be the real values a caller could compare against (e.g. `?\\M-a' must
+;; equal 134217825, not some smaller placeholder).  The string-escape
+;; resolver below only tests bit presence/absence, so it works with any
+;; distinct powers of two -- these just happen to also be correct ones.
+(defconst nelisp--rd-mod-alt   4194304)   ; 1<<22
+(defconst nelisp--rd-mod-super 8388608)   ; 1<<23
+(defconst nelisp--rd-mod-hyper 16777216)  ; 1<<24
+(defconst nelisp--rd-mod-shift 33554432)  ; 1<<25
+(defconst nelisp--rd-mod-ctrl  67108864)  ; 1<<26
+(defconst nelisp--rd-mod-meta  134217728) ; 1<<27
 
-(defun nelisp--rd-modified-string-escape (body pos n meta ctrl)
-  "Decode a control or meta string escape target in BODY at POS."
-  (when (>= pos n)
-    (signal 'invalid-read-syntax (list "Invalid modifier in string")))
-  (let ((r
-         (if (= (aref body pos) 92)
-             (progn
-               (when (>= (1+ pos) n)
-                 (signal 'invalid-read-syntax
-                         (list "Invalid modifier in string")))
-               (let ((e (aref body (1+ pos))))
-                 (cond
-                  ((and (or (= e 67) (= e 77))
-                        (< (+ pos 2) n) (= (aref body (+ pos 2)) 45))
-                   (nelisp--rd-modified-string-escape
-                    body (+ pos 3) n (or meta (= e 77)) (or ctrl (= e 67))))
-                  ((= e 94)
-                   (nelisp--rd-modified-string-escape
-                    body (+ pos 2) n meta t))
-                  (t (nelisp--rd-basic-string-escape body (1+ pos) n)))))
-           (cons (char-to-string (aref body pos)) (1+ pos)))))
-    (let ((chunk (car r)))
-      (unless (= (length chunk) 1)
-        (signal 'invalid-read-syntax (list "Invalid modifier in string")))
-      (let ((code (aref chunk 0)))
-        (when ctrl
-          (setq code (nelisp--rd-string-ctrl-char code))
-          (unless code
-            (signal 'invalid-read-syntax (list "Invalid modifier in string"))))
-        (when meta
-          ;; GNU permits meta only on an ASCII target and represents it by
-          ;; setting bit 7 in an otherwise-unibyte string.
-          (when (> code 127)
-            (signal 'invalid-read-syntax (list "Invalid modifier in string")))
-          (setq code (logior code 128)))
-        (cons (if meta (unibyte-string code) (char-to-string code))
-              (cdr r))))))
+(defun nelisp--rd-modified-string-escape (body pos n)
+  "Mirror GNU's `read_char_escape' (lread.c) for one escape in BODY at POS.
+POS is the index of the escape-selector character: the character right
+after the backslash that introduces this escape, or -- when a modifier
+prefix's target is itself another backslash escape (`\\M-\\C-x') --
+the character right after THAT backslash.  A single escape may chain
+through any number of `\\M-'/`\\S-'/`\\H-'/`\\A-'/`\\s-'/`\\C-'/`\\^'
+prefixes before reaching its base target; this walks that chain with a
+plain loop rather than recursion, since GNU's own C implementation
+does the equivalent with a `goto' back to its own top.
+
+Returns (CHR MODIFIERS BYTE8-P . NEXT-POS): CHR is the base character,
+already control-folded as far as GNU folds it here -- `\\C-'/`\\^' are
+\"messy and not actually idempotent\" (GNU's own words: stacking them,
+as in `?\\C-\\C-a', re-applies the fold to whatever the previous fold
+produced, which usually is not foldable again); MODIFIERS is a bitmask
+of `nelisp--rd-mod-*' values for meta/shift/hyper/alt/super, plus a
+control bit for any `\\C-'/`\\^' that turned out not to be foldable;
+BYTE8-P is non-nil when CHR names a raw byte 128-255 via an octal or
+short (fewer than 3 digit) hex escape -- GNU represents that
+differently from a same-valued Unicode character, which changes how a
+pending modifier resolves in `nelisp--rd-string-escape' below."
+  (let ((modifiers 0) (ncontrol 0) (chr nil) (byte8 nil) (i pos) (done nil))
+    (while (not done)
+      (when (>= i n) (signal 'end-of-file nil))
+      (let ((c (aref body i)))
+        (setq i (1+ i))
+        (cond
+         ((= c 97)  (setq chr 7   done t))
+         ((= c 98)  (setq chr 8   done t))
+         ((= c 100) (setq chr 127 done t))
+         ((= c 101) (setq chr 27  done t))
+         ((= c 102) (setq chr 12  done t))
+         ((= c 110) (setq chr 10  done t))
+         ((= c 114) (setq chr 13  done t))
+         ((= c 116) (setq chr 9   done t))
+         ((= c 118) (setq chr 11  done t))
+         ;; `\M-' `\S-' `\H-' `\A-' `\s-' -- modifier prefixes; bare `\s'
+         ;; (no following `-') is the super prefix's own single-character
+         ;; fallback to SPC, matching GNU's `mod_key' exactly.  (Bare `\s'
+         ;; reached directly -- not as another prefix's target -- never
+         ;; gets here: `nelisp--rd-string-escape' intercepts it first,
+         ;; unconditionally, per GNU's string-literal-only shortcut.)
+         ((memq c '(77 83 72 65 115))
+          (let ((mod (cond ((= c 77) nelisp--rd-mod-meta)
+                            ((= c 83) nelisp--rd-mod-shift)
+                            ((= c 72) nelisp--rd-mod-hyper)
+                            ((= c 65) nelisp--rd-mod-alt)
+                            (t nelisp--rd-mod-super))))
+            (if (and (< i n) (= (aref body i) 45))
+                (progn
+                  (setq i (1+ i) modifiers (logior modifiers mod))
+                  (when (>= i n) (signal 'end-of-file nil))
+                  (if (= (aref body i) 92)
+                      (setq i (1+ i)) ; consume `\'; loop reads the next selector
+                    (setq chr (aref body i) i (1+ i) done t)))
+              (if (= c 115)
+                  (setq chr 32 done t)
+                (signal 'error
+                        (list (format "Invalid escape char syntax: \\%c not followed by -" c)))))))
+         ;; `\C-' and `\^' are equivalent control prefixes.
+         ((or (= c 67) (= c 94))
+          (when (= c 67)
+            (if (and (< i n) (= (aref body i) 45))
+                (setq i (1+ i))
+              (signal 'error (list "Invalid escape char syntax: \\C not followed by -"))))
+          (setq ncontrol (1+ ncontrol))
+          (when (>= i n) (signal 'end-of-file nil))
+          (if (= (aref body i) 92)
+              (setq i (1+ i))
+            (setq chr (aref body i) i (1+ i) done t)))
+         ;; 1-3 octal digits; 0x80-0xff denotes a raw byte.
+         ((and (>= c 48) (<= c 55))
+          (let* ((r (nelisp--rd-octal-escape body (1- i) n)) (code (car r)))
+            (setq chr code byte8 (and (>= code 128) (< code 256))
+                  i (cdr r) done t)))
+         ;; 1+ hex digits; a value 0x80-0xff using AT MOST 2 of them
+         ;; denotes a raw byte -- 3 or more digits never do, even for the
+         ;; same numeric value (mirrors GNU's own `count < 3' test).
+         ((= c 120)
+          (let ((val 0) (digits 0) (cnt 0))
+            (while (and (< i n) (nelisp--rd-hex-digit-value (aref body i)))
+              (setq val (+ (* val 16) (nelisp--rd-hex-digit-value (aref body i)))
+                    i (1+ i) digits (1+ digits))
+              (when (< cnt 3) (setq cnt (1+ cnt))))
+            (when (= digits 0)
+              (signal 'invalid-read-syntax (list "Empty hex escape")))
+            (setq chr val byte8 (and (< cnt 3) (>= val 128) (< val 256)) done t)))
+         ((= c 117) (let ((r (nelisp--rd-unicode-escape body i n 4)))
+                      (setq chr (car r) i (cdr r) done t)))
+         ((= c 85) (let ((r (nelisp--rd-unicode-escape body i n 8)))
+                     (setq chr (car r) i (cdr r) done t)))
+         ((= c 78) (let ((r (nelisp--rd-named-unicode-escape body (1- i) n)))
+                     (setq chr (car r) i (cdr r) done t)))
+         ;; GNU drops the backslash on unknown escapes, retaining the character.
+         (t (setq chr c done t)))))
+    ;; Apply every accumulated `\C-'/`\^' fold, in order, to whichever
+    ;; character the chain settled on -- see the control-modifier
+    ;; docstring paragraph above for why more than one can matter.
+    (let ((k 0))
+      (while (< k ncontrol)
+        (let ((folded (nelisp--rd-string-ctrl-char chr)))
+          (if folded (setq chr folded)
+            (setq modifiers (logior modifiers nelisp--rd-mod-ctrl))))
+        (setq k (1+ k))))
+    (list chr modifiers byte8 i)))
 
 (defun nelisp--rd-string-escape (body pos n)
-  "Decode one GNU-compatible string escape in BODY at POS."
+  "Decode one GNU-compatible string escape in BODY at POS.
+POS is the index of the character right after the backslash that
+introduces this escape.  Returns (CHUNK . NEXT-POS); CHUNK is a 0- or
+1-character Elisp string (0 for the backslash-space/backslash-newline
+line-continuation escapes, which generate nothing)."
   (let ((e (aref body pos)))
     (cond
-     ((and (or (= e 67) (= e 77))
-           (< (1+ pos) n) (= (aref body (1+ pos)) 45))
-      (nelisp--rd-modified-string-escape
-       body (+ pos 2) n (= e 77) (= e 67)))
-     ((= e 94) (nelisp--rd-modified-string-escape body (1+ pos) n nil t))
-     (t (nelisp--rd-basic-string-escape body pos n)))))
+     ;; `\s' is always a space in a string -- unconditionally, even when
+     ;; a `-' follows.  GNU special-cases this in `read_string_literal'
+     ;; itself, before ever calling `read_char_escape'; the super
+     ;; modifier's own `\s-' syntax is reached the OTHER way, as the
+     ;; target of a PRECEDING modifier prefix (`\M-\s-x'), which recurses
+     ;; inside `nelisp--rd-modified-string-escape' above rather than
+     ;; through this clause.
+     ((= e 115) (cons " " (1+ pos)))
+     ;; `\SPC' and `\LF' generate no characters at all (continuations).
+     ((or (= e 32) (= e 10)) (cons "" (1+ pos)))
+     (t
+      (let* ((r (nelisp--rd-modified-string-escape body pos n))
+             (chr (nth 0 r)) (modifiers (nth 1 r)) (byte8 (nth 2 r))
+             (next (nth 3 r)))
+        (cond
+         ;; A raw byte or a genuine non-ASCII character: GNU's shift/meta
+         ;; resolution below applies only to an ASCII target, so ANY
+         ;; modifier reaching here at all is invalid.
+         ((or byte8 (>= chr 128))
+          (when (/= modifiers 0)
+            (signal 'invalid-read-syntax (list "Invalid modifier in string")))
+          (cons (if byte8 (unibyte-string chr) (char-to-string chr)) next))
+         (t
+          ;; ASCII target.  `\C-SPC'/`\^SPC' collapse to NUL, but only
+          ;; when no OTHER modifier is also pending (bug#55738's own
+          ;; carve-out); then shift folds onto a same-case letter; then
+          ;; meta moves into the string's high bit.  Anything left over
+          ;; afterward -- hyper, alt, super, an unfoldable control, or a
+          ;; shift that landed on neither case of letter -- is invalid.
+          (when (and (= modifiers nelisp--rd-mod-ctrl) (= chr 32))
+            (setq chr 0 modifiers 0))
+          (when (/= 0 (logand modifiers nelisp--rd-mod-shift))
+            (cond
+             ((and (>= chr 65) (<= chr 90))
+              (setq modifiers (logand modifiers (lognot nelisp--rd-mod-shift))))
+             ((and (>= chr 97) (<= chr 122))
+              (setq chr (- chr 32)
+                    modifiers (logand modifiers (lognot nelisp--rd-mod-shift))))))
+          (when (/= 0 (logand modifiers nelisp--rd-mod-meta))
+            (setq modifiers (logand modifiers (lognot nelisp--rd-mod-meta))
+                  chr (logior chr 128)
+                  byte8 t))
+          (when (/= modifiers 0)
+            (signal 'invalid-read-syntax (list "Invalid modifier in string")))
+          (cons (if byte8 (unibyte-string chr) (char-to-string chr)) next))))))))
 
 (defun nelisp--rd-unescape (body)
   (let ((out "") (i 0) (n (length body)))
@@ -8990,6 +9102,59 @@ are numbers; `1.' is the integer 1."
               (setq out (concat out (car r)) i (cdr r)))
           (setq out (concat out (char-to-string c)) i (1+ i)))))
     out))
+
+;; `#N=' labels are scoped to one public reader call.  The recursive reader
+;; itself needs dynamic access while it descends through lists and vectors;
+;; `nelisp--rd-read-one' below establishes a fresh table for each call.
+(defvar nelisp--rd-labels nil)
+(defvar nelisp--rd-label-proxies nil)
+
+(defun nelisp--rd-label-proxy-number (object)
+  "Return OBJECT's label number when it is one of this read's proxies."
+  (let ((tail nelisp--rd-label-proxies) (number nil) (done nil))
+    (while (and tail (not done))
+      (when (eq object (car tail))
+        (setq number (cdr (car tail)) done t))
+      (setq tail (cdr tail)))
+    number))
+
+(defun nelisp--rd-resolve-labels (object seen)
+  "Replace `#N#' proxies in OBJECT, preserving sharing and cycles."
+  (let ((number (nelisp--rd-label-proxy-number object)))
+    (if number
+        (let ((entry (assq number nelisp--rd-labels)))
+          (unless (and entry (eq (nth 1 entry) 'done))
+            (signal 'invalid-read-syntax (list (format "#%d#" number))))
+          (let ((target (nth 2 entry)))
+            ;; `#1=#1#' has no container whose identity could close the cycle.
+            (when (nelisp--rd-label-proxy-number target)
+              (signal 'invalid-read-syntax (list (format "#%d=" number))))
+            target))
+      (cond
+       ((consp object)
+        (unless (memq object seen)
+          (let ((next-seen (cons object seen)))
+            (setcar object
+                    (nelisp--rd-resolve-labels (car object) next-seen))
+            (setcdr object
+                    (nelisp--rd-resolve-labels (cdr object) next-seen))))
+        object)
+       ((vectorp object)
+        (unless (memq object seen)
+          (let ((i 0) (next-seen (cons object seen)))
+            (while (< i (length object))
+              (aset object i
+                    (nelisp--rd-resolve-labels (aref object i) next-seen))
+              (setq i (1+ i)))))
+        object)
+       (t object)))))
+
+(defun nelisp--rd-read-one (string start end)
+  "Read one form and resolve labels using a table local to this read."
+  (let ((nelisp--rd-labels nil)
+        (nelisp--rd-label-proxies nil))
+    (let ((result (nelisp--rd-one string start end)))
+      (cons (nelisp--rd-resolve-labels (car result) nil) (cdr result)))))
 
 (defun nelisp--rd-one (s i n)
   (setq i (nelisp--rd-skip-ws s i n))
@@ -9046,12 +9211,17 @@ are numbers; `1.' is the integer 1."
         ;; expected value in the corpus this was written against was read
         ;; out of stock Emacs 30.1, not derived from the manual.
         ;;
-        ;; Covers `?C' and the single-character escapes.  The modifier
-        ;; syntaxes (`?\C-x', `?\M-x', `?\^x') and the numeric ones
-        ;; (`?A', `?A', `?é') are NOT covered and fall through
-        ;; to the atom path exactly as the whole arm used to -- wrong in
-        ;; the same way it was before rather than newly wrong, and the
-        ;; corpus says so.
+        ;; Covers `?C' and the single-character escapes, plus (below) the
+        ;; modifier syntaxes `?\C-x' / `?\M-x' / `?\^x' / `?\S-x' / `?\H-x'
+        ;; / `?\A-x' / `?\s-x', by way of `nelisp--rd-modified-string-
+        ;; escape' -- the same GNU `read_char_escape' mirror the string
+        ;; reader uses.  A stacked modifier used to control-fold the
+        ;; ESCAPING BACKSLASH BYTE of its target when that target was
+        ;; itself an escape (`?\C-\[' gave 28, Control-backslash, instead
+        ;; of 27/ESC, Control-`[' -- the correct char never got resolved
+        ;; before the fold ran).  The numeric escapes (octal/hex/Unicode)
+        ;; as bare, unmodified character-literal targets are still NOT
+        ;; covered and fall through to the atom path exactly as before.
         (if (>= (1+ i) n)
             (let* ((e (nelisp--rd-atom-end s i n)))
               (cons (intern (substring s i e)) e))
@@ -9060,20 +9230,29 @@ are numbers; `1.' is the integer 1."
                 (if (>= (+ i 2) n)
                     (cons (intern (substring s i (nelisp--rd-atom-end s i n)))
                           (nelisp--rd-atom-end s i n))
-                  (let* ((c2 (aref s (+ i 2)))
-                         (v (cond ((= c2 110) 10)   ; n
-                                  ((= c2 116) 9)    ; t
-                                  ((= c2 114) 13)   ; r
-                                  ((= c2 102) 12)   ; f
-                                  ((= c2 101) 27)   ; e
-                                  ((= c2 115) 32)   ; s
-                                  ((= c2 97) 7)     ; a
-                                  ((= c2 98) 8)     ; b
-                                  ((= c2 100) 127)  ; d
-                                  ((= c2 118) 11)   ; v
-                                  ((= c2 48) 0)     ; 0
-                                  (t c2))))         ; \ \" \? \( ...
-                    (cons v (+ i 3))))
+                  (let ((c2 (aref s (+ i 2))))
+                    (if (memq c2 '(77 83 72 65 115 67 94)) ; M S H A s C ^
+                        ;; GNU's `read_char_literal' simply ORs any modifier
+                        ;; bits `read_char_escape' leaves pending onto the
+                        ;; resolved base character -- unlike a string, there
+                        ;; is no shift-fold, no meta high-bit move, and no
+                        ;; "Invalid modifier" validation.
+                        (let* ((r (nelisp--rd-modified-string-escape s (+ i 2) n))
+                               (chr (nth 0 r)) (modifiers (nth 1 r))
+                               (next (nth 3 r)))
+                          (cons (logior chr modifiers) next))
+                      (let ((v (cond ((= c2 110) 10)   ; n
+                                     ((= c2 116) 9)    ; t
+                                     ((= c2 114) 13)   ; r
+                                     ((= c2 102) 12)   ; f
+                                     ((= c2 101) 27)   ; e
+                                     ((= c2 97) 7)     ; a
+                                     ((= c2 98) 8)     ; b
+                                     ((= c2 100) 127)  ; d
+                                     ((= c2 118) 11)   ; v
+                                     ((= c2 48) 0)     ; 0
+                                     (t c2))))         ; \ \" \? \( ...
+                        (cons v (+ i 3))))))
               (cons c1 (+ i 2))))))
        ((= c 35) ; #
          (cond
@@ -9084,12 +9263,65 @@ are numbers; `1.' is the integer 1."
           ;; exactly two characters even when another atom follows.
           ((and (< (1+ i) n) (= (aref s (1+ i)) 35))
            (cons (intern "") (+ i 2)))
+          ;; `#("STRING" START1 END1 PLIST1 ...)': GNU's propertized-string
+          ;; literal.  GNU applies each PLIST over [START, END) of STRING
+          ;; via `set-text-properties'; this runtime attaches no text
+          ;; properties to strings at all (no `propertize', no per-string
+          ;; side table -- see `get-text-property' above, which always
+          ;; answers nil for exactly this reason), so the only faithful
+          ;; behavior available is to read and discard every START/END/
+          ;; PLIST triple, keeping just the string.  Without this arm,
+          ;; `#(' fell through to the plain-symbol fallback below and
+          ;; mis-tokenized as the bare symbol `#' followed by a SEPARATE
+          ;; list form -- a corrupted parse, not a decline -- because `('
+          ;; is one of `nelisp--rd-atom-end''s terminator characters.
+          ((and (< (1+ i) n) (= (aref s (1+ i)) 40))
+           (let ((r (nelisp--rd-one s (+ i 2) n)))
+             (unless (stringp (car r))
+               (signal 'invalid-read-syntax (list "#")))
+             (let ((str (car r)) (k (cdr r)) (done nil))
+               (while (not done)
+                 (setq k (nelisp--rd-skip-ws s k n))
+                 (cond
+                  ((>= k n) (signal 'end-of-file nil))
+                  ((= (aref s k) 41) (setq k (1+ k) done t))
+                  (t (let ((r2 (nelisp--rd-one s k n)))
+                       (setq k (cdr r2))))))
+               (cons str k))))
           (t
            (let ((j (1+ i)))
              (while (and (< j n) (>= (aref s j) 48) (<= (aref s j) 57))
                (setq j (1+ j)))
              (if (and (> j (1+ i)) (< j n)
-                      (or (= (aref s j) 114) (= (aref s j) 82)))
+                      (or (= (aref s j) 61) (= (aref s j) 35)))
+                 (let* ((number (string-to-number (substring s (1+ i) j)))
+                        (delimiter (aref s j)))
+                   (if (= delimiter 61) ; #N=OBJECT
+                       (progn
+                         (when (assq number nelisp--rd-labels)
+                           (signal 'invalid-read-syntax
+                                   (list (format "Duplicate #%d=" number))))
+                         ;; Install the entry before descending so a reference
+                         ;; inside OBJECT can denote the container being read.
+                         (let ((entry (list number 'pending nil)))
+                           (setq nelisp--rd-labels
+                                 (cons entry nelisp--rd-labels))
+                           (let ((r (nelisp--rd-one s (1+ j) n)))
+                             (setcar (cdr entry) 'done)
+                             (setcar (cdr (cdr entry)) (car r))
+                             r)))
+                     ;; GNU rejects forward references.  A self-reference is
+                     ;; accepted because its pending entry already exists.
+                     (let ((entry (assq number nelisp--rd-labels)))
+                       (unless entry
+                         (signal 'invalid-read-syntax
+                                 (list (format "#%d#" number))))
+                       (let ((proxy (cons 'nelisp--rd-label-reference number)))
+                         (setq nelisp--rd-label-proxies
+                               (cons proxy nelisp--rd-label-proxies))
+                         (cons proxy (1+ j))))))
+               (if (and (> j (1+ i)) (< j n)
+                        (or (= (aref s j) 114) (= (aref s j) 82)))
                  (let* ((base (string-to-number (substring s (1+ i) j)))
                         (k (1+ j)) (negative nil) (digits 0) (value 0)
                         (bad nil) (done nil))
@@ -9112,9 +9344,9 @@ are numbers; `1.' is the integer 1."
                      (signal 'invalid-read-syntax
                              (list (format "integer, radix %d" base))))
                    (cons (if negative (- value) value) k))
-               (let* ((e (nelisp--rd-atom-end s i n))
-                      (tok (substring s i e)))
-                 (cons (intern (nelisp--rd-symbol-unescape tok)) e)))))))
+                 (let* ((e (nelisp--rd-atom-end s i n))
+                        (tok (substring s i e)))
+                   (cons (intern (nelisp--rd-symbol-unescape tok)) e))))))))
        (t
          (let* ((e (nelisp--rd-atom-end s i n))
                 (raw-tok (substring s i e))
@@ -9184,7 +9416,7 @@ are numbers; `1.' is the integer 1."
           (signal 'args-out-of-range (list string given end)))))
     (let* ((base (or start 0))
            (s (if (or start end) (substring string base (or end (length string))) string))
-           (r (nelisp--rd-one s 0 (length s))))
+           (r (nelisp--rd-read-one s 0 (length s))))
       ;; Nothing but whitespace is `end-of-file' in Emacs, not a nil value at
       ;; position 0.  Answering (nil . 0) means a caller reading forms in a
       ;; loop never learns it reached the end, and reads nil for ever.
@@ -9326,7 +9558,7 @@ are numbers; `1.' is the integer 1."
               (let* ((s (if (or start end)
                             (substring string base (or end (length string)))
                           string))
-                     (r (nelisp--rd-one s 0 (length s))))
+                     (r (nelisp--rd-read-one s 0 (length s))))
                 (when (and (null (car r)) (>= (cdr r) (length s))
                            (>= (nelisp--rd-skip-ws s 0 (length s))
                                (length s)))

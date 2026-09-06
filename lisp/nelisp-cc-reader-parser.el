@@ -42,7 +42,8 @@
 ;;                            output; consumed before next lex).
 ;;                   slot 2:  CONST-NIL    — left Sexp::Nil forever as
 ;;                            a source for "this cell's cdr = nil".
-;;                   slots 3 + 4d, 4d+1, 4d+2, 4d+3 (= per-depth
+;;                   slot 3:  read-label entry count (reset per form).
+;;                   slots 4 + 4d, 4d+1, 4d+2, 4d+3 (= per-depth
 ;;                            working slots):
 ;;                              +0  car / item
 ;;                              +1  cdr / tail
@@ -55,8 +56,9 @@
 ;; error), anything else (-1, 0) = error.  On
 ;; error, `*RESULT-SLOT' is `Sexp::Nil'.
 ;;
-;; The safe Rust wrapper allocates SLOT-POOL with enough capacity for
-;; the deepest expected nesting (= 3 + 4 * MAX_DEPTH slots).  For the
+;; Read-label metadata/value pairs grow down from the pool tail.  The safe
+;; Rust wrapper allocates SLOT-POOL with enough capacity for the deepest
+;; expected nesting (= 4 + 4 * MAX_DEPTH slots without labels).  For the
 ;; bootstrap subset MAX_DEPTH = 32 is a generous ceiling (Doc 44 §3.2
 ;; pegs the deepest input at ~10).
 ;;
@@ -105,14 +107,14 @@
 
     ;; ===========================================================
     ;; Slot-pool indexing helpers (= compute slot index for the
-    ;; per-depth working slots).  Each depth gets 4 slots starting
-    ;; at offset (3 + d*4).
+    ;; per-depth working slots).  Slot 3 stores read-label state;
+    ;; each depth gets 4 slots starting at offset (4 + d*4).
     ;; ===========================================================
 
-    (defun nelisp_reader_p_car_idx   (d) (+ 3 (* d 4)))
-    (defun nelisp_reader_p_cdr_idx   (d) (+ 4 (* d 4)))
-    (defun nelisp_reader_p_head_idx  (d) (+ 5 (* d 4)))
-    (defun nelisp_reader_p_spare_idx (d) (+ 6 (* d 4)))
+    (defun nelisp_reader_p_car_idx   (d) (+ 4 (* d 4)))
+    (defun nelisp_reader_p_cdr_idx   (d) (+ 5 (* d 4)))
+    (defun nelisp_reader_p_head_idx  (d) (+ 6 (* d 4)))
+    (defun nelisp_reader_p_spare_idx (d) (+ 7 (* d 4)))
 
     ;; ===========================================================
     ;; Slot address helper (Doc 147 Phase 1.5 Group P).  The slot-pool
@@ -129,7 +131,7 @@
     ;; Reader depth guard.  Mirrors `nelisp_eval_call_stash_excessive_
     ;; lisp_nesting' (scripts/nelisp-standalone-build.el, the eval-side
     ;; `rec_max' guard) for the recursive-descent parser above: every
-    ;; nesting level costs 4 slots starting at (3 + d*4) in SLOT-POOL,
+    ;; nesting level costs 4 slots starting at (4 + d*4) in SLOT-POOL,
     ;; and nothing checked that against the pool's actual allocation
     ;; before this fix.  Past the bound, `nelisp_reader_p_slot' keeps
     ;; computing addresses that walk off the caller's `alloc-bytes'
@@ -150,10 +152,12 @@
     ;; pool is live instead of one fixed number that would be wrong
     ;; for most callers (their pools range from 256 to 4,194,304
     ;; slots).  The -8 margin below covers the widest per-depth slot
-    ;; offset (`spare_idx' = 6 + d*4) plus one word of slack.
+    ;; offset (`spare_idx' = 7 + d*4) plus one word of slack.
     ;; ===========================================================
 
     (defun nelisp_reader_p_pool_cap () (ptr-read-u64 268436448 0))
+    (defun nelisp_reader_p_label_count (pool)
+      (ptr-read-u64 (nelisp_reader_p_slot pool 3) 8))
     (defun nelisp_reader_p_max_depth ()
       (/ (- (nelisp_reader_p_pool_cap) 8) 4))
     ;; Arity 2 (even, with a `_pad'), matching `nelisp_eval_call_stash_
@@ -168,8 +172,10 @@
     ;; ok_p depth))' segfaulted even with `depth_ok_p''s body hardcoded to
     ;; return 1 unconditionally, which is why the call site below compares
     ;; the result to 0 explicitly instead.
-    (defun nelisp_reader_p_depth_ok_p (d _pad)
-      (< d (nelisp_reader_p_max_depth)))
+    (defun nelisp_reader_p_depth_ok_p (pool d)
+      (< (nelisp_reader_p_spare_idx d)
+         (- (nelisp_reader_p_pool_cap)
+            (* 2 (nelisp_reader_p_label_count pool)))))
     (defun nelisp_reader_p_stash_excessive_nesting (max-depth _pad)
       (let* ((tag-buf (alloc-bytes 24 1)))
         (seq
@@ -394,8 +400,7 @@
           (if (= (str-byte-at payload-slot 0) 92)
               ;; Escape body starts at byte 1.
               (if (>= (str-len payload-slot) 2)
-                  (nelisp_reader_p_decode_char_escape
-                   payload-slot 1 (str-byte-at payload-slot 1))
+                  (nelisp_reader_p_decode_char_modifier payload-slot 1 0 1)
                 0)
             ;; Plain `?X' — payload is one UTF-8 codepoint.
             (nelisp_reader_p_decode_utf8_char payload-slot))
@@ -510,6 +515,99 @@
        ((= inner 116) 9)
        ((= inner 114) 13)
        (t inner)))
+
+    ;; Complete modifier-chain decoder used by `decode_char'.  The older
+    ;; single-prefix helpers above remain for ABI stability, but no longer
+    ;; drive the production path.
+    (defun nelisp_reader_p_decode_char_resolve (chr modifiers)
+      ;; Control folds only GNU's ASCII control range.  For any other target
+      ;; the control event bit remains pending on the character literal.
+      (if (= (logand modifiers 67108864) 67108864)
+          (cond
+           ((= chr 63) (+ 127 (- modifiers 67108864)))
+           ((and (>= chr 64) (<= chr 95))
+            (+ (logand chr 31) (- modifiers 67108864)))
+           ((and (>= chr 97) (<= chr 122))
+            (+ (logand chr 31) (- modifiers 67108864)))
+           (t (+ chr modifiers)))
+        (+ chr modifiers)))
+
+    (defun nelisp_reader_p_decode_char_base
+        (payload-slot at modifiers selector escaped)
+      (nelisp_reader_p_decode_char_resolve
+       (if (= escaped 0)
+           selector
+         (cond
+          ((= selector 110) 10)
+          ((= selector 116) 9)
+          ((= selector 114) 13)
+          ((= selector 115) 32)
+          ((= selector 101) 27)
+          ((= selector 98) 8)
+          ((= selector 100) 127)
+          ((= selector 97) 7)
+          ((= selector 102) 12)
+          ((= selector 118) 11)
+          ((= selector 48) 0)
+          ((= selector 120)
+           (nelisp_reader_p_decode_char_hex payload-slot (+ at 1)))
+          (t selector)))
+       modifiers))
+
+    (defun nelisp_reader_p_decode_char_modifier
+        (payload-slot at modifiers escaped)
+      (if (>= at (str-len payload-slot))
+          0
+        (let* ((selector (str-byte-at payload-slot at)))
+          (cond
+           ;; Meta/Shift/Hyper/Alt/Super.
+           ((and (= escaped 1)
+                 (or (= selector 77) (= selector 83) (= selector 72)
+                     (= selector 65)
+                     (and (= selector 115)
+                          (< (+ at 1) (str-len payload-slot))
+                          (= (str-byte-at payload-slot (+ at 1)) 45))))
+            (if (or (>= (+ at 1) (str-len payload-slot))
+                    (= (= (str-byte-at payload-slot (+ at 1)) 45) 0))
+                0
+              (let* ((next (+ at 2))
+                     (bit (cond
+                           ((= selector 77) 134217728)
+                           ((= selector 83) 33554432)
+                           ((= selector 72) 16777216)
+                           ((= selector 65) 4194304)
+                           (t 8388608))))
+                (if (and (< next (str-len payload-slot))
+                         (= (str-byte-at payload-slot next) 92))
+                    (nelisp_reader_p_decode_char_modifier
+                     payload-slot (+ next 1) (logior modifiers bit) 1)
+                  (nelisp_reader_p_decode_char_modifier
+                   payload-slot next (logior modifiers bit) 0)))))
+           ;; Control and caret synonym.
+           ((and (= escaped 1) (= selector 67))
+            (if (or (>= (+ at 1) (str-len payload-slot))
+                    (= (= (str-byte-at payload-slot (+ at 1)) 45) 0))
+                0
+              (let* ((next (+ at 2)))
+                (if (and (< next (str-len payload-slot))
+                         (= (str-byte-at payload-slot next) 92))
+                    (nelisp_reader_p_decode_char_modifier
+                     payload-slot (+ next 1)
+                     (logior modifiers 67108864) 1)
+                  (nelisp_reader_p_decode_char_modifier
+                   payload-slot next (logior modifiers 67108864) 0)))))
+           ((and (= escaped 1) (= selector 94))
+            (let* ((next (+ at 1)))
+              (if (and (< next (str-len payload-slot))
+                       (= (str-byte-at payload-slot next) 92))
+                  (nelisp_reader_p_decode_char_modifier
+                   payload-slot (+ next 1)
+                   (logior modifiers 67108864) 1)
+                (nelisp_reader_p_decode_char_modifier
+                 payload-slot next (logior modifiers 67108864) 0))))
+           (t
+            (nelisp_reader_p_decode_char_base
+             payload-slot at modifiers selector escaped))))))
 
     ;; ===========================================================
     ;; Materialise a leaf token into RESULT-SLOT.  RESULT-SLOT
@@ -690,6 +788,181 @@
        (t 0)))
 
     ;; ===========================================================
+    ;; Read labels (`#N=' / `#N#').  Slot 3 stores the entry count.  Two
+    ;; slots per entry grow down from the pool tail: a Nil-tagged metadata
+    ;; slot (kind at +8, label at +16) and one rooted Sexp value.  Kind 1 is
+    ;; a pending definition, 2 a completed definition, 3 a reference proxy.
+    ;; ===========================================================
+
+    (defun nelisp_reader_p_label_entry_index (i)
+      (- (nelisp_reader_p_pool_cap) (* 2 (+ i 1))))
+
+    (defun nelisp_reader_p_label_meta (pool i)
+      (nelisp_reader_p_slot pool (nelisp_reader_p_label_entry_index i)))
+
+    (defun nelisp_reader_p_label_value (pool i)
+      (nelisp_reader_p_slot pool (+ (nelisp_reader_p_label_entry_index i) 1)))
+
+    (defun nelisp_reader_p_label_set_count (pool count)
+      (ptr-write-u64 (nelisp_reader_p_slot pool 3) 8 count))
+
+    (defun nelisp_reader_p_label_find_kind (pool label i)
+      (if (>= i (nelisp_reader_p_label_count pool))
+          0
+        (let* ((meta (nelisp_reader_p_label_meta pool i))
+               (kind (ptr-read-u64 meta 8)))
+          (if (and (or (= kind 1) (= kind 2))
+                   (= (ptr-read-u64 meta 16) label))
+              kind
+            (nelisp_reader_p_label_find_kind pool label (+ i 1))))))
+
+    (defun nelisp_reader_p_label_find_value (pool label i)
+      (if (>= i (nelisp_reader_p_label_count pool))
+          0
+        (let* ((meta (nelisp_reader_p_label_meta pool i))
+               (kind (ptr-read-u64 meta 8)))
+          (if (and (= kind 2) (= (ptr-read-u64 meta 16) label))
+              (nelisp_reader_p_label_value pool i)
+            (nelisp_reader_p_label_find_value pool label (+ i 1))))))
+
+    (defun nelisp_reader_p_label_add_pending (pool depth label)
+      (let* ((count (nelisp_reader_p_label_count pool))
+             (entry-index (nelisp_reader_p_label_entry_index count)))
+        (if (<= entry-index (nelisp_reader_p_spare_idx depth))
+            0
+          (let* ((meta (nelisp_reader_p_label_meta pool count))
+                 (value (nelisp_reader_p_label_value pool count)))
+            (seq
+             (ptr-write-u64 meta 0 0)
+             (ptr-write-u64 meta 8 1)
+             (ptr-write-u64 meta 16 label)
+             (ptr-write-u64 meta 24 0)
+             (nl_sexp_clone_into (nelisp_reader_p_slot pool 2) value)
+             (nelisp_reader_p_label_set_count pool (+ count 1))
+             meta)))))
+
+    (defun nelisp_reader_p_label_add_proxy (pool depth label proxy)
+      (let* ((count (nelisp_reader_p_label_count pool))
+             (entry-index (nelisp_reader_p_label_entry_index count)))
+        (if (<= entry-index (nelisp_reader_p_spare_idx depth))
+            0
+          (let* ((meta (nelisp_reader_p_label_meta pool count))
+                 (value (nelisp_reader_p_label_value pool count)))
+            (seq
+             (ptr-write-u64 meta 0 0)
+             (ptr-write-u64 meta 8 3)
+             (ptr-write-u64 meta 16 label)
+             (ptr-write-u64 meta 24 0)
+             (nl_sexp_clone_into proxy value)
+             (nelisp_reader_p_label_set_count pool (+ count 1))
+             1)))))
+
+    (defun nelisp_reader_p_label_proxy_number (object pool i)
+      (if (>= i (nelisp_reader_p_label_count pool))
+          -1
+        (let* ((meta (nelisp_reader_p_label_meta pool i))
+               (proxy (nelisp_reader_p_label_value pool i)))
+          (if (and (= (ptr-read-u64 meta 8) 3)
+                   (= (sexp-tag object) 7)
+                   (= (sexp-payload-ptr object) (sexp-payload-ptr proxy)))
+              (ptr-read-u64 meta 16)
+            (nelisp_reader_p_label_proxy_number object pool (+ i 1))))))
+
+    (defun nelisp_reader_p_parse_label_def
+        (str-ptr cursor-slot result-slot pool depth)
+      (let* ((label (nelisp_reader_p_atoi (nelisp_reader_p_slot pool 1))))
+        (if (= (nelisp_reader_p_label_find_kind pool label 0) 0)
+            (let* ((meta (nelisp_reader_p_label_add_pending pool depth label)))
+              (if (= meta 0)
+                  -1
+                (let* ((rc (nelisp_reader_p_parse_at
+                            str-ptr cursor-slot result-slot pool (+ depth 1))))
+                  (if (= rc 1)
+                      (let* ((proxy-label
+                              (nelisp_reader_p_label_proxy_number
+                               result-slot pool 0)))
+                        (if (>= proxy-label 0)
+                            ;; `#1=#1#' is nonsensical.  An alias to an
+                            ;; earlier completed label is valid; collapse it
+                            ;; before recording this definition.
+                            (let* ((target
+                                    (nelisp_reader_p_label_find_value
+                                     pool proxy-label 0)))
+                              (if (= target 0)
+                                  -1
+                                (seq
+                                 (nl_sexp_clone_into target result-slot)
+                                 (nl_sexp_clone_into result-slot (+ meta 32))
+                                 (ptr-write-u64 meta 8 2)
+                                 1)))
+                          (seq
+                           (nl_sexp_clone_into result-slot (+ meta 32))
+                           (ptr-write-u64 meta 8 2)
+                           1)))
+                    rc))))
+          -1)))
+
+    (defun nelisp_reader_p_parse_label_ref (result-slot pool depth)
+      (let* ((label (nelisp_reader_p_atoi (nelisp_reader_p_slot pool 1)))
+             (kind (nelisp_reader_p_label_find_kind pool label 0)))
+        (if (= kind 0)
+            -1
+          (let* ((label-slot
+                  (nelisp_reader_p_slot pool
+                                        (nelisp_reader_p_car_idx depth))))
+            (if (and (sexp-int-make label-slot label)
+                     (cons-make-with-clone
+                      label-slot (nelisp_reader_p_slot pool 2) result-slot)
+                     (= (nelisp_reader_p_label_add_proxy
+                         pool depth label result-slot) 1))
+                1
+              -1)))))
+
+    (defun nelisp_reader_p_label_resolve_vector (vec pool i n)
+      (if (>= i n)
+          vec
+        (let* ((resolved
+                (nelisp_reader_p_label_resolve
+                 (vector-ref-ptr vec i) pool)))
+          (nelisp_reader_p_prog2
+           (vector-slot-set vec i resolved)
+           (nelisp_reader_p_label_resolve_vector vec pool (+ i 1) n)))))
+
+    (defun nelisp_reader_p_label_resolve_record (record pool i n)
+      (if (>= i n)
+          record
+        (let* ((resolved
+                (nelisp_reader_p_label_resolve
+                 (record-slot-ref-ptr record i) pool)))
+          (nelisp_reader_p_prog2
+           (record-slot-set record i resolved)
+           (nelisp_reader_p_label_resolve_record
+            record pool (+ i 1) n)))))
+
+    (defun nelisp_reader_p_label_resolve (object pool)
+      (let* ((label (nelisp_reader_p_label_proxy_number object pool 0)))
+        (if (>= label 0)
+            (nelisp_reader_p_label_find_value pool label 0)
+          (cond
+           ((= (sexp-tag object) 7)
+            (let* ((car-value
+                    (nelisp_reader_p_label_resolve
+                     (nl_cons_car_ptr object) pool)))
+              (seq
+               (cons-set-car object car-value)
+               (let* ((cdr-value
+                       (nelisp_reader_p_label_resolve
+                        (nl_cons_cdr_ptr object) pool)))
+                 (seq (cons-set-cdr object cdr-value) object)))))
+           ((= (sexp-tag object) 8)
+            (nelisp_reader_p_label_resolve_vector
+             object pool 0 (vector-len object)))
+           ((= (sexp-tag object) 12)
+            (nelisp_reader_p_label_resolve_record
+             object pool 0 (record-slot-count object)))
+           (t object)))))
+
+    ;; ===========================================================
     ;; parse_at — lex one token at the current cursor + dispatch.
     ;; Writes the parsed Sexp into RESULT-SLOT.  Returns 1 on
     ;; success, -1 on error.  DEPTH is the current recursion depth
@@ -714,7 +987,7 @@
        ;; bound is derived.  Every recursive path (list body, vector
        ;; body, quote wrap) dispatches through here before touching a
        ;; new depth level's slots, so one clause here covers all of them.
-       ((= (nelisp_reader_p_depth_ok_p depth 0) 0)
+       ((= (nelisp_reader_p_depth_ok_p slot-pool depth) 0)
         (nelisp_reader_p_stash_excessive_nesting
          (nelisp_reader_p_max_depth) 0))
        ((= kind -2)
@@ -756,6 +1029,19 @@
        ((= kind 12)
         (nelisp_reader_p_parse_vector
          str-ptr cursor-slot result-slot slot-pool depth 0))
+       ;; `#("STRING" START END PLIST ...)'.  Text-property storage is not
+       ;; part of the standalone string representation yet; parse the whole
+       ;; literal for cursor correctness and retain its first string.
+       ((= kind 13)
+        (nelisp_reader_p_parse_propertized_string
+         str-ptr cursor-slot result-slot slot-pool depth))
+       ;; Read labels are handled before the generic >=20 leaf arm.
+       ((= kind 26)
+        (nelisp_reader_p_parse_label_def
+         str-ptr cursor-slot result-slot slot-pool depth))
+       ((= kind 27)
+        (nelisp_reader_p_parse_label_ref
+         result-slot slot-pool depth))
        ;; Leaf payloads.
        ((>= kind 20)
         (nelisp_reader_p_leaf kind result-slot
@@ -771,6 +1057,22 @@
        ((= kind 0) 2)
        ;; Stray close / dot / error / record / byte-code → error.
        (t -1)))
+
+    (defun nelisp_reader_p_parse_propertized_string
+        (str-ptr cursor-slot result-slot slot-pool depth)
+      (let* ((body (nelisp_reader_p_slot
+                    slot-pool (nelisp_reader_p_car_idx depth))))
+        (if (= (nelisp_reader_p_parse_list_step
+                str-ptr cursor-slot body slot-pool (+ depth 1)) 1)
+            (if (= (sexp-tag body) 7)
+                (let* ((first (nl_cons_car_ptr body)))
+                  (if (or (= (sexp-tag first) 5)
+                          (= (sexp-tag first) 14))
+                      (nelisp_reader_p_prog2
+                       (nl_sexp_clone_into first result-slot) 1)
+                    -1))
+              -1)
+          -1)))
 
     ;; ===========================================================
     ;; Build a (HEAD INNER) quote wrapper at the current depth.
@@ -1254,8 +1556,23 @@
 
     (defun nelisp_reader_parse_one
         (str-ptr cursor-slot result-slot slot-pool depth)
-      (nelisp_reader_p_parse_at
-       str-ptr cursor-slot result-slot slot-pool depth)))
+      (seq
+       ;; Labels never escape one public reader call, even when a caller
+       ;; reuses the same raw pool for every top-level form in a file.
+       (ptr-write-u64 (nelisp_reader_p_slot slot-pool 3) 0 0)
+       (ptr-write-u64 (nelisp_reader_p_slot slot-pool 3) 8 0)
+       (let* ((rc (nelisp_reader_p_parse_at
+                   str-ptr cursor-slot result-slot slot-pool depth)))
+         (if (= rc 1)
+             ;; A bare self-reference (`#1=#1#') has no container whose
+             ;; identity can close the cycle and is invalid in GNU too.
+             (if (>= (nelisp_reader_p_label_proxy_number
+                       result-slot slot-pool 0) 0)
+                 -1
+               (nelisp_reader_p_prog2
+                (nelisp_reader_p_label_resolve result-slot slot-pool)
+                1))
+           rc)))))
 
   "AOT source for Doc 116 §116.B pure-elisp Reader parser.
 
@@ -1267,8 +1584,9 @@ Sexp values via the §101 / §111 / §122 grammar primitives.
 
 Kinds dispatched: 0 EOF, 1 LParen, 2 RParen, 3 LBracket, 5 Quote,
 6 Backquote, 7 Comma, 8 CommaAt, 9 FunctionQuote, 10 Dot, 11
-SharpsParen, 12 CharTableBracket, 20 Int, 21 Float, 22 Str, 23 Sym,
-24 Char, 25 RadixInt.
+SharpsParen, 12 CharTableBracket, 13 PropertizedString, 20 Int,
+21 Float, 22 Str, 23 Sym, 24 Char, 25 RadixInt, 26 LabelDef and
+27 LabelRef.
 Kind 3 LBracket drives the vector parser (Doc 116 §116.B+ —
 `parse_vector_step' + `parse_vector' + `fill_vec' +
 `cons_list_len_walk').  Kind 11 materialises Emacs hash-table reader
@@ -1286,13 +1604,14 @@ so NlConsBoxRef refcounts are bumped at write time.  The Rust
 wrapper can therefore drop the slot-pool and stale result-slot
 normally — no deep_clone pass and no mem::forget are required.
 
-Slot-pool layout (= safe Rust wrapper allocates a Sexp::Vector of
-3 + 4 * MAX_DEPTH slots, all pre-Nil):
+Slot-pool layout (= safe Rust wrapper allocates a raw slot buffer):
   slot 0          SCRATCH MutStr (drained between lex calls).
   slot 1          PAYLOAD slot   (lexer's text Sexp::Str output).
   slot 2          CONST-NIL      (forever Sexp::Nil; cdr source for
                                   tail of single-form quote wraps).
-  slots 3+4d..6+4d  per-depth working slots: car/cdr/head/spare.")
+  slot 3          read-label count (reset for each public parse).
+  slots 4+4d..7+4d  per-depth working slots: car/cdr/head/spare.
+  pool tail       read-label metadata/value pairs, two slots each.")
 
 (provide 'nelisp-cc-reader-parser)
 

@@ -11494,13 +11494,19 @@ baked build's own `<'/`>'/`=' arms need it too.")
       ;; Raised when the reader could not read a form and had not reached the
       ;; end of the input.  Before this the two were one return code, so the
       ;; loops below stopped on both and reported success on both.
-      (let* ((buf (alloc-bytes 24 1)))
+      (let* ((buf (alloc-bytes 24 1))
+             (nil-slot (alloc-bytes 32 8)))
         (seq
          (ptr-write-u64 buf 0 3270855143590358633)  ; "invalid-"
          (ptr-write-u64 (+ buf 8) 0 7960520455148889458) ; "read-syn"
          (ptr-write-u64 (+ buf 16) 0 7889268)       ; "tax"
          (nl_alloc_symbol buf 19 268435480)
-         (bf_sig_copy32 268435512 what)
+         ;; Condition data is always a proper list.  Stashing WHAT directly
+         ;; made `(error-message-string e)' treat a source string as a cons
+         ;; and replace the useful reader error with `(wrong-type-argument
+         ;; listp WHAT)'.
+         (wf_write_nil nil-slot)
+         (nelisp_cons_construct what nil-slot 268435512)
          (ptr-write-u64 268435472 0 1)
          (atomic-fetch-add 268435544 1)
          1)))
@@ -11992,6 +11998,14 @@ baked build's own `<'/`>'/`=' arms need it too.")
            ((= esc 85) 0)              ; \\U
            ((= esc 78) 0)              ; \\N
            ((= esc 77) 0)              ; \\M-
+           ;; \S-/\H-/\A- (shift/hyper/alt) are not implemented by the
+           ;; bootstrap decoder at all -- it silently drops the backslash
+           ;; and keeps the letter, rather than either folding shift onto
+           ;; a same-case letter or signalling "Invalid modifier in
+           ;; string" the way GNU/`nelisp--rd-*' do.  Always defer.
+           ((= esc 83) 0)              ; \\S-
+           ((= esc 72) 0)              ; \\H-
+           ((= esc 65) 0)              ; \\A-
            ;; Native consumes exactly two hex digits; GNU consumes the whole
            ;; nonempty hex run.
            ((= esc 120)
@@ -12006,20 +12020,42 @@ baked build's own `<'/`>'/`=' arms need it too.")
                                (m5_byte_at src (+ at 3))) 1))
                       0
                     1)))))
-           ;; The bootstrap decoder uses `& 31' for `?', whereas GNU maps it
-           ;; to DEL.  Nested modifiers also belong to the fallback table.
+           ;; The bootstrap decoder folds ANY control target with a blind
+           ;; `& 31' -- correct for GNU's actual foldable ranges (`@'-`_'
+           ;; and `a'-`z', which is exactly where `byte & 31' agrees with
+           ;; GNU's `ascii_ctrl'), but silently wrong outside them (e.g.
+           ;; `\C-5' folds to 21 instead of signalling "Invalid modifier
+           ;; in string" the way GNU/`nelisp--rd-*' do).  Only trust it
+           ;; inside that range; `?' and a nested `\' target (another
+           ;; escape) are handled solely by the fallback table, and `\C'
+           ;; not followed by `-' is a GNU `error' ("not followed by -")
+           ;; the bootstrap decoder does not raise either -- defer all
+           ;; three rather than falling through to "supported".
            ((= esc 67)
             (if (and (< (+ at 2) end)
                      (= (m5_byte_at src (+ at 1)) 45))
-                (if (= (m5_byte_at src (+ at 2)) 63)
-                    0
-                  (if (= (m5_byte_at src (+ at 2)) 92) 0 1))
-              1))
+                (let* ((tgt (m5_byte_at src (+ at 2))))
+                  (if (or (= tgt 63) (= tgt 92))
+                      0
+                    (if (or (and (>= tgt 64) (<= tgt 95))
+                            (and (>= tgt 97) (<= tgt 122)))
+                        1
+                      0)))
+              0))
+           ;; `\^' is equivalent to `\C-' and shares its blind-`& 31'
+           ;; bootstrap fold, so it needs the same target-range guard: `?'
+           ;; and a nested `\' target both go to the fallback table, and so
+           ;; does anything outside GNU's actual foldable ranges.
            ((= esc 94)
-            (if (and (< (+ at 1) end)
-                     (= (m5_byte_at src (+ at 1)) 63))
-                0
-              1))
+            (if (< (+ at 1) end)
+                (let* ((tgt (m5_byte_at src (+ at 1))))
+                  (if (or (= tgt 63) (= tgt 92))
+                      0
+                    (if (or (and (>= tgt 64) (<= tgt 95))
+                            (and (>= tgt 97) (<= tgt 122)))
+                        1
+                      0)))
+              0))
            (t 1)))))
     (defun bf_read_one_scan_string (src at end)
       (let* ((ok 1))
@@ -26556,6 +26592,7 @@ loader when it is absent."
                                  nelisp-standalone--reader-bounded-backtrace-smoke
                                  nelisp-standalone--reader-doc200-mutation-smoke
                                  nelisp-standalone--reader-eq-identity-smoke
+                                 nelisp-standalone--reader-t105-compat-smoke
                                  nelisp-standalone--reader-socket-smoke
                                  nelisp-standalone--reader-ipv6-socket-smoke))
                   (funcall smoke)
@@ -26806,6 +26843,45 @@ answered t / (\"s\") / 1 here and nil in Emacs."
                      rc stderr-text)))
         (when (file-exists-p stderr-file)
           (delete-file stderr-file))))))
+
+(defun nelisp-standalone--reader-t105-compat-smoke ()
+  "Assert T105 reader parity on native and interpreted entry points.
+
+Covers chained string/character modifiers, an escaped control target,
+propertized strings, shared and cyclic `#N=' labels, and proper condition data
+from a malformed `nelisp--eval-source-string'.  The expected value is from
+GNU Emacs 31.1; text properties are intentionally absent because standalone
+strings have no property storage."
+  (let* ((source
+          (concat
+           "(list (string-to-list \"\\M-\\C-x\")"
+           " (string-to-list \"\\C-\\M-x\")"
+           " (string-to-list \"\\M-\\C-\\\\\")"
+           " (string-to-list \"\\S-a\")"
+           " ?\\C-\\[ ?\\M-\\C-x ?\\C-\\M-x ?\\S-a"
+           " #(\"abc\" 0 1 (face bold))"
+           " (get-text-property 0 'face #(\"abc\" 0 1 (face bold)))"
+           " (let ((x '(#1=(a) #1#))) (eq (car x) (car (cdr x))))"
+           " (let ((x '#2=(a . #2#))) (eq x (cdr x)))"
+           " (let ((x (car (read-from-string \"#1=(a . #1#)\"))))"
+           "   (eq x (cdr x)))"
+           " (let ((x (car (nelisp--rd-read-one"
+           "                \"#1=(a . #1#)\" 0 14))))"
+           "   (eq x (cdr x)))"
+           " (condition-case e (nelisp--eval-source-string \"(\")"
+           "   (error (stringp (error-message-string e)))))"))
+         (expected
+          (concat "((152) (152) (156) (65) 27 134217752 134217752 "
+                  "33554529 \"abc\" nil t t t t t)\n"))
+         (actual nil)
+         (rc nil))
+    (with-temp-buffer
+      (setq rc (call-process nelisp-standalone--reader-out nil t nil
+                             "--eval" source))
+      (setq actual (buffer-string)))
+    (unless (and (= rc 0) (equal actual expected))
+      (error "T105 reader compat exit=%S stdout=%S expected=%S"
+             rc actual expected))))
 
 (defun nelisp-standalone--reader-cli-smoke ()
   "Assert the short CLI supports help/eval/load and readable printed values."

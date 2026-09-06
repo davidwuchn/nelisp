@@ -72,6 +72,7 @@ lisp/nelisp-cc-nlstr-utf8-direct.el	nl_str_is_alphanumeric_at	tag-test-sexp-tag	
 lisp/nelisp-cc-nlstr-utf8-direct.el	nl_str_is_alphanumeric_at	tag-test-sexp-tag	1	walked	Read this Sexp string dispatch and added the applicable layout-identical tag-14/tag-15 arm(s).
 lisp/nelisp-cc-reader-parser.el	nelisp_reader_p_dispatch	unresolved-numeric	0	n-a	This dispatches reader token kinds 5/6 for quote-prefix syntax, not Sexp tags.
 lisp/nelisp-cc-reader-parser.el	nelisp_reader_p_dispatch	unresolved-numeric	1	n-a	This dispatches reader token kinds 5/6 for quote-prefix syntax, not Sexp tags.
+lisp/nelisp-cc-reader-parser.el	nelisp_reader_p_parse_propertized_string	tag-test-sexp-tag	0	walked	Read the propertized-string literal arm and accepted both immutable UTF-8 tag 5 and layout-identical unibyte tag 14 before discarding unsupported text properties.
 lisp/nelisp-cc-sexp-clone-into.el	nl_sci_bump	unresolved-numeric	0	walked	Read the cloner dispatch: tag 14 shallow-copies the immutable slot and tag 15 follows the tag-6 NlStr refcount path.
 lisp/nelisp-cc-sexp-clone-into.el	nl_sci_dispatch	unresolved-numeric	0	walked	Read the cloner dispatch: tag 14 shallow-copies the immutable slot and tag 15 follows the tag-6 NlStr refcount path.
 lisp/nelisp-cc-sexp-eq.el	nl_sexp_eq	tag-test-sexp-tag	0	walked	Read this Sexp string dispatch and added the applicable layout-identical tag-14/tag-15 arm(s).
