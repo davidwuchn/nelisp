@@ -2092,7 +2092,10 @@ loop for the exponent (= no `expt' / `float' primitive needed)."
      ((eq obj t) 1)
      ((symbolp obj) (nelisp--sxhash-string (symbol-name obj)))
      ((stringp obj) (nelisp--sxhash-string obj))
-     ((integerp obj) (logand obj 1073741823))
+     ;; `logand' does not take a bignum here; hash its decimal text instead.
+     ((integerp obj) (if (and (fboundp 'bignump) (bignump obj))
+                         (nelisp--sxhash-string (number-to-string obj))
+                       (logand obj 1073741823)))
      ((floatp obj) (nelisp--sxhash-string (number-to-string obj)))
      ((>= depth 3) 0)
      ((consp obj)
@@ -2115,9 +2118,20 @@ loop for the exponent (= no `expt' / `float' primitive needed)."
         h))
      (t 0)))
   (defun sxhash-equal (obj) (nelisp--sxhash-walk obj 0))
-  (defun sxhash (obj) (sxhash-equal obj))
-  (defun sxhash-eq (obj) (nelisp--sxhash-walk obj 3))
-  (defun sxhash-eql (obj) (nelisp--sxhash-walk obj 3)))
+  (defun sxhash (obj) (sxhash-equal obj)))
+;; Doc 201 §6.17: `sxhash-eq' hashes identity, which only the runtime can
+;; see -- the standalone installs it as a native arm (`bf_identity_hash' in
+;; scripts/nelisp-standalone-build.el) before this file loads, and the
+;; guard keeps that one.  The fallback is for a host with neither: a
+;; content hash still satisfies "eq objects hash equal", it just cannot
+;; tell two equal strings apart.
+(unless (fboundp 'sxhash-eq)
+  (defun sxhash-eq (obj) (nelisp--sxhash-walk obj 3)))
+;; `eql' is `eq' plus same-type numbers by value, so numbers take the
+;; content hash and everything else the identity hash.
+(unless (fboundp 'sxhash-eql)
+  (defun sxhash-eql (obj)
+    (if (numberp obj) (sxhash-equal obj) (sxhash-eq obj))))
 (unless (fboundp 'string-to-vector)
   (defun string-to-vector (s)
     (nelisp--check-seq-list s)
@@ -6902,11 +6916,17 @@ Rust-min migration (= moved out of build-tool/src/eval/special_forms.rs)."
 ;; which is the one thing `eql' exists to distinguish.
 (unless (fboundp 'eql)
   (defun eql (a b)
+    ;; Doc 201 §6.17: identity first, then same-type numbers by value.
+    ;; Floats go through `equal' so that, as in Emacs, 0.0 and -0.0 are not
+    ;; `eql' and a NaN is `eql' to itself -- the native `equal' arm compares
+    ;; the bit pattern where `=' compares numerically.  Fixnums are already
+    ;; decided by `eq'; the `integerp' arm is for bignums, which are
+    ;; separate objects with equal value.
     (cond
-     ((and (floatp a) (floatp b)) (= a b))
+     ((eq a b) t)
+     ((and (floatp a) (floatp b)) (equal a b))
      ((and (integerp a) (integerp b)) (= a b))
-     ((or (numberp a) (numberp b)) nil)
-     (t (eq a b)))))
+     (t nil))))
 (unless (fboundp 'encode-coding-string)
   (defun encode-coding-string (str coding &optional _nocopy)
     (nelisp--check-string str)
@@ -8324,9 +8344,9 @@ as a likely mistake.")
 (unless (fboundp 'hash-table-test)
   (defun hash-table-test (table)
     ;; The requested test IS recorded now -- marker slot 2 -- so this reports
-    ;; what the caller asked for instead of a fixed answer.  Lookup is still
-    ;; `equal'-shaped underneath; that is a separate divergence and is not
-    ;; hidden by reporting the request accurately.
+    ;; what the caller asked for instead of a fixed answer.  Since Doc 201
+    ;; §6.17 the native lookup reads the same slot (`nl_ht_test_mode') and
+    ;; compares keys with `eq' / `eql' / `equal' accordingly.
     (unless (hash-table-p table)
       (signal 'wrong-type-argument (list 'hash-table-p table)))
     (or (and (> (length (car table)) 2) (aref (car table) 2)) 'eql)))
@@ -8334,7 +8354,10 @@ as a likely mistake.")
   (defun copy-hash-table (table)
     (unless (hash-table-p table)
       (signal 'wrong-type-argument (list 'hash-table-p table)))
-    (let ((new (make-hash-table)))
+    ;; Carry the :test.  Lookup honours it since Doc 201 §6.17, so a copy
+    ;; of an `equal' table made with the `eql' default would stop finding
+    ;; its own string keys.
+    (let ((new (make-hash-table :test (hash-table-test table))))
       (maphash (lambda (k v) (puthash k v new)) table)
       new)))
 (unless (fboundp 'hash-table-keys)
@@ -10509,9 +10532,10 @@ comment above this definition for how that value was measured."))
   "Structural equality with vector support (Doc 22 A3).
 Only `cons' and `vector' are walked in elisp; every atom (number, string,
 symbol, nil, t) is delegated to the native `equal', which compares them
-correctly.  We deliberately avoid an `(eq a b)' fast path: on the bare
-reader `eq' returns t for distinct strings, which would make any two
-strings compare equal."
+correctly.  No `(eq a b)' fast path: it would save one native call on
+identical objects and cost one interpreted operation on every other pair
+(Doc 201 §6.15).  It is no longer a correctness hazard either -- `eq' on
+strings is identity since Doc 201 §6.17, not contents."
   (cond
    ((and (consp a) (consp b))
     (and (equal (car a) (car b)) (equal (cdr a) (cdr b))))

@@ -282,7 +282,12 @@
 # scripts/nelisp-standalone-build.el below.  Same shape as the Schannel
 # entry above -- backquoted units splicing raw calls, visible to this gate
 # where the surrounding quoted ones are not.  Nothing to wrap.
-unsafe-call 762
+# 762 -> 767 on 2026-09-06 (Doc 201 section 6.17): `wf_raw_eq' adds five
+# unquoted `ptr-read-u64' sites to distinguish inline string objects by their
+# buffer pointer and length.  The fallback for the other immediate variants
+# keeps the former raw-word comparison.  These reads inspect the same 32-byte
+# Sexp layout this generator's adjacent predicate arms already consume.
+unsafe-call 767
 
 # `pinned-kernel-call FILE COUNT' pins the per-file unquoted `unsafe-call'
 # count behind `total' above -- the three kernel files that actually carry
@@ -368,4 +373,6 @@ pinned-kernel-call scripts/nelisp-flat-arena-probe.el 6
 # same reason that one is -- nothing new in KIND, only in number.  Before
 # them NR=83/84/87 were an unconditional -ENOSYS on that target and
 # `make-directory' silently created nothing.
-pinned-kernel-call scripts/nelisp-standalone-build.el 680
+# 680 -> 685 on 2026-09-06 (Doc 201 section 6.17): the five `wf_raw_eq'
+# string-layout reads itemised at the `unsafe-call 767' note above.
+pinned-kernel-call scripts/nelisp-standalone-build.el 685

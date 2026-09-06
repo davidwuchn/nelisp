@@ -3,7 +3,14 @@
 # mentions.  Raise it whenever cases are added; it may never go down without a
 # stated reason, so a case cannot be deleted quietly.
 
-covered 265
+covered 272
+
+# 265 -> 272 on 2026-09-06 (Doc 201 §6.17, `eq' is identity for strings):
+# the 27 new forms at the end of test/nelisp-shadow-differential-cases.el
+# (eq / memq / memql / assq / rassq / delq / remq / plist-get / plist-put /
+# plist-member / eq-, eql- and equal-tables / eql / catch-throw string tags /
+# sxhash-eq, all on equal-content-but-distinct strings) newly mention 7
+# tracked shared names, matching the gate's own "7 above baseline" notice.
 
 # 264 -> 265 on 2026-08-23 (Doc 188 P2, buffer unification): the 3 new
 # forms in test/nelisp-shadow-differential-cases.el (current-buffer/

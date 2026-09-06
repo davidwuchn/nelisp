@@ -245,7 +245,11 @@
 # fixnum count to the `nl--nthcdr' reader builtin and keeps its own loop for
 # a bignum one, so its shape moved; lisp/nelisp-stdlib-list.el, which has no
 # builtin to call, is untouched.  Same divergence, new shape.
-ns-collision 256
+# 256 -> 257 on 2026-09-06 (Doc 201 §6.17): `eql' in lisp/nelisp-stdlib-misc.el
+# was `(defalias 'eql 'equal)' -- wrong for strings and conses -- and is now
+# the same guarded definition the prelude carries, so its pin moved from
+# ns-collision-divergent (below) to ns-collision.  Net collisions unchanged.
+ns-collision 257
 # 97 -> 96 on 2026-08-19: `string-equal' no longer differs between the two
 # files -- the prelude's now signals for a non-string instead of falling
 # through to `equal', and the lisp copy was brought with it.  Ratcheted down
@@ -344,7 +348,10 @@ ns-collision 256
 # nl-ns hashes explicit UTF-8, only `expand-file-name' (260710ab) and `read'
 # (647c8448) have genuinely changed definitions; their identities are
 # reviewed and updated below.
-ns-collision-divergent 126
+# 126 -> 125 on 2026-09-06 (Doc 201 §6.17): `eql' left this kind for
+# ns-collision (see above); `equal' and `sxhash-eql' stay divergent with new
+# digests (docstring resp. body edited on the prelude side).
+ns-collision-divergent 125
 # 850 -> 851 on 2026-08-19: `nl-check-file-quoted-unsafe', the entry point
 # that reports the unsafe calls inside quoted forms.  Same situation as the
 # nl-ns pair above -- it is public because tools/nl-check-inventory.el calls
@@ -944,8 +951,8 @@ pinned-collision ns-collision-divergent	delete-process	packages/nelisp-process-a
 pinned-collision ns-collision-divergent	directory-files	lisp/nelisp-stdlib-misc.el scripts/nelisp-stdlib-prelude.el	5772735e4f7a
 pinned-collision ns-collision-divergent	dotimes	lisp/nelisp-stdlib-eval-special.el scripts/nelisp-stdlib-prelude.el	f4ac7387792a
 pinned-collision ns-collision-divergent	downcase	lisp/nelisp-stdlib-plist-str.el scripts/nelisp-stdlib-prelude.el	dfe335f7e113
-pinned-collision ns-collision-divergent	eql	lisp/nelisp-stdlib-misc.el scripts/nelisp-stdlib-prelude.el	60aa2e62e528
-pinned-collision ns-collision-divergent	equal	lisp/nelisp-stdlib-equal.el scripts/nelisp-stdlib-prelude.el	543ee12bca1e
+pinned-collision ns-collision	eql	lisp/nelisp-stdlib-misc.el scripts/nelisp-stdlib-prelude.el
+pinned-collision ns-collision-divergent	equal	lisp/nelisp-stdlib-equal.el scripts/nelisp-stdlib-prelude.el	6df26e58aab0
 pinned-collision ns-collision-divergent	error-message-string	lisp/nelisp-stdlib-error.el scripts/nelisp-stdlib-prelude.el	e68c50192fb1
 pinned-collision ns-collision-divergent	file-directory-p	lisp/nelisp-stdlib-misc.el scripts/nelisp-stdlib-prelude.el	e7c82a43cd51
 pinned-collision ns-collision-divergent	file-exists-p	lisp/nelisp-stdlib-misc.el scripts/nelisp-stdlib-prelude.el	a33be9a70288
@@ -1032,7 +1039,7 @@ pinned-collision ns-collision-divergent	string=	lisp/nelisp-stdlib-misc.el scrip
 pinned-collision ns-collision-divergent	substring	lisp/nelisp-stdlib-plist-str.el scripts/nelisp-stdlib-prelude.el	6e7a35e2d425
 pinned-collision ns-collision-divergent	sxhash	lisp/nelisp-stdlib.el scripts/nelisp-stdlib-prelude.el	c6647c32772e
 pinned-collision ns-collision-divergent	sxhash-eq	lisp/nelisp-stdlib-misc.el scripts/nelisp-stdlib-prelude.el	f30c9e810c87
-pinned-collision ns-collision-divergent	sxhash-eql	lisp/nelisp-stdlib-misc.el scripts/nelisp-stdlib-prelude.el	ef0e301feba4
+pinned-collision ns-collision-divergent	sxhash-eql	lisp/nelisp-stdlib-misc.el scripts/nelisp-stdlib-prelude.el	9e007412b826
 pinned-collision ns-collision-divergent	sxhash-equal	lisp/nelisp-stdlib-misc.el scripts/nelisp-stdlib-prelude.el	e9e6292cefd6
 pinned-collision ns-collision-divergent	terpri	lisp/nelisp-stdlib-prn.el scripts/nelisp-stdlib-prelude.el	c1e5577e4c95
 # timerp: added 2026-08-24 (integration/wave6 battery run, the emacs-parity

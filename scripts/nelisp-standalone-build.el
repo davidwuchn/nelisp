@@ -5113,7 +5113,20 @@ leave symbols unresolved at link time."
       (if (= (ptr-read-u64 a 0) (ptr-read-u64 b 0))
           (if (= (ptr-read-u64 a 0) 13)
               (if (= (ptr-read-u64 a 16) (ptr-read-u64 b 16)) 1 0)
-            (if (= (ptr-read-u64 a 8) (ptr-read-u64 b 8)) 1 0))
+            ;; Doc 201 §6.17: Str(5)/UnibyteStr(14) are inline {cap@8,
+            ;; ptr@16, len@24}; offset 8 is the capacity, so the generic
+            ;; word compare made every equal-capacity pair `eq'.  The char
+            ;; buffer pointer is the per-object identity (Doc 149 clone
+            ;; aliasing shares it between the copies of ONE object, never
+            ;; between two objects); the length is compared as well so an
+            ;; empty string's placeholder pointer cannot alias a real one.
+            (if (or (= (ptr-read-u64 a 0) 5) (= (ptr-read-u64 a 0) 14))
+                (if (= (ptr-read-u64 a 24) (ptr-read-u64 b 24))
+                    (if (= (ptr-read-u64 a 24) 0)
+                        1
+                      (if (= (ptr-read-u64 a 16) (ptr-read-u64 b 16)) 1 0))
+                  0)
+              (if (= (ptr-read-u64 a 8) (ptr-read-u64 b 8)) 1 0)))
         0))
     ;; --- Doc 190 Phase A: Bignum (tag 13) numeric comparison -----------
     ;; Bignum-vs-Bignum and Bignum-vs-Int ONLY (the task's own scope);
@@ -7918,6 +7931,29 @@ eval applyfn.")
          ok)))
     (defun wf_key_eq (ka kb)
       (wf_key_eq_depth ka kb 1024))
+    ;; Doc 201 §6.17: `eql' = `eq', plus same-type numbers by value.  Fixnum
+    ;; and Float payloads are inline and already compared by value/bits in
+    ;; `bf_eq2', so only Bignum(13) needs the value compare here.
+    (defun bf_eql2 (a b)
+      (if (= (bf_eq2 a b) 1)
+          1
+        (if (= (ptr-read-u64 a 0) 13)
+            (if (= (ptr-read-u64 b 0) 13)
+                (if (= (nl_bignum_cmp_bignum a b) 0) 1 0)
+              0)
+          0)))
+    ;; Hash-table key comparison honouring the table's :test.  MODE is 0 for
+    ;; `equal' (and anything unrecognised -- Emacs's own default for an
+    ;; unknown test name is also `equal'-shaped), 1 for `eq', 2 for `eql'.
+    ;; Before this every table compared keys with `wf_key_eq' whatever its
+    ;; test said, so `(gethash (copy-sequence "k") EQ-TABLE)' found the entry
+    ;; `(puthash "k" ...)' had made (Doc 201 §6.17).  Hashing stays by
+    ;; contents for every test: identical objects have identical contents,
+    ;; so the bucket is right, and the comparison decides.
+    (defun nl_ht_key_match (ka kb mode)
+      (if (= mode 0) (wf_key_eq ka kb)
+        (if (= mode 1) (bf_eq2 ka kb)
+          (bf_eql2 ka kb))))
     (defun nl_ht_data_slot (table_ptr) (nl_cons_cdr_ptr table_ptr))
     (defun nl_ht_alist_slot (table_ptr) (nl_ht_data_slot table_ptr))
     (defun nl_ht_meta_slot (table_ptr) (nl_cons_car_ptr table_ptr))
@@ -7937,6 +7973,32 @@ eval applyfn.")
                (ptr-write-u64 c 16 0)
                (ptr-write-u64 c 24 0)
                0))
+          0)))
+    ;; The :test the table was made with, read off marker slot 2 (the symbol
+    ;; `nl_ht_make' / the prelude's `make-hash-table' write there): 1 = `eq',
+    ;; 2 = `eql', 0 = `equal' or anything else.  A symbol's name is inline
+    ;; (ptr@16, len@24), so this is a byte compare with no allocation --
+    ;; `wf_name_is' would cost a symbol allocation per lookup.
+    (defun nl_ht_test_mode (table_ptr)
+      (let* ((meta_ptr (nl_ht_meta_slot table_ptr)))
+        (if (= (ptr-read-u64 meta_ptr 0) 8)
+            (if (< (vector-len meta_ptr) 3)
+                0
+              (let* ((sy (vector-ref-ptr meta_ptr 2)))
+                (if (= (ptr-read-u64 sy 0) 4)
+                    (let* ((n (ptr-read-u64 sy 24)) (p (ptr-read-u64 sy 16)))
+                      (if (= n 2)
+                          (if (= (ptr-read-u8 p 0) 101)
+                              (if (= (ptr-read-u8 p 1) 113) 1 0)
+                            0)
+                        (if (= n 3)
+                            (if (= (ptr-read-u8 p 0) 101)
+                                (if (= (ptr-read-u8 p 1) 113)
+                                    (if (= (ptr-read-u8 p 2) 108) 2 0)
+                                  0)
+                              0)
+                          0)))
+                  0)))
           0)))
     (defun nl_ht_str_hash_loop (str_ptr i n h)
       (if (>= i n)
@@ -7993,7 +8055,7 @@ eval applyfn.")
         (if (= (logand n (- n 1)) 0)
             (logand h (- n 1))
           (mod h n))))
-    (defun nl_ht_find (node_ptr key_ptr)
+    (defun nl_ht_find (node_ptr key_ptr mode)
       (let* ((node node_ptr)
              (found 0)
              (entry_ptr 0)
@@ -8003,7 +8065,7 @@ eval applyfn.")
            (seq
             (setq entry_ptr (nl_cons_car_ptr node))
             (setq key_slot (nl_cons_car_ptr entry_ptr))
-            (if (= (wf_key_eq key_slot key_ptr) 1)
+            (if (= (nl_ht_key_match key_slot key_ptr mode) 1)
                 (setq found entry_ptr)
               (setq node (nl_cons_cdr_ptr node)))))
          found)))
@@ -8011,29 +8073,29 @@ eval applyfn.")
       (if (= (ptr-read-u64 node_ptr 0) 7)
           (nl_ht_count (nl_cons_cdr_ptr node_ptr) (+ acc 1))
         acc))
-    (defun nl_ht_find_vec_from (vec key_ptr i n)
+    (defun nl_ht_find_vec_from (vec key_ptr i n mode)
       (let* ((idx i)
              (entry_ptr 0))
         (seq
          (while (and (= entry_ptr 0) (< idx n))
            (seq
-            (setq entry_ptr (nl_ht_find (vector-ref-ptr vec idx) key_ptr))
+            (setq entry_ptr (nl_ht_find (vector-ref-ptr vec idx) key_ptr mode))
             (if (= entry_ptr 0)
                 (setq idx (+ idx 1))
               0)))
          entry_ptr)))
-    (defun nl_ht_find_table (data_ptr key_ptr)
+    (defun nl_ht_find_table (data_ptr key_ptr mode)
       (if (= data_ptr 0)
           0
         (if (= (ptr-read-u64 data_ptr 0) 8)
             (let* ((idx (nl_ht_bucket_index data_ptr key_ptr))
-                   (entry_ptr (nl_ht_find (vector-ref-ptr data_ptr idx) key_ptr)))
+                   (entry_ptr (nl_ht_find (vector-ref-ptr data_ptr idx) key_ptr mode)))
               (if (= entry_ptr 0)
                   (if (= (nl_ht_key_hash_stable_p key_ptr 8) 1)
                       0
-                    (nl_ht_find_vec_from data_ptr key_ptr 0 (vector-len data_ptr)))
+                    (nl_ht_find_vec_from data_ptr key_ptr 0 (vector-len data_ptr) mode))
                 entry_ptr))
-          (nl_ht_find data_ptr key_ptr))))
+          (nl_ht_find data_ptr key_ptr mode))))
     (defun nl_ht_get_default (args out)
       (let* ((rest1 (nl_cons_cdr_ptr args))
              (rest2 (nl_cons_cdr_ptr rest1)))
@@ -8132,7 +8194,8 @@ eval applyfn.")
             (wf_write_nil out)
           (if (= (ptr-read-u64 table_ptr 0) 7)
               (let* ((data_slot (nl_ht_data_slot table_ptr))
-                     (entry_ptr (nl_ht_find_table data_slot key_ptr)))
+                     (entry_ptr (nl_ht_find_table data_slot key_ptr
+                                                  (nl_ht_test_mode table_ptr))))
                 (if (= entry_ptr 0)
                     ;; An EMPTY table's cdr is nil, and nil is an immediate:
                     ;; `nl_cons_cdr_ptr' hands back a FRESH 32B view of it,
@@ -8194,7 +8257,8 @@ eval applyfn.")
                           (if (= (ptr-read-u64 table_ptr 0) 7)
                               (nl_ht_data_slot table_ptr)
                             0)))
-             (entry_ptr (nl_ht_find_table data_slot key_ptr)))
+             (mode (if (= data_slot 0) 0 (nl_ht_test_mode table_ptr)))
+             (entry_ptr (nl_ht_find_table data_slot key_ptr mode)))
         (if (= entry_ptr 0)
             (nl_ht_get_default args out)
           (nl_ht_copy32 out (nl_cons_cdr_ptr entry_ptr)))))
@@ -8208,12 +8272,13 @@ eval applyfn.")
                (let* ((data_slot (nl_ht_data_slot table_ptr)))
                  (if (= data_slot 0)
                      0
-                   (let* ((entry_ptr (nl_ht_find_table data_slot key_ptr)))
+                   (let* ((mode (nl_ht_test_mode table_ptr))
+                          (entry_ptr (nl_ht_find_table data_slot key_ptr mode)))
                      (seq
                       (if (= (ptr-read-u64 data_slot 0) 8)
-                          (nl_ht_rem_vec data_slot key_ptr 0 (vector-len data_slot))
+                          (nl_ht_rem_vec data_slot key_ptr 0 (vector-len data_slot) mode)
                         (seq
-                         (nl_ht_rem_walk data_slot key_ptr rebuilt)
+                         (nl_ht_rem_walk data_slot key_ptr rebuilt mode)
                          (nl_ht_copy32 data_slot rebuilt)))
                       (if (= entry_ptr 0)
                           0
@@ -8221,23 +8286,23 @@ eval applyfn.")
              0))
          (wf_write_nil out)
          0)))
-    (defun nl_ht_rem_vec (vec key_ptr i n)
+    (defun nl_ht_rem_vec (vec key_ptr i n mode)
       (if (>= i n)
           0
         (let* ((rebuilt (alloc-bytes 32 8)))
           (seq
-           (nl_ht_rem_walk (vector-ref-ptr vec i) key_ptr rebuilt)
+           (nl_ht_rem_walk (vector-ref-ptr vec i) key_ptr rebuilt mode)
            (vector-slot-set vec i rebuilt)
-           (nl_ht_rem_vec vec key_ptr (+ i 1) n)))))
-    (defun nl_ht_rem_walk (node_ptr key_ptr out_slot)
+           (nl_ht_rem_vec vec key_ptr (+ i 1) n mode)))))
+    (defun nl_ht_rem_walk (node_ptr key_ptr out_slot mode)
       (if (= (ptr-read-u64 node_ptr 0) 7)
           (let* ((entry_ptr (nl_cons_car_ptr node_ptr))
                  (key_slot (nl_cons_car_ptr entry_ptr)))
-            (if (= (wf_key_eq key_slot key_ptr) 1)
+            (if (= (nl_ht_key_match key_slot key_ptr mode) 1)
                 (nl_ht_copy32 out_slot (nl_cons_cdr_ptr node_ptr))
               (let* ((rest_s (alloc-bytes 32 8)) (entry_s (alloc-bytes 32 8)))
                 (seq
-                 (nl_ht_rem_walk (nl_cons_cdr_ptr node_ptr) key_ptr rest_s)
+                 (nl_ht_rem_walk (nl_cons_cdr_ptr node_ptr) key_ptr rest_s mode)
                  (nl_ht_copy32 entry_s entry_ptr)
                  (nelisp_cons_construct entry_s rest_s out_slot)
                  0))))
@@ -12070,45 +12135,81 @@ baked build's own `<'/`>'/`=' arms need it too.")
     (defun bf_length (p)
       (if (= (ptr-read-u64 p 0) 8) (vector-len p) (m5_length p)))
     ;; CORRECT eq: tag-aware identity.  The stock applyfn `eq' arm compared
-    ;; value@8 which is garbage for Symbol/Str (their identity is the name).
+    ;; value@8 which is garbage for Symbol/Str (their identity is the name
+    ;; resp. the char buffer).
     ;;   Int(2)   -> value@8 equal
     ;;   Symbol(4)-> symbol-eq (name compare; no interning so name == identity)
     ;;   Nil(0)/T(1) -> same tag is enough
-    ;;   else (Cons/Vector/Str/...) -> pointer identity (same box@8)
+    ;;   Str(5)/UnibyteStr(14) -> char buffer pointer@16 (+ len@24)
+    ;;   Bignum(13) -> limb pointer@16
+    ;;   else (Cons/Vector/MutStr/...) -> pointer identity (same box@8)
     (defun bf_eq2 (a b)
       (let* ((ta (ptr-read-u64 a 0)) (tb (ptr-read-u64 b 0)))
-        (if (and (= (m5_string_tag_p ta) 1)
-                 (= (m5_string_tag_p tb) 1))
-            (m5_streq a b)
-          (if (= ta tb)
+        (if (= ta tb)
             (cond
              ((= ta 2) (if (= (ptr-read-u64 a 8) (ptr-read-u64 b 8)) 1 0))
              ((= ta 4) (symbol-eq a b))
              ((= ta 0) 1)
              ((= ta 1) 1)
-                    ;; Doc 22 A20: Str(5)/MutStr(6) have NO stable pointer
-                    ;; identity -- tag 5 is deep-copied on clone (new buffer)
-                    ;; and offset 8 is the String length/capacity field, so the
-                    ;; stock pointer-identity arm made every equal-length pair
-                    ;; eq.  In this value-semantics reader a string IS its value,
-                    ;; so compare by content (length + bytes), consistent with
-                    ;; the Symbol(4) arm comparing by name.
-             ((or (= ta 5) (= ta 6) (= ta 14) (= ta 15))
-              (m5_streq a b))
-                        ;; Doc 190 Phase A: Bignum(13) has the same "no
-                        ;; stable identity at offset 8" shape as Str/Symbol
-                        ;; above -- offset 8 is the SIGN word, not a
-                        ;; per-object pointer, so the generic offset-8
-                        ;; compare would make most positive bignums
-                        ;; mutually eq.  The limb pointer at offset 16 is
-                        ;; the real per-allocation identity.
+             ;; Doc 201 §6.17: strings are compared by IDENTITY, as in
+             ;; Emacs.  This arm used to call `m5_streq' (contents), so
+             ;; `(eq (copy-sequence "ab") (copy-sequence "ab"))' was t and
+             ;; `memq'/`assq'/`delq'/`plist-get'/eq-tables all inherited
+             ;; it.  Str(5)/UnibyteStr(14) are inline {cap@8, ptr@16,
+             ;; len@24}: offset 8 is the capacity (no identity in it), the
+             ;; char buffer pointer at 16 is -- Doc 149's clone aliasing
+             ;; shares it between every copy of ONE object and never
+             ;; between two.  The length is compared as well so an empty
+             ;; string's placeholder buffer cannot alias a real one that
+             ;; happens to start at the same address.  Every empty string
+             ;; is `eq' to every other: Emacs keeps ONE empty string object
+             ;; and hands it out for "", `(copy-sequence "")', `(string)',
+             ;; and nothing can be observed through an empty string that
+             ;; would tell two apart.  MutStr(6)/UnibyteMutStr(15) carry
+             ;; their NlStr box at 8 and take the generic box-pointer arm.
+             ;; A 5 never `eq's a 6: two tags are two objects.  Float(3) is
+             ;; inline and has no identity; its bits at 8 are compared, so
+             ;; `(eq 1.0 1.0)' is t here where Emacs (boxed floats) answers
+             ;; nil -- recorded, not fixed.
+             ((or (= ta 5) (= ta 14))
+              (if (= (ptr-read-u64 a 24) (ptr-read-u64 b 24))
+                  (if (= (ptr-read-u64 a 24) 0)
+                      1
+                    (if (= (ptr-read-u64 a 16) (ptr-read-u64 b 16)) 1 0))
+                0))
+             ;; Doc 190 Phase A: Bignum(13) -- offset 8 is the SIGN word,
+             ;; not a per-object pointer, so the generic offset-8 compare
+             ;; would make most positive bignums mutually eq.  The limb
+             ;; pointer at offset 16 is the real per-allocation identity.
              ((= ta 13)
               (if (= (ptr-read-u64 a 16) (ptr-read-u64 b 16)) 1 0))
              (t (if (= (ptr-read-u64 a 8) (ptr-read-u64 b 8)) 1 0)))
-            0))))
+          0)))
     (defun bf_eq (args out)
       (if (= (bf_eq2 (wf_arg_ptr args 0) (wf_arg_ptr args 1)) 1)
           (wf_write_t out) (wf_write_nil out)))
+    ;; Doc 201 §6.17: the hash that goes with `bf_eq2' -- it hashes exactly
+    ;; what `eq' compares, so `(eq a b)' implies equal hashes and two
+    ;; equal-content strings hash apart, as `sxhash-eq' does in Emacs.
+    ;; Symbols are compared by name (no interning), so they hash by name;
+    ;; inline Int/Float hash their payload bits; every boxed type hashes its
+    ;; box pointer, Str/UnibyteStr/Bignum their buffer pointer and length.
+    ;; Masked to 30 bits like the prelude's `sxhash-equal'.
+    (defun bf_identity_hash (p)
+      (let* ((tg (ptr-read-u64 p 0)))
+        (logand
+         (if (= tg 0) 0
+           (if (= tg 1) 1
+             (if (= tg 2) (ptr-read-u64 p 8)
+               (if (= tg 3) (ptr-read-u64 p 8)
+                 (if (= tg 4) (nl_ht_str_hash p)
+                   (if (or (= tg 5) (= tg 14) (= tg 13))
+                       (if (= (ptr-read-u64 p 24) 0)
+                           tg
+                         (+ (sar (ptr-read-u64 p 16) 3)
+                            (* 31 (ptr-read-u64 p 24))))
+                     (sar (ptr-read-u64 p 8) 3)))))))
+         1073741823)))
     ;; equal: like eq but Str(5/6) compared by bytes, and one-level structural
     ;; for cons (recurses car+cdr).  Enough for member/assoc on flat data.
     ;; Doc 190 Phase A: Bignum(13) is compared by VALUE (same-sign,
@@ -12337,6 +12438,10 @@ Wave-2 (C) appends bf_ash (shl/sar compose) + bf_str_lt (byte-lexicographic).")
     ((:lit "numberp")  . (let* ((tg (ptr-read-u64 (wf_arg_ptr args 0) 0)))
                            (if (= tg 2) (wf_write_t out) (if (= tg 3) (wf_write_t out) (if (= tg 13) (wf_write_t out) (wf_write_nil out))))))
     ((:lit "floatp")   . (if (= (ptr-read-u64 (wf_arg_ptr args 0) 0) 3) (wf_write_t out) (wf_write_nil out)))
+    ;; Doc 201 §6.17: `sxhash-eq' hashes what `eq' compares -- identity --
+    ;; so two equal-content strings hash apart as they do in Emacs, while
+    ;; `(eq a b)' still implies equal hashes (`bf_identity_hash').
+    ((:lit "sxhash-eq") . (wf_write_int out (bf_identity_hash (wf_arg_ptr args 0))))
     ((:lit "vectorp")  . (if (= (ptr-read-u64 (wf_arg_ptr args 0) 0) 8) (wf_write_t out) (wf_write_nil out)))
     ((:lit "listp")    . (let* ((tg (ptr-read-u64 (wf_arg_ptr args 0) 0)))
                            (if (= tg 7) (wf_write_t out) (if (= tg 0) (wf_write_t out) (wf_write_nil out)))))
@@ -12652,7 +12757,7 @@ ops, signal/error stubs, structural equal, setcar/setcdr.  Wave-2 (C) appends
 ash/logand/logior/logxor/lognot + string<.")
 
 (defconst nelisp-standalone--applyfn-bf-builtins
-  '("consp" "atom" "stringp" "symbolp" "integerp" "bignump" "natnump" "numberp" "floatp"
+  '("consp" "atom" "stringp" "symbolp" "integerp" "bignump" "natnump" "numberp" "floatp" "sxhash-eq"
     "nl--read-int" "nl--int-token-p" "nl--nthcdr"
     "vectorp" "listp" "zerop" "set" "symbol-value" "fboundp" "boundp" "featurep" "provide" "require"
     "symbol-name" "intern" "intern-soft" "make-symbol" "nelisp--intern-lookup"
@@ -14944,10 +15049,22 @@ before feat/windows-spawn; Windows targets get a CreateProcessW spawn-model
               (if (= (sexp-int-unwrap a) (sexp-int-unwrap b)) 1 0)
             (if (= (sexp-tag a) 4)
                 (symbol-eq a b)
+              ;; Doc 201 §6.17: a string tag matches by identity (buffer
+              ;; pointer + length, the `bf_eq2' test), not by contents -- a
+              ;; `throw' to an equal-but-distinct string has no catcher in
+              ;; Emacs and signals `no-catch'.
               (if (= (sexp-tag a) 5)
-                  (str-eq a b)
+                  (if (= (ptr-read-u64 a 24) (ptr-read-u64 b 24))
+                      (if (= (ptr-read-u64 a 24) 0)
+                          1
+                        (if (= (ptr-read-u64 a 16) (ptr-read-u64 b 16)) 1 0))
+                    0)
                 (if (= (sexp-tag a) 14)
-                    (str-eq a b)
+                    (if (= (ptr-read-u64 a 24) (ptr-read-u64 b 24))
+                        (if (= (ptr-read-u64 a 24) 0)
+                            1
+                          (if (= (ptr-read-u64 a 16) (ptr-read-u64 b 16)) 1 0))
+                      0)
                 (if (= (sexp-tag a) 3)
                     (if (= (sexp-int-unwrap a) (sexp-int-unwrap b)) 1 0)
                   (if (= (sexp-tag a) 0)
@@ -16958,21 +17075,23 @@ outside it needs; copied rather than the whole block pulled in."
           (ptr-read-u64 sx 24))))
     (defun bf_eq2 (a b)
       (let* ((ta (ptr-read-u64 a 0)) (tb (ptr-read-u64 b 0)))
-        (if (and (= (m5_string_tag_p ta) 1)
-                 (= (m5_string_tag_p tb) 1))
-            (m5_streq a b)
-          (if (= ta tb)
+        (if (= ta tb)
             (if (= ta 2) (if (= (ptr-read-u64 a 8) (ptr-read-u64 b 8)) 1 0)
               (if (= ta 4) (symbol-eq a b)
                 (if (= ta 0) 1
                   (if (= ta 1) 1
-                    (if (= ta 5) (m5_streq a b)
-                      (if (= ta 6) (m5_streq a b)
-                        (if (= ta 14) (m5_streq a b)
-                          (if (= ta 15) (m5_streq a b)
-                        (if (= ta 13) (if (= (ptr-read-u64 a 16) (ptr-read-u64 b 16)) 1 0)
-                          (if (= (ptr-read-u64 a 8) (ptr-read-u64 b 8)) 1 0))))))))))
-            0))))
+                    ;; Doc 201 §6.17: string identity (buffer pointer@16 +
+                    ;; len@24), not contents -- same arm as the reader's
+                    ;; `bf_eq2' in `nelisp-standalone--applyfn-bf-helpers'.
+                    (if (or (= ta 5) (= ta 14))
+                        (if (= (ptr-read-u64 a 24) (ptr-read-u64 b 24))
+                            (if (= (ptr-read-u64 a 24) 0)
+                                1
+                              (if (= (ptr-read-u64 a 16) (ptr-read-u64 b 16)) 1 0))
+                          0)
+                      (if (= ta 13) (if (= (ptr-read-u64 a 16) (ptr-read-u64 b 16)) 1 0)
+                        (if (= (ptr-read-u64 a 8) (ptr-read-u64 b 8)) 1 0)))))))
+          0)))
     (defun bf_eq (args out)
       (if (= (bf_eq2 (wf_arg_ptr args 0) (wf_arg_ptr args 1)) 1)
           (wf_write_t out) (wf_write_nil out)))
@@ -17568,7 +17687,7 @@ value (matches the binary's M8 read+eval-loop driver)."
     "exit"
     ;; Wave-1 (B) breadth: predicates / symbol+vector ops / equal / setcar-setcdr
     ;; / signal-error (the names back the breadth arms in the reader applyfn).
-    "consp" "atom" "stringp" "symbolp" "integerp" "bignump" "natnump" "numberp" "floatp"
+    "consp" "atom" "stringp" "symbolp" "integerp" "bignump" "natnump" "numberp" "floatp" "sxhash-eq"
     "nl--read-int" "nl--int-token-p" "nl--nthcdr"
     "vectorp" "listp" "zerop" "set" "symbol-value" "fboundp" "boundp" "featurep" "provide" "require"
     "symbol-name" "intern" "intern-soft" "make-symbol" "nelisp--intern-lookup"
@@ -26436,6 +26555,7 @@ loader when it is absent."
                                  nelisp-standalone--reader-frame-stack-pop-desync-smoke
                                  nelisp-standalone--reader-bounded-backtrace-smoke
                                  nelisp-standalone--reader-doc200-mutation-smoke
+                                 nelisp-standalone--reader-eq-identity-smoke
                                  nelisp-standalone--reader-socket-smoke
                                  nelisp-standalone--reader-ipv6-socket-smoke))
                   (funcall smoke)
@@ -26611,6 +26731,81 @@ contract."
                        mixed rc stderr-text)))
           (when (file-exists-p stderr-file)
             (delete-file stderr-file)))))))
+
+(defun nelisp-standalone--reader-eq-identity-smoke ()
+  "Assert Doc 201 §6.17: `eq' is identity for strings and the eq-family
+inherits it -- `memq'/`memql'/`assq'/`rassq'/`delq'/`remq'/`plist-*',
+eq- and eql-tables, `eql', `catch' tags and `sxhash-eq'.  EXPECTED is what
+GNU Emacs 31.1 prints for the same form (`emacs -Q --batch').  Before the
+fix `bf_eq2' compared string CONTENTS, so the first, second, fifth, ... rows
+answered t / (\"s\") / 1 here and nil in Emacs."
+  (let ((source
+         (concat
+          "(let* ((s (copy-sequence \"k\")) (ht (make-hash-table :test 'eq))"
+          "       (eqlt (make-hash-table :test 'eql)) (eqt (make-hash-table :test 'equal)))"
+          "  (puthash s 1 ht) (puthash s 1 eqlt) (puthash s 1 eqt)"
+          "  (list (eq (copy-sequence \"ab\") (copy-sequence \"ab\"))"
+          "        (eq \"ab\" (concat \"a\" \"b\"))"
+          "        (let ((a (copy-sequence \"q\"))) (list (eq a a) (eq a (car (list a)))))"
+          "        (eq 1180591620717411303424 1180591620717411303424)"
+          "        (memq (copy-sequence \"s\") (list \"s\"))"
+          "        (let ((a (copy-sequence \"s\"))) (memq a (list \"x\" a)))"
+          "        (memql (copy-sequence \"s\") (list \"s\"))"
+          "        (assq (copy-sequence \"s\") (list (cons \"s\" 1)))"
+          "        (rassq (copy-sequence \"s\") (list (cons 1 \"s\")))"
+          "        (delq (copy-sequence \"s\") (list \"s\" 2))"
+          "        (remq (copy-sequence \"s\") (list \"s\" 2))"
+          "        (plist-get (list \"s\" 1) \"s\")"
+          "        (plist-put (list \"s\" 1) (copy-sequence \"s\") 2)"
+          "        (plist-member (list \"s\" 1) (copy-sequence \"s\"))"
+          "        (gethash (copy-sequence \"k\") ht) (gethash s ht)"
+          "        (gethash (copy-sequence \"k\") eqlt) (gethash (copy-sequence \"k\") eqt)"
+          "        (progn (remhash (copy-sequence \"k\") ht) (gethash s ht))"
+          "        (eql \"s\" (copy-sequence \"s\")) (eql 1.0 1.0) (eql 1.0 1)"
+          "        (eql 1180591620717411303424 1180591620717411303424)"
+          "        (equal \"s\" (copy-sequence \"s\"))"
+          "        (funcall #'eq (copy-sequence \"b\") (copy-sequence \"b\"))"
+          "        (let ((tag (copy-sequence \"x\"))) (catch tag (throw tag 2)))"
+          "        (/= (sxhash-eq (copy-sequence \"abc\")) (sxhash-eq (copy-sequence \"abc\")))"
+          "        (= (sxhash-eq s) (sxhash-eq s))"
+          "        (let* ((a (copy-sequence \"ab\")) (b a)) (aset a 0 ?z) (list a b (eq a b)))))"))
+        (expected
+         (concat
+          "(nil nil (t t) nil nil (\"s\") nil nil nil (\"s\" 2) (\"s\" 2) nil "
+          "(\"s\" 1 \"s\" 2) nil nil 1 nil 1 1 nil t nil t t nil 2 t t "
+          "(\"zb\" \"zb\" t))\n"))
+        (actual nil)
+        (rc nil))
+    (with-temp-buffer
+      (setq rc (call-process nelisp-standalone--reader-out nil t nil
+                             "--eval" source))
+      (setq actual (buffer-string)))
+    (unless (and (= rc 0) (equal actual expected))
+      (error "Doc 201 §6.17 eq identity exit=%S stdout=%S expected=%S"
+             rc actual expected))
+    ;; A `throw' to an equal-but-distinct string finds no catcher: Emacs
+    ;; signals `no-catch'.  Before the fix the catch tag matched by contents
+    ;; and this form answered 1.  Asserted on the process rather than through
+    ;; `condition-case', because the standalone's `throw' unwinds past
+    ;; `condition-case' handlers on its way to the top level -- a separate,
+    ;; pre-existing divergence recorded in Doc 201 §6.17's follow-up.
+    (let ((stderr-file (make-temp-file "nelisp-doc201-no-catch-stderr-"))
+          (stderr-text nil))
+      (unwind-protect
+          (progn
+            (with-temp-buffer
+              (setq rc (call-process nelisp-standalone--reader-out nil
+                                     (list t stderr-file) nil "--eval"
+                                     (concat "(catch (copy-sequence \"x\")"
+                                             " (throw (copy-sequence \"x\") 1))"))))
+            (with-temp-buffer
+              (insert-file-contents stderr-file)
+              (setq stderr-text (buffer-string)))
+            (unless (and (= rc 1) (string-match-p "no-catch" stderr-text))
+              (error "Doc 201 §6.17 string catch tag exit=%S stderr=%S"
+                     rc stderr-text)))
+        (when (file-exists-p stderr-file)
+          (delete-file stderr-file))))))
 
 (defun nelisp-standalone--reader-cli-smoke ()
   "Assert the short CLI supports help/eval/load and readable printed values."

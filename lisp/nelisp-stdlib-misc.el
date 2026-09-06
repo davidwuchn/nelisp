@@ -625,7 +625,18 @@ or signals otherwise.  Replaces the deleted Rust `bi_require'."
 ;; (= `(symbol-function 'string=)' now returns `string-equal' so
 ;; callers can distinguish the canonical name).
 (defalias 'equal-including-properties 'equal)
-(defalias 'eql 'equal)
+;; `eql' is NOT `equal': strings and conses compare by identity, numbers by
+;; same-type value (Doc 201 §6.17).  Guarded so a runtime that already has
+;; the right `eql' -- the standalone prelude, host Emacs -- keeps it; the
+;; unconditional `(defalias 'eql 'equal)' this replaces made every `eql'
+;; and `memql' on strings answer by contents wherever this file was loaded.
+(unless (fboundp 'eql)
+  (defun eql (a b)
+    (cond
+     ((eq a b) t)
+     ((and (floatp a) (floatp b)) (equal a b))
+     ((and (integerp a) (integerp b)) (= a b))
+     (t nil))))
 (unless (fboundp 'lsh)
   (defun lsh (value count)
     ;; Measured: only a NON-NUMBER in argument one names
@@ -651,8 +662,10 @@ or signals otherwise.  Replaces the deleted Rust `bi_require'."
         ;; and `integer-length' do not exist in this runtime to ask with.
         (ash (logand (ash value -1) (1- (ash 1 61))) (+ count 1))))))
 (defalias 'sxhash-equal 'sxhash)
-(defalias 'sxhash-eq 'sxhash)
-(defalias 'sxhash-eql 'sxhash)
+;; Identity hashes: keep a runtime's own (the standalone's `sxhash-eq' is a
+;; native arm, Doc 201 §6.17) and only fill the gap on one that has none.
+(unless (fboundp 'sxhash-eq) (defalias 'sxhash-eq 'sxhash))
+(unless (fboundp 'sxhash-eql) (defalias 'sxhash-eql 'sxhash))
 (defalias 'string= 'string-equal)
 (defalias 'print 'princ)
 

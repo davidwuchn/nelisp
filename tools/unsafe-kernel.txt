@@ -37,7 +37,7 @@ scripts/nelisp-macos-build.el
 # Files inside the kernel that actually contain an unsafe call.  Raise it in
 # the commit that adds one, and say there what the new file does with raw
 # memory.  Lower it whenever the ratchet notice says you can.
-kernel-files 90
+kernel-files 91
 
 # `pinned-kernel-touch NAME' pins the 88 kernel files that actually touch
 # raw memory today (`unsafe-call' or a quoted form) -- one line per file,
@@ -127,6 +127,9 @@ pinned-kernel-touch lisp/nelisp-cc-rc-strong-count.el
 pinned-kernel-touch lisp/nelisp-cc-reader-parser.el
 pinned-kernel-touch lisp/nelisp-cc-rootstack.el
 pinned-kernel-touch lisp/nelisp-cc-sexp-clone-into.el
+# Doc 201 section 6.17's `eq' implementation: reads inline string buffer
+# pointers and lengths so heap strings compare by object identity.
+pinned-kernel-touch lisp/nelisp-cc-sexp-eq.el
 pinned-kernel-touch lisp/nelisp-cc-sexp-fmt.el
 pinned-kernel-touch lisp/nelisp-cc-sf-lambda.el
 pinned-kernel-touch lisp/nelisp-cc-sf-unwind-protect.el

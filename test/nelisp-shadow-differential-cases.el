@@ -1447,6 +1447,50 @@
    (list (hash-table-count h) (puthash "k" 9 h) (gethash "k" h) (hash-table-count h)))
  (hash-table-count (read "#s(hash-table)"))
  (hash-table-count (car (read-from-string "#s(hash-table size 65 test equal rehash-size 1.5 rehash-threshold 0.8125 data ())")))
+ ;; Doc 201 §6.17: `eq' is identity for strings, as in Emacs, and every
+ ;; comparison built on it inherits that -- `memq'/`memql'/`assq'/`rassq'/
+ ;; `delq'/`remq'/`plist-*', eq- and eql-tables, `eql', `catch' tags,
+ ;; `sxhash-eq'.  Before the fix the standalone's `bf_eq2' compared string
+ ;; CONTENTS, so the forms below answered t / ("s") / ("s" . 1) / 1 here and
+ ;; nil in Emacs.  Two literals or two copies are two objects on both sides;
+ ;; one binding is one object on both sides; mutation through one name is
+ ;; seen through the other.  No form prints a float or a hash value: `/='
+ ;; and `=' reduce the hashes to a boolean, since the numbers themselves are
+ ;; not specified by Emacs.
+ (eq (copy-sequence "ab") (copy-sequence "ab"))
+ (eq "ab" (concat "a" "b"))
+ (let ((a (copy-sequence "q"))) (list (eq a a) (eq a (car (list a)))))
+ (memq (copy-sequence "s") (list "s"))
+ (let ((a (copy-sequence "s"))) (memq a (list "x" a)))
+ (memql (copy-sequence "s") (list "s"))
+ (assq (copy-sequence "s") (list (cons "s" 1)))
+ (rassq (copy-sequence "s") (list (cons 1 "s")))
+ (delq (copy-sequence "s") (list "s" 2))
+ (remq (copy-sequence "s") (list "s" 2))
+ (plist-get (list "s" 1) "s")
+ (plist-put (list "s" 1) (copy-sequence "s") 2)
+ (plist-member (list "s" 1) (copy-sequence "s"))
+ (let ((h (make-hash-table :test 'eq)) (k (copy-sequence "k")))
+   (puthash k 1 h)
+   (list (gethash (copy-sequence "k") h) (gethash k h) (hash-table-count h)))
+ (let ((h (make-hash-table :test 'eql)) (k (copy-sequence "k")))
+   (puthash k 1 h)
+   (list (gethash (copy-sequence "k") h) (gethash k h)))
+ (let ((h (make-hash-table :test 'equal)) (k (copy-sequence "k")))
+   (puthash k 1 h)
+   (list (gethash (copy-sequence "k") h) (gethash k h)))
+ (eql "s" (copy-sequence "s"))
+ (let ((s (copy-sequence "s"))) (eql s s))
+ (eql 1.0 1) (eql 7 7) (eql 0.0 -0.0)
+ ;; A `catch' tag is matched by identity too.  The other half -- a throw to
+ ;; an equal-but-distinct string signals `no-catch' -- cannot be written
+ ;; here: the standalone's `throw' unwinds past `condition-case' on its way
+ ;; to the top level (a separate divergence), so the value would never be
+ ;; printed.  test/nelisp-eq-identity-test.el asserts it on the process.
+ (let ((tag (copy-sequence "x"))) (catch tag (throw tag 2)))
+ (/= (sxhash-eq (copy-sequence "abc")) (sxhash-eq (copy-sequence "abc")))
+ (let ((s (copy-sequence "abc"))) (= (sxhash-eq s) (sxhash-eq s)))
+ (let* ((a (copy-sequence "ab")) (b a)) (aset a 0 ?z) (list a b (eq a b)))
 )
 
 ;;; nelisp-shadow-differential-cases.el ends here

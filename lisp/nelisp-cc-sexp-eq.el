@@ -55,11 +55,25 @@
                ;; Symbol: inline name compare via symbol-eq.
                (symbol-eq a b)
              (if (= (sexp-tag a) 5)
-                 ;; Str: byte-payload equality via str-eq.
-                 (str-eq a b)
+                 ;; Str: identity.  Inline {cap@8, ptr@16, len@24}; the
+                 ;; char buffer pointer is the per-object identity and the
+                 ;; length guards an empty string's placeholder pointer.
+                 ;; Doc 201 §6.17: `eq' on strings is identity, as in
+                 ;; Emacs -- it used to be byte-payload equality here.
+                 ;; Every empty string is `eq' to every other, as in
+                 ;; Emacs (one shared empty string object).
+                 (if (= (ptr-read-u64 a 24) (ptr-read-u64 b 24))
+                     (if (= (ptr-read-u64 a 24) 0)
+                         1
+                       (if (= (ptr-read-u64 a 16) (ptr-read-u64 b 16)) 1 0))
+                   0)
                (if (= (sexp-tag a) 14)
-                   ;; UnibyteStr: immutable byte-payload equality.
-                   (str-eq a b)
+                   ;; UnibyteStr: same inline layout, same identity test.
+                   (if (= (ptr-read-u64 a 24) (ptr-read-u64 b 24))
+                       (if (= (ptr-read-u64 a 24) 0)
+                           1
+                         (if (= (ptr-read-u64 a 16) (ptr-read-u64 b 16)) 1 0))
+                     0)
                (if (= (sexp-tag a) 3)
                    ;; Float: compare raw bits (same layout as Int at offset 8).
                    (if (= (sexp-int-unwrap a) (sexp-int-unwrap b)) 1 0)
@@ -82,7 +96,7 @@
 Replaces the Rust `#[no_mangle] extern \"C\" fn nl_sexp_eq' in
 `build-tool/src/eval/special_forms.rs'.  Tag dispatch with inline
 grammar ops; no heap allocation; no PLT calls beyond the inline
-string-eq-core shared helper used by `symbol-eq' and `str-eq'.
+string-eq-core shared helper used by `symbol-eq'.
 
 The defun name `nl_sexp_eq' is the exported symbol; callers using
 `extern-call nl_sexp_eq' resolve unchanged.")

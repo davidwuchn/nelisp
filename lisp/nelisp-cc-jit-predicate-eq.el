@@ -28,7 +28,7 @@
 ;;
 ;; The slow-path `nl_sexp_eq' itself ports the rest of `sexp_eq's
 ;; variant-specific arms (Symbol-by-name via `nelisp_eq_symbol' /
-;; Cons-by-Rc-ptr-eq / Str-by-content / Float-by-bits / ...); the
+;; Cons-by-Rc-ptr-eq / Str-by-identity (Doc 201 §6.17) / Float-by-bits / ...); the
 ;; AOT grammar does not yet expose `Rc::ptr_eq' for boxed
 ;; variants so the slow path stays in Rust for now.
 ;;
