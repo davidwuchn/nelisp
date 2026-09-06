@@ -17,16 +17,19 @@
 ;;   1. Check mirror entry existence via `nelisp_mirror_lookup_entry'.
 ;;      If miss (= 0), return 1 (= unbound-fn sentinel).
 ;;
-;;   2. If hit: call `nelisp_mirror_lookup_function' to fill out-ptr
-;;      with the function Sexp (refcount-aware copy via record-slot-ref
-;;      which delegates to `nl_sexp_clone_into' since Doc 111 §111.C v3).
-;;      Return 0 (= found).
+;;   2. If hit: compare slot 1 with UNBOUND-PTR.  A symbol created by a
+;;      variable-only definition has a mirror entry whose function slot is
+;;      this sentinel; treat it as a miss instead of exposing it as a
+;;      callable function.
+;;
+;;   3. Otherwise fill out-ptr with the function Sexp (refcount-aware copy
+;;      via record-slot-ref, which delegates to `nl_sexp_clone_into' since
+;;      Doc 111 §111.C v3).  Return 0 (= found).
 ;;
 ;; Signature:
 ;;   (nelisp_env_lookup_function MIRROR-PTR UNBOUND-PTR NAME-PTR OUT-PTR)
 ;;     MIRROR-PTR  : *const Sexp — Env::globals_record.
-;;     UNBOUND-PTR : *const Sexp — Env::unbound_marker (unused, for future
-;;                                  use / arity padding to 4 = even).
+;;     UNBOUND-PTR : *const Sexp — Env::unbound_marker.
 ;;     NAME-PTR    : *const Sexp — Sexp::Symbol name to look up.
 ;;     OUT-PTR     : *mut Sexp   — 32-byte caller-owned result slot.
 ;;   Returns: i64.  0 = found (function written to *out-ptr),
@@ -63,7 +66,9 @@
      (let ((entry (extern-call nelisp_mirror_lookup_entry mirror-ptr name-ptr)))
        (if (= entry 0)
            1
-         (and (record-slot-ref entry 1 out-ptr) 0))))
+         (if (= (symbol-eq (record-slot-ref-ptr entry 1) unbound-ptr) 1)
+             1
+           (and (record-slot-ref entry 1 out-ptr) 0)))))
   "AOT source for Wave a-2 `Env::lookup_function' body.
 
 R11a (Doc 49 Wave 9): collapsed two-defun CPS to a single defun
@@ -71,10 +76,11 @@ using `let-rt' CSE hoist of the entry pointer + `record-slot-ref'
 direct slot-1 read.  Previous shape paid 2 FNV-1a hashes per call
 (`lookup_entry' + `lookup_function'); hoisted shape pays 1.
 
-The `unbound-ptr' parameter is unused (retained for call-site symmetry
-with `lookup_value' and to keep even arity).  The miss sentinel is 1
-(= unbound-fn), found is 0 (= out-ptr filled with function Sexp via
-the refcount-safe `nl_sexp_clone_into' invoked by `record-slot-ref').")
+The `unbound-ptr' parameter prevents a variable-only symbol's slot-1
+`nelisp--unbound-marker' from escaping as a callable definition.  The miss
+sentinel is 1 (= absent entry or unbound function slot), found is 0 (=
+out-ptr filled with function Sexp via the refcount-safe
+`nl_sexp_clone_into' invoked by `record-slot-ref').")
 
 (provide 'nelisp-cc-env-lookup-function)
 

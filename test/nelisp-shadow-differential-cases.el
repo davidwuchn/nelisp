@@ -1491,6 +1491,20 @@
  (/= (sxhash-eq (copy-sequence "abc")) (sxhash-eq (copy-sequence "abc")))
  (let ((s (copy-sequence "abc"))) (= (sxhash-eq s) (sxhash-eq s)))
  (let* ((a (copy-sequence "ab")) (b a)) (aset a 0 ?z) (list a b (eq a b)))
+ ;; A variable-only mirror entry carries the runtime's internal unbound
+ ;; function sentinel in slot 1.  It must behave exactly like an absent
+ ;; function cell at every public lookup/call boundary, never escape as
+ ;; `nelisp--unbound-marker'.  This is the shape that blocked `(evil-mode 1)'.
+ (progn
+   (defconst par-variable-only-function-cell nil)
+   (list
+    (symbol-function 'par-variable-only-function-cell)
+    (condition-case e (par-variable-only-function-cell 1)
+      (void-function (cadr e)))
+    (condition-case e (funcall 'par-variable-only-function-cell 1)
+      (void-function (cadr e)))
+    (condition-case e (apply 'par-variable-only-function-cell '(1))
+      (void-function (cadr e)))))
 )
 
 ;;; nelisp-shadow-differential-cases.el ends here

@@ -340,3 +340,24 @@ string or vector (keyboard macros) and a lambda with a top-level
                           " (commandp (lambda () 1))"
                           " (commandp (lambda () (interactive) 1)))"))
                  "(nil nil nil t t nil t)")))
+
+(ert-deftest nelisp-doc22-variable-only-symbol-has-no-callable-sentinel ()
+  "A variable binding must not expose the mirror's unbound-function marker."
+  ;; Against the bug, every element was `nelisp--unbound-marker':
+  ;; `symbol-function' returned the internal sentinel and direct, `funcall'
+  ;; and `apply' dispatch reported it as the missing function.  Evil reaches
+  ;; this shape when its `evil-mode' variable exists before the function cell
+  ;; is installed.
+  (should
+   (equal
+    (nelisp-doc22--standalone-eval
+     (concat
+      "(progn (defconst nelisp-doc22-variable-only nil)"
+      " (list (symbol-function 'nelisp-doc22-variable-only)"
+      "  (condition-case e (nelisp-doc22-variable-only 1)"
+      "    (void-function (cadr e)))"
+      "  (condition-case e (funcall 'nelisp-doc22-variable-only 1)"
+      "    (void-function (cadr e)))"
+      "  (condition-case e (apply 'nelisp-doc22-variable-only '(1))"
+      "    (void-function (cadr e)))))"))
+    "(nil nelisp-doc22-variable-only nelisp-doc22-variable-only nelisp-doc22-variable-only)")))
