@@ -17209,6 +17209,18 @@ manifests use.")
        (nelisp-standalone--cached-unit name (symbol-value src)
                                        (locate-library (symbol-name kind)))))))
 
+(defun nelisp-standalone--reader-driver-unit ()
+  "Return the cached link-unit for the reader's driver.
+
+The reader driver takes about 15 seconds to compile.  Its content-addressed
+key covers the generated source (and therefore `NELISP_SRC') plus the
+toolchain digest.  The cache is also split by target, dynamic-reader mode,
+and TCO mode, so reusing it is safe across those build variants."
+  (nelisp-standalone--cached-unit
+   "driver.o"
+   (nelisp-standalone--reader-driver-source)
+   nelisp-standalone--this-file))
+
 ;;;###autoload
 (defun nelisp-standalone-compile-chunk ()
   "Compile this worker's slice of the cacheable units to the cache (NO link).
@@ -18605,7 +18617,8 @@ no-catch tail above, not this defensive path."
            (nl_eval_source_print_error file_ptr file_len form_index form_start line_no)))
        0))
     ,@(nelisp-standalone--eval-source-report-error-form))
-  "Reader source parse/eval loop split out of the always-recompiled driver.
+  "Reader source parse/eval loop split out of the reader driver.
+Keeping it separate lets both units remain independently cacheable.
 REPORT_ERRORS gates DEFECT-2 (artifact-cli-silent-noop) top-level aborting,
 not stderr visibility: pass 1 from --eval/--load/--embedded/the
 artifact-and-runtime-image dispatch tail, 0 from `nl_repl_loop' and from
@@ -26046,10 +26059,7 @@ of DEFUN-NAMES in the unit's source (for persistent-install escape sites)."
 Links the REAL special-form + env machinery (no trap stubs) so the binary is a
 genuine general interpreter for the 11 special forms + installed builtins."
   (let* ((start (nelisp-standalone--target-start-unit t))
-         (driver (let* ((name (nelisp-standalone--target-object-name "driver.o"))
-                        (u (nelisp-standalone--compile-to-unit
-                            name (nelisp-standalone--reader-driver-source))))
-                   (push name nelisp-standalone--recompiled) u))
+         (driver (nelisp-standalone--reader-driver-unit))
          ;; helpers: shipped manifest minus arena/trap/gc and minus the units we
          ;; build from PATCHED sources below (eval-inner = M4 keyword self-eval,
          ;; combiner-cons = M6 catch/throw, combiner-apply = M3 do_fset fix).
@@ -26238,7 +26248,7 @@ genuine general interpreter for the 11 special forms + installed builtins."
                        "reader-catch-throw.o" nelisp-standalone--catch-throw-source
                        nelisp-standalone--this-file))
          ;; Doc 140 Stage 5: top-level boundary reset helpers.  Keep this out of
-         ;; the always-recompiled driver so focused CLI/REPL work stays cacheable.
+         ;; the cached driver so focused CLI/REPL work stays cacheable.
          (boundary (nelisp-standalone--cached-unit
                     "reader-boundary.o" nelisp-standalone--reader-boundary-source
                     nelisp-standalone--this-file))

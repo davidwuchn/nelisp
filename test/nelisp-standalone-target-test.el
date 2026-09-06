@@ -47,6 +47,25 @@
 (require 'nelisp-cc-mirror-set-constant-or-insert)
 (require 'nelisp-cc-mirror-install-entry-or-insert)
 
+(ert-deftest nelisp-standalone-target-reader-driver-uses-cache ()
+  "The reader driver goes through the content-addressed unit cache."
+  (let ((source '(reader-driver-source-sentinel))
+        captured)
+    (cl-letf (((symbol-function 'nelisp-standalone--reader-driver-source)
+               (lambda () source))
+              ((symbol-function 'nelisp-standalone--compile-to-unit)
+               (lambda (&rest _args)
+                 (ert-fail "reader driver bypassed cached-unit")))
+              ((symbol-function 'nelisp-standalone--cached-unit)
+               (lambda (name actual-source &rest dependencies)
+                 (setq captured (list name actual-source dependencies))
+                 'cached-reader-driver-unit)))
+      (should (eq 'cached-reader-driver-unit
+                  (nelisp-standalone--reader-driver-unit)))
+      (should (equal (list "driver.o" source
+                           (list nelisp-standalone--this-file))
+                     captured)))))
+
 (ert-deftest nelisp-standalone-target-stage3-rootstack-abi-shape ()
   "Doc 152 Stage 3 roots the audited eval/apply GAP slots by handle.
 The checks here are deliberately structural: runtime poison/collection and
